@@ -97,6 +97,28 @@ union路線決定後、「`type Status = ...` と `type User { ... }` の2形態
    「未処理・仕様変更漏れをコンパイラが捕まえる」を決め手に採用
 2. **B-4(let/mut vs :=)+ 表層構文の流儀** — 背骨が決まれば見た目を統一できる
 3. **C-3(named args)・C-2(matchガード)** — 小粒の採否
-4. **B-3 + C-5(select/close などchannel仕様)** — 並行処理の完成
+4. **E-1 → B-3 + C-5(channel露出の是非 → select/close などchannel仕様)** — 並行処理の完成。
+   E-1(構造化並行に寄せるか)を先に決めてから select/close の詳細に入る
 5. **C-6〜C-9(stdlib層分け・FFI・APIコントラクト)** — 未決Q2/Q3と統合して設計
 6. メモの未決6「構文仕様の文書化」 — 上記が済んだら言語仕様書(spec)へ移行
+
+## E. 類似言語調査からの論点(2026-07-18追記)
+
+MoonBit調査([related-languages.md](related-languages.md))から出た討議事項。
+
+### E-1. channelを露出すべきか — 構造化並行という対抗案
+
+- **現状のMesh**: Go風 `spawn`/`wait`/channel(実装済み)。残タスクは select(B-3)と容量指定
+- **MoonBitの設計**: channel無し。タスクは task group 内でのみ生成でき、group は全タスク終了後に
+  のみ返る(構造化並行)。孤児タスク(goroutine泄漏)が設計上発生せず、キャンセルも組み込み
+- **論点**: B-3(select)や容量指定・close設計(C-5)に進む前に、「channelは言語の顔として
+  残すか、構造化並行に寄せるか」を一度決める。Meshの `wait` ブロックはすでに構造化並行に
+  半歩踏み出しており、折衷(waitを唯一のspawn許可スコープにする等)もあり得る。
+  P1(書き方は一つ)とP5(学習データ近さ=Goのchannel資産)が衝突する構図
+
+### E-2. AI向けレビュー支援ツールの優先度
+
+- MoonBitは fmt(設定なし)と**言語組み込みスナップショットテスト**を早期整備。
+  「AIが書いた差分を人がレビューしやすくする」効果が大きい
+- Meshでは `mesh fmt` がTODO済み。スナップショットテストは未議論 → 採否を検討
+- なお `mesh check --json`・全関数の型注釈必須は MoonBit と同方向で追認材料
