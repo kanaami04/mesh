@@ -190,6 +190,12 @@ fn main() {
     expect(fails(`fn main() { while true { } }`)).toBe(true); // while は存在しない
   });
 
+  test("カードの主張: map の反復は挿入順で決定的", () => {
+    expect(
+      runSource(`fn main() {\n\tm := map<string, int>{}\n\tm["z"] = 1\n\tm["a"] = 2\n\tm["m"] = 3\n\tfor k, v := range m {\n\t\tprint("\${k}=\${v}")\n\t}\n}`),
+    ).toBe("z=1\na=2\nm=3\n");
+  });
+
   test("カードの主張: 配列は参照渡し / 前置! / mut widening / print挙動", () => {
     // 配列を関数に渡して push すると呼び出し元に反映される(参照値)
     expect(

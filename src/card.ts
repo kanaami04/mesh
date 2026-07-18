@@ -104,6 +104,9 @@ Building an optional result imperatively (e.g. "the best so far"):
     n := len(m)                    // number of keys
     m[k] = (m[k] or 0) + 1         // count/accumulate idiom (no += , no comma-ok read)
 
+- \`for k, v := range m\` iterates in INSERTION ORDER (deterministic). Reading a key you
+  are sure exists still gives \`V | none\`, so use \`m[k] or <default>\` to get a plain value.
+
 - Structs are reference values: a struct returned from \`find\` is the SAME object stored in
   the array, so writing \`u.age = 31\` to it updates the stored one. (Same for range loop vars.)
 
