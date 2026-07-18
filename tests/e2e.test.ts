@@ -292,6 +292,33 @@ fn main() {
       null,
     );
   });
+
+  test("カードの新項目: メソッド(Goスタイルのレシーバ構文)", () => {
+    const out = runSource(`struct Todo {
+      title: string
+      done: bool
+    }
+    fn (t: Todo) complete() Todo {
+      return Todo{title: t.title, done: true}
+    }
+    fn (t: Todo) render() string {
+      if t.done { return "[x] " + t.title }
+      return "[ ] " + t.title
+    }
+    fn main() {
+      todos := [Todo{title: "a", done: false}]
+      todos[0] = todos[0].complete()
+      print(todos[0].render())
+      print(Todo{title: "b", done: false}.complete().render())  // 連鎖(左から右へ読める)
+    }`);
+    expect(out).toBe("[x] a\n[x] b\n");
+    // カードどおり、メソッド名は裸では呼べない(名前空間が分離している)
+    expect(
+      compile(`struct Todo { title: string }
+fn (t: Todo) render() string { return t.title }
+fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
+    ).toBe(null);
+  });
 });
 
 describe("e2e", () => {
@@ -899,5 +926,81 @@ describe("e2e", () => {
       print(result)   // (2+4+6)*2 = 24
     }`);
     expect(out).toBe("24\n");
+  });
+
+  test("メソッド: 基本の宣言・呼び出し・連鎖(chaining)", () => {
+    const out = runSource(`struct Todo {
+      title: string
+      done: bool
+    }
+    fn (t: Todo) complete() Todo {
+      return Todo{title: t.title, done: true}
+    }
+    fn (t: Todo) render() string {
+      if t.done {
+        return "[x] " + t.title
+      }
+      return "[ ] " + t.title
+    }
+    fn main() {
+      todos := [Todo{title: "a", done: false}, Todo{title: "b", done: false}]
+      todos[0] = todos[0].complete()
+      for _, t := range todos {
+        print(t.render())
+      }
+      // 連鎖: 左から右へ読める
+      print(Todo{title: "c", done: false}.complete().render())
+    }`);
+    expect(out).toBe("[x] a\n[ ] b\n[x] c\n");
+  });
+
+  test("メソッド: 同名メソッドがstructごとに別物として動く", () => {
+    const out = runSource(`struct User { name: string }
+    struct Order { id: int }
+    fn (u: User) describe() string { return "user " + u.name }
+    fn (o: Order) describe() string { return "order #" + str(o.id) }
+    fn main() {
+      u := User{name: "alice"}
+      o := Order{id: 42}
+      print(u.describe())
+      print(o.describe())
+    }`);
+    expect(out).toBe("user alice\norder #42\n");
+  });
+
+  test("メソッド: レシーバはstructの参照値そのもの(フィールド書き込みが反映される)", () => {
+    const out = runSource(`struct Counter { n: int }
+    fn (c: Counter) inc() {
+      c.n = c.n + 1
+    }
+    fn main() {
+      list := [Counter{n: 0}]
+      list[0].inc()
+      list[0].inc()
+      print(list[0].n)
+    }`);
+    // struct のフィールド書き込みは束縛の可変性と無関係(既存仕様。structは参照値)
+    expect(out).toBe("2\n");
+  });
+
+  test("メソッド: 引数を取り、他のメソッド・関数を呼べる", () => {
+    const out = runSource(`struct Todo {
+      title: string
+      done: bool
+    }
+    fn (t: Todo) withTitle(newTitle: string) Todo {
+      return Todo{title: newTitle, done: t.done}
+    }
+    fn (t: Todo) summary() string {
+      return t.withTitle(upper(t.title)).render()
+    }
+    fn (t: Todo) render() string {
+      return "<" + t.title + ">"
+    }
+    fn main() {
+      t := Todo{title: "abc", done: false}
+      print(t.summary())
+    }`);
+    expect(out).toBe("<ABC>\n");
   });
 });

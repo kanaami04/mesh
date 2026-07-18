@@ -13,6 +13,7 @@ import type {
   MatchPattern,
   Param,
   Program,
+  Receiver,
   Stmt,
   StructFieldNode,
   TypeDecl,
@@ -162,11 +163,23 @@ class Parser {
 
   private parseFnDecl(): FnDecl {
     const start = this.expect("fn", "at start of function declaration");
+    // fn (u: User) describe() ... — 直後が '(' ならメソッドのレシーバ節(Goスタイル)。
+    // 関数名は常に ident なので、'(' との1トークン先読みで曖昧さなく判定できる
+    const receiver = this.check("(") ? this.parseReceiver() : null;
     const name = this.expect("ident", "as function name").value;
     const params = this.parseParams();
     const ret = this.parseReturnType();
     const body = this.parseBlock();
-    return { kind: "fnDecl", name, params, ret, body, pos: start.pos };
+    return { kind: "fnDecl", name, receiver, params, ret, body, pos: start.pos };
+  }
+
+  private parseReceiver(): Receiver {
+    this.expect("(", "at start of method receiver");
+    const nameTok = this.expect("ident", "as receiver name");
+    this.expect(":", "after receiver name");
+    const type = this.parseType();
+    this.expect(")", "after receiver type");
+    return { name: nameTok.value, type, pos: nameTok.pos };
   }
 
   private parseParams(): Param[] {

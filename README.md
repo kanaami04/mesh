@@ -99,6 +99,34 @@ fn half(n: int) int | error {
 }
 ```
 
+### struct とメソッド
+
+データの形は `struct`、振る舞いは関数(Goスタイルのレシーバ構文)で書きます。
+
+```go
+struct Todo {
+	title: string
+	done: bool
+}
+
+fn (t: Todo) complete() Todo {
+	return Todo{title: t.title, done: true}
+}
+fn (t: Todo) render() string {
+	if t.done { return "[x] " + t.title }
+	return "[ ] " + t.title
+}
+
+todos[0] = todos[0].complete()
+print(todos[0].render())
+print(Todo{title: "x", done: false}.complete().render())  // 連鎖(左から右へ読める)
+```
+
+内部的には第1引数にレシーバを取る普通の関数で、vtable・継承・インターフェースはありません。
+**名前空間は自由関数と完全に分離**していて、`render(t)`という裸の呼び出しはできず`t.render()`のみです
+——同じ操作の呼び方が2通り存在することはありません。この分離のおかげで、`User`にも`Order`にも
+`describe()`という同名メソッドを両方持たせられます(自由関数だと名前が衝突します)。
+
 ### 並行処理: spawn / wait / channel
 
 ```go
@@ -154,7 +182,7 @@ for { ... }                       // 無限ループ(break で脱出)
 - 例外・try/catch(エラーは `T | error` の union で返す)
 - `null` / `undefined`(不在は `T | none` の union で型に現す)
 - 多値戻り `(T, error)`(union に置換)
-- クラス・継承(v1 で struct を予定)
+- クラス・継承・インターフェース(structメソッドはあるが、vtable・継承は無い)
 
 ## コンパイラの仕組み
 

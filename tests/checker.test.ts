@@ -317,7 +317,7 @@ fn main() {
 	print(u.name)
 }`);
     expect(errors).toEqual([
-      expect.stringContaining("cannot access field on User | none — narrow it first"),
+      expect.stringContaining("cannot access field or method on User | none — narrow it first"),
     ]);
   });
 
@@ -675,5 +675,127 @@ fn main() {
     expect(() => errorsOf(`nums := [1, 2, 3]\nprint(map(nums, fn(n: int) int { return n }))`)).toThrow(
       CompileError,
     );
+  });
+
+  test("メソッド: 正しい宣言・呼び出しはエラーなし", () => {
+    const errors = errorsOf(`struct Todo {
+	title: string
+	done: bool
+}
+fn (t: Todo) complete() Todo {
+	return Todo{title: t.title, done: true}
+}
+fn (t: Todo) render() string {
+	return t.title
+}
+fn main() {
+	t := Todo{title: "a", done: false}
+	t2 := t.complete()
+	print(t2.render())
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("メソッド: 名前空間はグローバル関数と分離している(render(t)は呼べない)", () => {
+    const errors = errorsOf(`struct Todo { title: string }
+fn (t: Todo) render() string { return t.title }
+fn main() {
+	t := Todo{title: "a"}
+	print(render(t))
+}`);
+    expect(errors).toEqual([expect.stringContaining("undefined: 'render'")]);
+  });
+
+  test("メソッド: 別structなら同名メソッドが衝突しない", () => {
+    const errors = errorsOf(`struct User { name: string }
+struct Order { id: int }
+fn (u: User) describe() string { return u.name }
+fn (o: Order) describe() string { return str(o.id) }
+fn main() {
+	u := User{name: "a"}
+	o := Order{id: 1}
+	print(u.describe(), o.describe())
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("メソッド: 引数の数・型の不一致を検出", () => {
+    const errors1 = errorsOf(`struct Todo { title: string }
+fn (t: Todo) rename(newTitle: string) Todo { return Todo{title: newTitle} }
+fn main() {
+	t := Todo{title: "a"}
+	print(t.rename())
+}`);
+    expect(errors1).toEqual([expect.stringContaining("expected 1 argument(s), got 0")]);
+
+    const errors2 = errorsOf(`struct Todo { title: string }
+fn (t: Todo) rename(newTitle: string) Todo { return Todo{title: newTitle} }
+fn main() {
+	t := Todo{title: "a"}
+	print(t.rename(1))
+}`);
+    expect(errors2).toEqual([expect.stringContaining("argument 1: cannot use int as string")]);
+  });
+
+  test("メソッド: レシーバはstruct限定(intなどは拒否)", () => {
+    const errors = errorsOf(`fn (n: int) double() int { return n * 2 }\nfn main() {}`);
+    expect(errors).toEqual([expect.stringContaining("method receiver must be a struct type, got int")]);
+  });
+
+  test("メソッド: フィールドと同名は宣言時に拒否", () => {
+    const errors = errorsOf(`struct Todo { title: string }
+fn (t: Todo) title() string { return t.title }
+fn main() {}`);
+    expect(errors).toEqual([expect.stringContaining("Todo already has a field named 'title'")]);
+  });
+
+  test("メソッド: 同じstructへの重複宣言を拒否", () => {
+    const errors = errorsOf(`struct Todo { title: string }
+fn (t: Todo) render() string { return t.title }
+fn (t: Todo) render() string { return t.title }
+fn main() {}`);
+    expect(errors).toEqual([expect.stringContaining("Todo already has a method named 'render'")]);
+  });
+
+  test("メソッド: union未絞り込みでの呼び出しを検出", () => {
+    const errors = errorsOf(`struct User { name: string }
+fn find(id: int) User | none { return none }
+fn (u: User) describe() string { return u.name }
+fn main() {
+	u := find(1)
+	print(u.describe())
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining("cannot access field or method on User | none — narrow it first"),
+    ]);
+  });
+
+  test("メソッド: ()を付けずに参照すると修正方法つきエラー", () => {
+    const errors = errorsOf(`struct Todo { title: string }
+fn (t: Todo) render() string { return t.title }
+fn main() {
+	t := Todo{title: "a"}
+	print(t.render)
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining("'render' is a method — call it like render(...)"),
+    ]);
+  });
+
+  test("メソッド: 連鎖呼び出し(chaining)が書ける", () => {
+    const errors = errorsOf(`struct Todo {
+	title: string
+	done: bool
+}
+fn (t: Todo) complete() Todo { return Todo{title: t.title, done: true} }
+fn (t: Todo) render() string {
+	if t.done { return "[x] " + t.title }
+	return "[ ] " + t.title
+}
+fn main() {
+	todos := [Todo{title: "a", done: false}]
+	print(todos[0].complete().render())
+}`);
+    expect(errors).toEqual([]);
   });
 });

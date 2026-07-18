@@ -45,10 +45,22 @@ class Codegen {
   }
 
   private genFnDecl(fn: FnDecl) {
-    const params = fn.params.map((p) => p.name).join(", ");
-    this.emit(`async function ${fn.name}(${params}) {`);
+    const recvParams = fn.receiver ? [fn.receiver.name] : [];
+    const params = [...recvParams, ...fn.params.map((p) => p.name)].join(", ");
+    const name = fn.receiver ? this.methodJsName(this.receiverStructName(fn.receiver), fn.name) : fn.name;
+    this.emit(`async function ${name}(${params}) {`);
     this.genFnBody(fn.body);
     this.emit("}");
+  }
+
+  // メソッドの生成JS名: struct名+メソッド名で一意にする(他structの同名メソッドと衝突しないように)
+  private methodJsName(structName: string, methodName: string): string {
+    return `__m_${structName}_${methodName}`;
+  }
+
+  // レシーバの型は checker が struct であることを保証済み(v1は名前で直接参照する形のみ)
+  private receiverStructName(receiver: NonNullable<FnDecl["receiver"]>): string {
+    return receiver.type.kind === "name" ? receiver.type.name : "(anonymous)";
   }
 
   // 関数本体を出力する。`!` を使っていたら全体を try/catch で包み、
@@ -424,6 +436,20 @@ class Codegen {
 
   private genCall(expr: Expr & { kind: "call" }): string {
     const args = expr.args.map((a) => this.genExpr(a));
+
+    // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)。
+    // struct のフィールドが関数値のケース(recv.fieldFn(args))とは checker が既に区別済みで、
+    // その場合は target.resolvedType の中に対象の名前が「フィールド」として現れるので
+    // ここでは再チェックせず、struct型 かつ フィールドに無い名前のときだけメソッドと判定する
+    if (expr.callee.kind === "member") {
+      const member = expr.callee;
+      const targetType = member.target.resolvedType;
+      if (targetType?.kind === "struct" && !targetType.fields.some((f) => f.name === member.name)) {
+        const recv = this.genExpr(member.target);
+        const jsName = this.methodJsName(targetType.name, member.name);
+        return `(await ${jsName}(${[recv, ...args].join(", ")}))`;
+      }
+    }
 
     // 組み込み関数はランタイムの同期ヘルパへ直接変換
     if (expr.callee.kind === "ident" && BUILTINS.has(expr.callee.name)) {

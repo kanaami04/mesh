@@ -69,6 +69,10 @@ class Checker {
   private typeTable = new Map<string, TypeNode>();
   private resolvedAliases = new Map<string, Type>();
   private resolvingAliases = new Set<string>(); // 循環検出用
+  // メソッド: struct名 → (メソッド名 → 関数型 [レシーバを含む])。
+  // 自由関数のグローバル scope とは別の名前空間(P1: recv.method() と method(recv) が両方
+  // 使える「二通りの書き方」を作らないため、メソッド名はここにしか登録しない)
+  private methodTable = new Map<string, Map<string, Type>>();
 
   // ---- ユーティリティ ----
 
@@ -211,12 +215,16 @@ class Checker {
       if (this.typeTable.get(td.name) === td.node) this.resolveAlias(td.name, td.pos);
     }
 
-    // 先に全関数のシグネチャを登録する(前方参照・相互再帰を許すため)
+    // 先に全関数/メソッドのシグネチャを登録する(前方参照・相互再帰を許すため)
     for (const fn of program.fns) {
-      this.declare(fn.name, this.fnType(fn.params, fn.ret), fn.pos);
+      if (fn.receiver) {
+        this.declareMethod(fn);
+      } else {
+        this.declare(fn.name, this.fnType(fn.params, fn.ret), fn.pos);
+      }
     }
 
-    const main = program.fns.find((f) => f.name === "main");
+    const main = program.fns.find((f) => f.name === "main" && !f.receiver);
     if (!main) {
       this.error({ line: 1, col: 1 }, "missing 'fn main()' — Mesh programs start from main");
     } else if (main.params.length > 0 || main.ret !== null) {
@@ -227,8 +235,41 @@ class Checker {
     return this.diagnostics;
   }
 
+  // fn (u: User) describe() ... のシグネチャを methodTable に登録する(グローバルscopeには置かない)
+  private declareMethod(fn: FnDecl) {
+    if (!fn.receiver) return;
+    const recvType = this.resolveType(fn.receiver.type);
+    if (recvType.kind !== "struct") {
+      this.error(fn.receiver.pos, `method receiver must be a struct type, got ${typeToString(recvType)}`);
+      return;
+    }
+    if (BUILTINS.has(fn.name)) {
+      this.error(fn.pos, `'${fn.name}' is a builtin function and cannot be used as a method name`);
+      return;
+    }
+    if (recvType.fields.some((f) => f.name === fn.name)) {
+      this.error(fn.pos, `${recvType.name} already has a field named '${fn.name}'`);
+      return;
+    }
+    let methods = this.methodTable.get(recvType.name);
+    if (!methods) {
+      methods = new Map();
+      this.methodTable.set(recvType.name, methods);
+    }
+    if (methods.has(fn.name)) {
+      this.error(fn.pos, `${recvType.name} already has a method named '${fn.name}'`);
+      return;
+    }
+    const base = this.fnType(fn.params, fn.ret);
+    if (base.kind !== "fn") return; // 到達しない(fnTypeは常にkind:"fn"を返す)
+    methods.set(fn.name, { kind: "fn", params: [recvType, ...base.params], ret: base.ret });
+  }
+
   private checkFn(fn: FnDecl | FnExpr) {
     this.pushScope();
+    if (fn.kind === "fnDecl" && fn.receiver) {
+      this.declare(fn.receiver.name, this.resolveType(fn.receiver.type), fn.receiver.pos);
+    }
     for (const p of fn.params) this.declare(p.name, this.resolveType(p.type), p.pos);
     this.retStack.push(fn.ret ? this.resolveType(fn.ret) : VOID);
     this.checkBlock(fn.body);
@@ -688,29 +729,7 @@ class Checker {
 
       case "member": {
         const t = this.checkExprSingle(expr.target);
-        if (t.kind === "struct") {
-          const field = t.fields.find((f) => f.name === expr.name);
-          if (!field) {
-            this.error(
-              expr.pos,
-              `${t.name} has no field '${expr.name}'` +
-                ` (fields: ${t.fields.map((f) => f.name).join(", ")})`,
-            );
-            return ANY;
-          }
-          return field.type;
-        }
-        if (t.kind === "union") {
-          this.error(
-            expr.pos,
-            `cannot access field on ${typeToString(t)} — narrow it first (with 'is' or 'match')`,
-          );
-          return ANY;
-        }
-        if (t.kind !== "any") {
-          this.error(expr.pos, `${typeToString(t)} has no fields`);
-        }
-        return ANY;
+        return this.memberFieldType(expr, t);
       }
 
       case "structLit": {
@@ -908,26 +927,110 @@ class Checker {
       return this.inferBuiltinCall(expr.callee.name, expr);
     }
 
-    const callee = this.checkExprSingle(expr.callee);
-    const args = expr.args.map((a) => this.checkExprSingle(a));
+    // recv.method(args) — struct のメソッドとして解決を試みる。
+    // target の型はここで一度だけ評価する(呼び出し不成立時のフォールバックでも
+    // 再評価しない。二重評価すると undefined 変数などのエラーが2回出てしまう)
+    if (expr.callee.kind === "member") {
+      const member = expr.callee;
+      const targetType = this.checkExprSingle(member.target);
 
-    if (callee.kind === "any") return ANY;
-    if (callee.kind !== "fn") {
-      this.error(expr.pos, `cannot call non-function type ${typeToString(callee)}`);
+      if (targetType.kind === "struct" && !targetType.fields.some((f) => f.name === member.name)) {
+        const methodType = this.methodTable.get(targetType.name)?.get(member.name);
+        if (methodType && methodType.kind === "fn") {
+          member.resolvedType = methodType;
+          const [, ...paramsWithoutReceiver] = methodType.params;
+          return this.checkCallArgs(expr, paramsWithoutReceiver, methodType.ret);
+        }
+        this.error(
+          member.pos,
+          `${targetType.name} has no field or method '${member.name}'` +
+            ` (fields: ${targetType.fields.map((f) => f.name).join(", ") || "none"})`,
+        );
+        member.resolvedType = ANY;
+        expr.args.forEach((a) => this.checkExprSingle(a)); // 引数側もチェックしてエラーの連鎖を減らす
+        return ANY;
+      }
+
+      // メソッド対象でなければ、member を通常どおり「値」として評価し、それを呼び出す
+      // (struct フィールドが関数値のケース・union未絞り込み・非structなど)
+      const memberType = this.memberFieldType(member, targetType);
+      member.resolvedType = memberType;
+      return this.checkCallOfValue(expr, memberType);
+    }
+
+    const callee = this.checkExprSingle(expr.callee);
+    return this.checkCallOfValue(expr, callee);
+  }
+
+  // struct フィールドアクセスの型検査(member式・メソッド呼び出しの両方から使う共通部分)。
+  // target の型は呼び出し元が(二重評価を避けるため)既に確定させて渡す
+  private memberFieldType(member: Expr & { kind: "member" }, targetType: Type): Type {
+    if (targetType.kind === "struct") {
+      const field = targetType.fields.find((f) => f.name === member.name);
+      if (field) return field.type;
+      if (this.methodTable.get(targetType.name)?.has(member.name)) {
+        this.error(member.pos, `'${member.name}' is a method — call it like ${member.name}(...)`);
+        return ANY;
+      }
+      this.error(
+        member.pos,
+        `${targetType.name} has no field '${member.name}'` +
+          ` (fields: ${targetType.fields.map((f) => f.name).join(", ")})`,
+      );
       return ANY;
     }
-    if (args.length !== callee.params.length) {
-      this.error(expr.pos, `expected ${callee.params.length} argument(s), got ${args.length}`);
+    if (targetType.kind === "union") {
+      this.error(
+        member.pos,
+        `cannot access field or method on ${typeToString(targetType)} — narrow it first (with 'is' or 'match')`,
+      );
+      return ANY;
     }
-    for (let i = 0; i < Math.min(args.length, callee.params.length); i++) {
-      if (!assignable(args[i], callee.params[i])) {
+    if (targetType.kind !== "any") {
+      this.error(member.pos, `${typeToString(targetType)} has no fields`);
+    }
+    return ANY;
+  }
+
+  // 引数リストを既知の paramTypes と照合する(メソッド呼び出し用。callee自体は常にfnなので
+  // 「呼べない型」チェックは不要)
+  private checkCallArgs(callExpr: Expr & { kind: "call" }, paramTypes: Type[], retType: Type): Type {
+    const args = callExpr.args.map((a) => this.checkExprSingle(a));
+    if (args.length !== paramTypes.length) {
+      this.error(callExpr.pos, `expected ${paramTypes.length} argument(s), got ${args.length}`);
+    }
+    for (let i = 0; i < Math.min(args.length, paramTypes.length); i++) {
+      if (!assignable(args[i], paramTypes[i])) {
         this.error(
-          expr.args[i].pos,
-          `argument ${i + 1}: cannot use ${typeToString(args[i])} as ${typeToString(callee.params[i])}`,
+          callExpr.args[i].pos,
+          `argument ${i + 1}: cannot use ${typeToString(args[i])} as ${typeToString(paramTypes[i])}`,
         );
       }
     }
-    return callee.ret;
+    return retType;
+  }
+
+  // callee の型が分かっている状態からの呼び出し検査(通常の関数呼び出し・
+  // structフィールドが関数値のケースの両方で使う)
+  private checkCallOfValue(callExpr: Expr & { kind: "call" }, calleeType: Type): Type {
+    const args = callExpr.args.map((a) => this.checkExprSingle(a));
+    if (calleeType.kind === "any") return ANY;
+    if (calleeType.kind !== "fn") {
+      this.error(callExpr.pos, `cannot call non-function type ${typeToString(calleeType)}`);
+      return ANY;
+    }
+    if (args.length !== calleeType.params.length) {
+      this.error(callExpr.pos, `expected ${calleeType.params.length} argument(s), got ${args.length}`);
+    }
+    for (let i = 0; i < Math.min(args.length, calleeType.params.length); i++) {
+      if (!assignable(args[i], calleeType.params[i])) {
+        this.error(
+          callExpr.args[i].pos,
+          `argument ${i + 1}: cannot use ${typeToString(args[i])} as ${typeToString(calleeType.params[i])}`,
+        );
+      }
+    }
+    return calleeType.ret;
   }
 
   private inferBuiltinCall(name: string, expr: Expr & { kind: "call" }): Type {

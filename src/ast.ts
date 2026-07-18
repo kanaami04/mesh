@@ -45,9 +45,16 @@ export interface Param {
 export interface FnDecl {
   kind: "fnDecl";
   name: string;
+  receiver: Receiver | null; // fn (u: User) describe() ... — Goスタイルのメソッドレシーバ
   params: Param[];
   ret: TypeNode | null; // 戻り値なし = null。失敗し得るなら `int | error` のような union
   body: Block;
+  pos: Pos;
+}
+
+export interface Receiver {
+  name: string;
+  type: TypeNode; // v1は struct 型のみ(checkerが検証)
   pos: Pos;
 }
 

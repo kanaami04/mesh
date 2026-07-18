@@ -36,16 +36,17 @@
 
 ## 言語機能(中期)
 
-- [ ] **struct のメソッド** — 言語カード実験(2026-07-18)で必要性が浮上。
-      現状 struct は「データの形」だけで振る舞いを持てず、`fn complete(todos, id)` のように
-      第1引数で受け渡す関数スタイルしか書けない。メソッド構文(例: `fn (t: Todo) render() string`)
-      を入れるか、関数スタイルのまま貫くか要設計。P1(書き方は一つ)との兼ね合いも論点
+- [x] **struct のメソッド**(2026-07-18実装)— Goスタイルの `fn (t: Todo) render() string { ... }`。
+      名前空間は自由関数と分離(`render(t)`は不可、`t.render()`のみ)しP1を維持。
+      レシーバはstruct限定。テスト182件。残: 関数型注釈(`f: fn(int) int`)は未実装のまま
 - [ ] **標準ライブラリ** — 言語カード実験(2026-07-18)で必要性が浮上。第一弾・第二弾実装済み
       - [x] 配列/map操作: contains / indexOf(`int | none`)/ keys / values / sort(非破壊)— 2026-07-18
       - [x] 文字列操作: split / join / trim / upper / lower / toInt(`int | error`)— 2026-07-18
       - [x] 高階関数: filter / transform(map改名。型キーワードと衝突するため)/ reduce — 2026-07-18
       - [ ] 層分け設計(core共通 / 環境別: http・json・file・DOM)は requirements C-6 / Q3 と統合して検討
 - [ ] チャネルの容量指定 `chan<int>(0)` と同期(ブロックする)送信
+      — 先に [design-agenda E-1](docs/design-agenda.md)「channel露出の是非(構造化並行案)」を討議。
+      MoonBit調査([docs/related-languages.md](docs/related-languages.md))で浮上した論点
 - [ ] defer 文
 
 ## ツール・品質(中期)

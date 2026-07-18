@@ -93,7 +93,7 @@ Building an optional result imperatively (e.g. "the best so far"):
   string literals (\`"active"\`), or \`_\` (last arm only). Multiple patterns: \`"a", "b" => ...\`.
 - \`x == none\` is a compile error — use \`is none\` (it narrows; \`==\` does not).
 
-## Structs & maps
+## Structs, maps & methods
 
     u := User{name: "a", age: 1}   // ALL fields required (no zero values / defaults)
     u.age = 31                     // field writes are allowed (immutability is per-binding)
@@ -109,6 +109,32 @@ Building an optional result imperatively (e.g. "the best so far"):
 
 - Structs are reference values: a struct returned from \`find\` is the SAME object stored in
   the array, so writing \`u.age = 31\` to it updates the stored one. (Same for range loop vars.)
+
+Methods use Go's syntax — a receiver clause right after \`fn\`, before the method name:
+
+    fn (t: Todo) complete() Todo {
+        return Todo{title: t.title, done: true}
+    }
+    fn (t: Todo) render() string {
+        if t.done { return "[x] " + t.title }
+        return "[ ] " + t.title
+    }
+
+    todos[0] = todos[0].complete()
+    print(todos[0].render())
+    print(Todo{title: "x", done: false}.complete().render())   // chains left-to-right
+
+- Methods are declared at the TOP LEVEL only (never nested inside \`struct { ... }\`), one \`fn\`
+  per method. The receiver type must be a \`struct\` (not int/string/array/etc).
+- A method's name lives ONLY on its receiver type — \`render(t)\` does NOT work for a method
+  declared as \`fn (t: Todo) render()\`; you must write \`t.render()\`. This means two different
+  structs can each have their own \`describe()\` method with no collision (unlike free functions,
+  which share one global name).
+  Conversely, a plain function is ALWAYS called \`f(x)\`, never \`x.f()\` — there is exactly one
+  call syntax per declaration, never a choice between two.
+- Follow Go's convention for which to use: if an operation's natural first argument is one
+  struct value and reads like "T does X", make it a method on T. Otherwise (multiple unrelated
+  types, or a free-standing utility), use a plain function.
 
 ## Arrays
 
@@ -193,15 +219,20 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
 ## Does NOT exist in Mesh — never write these
 
 null, undefined, nil / try, catch, throw, exceptions / panic(), recover /
-class, inheritance, methods / switch, while, do-while / (T, error) multi-value returns /
-enum (use unions) / default args, overloads / semicolons / backtick strings /
-comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if)
+class, inheritance, interfaces, generics / switch, while, do-while /
+(T, error) multi-value returns / enum (use unions) / default args, overloads /
+semicolons / backtick strings / comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if) /
+methods on non-struct types (int/string/array — struct only) / function-type annotations
+(a variable CAN hold a function value, e.g. \`f := fn(x: int) int {...}\`, but you cannot
+write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration)
 
 ## Common compile errors → how to fix
 
     'x' is immutable — declare it with 'mut'        → change x := ... to mut x := ...
     'x' shadows an outer binding                    → rename it, or assign with = to a mut binding
-    cannot access field on User | none — narrow it  → add: if u is none { return }
+    cannot access field or method on User | none    → add: if u is none { return }, then narrow it first
+    undefined: 'render' (when render is a method)   → methods have no bare-name form; write t.render(), not render(t)
+    'render' is a method — call it like render(...) → you wrote t.render (no parens); add ()
     match is not exhaustive — missing: ...          → add arms for the listed members, or a _ arm
     use 'is none' to test for none                  → replace == none with is none
     '!' propagates error, but this function returns int → add | error to the return type
