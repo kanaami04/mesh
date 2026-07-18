@@ -443,6 +443,16 @@ class Codegen {
           return `__error(${args[0]})`;
         case "sleep":
           return `(await __sleep(${args[0]}))`;
+        case "contains":
+          return `${args[0]}.includes(${args[1]})`;
+        case "indexOf":
+          return `__indexOf(${args[0]}, ${args[1]})`;
+        case "keys":
+          return `Array.from(${args[0]}.keys())`;
+        case "values":
+          return `Array.from(${args[0]}.values())`;
+        case "sort":
+          return `__sorted(${args[0]})`;
       }
     }
 

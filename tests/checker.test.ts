@@ -573,4 +573,37 @@ fn main() { print(g()) }`);
       expect.stringContaining("cannot return none as int"),
     ]);
   });
+
+  test("contains: 正しい使用はエラーなし・要素型の不一致を検出", () => {
+    expect(inMain(`nums := [1, 2, 3]\nprint(contains(nums, 2))`)).toEqual([]);
+    expect(inMain(`nums := [1, 2, 3]\nprint(contains(nums, "x"))`)).toEqual([
+      expect.stringContaining(`contains() second argument must be int, got "x"`),
+    ]);
+  });
+
+  test("indexOf: 戻り値は int | none なので絞り込みが必要", () => {
+    expect(inMain(`nums := [1, 2, 3]\ni := indexOf(nums, 2)\nprint(i + 1)`)).toEqual([
+      expect.stringContaining("invalid operation"),
+    ]);
+    expect(inMain(`nums := [1, 2, 3]\ni := indexOf(nums, 2)\nif i is none {\nreturn\n}\nprint(i + 1)`)).toEqual(
+      [],
+    );
+  });
+
+  test("keys/values: mapから配列の型を正しく推論", () => {
+    expect(
+      inMain(`ages := map<string, int>{"a": 1}\nnames := keys(ages)\nprint(names[0])\nnums := values(ages)\nprint(nums[0])`),
+    ).toEqual([]);
+  });
+
+  test("sort: int[]/string[]は通り、structなど非順序型は弾く", () => {
+    expect(inMain(`nums := [3, 1, 2]\nsorted := sort(nums)\nprint(sorted[0])`)).toEqual([]);
+    expect(inMain(`words := ["b", "a"]\nprint(sort(words))`)).toEqual([]);
+    const errors = errorsOf(`struct User { name: string }
+fn main() {
+	us := [User{name: "b"}, User{name: "a"}]
+	print(sort(us))
+}`);
+    expect(errors).toEqual([expect.stringContaining("sort() requires int[], float[] or string[]")]);
+  });
 });

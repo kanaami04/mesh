@@ -132,9 +132,14 @@ for { ... }                       // 無限ループ(break で脱出)
 | `print(...)` | 標準出力(none は `none`、error はメッセージを表示) |
 | `str(x)` | 文字列化(`"id: " + str(42)`) |
 | `len(x)` | 文字列・配列の長さ |
-| `push(arr, v)` | 配列に追加 |
+| `push(arr, v)` | 配列に追加(破壊的) |
 | `error(msg)` | エラー値を作る |
 | `sleep(ms)` | ミリ秒待つ |
+| `delete(m, k)` | mapからキーを削除 |
+| `contains(arr, v)` | 配列に含まれるか(`bool`) |
+| `indexOf(arr, v)` | 配列内の位置(`int \| none`) |
+| `keys(m)` / `values(m)` | mapのキー/値の配列(挿入順) |
+| `sort(arr)` | 昇順に並べた**新しい**配列を返す(非破壊。`int[]`/`float[]`/`string[]`のみ) |
 
 ### 意図的にオミットしているもの(Go 流のシンプルさ)
 

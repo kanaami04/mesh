@@ -35,7 +35,10 @@ export interface Diagnostic {
 }
 
 // 組み込み関数。特殊な検査(可変長引数など)は checkCall 内で行う。
-export const BUILTINS = new Set(["print", "len", "push", "str", "error", "sleep", "delete"]);
+export const BUILTINS = new Set([
+  "print", "len", "push", "str", "error", "sleep", "delete",
+  "contains", "indexOf", "keys", "values", "sort",
+]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
 const RESERVED = new Set([
@@ -986,6 +989,69 @@ class Checker {
           this.error(expr.args[0].pos, `sleep() requires milliseconds (int), got ${typeToString(args[0])}`);
         }
         return VOID;
+      }
+      case "contains": {
+        if (expectArity(2)) {
+          const arr = args[0];
+          if (arr.kind === "array") {
+            if (!assignable(args[1], arr.elem)) {
+              this.error(
+                expr.args[1].pos,
+                `contains() second argument must be ${typeToString(arr.elem)}, got ${typeToString(args[1])}`,
+              );
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `contains() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        return BOOL;
+      }
+      case "indexOf": {
+        if (expectArity(2)) {
+          const arr = args[0];
+          if (arr.kind === "array") {
+            if (!assignable(args[1], arr.elem)) {
+              this.error(
+                expr.args[1].pos,
+                `indexOf() second argument must be ${typeToString(arr.elem)}, got ${typeToString(args[1])}`,
+              );
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `indexOf() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        return unionOf([INT, NONE]);
+      }
+      case "keys": {
+        if (!expectArity(1)) return { kind: "array", elem: ANY };
+        const m = args[0];
+        if (m.kind === "map") return { kind: "array", elem: m.key };
+        if (m.kind !== "any") this.error(expr.args[0].pos, `keys() requires a map, got ${typeToString(m)}`);
+        return { kind: "array", elem: ANY };
+      }
+      case "values": {
+        if (!expectArity(1)) return { kind: "array", elem: ANY };
+        const m = args[0];
+        if (m.kind === "map") return { kind: "array", elem: m.value };
+        if (m.kind !== "any") this.error(expr.args[0].pos, `values() requires a map, got ${typeToString(m)}`);
+        return { kind: "array", elem: ANY };
+      }
+      case "sort": {
+        if (expectArity(1)) {
+          const arr = args[0];
+          if (arr.kind === "array") {
+            if (!isNumeric(arr.elem) && !isStringy(arr.elem)) {
+              this.error(
+                expr.args[0].pos,
+                `sort() requires int[], float[] or string[], got ${typeToString(arr)}`,
+              );
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `sort() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        // 非破壊(new arrayを返す)。引数の配列自体は変わらない
+        return args[0]?.kind === "array" ? args[0] : ANY;
       }
       default:
         return ANY;

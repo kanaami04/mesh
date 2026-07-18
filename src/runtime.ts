@@ -70,6 +70,14 @@ const __spawn = (f, args) => {
 const __sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // map の読み取り: 無いキーは none(null)を返す — V | none 型に対応
 const __mget = (m, k) => (m.has(k) ? m.get(k) : null);
+// 標準ライブラリ第一弾(配列・map操作)
+const __indexOf = (arr, v) => {
+  const i = arr.indexOf(v);
+  return i === -1 ? null : i;
+};
+// sort() は非破壊: 元の配列は変えず、並び替えたコピーを返す。
+// < / > は int・float・string のどれでも正しく比較できるので単一の比較関数で足りる
+const __sorted = (arr) => [...arr].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v instanceof Error ? v.message

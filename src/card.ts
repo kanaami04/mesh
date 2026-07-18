@@ -160,11 +160,16 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
 ## Builtins (complete list)
 
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
+    contains(arr, v)  indexOf(arr, v)  keys(m)  values(m)  sort(arr)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
-- push, not append. There are no methods on values other than struct fields, and no
-  standard library yet: array find/filter/map, string split/join, parseInt, sort etc.
-  must be written by hand (loop with \`for ... range\`).
+- push, not append. \`contains\`/\`indexOf\` work on arrays; \`indexOf\` returns \`int | none\`
+  (narrow it, same as any other union). \`keys\`/\`values\` return arrays from a map (insertion
+  order). \`sort(arr)\` is NON-mutating — it returns a NEW sorted array (\`int[]\`, \`float[]\` or
+  \`string[]\` only, ascending); the argument is unchanged.
+- There are no methods on values other than struct fields, and nothing beyond the list above:
+  no filter/map/reduce, no string split/join/trim/upper/lower, no parseInt. Write these by
+  hand with \`for ... range\` until they land in the standard library.
 
 ## Does NOT exist in Mesh — never write these
 

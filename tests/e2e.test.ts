@@ -232,6 +232,26 @@ fn main() {
     // 「push を値として使う」はカードどおりエラーになる
     expect(compile(`fn main() { xs := [1]\ny := push(xs, 2)\nprint(y) }`).code).toBe(null);
   });
+
+  test("カードの新項目: 標準ライブラリ第一弾(contains/indexOf/keys/values/sort)", () => {
+    const out = runSource(`fn main() {
+      nums := [3, 1, 2]
+      print(contains(nums, 1))
+
+      i := indexOf(nums, 9)
+      if i is none {
+        print("missing")
+      }
+
+      ages := map<string, int>{"b": 2, "a": 1}
+      print(keys(ages))
+      print(values(ages))
+
+      print(sort(nums))
+      print(nums)   // sort は非破壊 — 元の配列は変わらない
+    }`);
+    expect(out).toBe("true\nmissing\n[b a]\n[2 1]\n[1 2 3]\n[3 1 2]\n");
+  });
 });
 
 describe("e2e", () => {
@@ -683,5 +703,49 @@ describe("e2e", () => {
 
   test("float のゼロ除算は panic せず Infinity(Goと同じ割り切り)", () => {
     expect(runSource(`fn main() { print(1.0 / 0.0) }`)).toBe("Infinity\n");
+  });
+
+  test("標準ライブラリ第一弾: contains / indexOf", () => {
+    const out = runSource(`fn main() {
+      nums := [10, 20, 30]
+      print(contains(nums, 20))
+      print(contains(nums, 99))
+
+      i := indexOf(nums, 20)
+      if i is none {
+        return
+      }
+      print(i)
+
+      j := indexOf(nums, 99)
+      if j is none {
+        print("not found")
+      }
+    }`);
+    expect(out).toBe("true\nfalse\n1\nnot found\n");
+  });
+
+  test("標準ライブラリ第一弾: keys / values(mapの挿入順)", () => {
+    const out = runSource(`fn main() {
+      ages := map<string, int>{}
+      ages["b"] = 2
+      ages["a"] = 1
+      print(keys(ages))
+      print(values(ages))
+    }`);
+    expect(out).toBe("[b a]\n[2 1]\n");
+  });
+
+  test("標準ライブラリ第一弾: sortは非破壊で元の配列を変えない", () => {
+    const out = runSource(`fn main() {
+      nums := [3, 1, 2]
+      sorted := sort(nums)
+      print(nums)
+      print(sorted)
+
+      words := ["banana", "apple", "cherry"]
+      print(sort(words))
+    }`);
+    expect(out).toBe("[3 1 2]\n[1 2 3]\n[apple banana cherry]\n");
   });
 });
