@@ -1,0 +1,48 @@
+// channel仕様の完成: close + T | closed + 容量指定(本物のブロッキング) + select。
+// <-ch は常に T | closed を返す(mapの V | none と同じ理由: closeされうることを型で強制する)
+
+fn produce(ch: chan<int>) {
+	for i := 1; i <= 3; i++ {
+		ch <- i
+	}
+	close(ch)   // これ以上送信しないことを宣言
+}
+
+fn slowSend(ch: chan<string>, msg: string, ms: int) {
+	sleep(ms)
+	ch <- msg
+}
+
+fn main() {
+	// close: 終端を型で検出する
+	ch := chan<int>()
+	spawn produce(ch)
+	mut total := 0
+	for {
+		v := <-ch
+		if v is closed {
+			break
+		}
+		total = total + v
+	}
+	print("total: ${total}")
+
+	// select: 複数チャネルのうち先に準備できた方を選ぶ(Goと同じく擬似ランダムに公平選択)
+	a := chan<string>()
+	b := chan<string>()
+	spawn slowSend(a, "from a", 15)
+	spawn slowSend(b, "from b", 60)
+	msg := select {
+		v := <-a => "got: ${v}"
+		v := <-b => "got: ${v}"
+	}
+	print(msg)
+
+	// select の "_" は非ブロッキング用のdefault
+	empty := chan<int>()
+	r := select {
+		v := <-empty => "unexpected: ${v}"
+		_ => "nothing ready"
+	}
+	print(r)
+}

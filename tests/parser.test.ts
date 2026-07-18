@@ -121,6 +121,36 @@ describe("parser", () => {
     expect(stmt.kind).toBe("wait");
   });
 
+  test("chan<T>(n) は容量式を持つ", () => {
+    const [stmt] = parseBody(`ch := chan<int>(3)`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const expr = stmt.values[0];
+    if (expr.kind !== "chanExpr") throw new Error("expected chanExpr, got " + expr.kind);
+    expect(expr.capacity?.kind).toBe("int");
+  });
+
+  test("chan<T>() は容量なし(null)", () => {
+    const [stmt] = parseBody(`ch := chan<int>()`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const expr = stmt.values[0];
+    if (expr.kind !== "chanExpr") throw new Error("expected chanExpr, got " + expr.kind);
+    expect(expr.capacity).toBeNull();
+  });
+
+  test("select式: アームとdefault(_)をパースできる", () => {
+    const [stmt] = parseBody(`msg := select {\nv := <-a => v\n_ => "none"\n}`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const expr = stmt.values[0];
+    if (expr.kind !== "select") throw new Error("expected select, got " + expr.kind);
+    expect(expr.arms.length).toBe(1);
+    expect(expr.arms[0].name).toBe("v");
+    expect(expr.defaultArm).not.toBeNull();
+  });
+
+  test("select式: defaultは1つまで", () => {
+    expect(() => parseBody(`msg := select {\n_ => "a"\n_ => "b"\n}`)).toThrow(CompileError);
+  });
+
   test("トップレベルは fn のみ", () => {
     expect(() => parse(`x := 1`)).toThrow(CompileError);
   });

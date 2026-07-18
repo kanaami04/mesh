@@ -200,7 +200,8 @@ export type Expr =
   | MatchExpr
   | StructLit
   | SpawnExpr
-  | MapLit;
+  | MapLit
+  | SelectExpr;
 
 export interface IntLit extends ExprBase {
   kind: "int";
@@ -274,8 +275,9 @@ export interface FnExpr extends ExprBase {
   body: Block;
 }
 export interface ChanExpr extends ExprBase {
-  kind: "chanExpr"; // chan<int>()
+  kind: "chanExpr"; // chan<int>() 無制限バッファ(既定) / chan<int>(n) 容量n(nがブロッキング送信)
   elem: TypeNode;
+  capacity: Expr | null;
 }
 export interface IsExpr extends ExprBase {
   kind: "is"; // x is none / x is error — narrowing の起点
@@ -323,3 +325,15 @@ export interface MatchArm {
 export type MatchPattern =
   | { kind: "type"; type: TypeNode } // none / error / int などの型パターン
   | { kind: "wildcard"; pos: Pos }; // _ (最後のアームのみ)
+
+export interface SelectExpr extends ExprBase {
+  kind: "select"; // select { v := <-ch1 => ...  v := <-ch2 => ...  _ => ... }
+  arms: SelectArm[];
+  defaultArm: Expr | null; // "_" アーム。あれば非ブロッキング(即座に何も準備できていなければこちら)
+}
+export interface SelectArm {
+  name: string; // 受信した値(T | closed)を束縛する名前。アームの body スコープ内だけで有効
+  channel: Expr;
+  body: Expr;
+  pos: Pos;
+}

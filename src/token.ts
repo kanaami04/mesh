@@ -29,6 +29,7 @@ export type TokenType =
   | "is"
   | "or"
   | "match"
+  | "select"
   | "type"
   | "struct"
   | "true"
@@ -99,6 +100,7 @@ export const KEYWORDS = new Set<TokenType>([
   "is",
   "or",
   "match",
+  "select",
   "type",
   "struct",
   "true",

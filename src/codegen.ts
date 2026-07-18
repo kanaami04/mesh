@@ -223,7 +223,8 @@ class Codegen {
       }
 
       case "send":
-        this.emit(`${this.genExpr(stmt.channel)}.send(${this.genExpr(stmt.value)});`);
+        // 容量指定チャネルは満杯だと本当にブロックしうるので await する
+        this.emit(`(await ${this.genExpr(stmt.channel)}.send(${this.genExpr(stmt.value)}));`);
         break;
 
       case "incDec": {
@@ -295,6 +296,7 @@ class Codegen {
     if (t.kind === "mapType") return "(__m instanceof Map)";
     switch (t.name) {
       case "none": return "(__m === null)";
+      case "closed": return "(__m === __CLOSED)";
       case "error": return "(__m instanceof Error)";
       case "int": return "Number.isInteger(__m)";
       case "float": return '(typeof __m === "number")';
@@ -341,9 +343,12 @@ class Codegen {
 
       case "is": {
         const operand = this.genExpr(expr.operand);
-        // v1 の is は none / error のみ(checker が保証)
+        // v1 の is は none / error / closed のみ(checker が保証)
         if (expr.target.kind === "name" && expr.target.name === "none") {
           return `(${operand} === null)`;
+        }
+        if (expr.target.kind === "name" && expr.target.name === "closed") {
+          return `(${operand} === __CLOSED)`;
         }
         return `(${operand} instanceof Error)`;
       }
@@ -392,7 +397,15 @@ class Codegen {
         return `(${expr.op}${this.genExpr(expr.operand)})`;
 
       case "recv":
-        return `(await ${this.genExpr(expr.channel)}.recv())`;
+        // 受信は常に T | closed。__recv が {value, closed} を Mesh の値(closed なら __CLOSED)に変換する
+        return `(await __recv(${this.genExpr(expr.channel)}))`;
+
+      case "select": {
+        const channels = expr.arms.map((a) => this.genExpr(a.channel));
+        const handlers = expr.arms.map((a) => `(async (${a.name}) => ${this.genExpr(a.body)})`);
+        const defaultHandler = expr.defaultArm ? `(async () => ${this.genExpr(expr.defaultArm)})` : "null";
+        return `(await __select([${channels.join(", ")}], [${handlers.join(", ")}], ${defaultHandler}))`;
+      }
 
       case "call":
         return this.genCall(expr);
@@ -432,7 +445,7 @@ class Codegen {
       }
 
       case "chanExpr":
-        return "new __Channel()";
+        return expr.capacity ? `new __Channel(${this.genExpr(expr.capacity)})` : "new __Channel()";
 
       case "spawn": {
         // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す。
@@ -517,6 +530,8 @@ class Codegen {
           return `(await __map(${args[0]}, ${args[1]}))`;
         case "reduce":
           return `(await __reduce(${args[0]}, ${args[1]}, ${args[2]}))`;
+        case "close":
+          return `${args[0]}.close()`;
       }
     }
 

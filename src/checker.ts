@@ -8,6 +8,7 @@ import type { Pos } from "./token";
 import {
   ANY,
   BOOL,
+  CLOSED,
   ERROR,
   FLOAT,
   INT,
@@ -16,6 +17,7 @@ import {
   VOID,
   assignable,
   isFailure,
+  isNarrowTarget,
   isNumeric,
   isStringy,
   typeEquals,
@@ -27,7 +29,9 @@ import {
 } from "./types";
 
 // 組み込みの型名(type 宣言でこれらの名前は使えない)
-const BUILTIN_TYPE_NAMES = new Set(["int", "float", "string", "bool", "void", "error", "none", "any"]);
+const BUILTIN_TYPE_NAMES = new Set([
+  "int", "float", "string", "bool", "void", "error", "none", "closed", "any",
+]);
 
 export interface Diagnostic {
   pos: Pos;
@@ -40,6 +44,7 @@ export const BUILTINS = new Set([
   "contains", "indexOf", "keys", "values", "sort",
   "split", "join", "trim", "upper", "lower", "toInt",
   "filter", "transform", "reduce",
+  "close",
 ]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
@@ -150,6 +155,7 @@ class Checker {
           case "void": return VOID;
           case "error": return ERROR;
           case "none": return NONE;
+          case "closed": return CLOSED;
           case "any": return ANY;
           default:
             return this.resolveAlias(node.name, node.pos);
@@ -538,8 +544,8 @@ class Checker {
       case "is": {
         const t = this.checkExprSingle(expr.operand);
         const target = this.resolveType(expr.target);
-        if (!isFailure(target)) {
-          this.error(expr.pos, "right side of 'is' must be 'none' or 'error' (for now)");
+        if (!isNarrowTarget(target)) {
+          this.error(expr.pos, "right side of 'is' must be 'none', 'error', or 'closed' (for now)");
           return BOOL;
         }
         if (t.kind === "union") {
@@ -680,12 +686,16 @@ class Checker {
 
       case "recv": {
         const ch = this.checkExprSingle(expr.channel);
-        if (ch.kind === "chan") return ch.elem;
+        // 受信は常に T | closed(mapの V | none と同じ理由: closeされうることを型で強制する)
+        if (ch.kind === "chan") return unionOf([ch.elem, CLOSED]);
         if (ch.kind !== "any") {
           this.error(expr.pos, `cannot receive from non-channel type ${typeToString(ch)}`);
         }
         return ANY;
       }
+
+      case "select":
+        return this.inferSelect(expr);
 
       case "call":
         return this.inferCall(expr);
@@ -773,8 +783,15 @@ class Checker {
         return t;
       }
 
-      case "chanExpr":
+      case "chanExpr": {
+        if (expr.capacity) {
+          const cap = this.checkExprSingle(expr.capacity);
+          if (!typeEquals(cap, INT) && cap.kind !== "any") {
+            this.error(expr.capacity.pos, `channel capacity must be int, got ${typeToString(cap)}`);
+          }
+        }
         return { kind: "chan", elem: this.resolveType(expr.elem) };
+      }
     }
   }
 
@@ -916,6 +933,40 @@ class Checker {
     if (voids.length === armTypes.length) return VOID;
     if (voids.length > 0) {
       this.error(expr.pos, "match arms mix values and void — all arms must return a value, or none");
+      return ANY;
+    }
+    return unionOf(armTypes);
+  }
+
+  // select式: 複数チャネルのうちどれかが準備できたら、そのアームを評価する。
+  // matchと見た目は揃えるが、パターンは「型」ではなく「どのチャネル操作が先に終わったか」
+  private inferSelect(expr: Expr & { kind: "select" }): Type {
+    if (expr.arms.length === 0 && !expr.defaultArm) {
+      this.error(expr.pos, "select must have at least one arm");
+      return ANY;
+    }
+    const armTypes: Type[] = [];
+    for (const arm of expr.arms) {
+      const chType = this.checkExprSingle(arm.channel);
+      let bindingType: Type = ANY;
+      if (chType.kind === "chan") {
+        bindingType = unionOf([chType.elem, CLOSED]);
+      } else if (chType.kind !== "any") {
+        this.error(arm.channel.pos, `select arm requires a channel, got ${typeToString(chType)}`);
+      }
+      this.pushScope();
+      this.declare(arm.name, bindingType, arm.pos);
+      armTypes.push(this.checkExpr(arm.body));
+      this.popScope();
+    }
+    if (expr.defaultArm) {
+      armTypes.push(this.checkExpr(expr.defaultArm));
+    }
+
+    const voids = armTypes.filter((t) => typeEquals(t, VOID));
+    if (voids.length === armTypes.length) return VOID;
+    if (voids.length > 0) {
+      this.error(expr.pos, "select arms mix values and void — all arms must return a value, or none");
       return ANY;
     }
     return unionOf(armTypes);
@@ -1198,6 +1249,15 @@ class Checker {
           this.error(expr.args[0].pos, `toInt() requires a string, got ${typeToString(args[0])}`);
         }
         return unionOf([INT, ERROR]);
+      }
+      case "close": {
+        if (expectArity(1)) {
+          const ch = args[0];
+          if (ch.kind !== "chan" && ch.kind !== "any") {
+            this.error(expr.args[0].pos, `close() requires a channel, got ${typeToString(ch)}`);
+          }
+        }
+        return VOID;
       }
       case "filter": {
         if (expectArity(2)) {

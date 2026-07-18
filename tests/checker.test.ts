@@ -798,4 +798,61 @@ fn main() {
 }`);
     expect(errors).toEqual([]);
   });
+
+  test("受信は常に T | closed — 絞り込む前に演算に使うとエラー", () => {
+    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v + 1)`)).toEqual([
+      expect.stringContaining("invalid operation"),
+    ]);
+    expect(
+      inMain(`ch := chan<int>()\nv := <-ch\nif v is closed {\nreturn\n}\nprint(v + 1)`),
+    ).toEqual([]);
+  });
+
+  test("is は none / error / closed のみ許可", () => {
+    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v is int)`)).toEqual([
+      expect.stringContaining("right side of 'is' must be 'none', 'error', or 'closed'"),
+    ]);
+  });
+
+  test("close(): チャネル以外を渡すとエラー", () => {
+    expect(inMain(`close(1)`)).toEqual([expect.stringContaining("close() requires a channel, got int")]);
+  });
+
+  test("chan<T>(n): 容量は int でなければならない", () => {
+    expect(inMain(`ch := chan<int>("x")`)).toEqual([
+      expect.stringContaining("channel capacity must be int"),
+    ]);
+    expect(inMain(`ch := chan<int>(3)\nprint(ch)`)).toEqual([]);
+  });
+
+  test("select: 型は各アームの union、チャネル以外を渡すとエラー", () => {
+    const errors = errorsOf(`fn main() {
+	a := chan<int>()
+	b := chan<string>()
+	x := select {
+		v := <-a => str(v)
+		v := <-b => v
+	}
+	print(x)
+}`);
+    expect(errors).toEqual([]);
+
+    expect(inMain(`x := select {\nv := <-1 => v\n}`)).toEqual([
+      expect.stringContaining("select arm requires a channel, got int"),
+    ]);
+  });
+
+  test("select: アーム内で束縛した変数は T | closed として絞り込める", () => {
+    const errors = errorsOf(`fn main() {
+	a := chan<int>()
+	total := select {
+		v := <-a => match v {
+			closed => 0
+			int => v + 1
+		}
+	}
+	print(total)
+}`);
+    expect(errors).toEqual([]);
+  });
 });

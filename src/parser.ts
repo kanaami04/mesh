@@ -14,6 +14,7 @@ import type {
   Param,
   Program,
   Receiver,
+  SelectArm,
   Stmt,
   StructFieldNode,
   TypeDecl,
@@ -663,15 +664,48 @@ class Parser {
         this.expect("}", "at end of match");
         return { kind: "match", subject, arms, pos: t.pos };
       }
+      case "select": {
+        // select { v := <-ch1 => ...  v := <-ch2 => ...  _ => ... }
+        // "_" は非ブロッキング用の default アーム(あれば最大1つ)。matchと見た目は揃えるが、
+        // パターンが「型」ではなく「どのchannel操作が先に終わったか」なので独立構文にしてある
+        this.next();
+        this.expect("{", "after 'select'");
+        this.skipSemis();
+        const arms: SelectArm[] = [];
+        let defaultArm: Expr | null = null;
+        while (!this.check("}") && !this.check("eof")) {
+          const armPos = this.peek().pos;
+          if (this.check("ident") && this.peek().value === "_") {
+            this.next();
+            if (defaultArm !== null) {
+              throw new CompileError("select can only have one default ('_') arm", armPos);
+            }
+            this.expect("=>", "after '_' in select");
+            defaultArm = this.parseExpr();
+          } else {
+            const nameTok = this.expect("ident", "as select binding name");
+            this.expect(":=", "in select arm ('name := <-ch => body')");
+            this.expect("<-", "select arms receive from a channel ('name := <-ch => body')");
+            const channel = this.parseExpr();
+            this.expect("=>", "after select arm channel");
+            const body = this.parseExpr();
+            arms.push({ name: nameTok.value, channel, body, pos: armPos });
+          }
+          this.skipSemis();
+        }
+        this.expect("}", "at end of select");
+        return { kind: "select", arms, defaultArm, pos: t.pos };
+      }
       case "chan": {
-        // チャネル生成: chan<int>()
+        // チャネル生成: chan<int>()(無制限バッファ) / chan<int>(n)(容量n、送信がブロックしうる)
         this.next();
         this.expect("<", "after 'chan'");
         const elem = this.parseType();
         this.expect(">", "after channel element type");
-        this.expect("(", "to create a channel: chan<T>()");
-        this.expect(")", "to create a channel: chan<T>()");
-        return { kind: "chanExpr", elem, pos: t.pos };
+        this.expect("(", "to create a channel: chan<T>() or chan<T>(capacity)");
+        const capacity = this.check(")") ? null : this.parseExpr();
+        this.expect(")", "to create a channel: chan<T>() or chan<T>(capacity)");
+        return { kind: "chanExpr", elem, capacity, pos: t.pos };
       }
       case "map": {
         // mapリテラル: map<string, int>{"a": 1, "b": 2}(空は {} )

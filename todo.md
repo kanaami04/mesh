@@ -17,7 +17,8 @@
   - [x] union型(`T | none` / `T | error`)・narrowing・`!`/`or`・nil/多値戻りの撤去
   - [x] match式(網羅性検査・アーム内narrowing・`_`・複数パターン・リテラルパターン)
   - [x] 文字列リテラル型(widening込み)と `type Status = ...` 宣言(循環検出込み)
-  - [ ] `is` の対象拡大(現状は none/error のみ。型名・リテラルへ)
+  - [x] `is` の対象拡大(2026-07-18: `closed`を追加。none/error/closedの3種)
+  - [ ] `is` のさらなる対象拡大(型名・リテラルへ)は未着手
 - [ ] **struct と型定義** — コア実装済み(2026-07-17)
   - [x] struct 宣言・リテラル生成・フィールドアクセスの型検査・再帰struct・`type =` の `{...}` ガード
   - [ ] インライン `{...}` 型式(union内)と判別可能union(`{ kind: "ok", ... } | ...`)
@@ -26,7 +27,7 @@
   - ~~文字列補間 `"${式}"`~~ ✅ 実装済み(2026-07-17)
   - ~~デフォルト不変 + `mut`~~ ✅ 実装済み(2026-07-17)
   - E1 `!` / E2 `or`(union移行とセットで)
-  - ~~`spawn` 式 / `wait` ブロック~~ ✅ 実装済み(2026-07-18)/ `select`(残)
+  - ~~`spawn` 式 / `wait` ブロック / `select`~~ ✅ 実装済み(2026-07-18)
   - ~~map型(`m[k]` は `V | none`)/ for range(完全形のみ)~~ ✅ 実装済み(2026-07-18)
   - 決定記録は [docs/syntax-proposals.md](docs/syntax-proposals.md) と [docs/design-agenda.md](docs/design-agenda.md)
 - [ ] **Rust移植の開始**
@@ -47,7 +48,9 @@
 - [x] **E-1決着: 2段スコープの構造化並行**(2026-07-18実装)— spawn=関数所有で暗黙wait
       (リーク構文的に不可能)/ detach=プログラム所有のバックグラウンド。channelは維持。
       kanayamaの「deferのように後片付けを自動保証」発案が起点。テスト188件
-- [ ] チャネルの容量指定 `chan<int>(0)` と同期(ブロックする)送信 / close設計(C-5)/ select(B-3)
+- [x] **channel仕様の完成**(2026-07-18実装)— 容量指定(Go互換の本物のブロッキング送信、
+      panic方式ではなくkanayama選択)/ close+`T | closed`(C-5決着、union路線をそのまま適用)/
+      select式(matchの見た目を踏襲した独立構文、擬似ランダム公平選択)。テスト206件
 - [ ] defer 文
 
 ## ツール・品質(中期)

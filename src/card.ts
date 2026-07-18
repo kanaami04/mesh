@@ -176,8 +176,8 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
 ## Concurrency (structured — every task has an owner, leaks are impossible)
 
     task := spawn f(x)       // run concurrently; returns a receive port (chan<T>)
-    v := <-task              // receive = wait for the result
-    ch := chan<string>()     // channel: ch <- v sends, <-ch receives
+    v := <-task              // receive = wait for the result — type is T | closed (see below)
+    ch := chan<string>()     // channel, unbounded buffer: ch <- v sends, <-ch receives
     wait {                   // wait EARLIER than the function exit: block until every
         spawn a()            // task spawned inside this block has finished
         spawn b()
@@ -196,12 +196,58 @@ Two ownership tiers — pick by how long the task should live:
 - A long-lived worker that loops forever receiving from a channel must be \`detach\`ed —
   \`spawn\` would make the enclosing function wait for it forever at its exit.
 
+### Channel capacity — chan<T>() vs chan<T>(n)
+
+    ch := chan<T>()     // no argument: UNBOUNDED buffer, send never blocks (the common case)
+    ch := chan<T>(0)    // capacity 0: UNBUFFERED — send blocks until a receiver is ready right now
+    ch := chan<T>(3)    // capacity 3: send blocks only once 3 unreceived values are already buffered
+
+This is REAL Go-compatible blocking (not a panic-based approximation) — \`ch <- v\` on a full
+bounded channel genuinely waits (\`await\`s) until space frees up.
+
+### close — receiving is ALWAYS \`T | closed\`
+
+Like map reads (\`V | none\`), a channel receive can ALWAYS observe "no more values", so its
+type always includes \`closed\` — you must narrow before using the value, same as none/error:
+
+    fn produce(ch: chan<int>) {
+        for i := 1; i <= 3; i++ { ch <- i }
+        close(ch)             // declares "no more sends" — required to end a receive loop cleanly
+    }
+    fn main() {
+        ch := chan<int>()
+        spawn produce(ch)
+        for {
+            v := <-ch          // type: int | closed
+            if v is closed { break }
+            print(v)
+        }
+    }
+
+\`closed\` is its own type (like \`none\`/\`error\`) — narrow with \`is closed\` or a \`match\` arm
+(\`closed => ...\`). It is NOT swept into \`!\`/\`or\` propagation (a closed channel isn't "this
+function's own failure"). Sending to an already-closed channel, or closing twice, panics.
+
+### select — wait on multiple channels, pick whichever is ready first
+
+    result := select {
+        v := <-ch1 => "from ch1: \${v}"    // v is bound to ch1's element type | closed
+        v := <-ch2 => "from ch2: \${v}"
+        _ => "nothing ready"               // OPTIONAL — makes the whole select non-blocking
+    }
+
+If multiple channels are ready simultaneously, one is picked pseudo-randomly (same as Go —
+prevents one case from starving the others). Without a \`_\` arm, \`select\` blocks until at
+least one channel is ready. \`select\`'s syntax deliberately echoes \`match\`'s \`pattern => body\`
+shape, but its "patterns" are channel-receive expressions, not type patterns — it is NOT a
+form of \`match\`.
+
 ## Builtins (complete list)
 
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
     contains(arr, v)  indexOf(arr, v)  keys(m)  values(m)  sort(arr)
     split(s, sep)  join(arr, sep)  trim(s)  upper(s)  lower(s)  toInt(s)
-    filter(arr, pred)  transform(arr, f)  reduce(arr, f, init)
+    filter(arr, pred)  transform(arr, f)  reduce(arr, f, init)  close(ch)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
 - push, not append. \`contains\`/\`indexOf\` work on arrays; \`indexOf\` returns \`int | none\`
@@ -237,7 +283,9 @@ class, inheritance, interfaces, generics / switch, while, do-while /
 semicolons / backtick strings / comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if) /
 methods on non-struct types (int/string/array — struct only) / function-type annotations
 (a variable CAN hold a function value, e.g. \`f := fn(x: int) int {...}\`, but you cannot
-write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration)
+write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration) /
+Go's close/comma-ok idiom (\`v, ok := <-ch\`) — use \`v := <-ch\` then narrow with \`is closed\` /
+send-case / default-send in select (select only reacts to RECEIVE readiness, not send readiness)
 
 ## Common compile errors → how to fix
 
@@ -249,6 +297,8 @@ write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` decla
     match is not exhaustive — missing: ...          → add arms for the listed members, or a _ arm
     use 'is none' to test for none                  → replace == none with is none
     '!' propagates error, but this function returns int → add | error to the return type
+    invalid operation: T + T | closed                → you used <-ch directly; narrow with 'is closed' first
+    send on closed channel / close of closed channel → panic: don't send/close after close(ch) already ran
     range over an array needs two names             → for i, v := range arr (use _ to drop one)
     cannot use any[] as Todo[] / cannot return any[] → you wrote []; use Todo[]{} for an empty typed array
     this function has no return value (from push)   → push returns none; don't use it as a value

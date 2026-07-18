@@ -6,6 +6,7 @@ export type Type =
   | { kind: "prim"; name: "int" | "float" | "string" | "bool" | "void" | "error" }
   | { kind: "any" }
   | { kind: "none" } // 「不在」を表す単位型。T | none の形でだけ現れる
+  | { kind: "closed" } // channelがcloseされたことを表す単位型。<-ch は常に T | closed を返す
   | { kind: "literal"; value: string } // 文字列リテラル型: "active"。string の部分型
   | { kind: "array"; elem: Type }
   | { kind: "chan"; elem: Type }
@@ -30,6 +31,7 @@ export const VOID: Type = { kind: "prim", name: "void" };
 export const ERROR: Type = { kind: "prim", name: "error" };
 export const ANY: Type = { kind: "any" };
 export const NONE: Type = { kind: "none" };
+export const CLOSED: Type = { kind: "closed" };
 
 export function typeToString(t: Type): string {
   switch (t.kind) {
@@ -39,6 +41,8 @@ export function typeToString(t: Type): string {
       return "any";
     case "none":
       return "none";
+    case "closed":
+      return "closed";
     case "literal":
       return JSON.stringify(t.value);
     case "array":
@@ -63,6 +67,7 @@ export function typeEquals(a: Type, b: Type): boolean {
       return a.name === (b as typeof a).name;
     case "any":
     case "none":
+    case "closed":
       return true;
     case "literal":
       return a.value === (b as typeof a).value;
@@ -114,9 +119,15 @@ export function unionWithout(t: Type, remove: (m: Type) => boolean): Type {
   return unionOf(t.members.filter((m) => !remove(m)));
 }
 
-// 「失敗」を表すメンバーか(none または error)
+// 「失敗」を表すメンバーか(none または error)。!/or の伝播対象はこれだけ
+// (closed は「入力が終わった」であって「このコードが失敗した」ではないので含めない)
 export function isFailure(t: Type): boolean {
   return t.kind === "none" || (t.kind === "prim" && t.name === "error");
+}
+
+// `is` で絞り込める対象か(none / error / closed)
+export function isNarrowTarget(t: Type): boolean {
+  return isFailure(t) || t.kind === "closed";
 }
 
 // from の値を to の場所に入れてよいか

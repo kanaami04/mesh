@@ -340,6 +340,45 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     }`);
     expect(out).toBe("2\n2\n");
   });
+
+  test("カードの新項目: channel仕様の完成(close/T|closed/容量/select)", () => {
+    const out = runSource(`fn produce(ch: chan<int>) {
+      for i := 1; i <= 2; i++ {
+        ch <- i
+      }
+      close(ch)
+    }
+    fn main() {
+      ch := chan<int>()
+      spawn produce(ch)
+      mut total := 0
+      for {
+        v := <-ch
+        if v is closed {
+          break
+        }
+        total = total + v
+      }
+      print(total)
+
+      a := chan<string>()
+      spawn slowSend(a, "hi")
+      r := select {
+        v := <-a => v
+        _ => "nothing"
+      }
+      print(r)
+    }
+    fn slowSend(ch: chan<string>, msg: string) {
+      sleep(10)
+      ch <- msg
+    }`);
+    expect(out).toBe("3\nnothing\n");
+    // カードどおり、<-ch は絞り込まずに算術に使うとコンパイルエラーになる
+    expect(
+      compile(`fn main() { ch := chan<int>()\nv := <-ch\nprint(v + 1) }`).code,
+    ).toBe(null);
+  });
 });
 
 describe("e2e", () => {
@@ -361,6 +400,10 @@ describe("e2e", () => {
     expect(runExample("maps.mesh")).toBe(
       "alice is 30\ndave is unknown\n2 people\nalice: 30\ncarol: 28\ntotal: 60\ntick 0\ntick 1\ntick 2\n",
     );
+  });
+
+  test("channel_spec.mesh — close/T|closed/容量/select", () => {
+    expect(runExample("channel_spec.mesh")).toBe("total: 6\ngot: from a\nnothing ready\n");
   });
 
   test("users.mesh — struct+union+match", () => {
@@ -402,7 +445,16 @@ describe("e2e", () => {
     fn main() {
       a := spawn slow(1)
       b := spawn slow(2)
-      print(<-a + <-b)
+      // <-a の型は int | closed(2026-07-18のclose対応で常にこうなる)。絞り込んでから使う
+      va := <-a
+      if va is closed {
+        return
+      }
+      vb := <-b
+      if vb is closed {
+        return
+      }
+      print(va + vb)
     }`);
     expect(out).toBe("3\n");
   });
@@ -1086,5 +1138,107 @@ describe("e2e", () => {
       print(t.summary())
     }`);
     expect(out).toBe("<ABC>\n");
+  });
+
+  test("channel仕様: close + T|closed で終端を検出できる", () => {
+    const out = runSource(`fn produce(ch: chan<int>) {
+      for i := 1; i <= 3; i++ {
+        ch <- i
+      }
+      close(ch)
+    }
+    fn main() {
+      ch := chan<int>()
+      spawn produce(ch)
+      mut total := 0
+      for {
+        v := <-ch
+        if v is closed {
+          break
+        }
+        total = total + v
+      }
+      print(total)
+    }`);
+    expect(out).toBe("6\n");
+  });
+
+  test("channel仕様: close済みへの送信・二重closeはpanic", () => {
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tch := chan<int>()\n\tclose(ch)\n\tclose(ch)\n}`),
+    ).toContain("close of closed channel");
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tch := chan<int>()\n\tclose(ch)\n\tch <- 1\n}`),
+    ).toContain("send on closed channel");
+  });
+
+  test("channel仕様: chan<T>(n) は本物のブロッキング送信(バッファが空くまで待つ)", () => {
+    const out = runSource(`fn producer(ch: chan<int>, log: string[]) {
+      ch <- 1
+      push(log, "sent 1")
+      ch <- 2
+      push(log, "sent 2")   // 容量1なので、1が受信されるまでここはブロックする
+    }
+    fn main() {
+      ch := chan<int>(1)
+      log := string[]{}
+      spawn producer(ch, log)
+      sleep(30)
+      print(log)          // まだ "sent 1" だけのはず(2個目はブロック中)
+      v1 := <-ch
+      if v1 is closed { return }
+      sleep(10)
+      print(log)          // 受信したので "sent 1" "sent 2" になっているはず
+      v2 := <-ch
+      if v2 is closed { return }
+      print(v1, v2)
+    }`);
+    expect(out).toBe('[sent 1]\n[sent 1 sent 2]\n1 2\n');
+  });
+
+  test("channel仕様: select は準備できたアームを選ぶ", () => {
+    const out = runSource(`fn slowSend(ch: chan<string>, msg: string, ms: int) {
+      sleep(ms)
+      ch <- msg
+    }
+    fn main() {
+      a := chan<string>()
+      b := chan<string>()
+      spawn slowSend(a, "from a", 15)
+      spawn slowSend(b, "from b", 60)
+      msg := select {
+        v := <-a => "got: \${v}"
+        v := <-b => "got: \${v}"
+      }
+      print(msg)
+    }`);
+    expect(out).toBe("got: from a\n");
+  });
+
+  test("channel仕様: select の _ (default) は非ブロッキングにする", () => {
+    const out = runSource(`fn main() {
+      empty := chan<int>()
+      r := select {
+        v := <-empty => "unexpected"
+        _ => "nothing ready"
+      }
+      print(r)
+    }`);
+    expect(out).toBe("nothing ready\n");
+  });
+
+  test("channel仕様: selectでもclosedをmatchで扱える", () => {
+    const out = runSource(`fn main() {
+      ch := chan<int>()
+      close(ch)
+      r := select {
+        v := <-ch => match v {
+          closed => "closed"
+          int => "got " + str(v)
+        }
+      }
+      print(r)
+    }`);
+    expect(out).toBe("closed\n");
   });
 });

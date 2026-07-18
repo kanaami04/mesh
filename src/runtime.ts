@@ -2,19 +2,113 @@
 // Mesh の実行に必要な最小限の道具(チャネル・goroutine 起動・print など)。
 
 export const PRELUDE = `// ===== Mesh runtime =====
+// channel: capacity未指定は無制限バッファ(送信は常に即完了)。capacity指定時はGo互換の
+// 本物のブロッキング送信(送信は空きができるまで待つ)。close後の受信は __CLOSED を返し続ける
 class __Channel {
-  #values = [];
-  #waiters = [];
+  #capacity;
+  #closed = false;
+  #buf = [];
+  #recvQueue = []; // 値待ちの callback: (result) => void
+  #sendQueue = []; // 空き待ちの送信: { value, resolve }
+  constructor(capacity) {
+    this.#capacity = capacity === undefined ? Infinity : capacity;
+  }
+  // 消費せずに「今すぐ受信できるか」だけを確認する(selectの非破壊スキャン用)
+  isReady() {
+    return this.#buf.length > 0 || this.#sendQueue.length > 0 || this.#closed;
+  }
+  // 即座に受信できるときだけ消費して返す。無ければ null
+  tryRecv() {
+    if (this.#buf.length > 0) {
+      const value = this.#buf.shift();
+      const pending = this.#sendQueue.shift();
+      if (pending) {
+        this.#buf.push(pending.value);
+        pending.resolve();
+      }
+      return { value, closed: false };
+    }
+    const pending = this.#sendQueue.shift();
+    if (pending) {
+      pending.resolve();
+      return { value: pending.value, closed: false };
+    }
+    if (this.#closed) return { value: null, closed: true };
+    return null;
+  }
+  // callback を受信待ちに登録し、登録解除する関数を返す(select用)
+  waitRecv(callback) {
+    this.#recvQueue.push(callback);
+    return () => {
+      const i = this.#recvQueue.indexOf(callback);
+      if (i !== -1) this.#recvQueue.splice(i, 1);
+    };
+  }
   send(v) {
-    const w = this.#waiters.shift();
-    if (w) w(v);
-    else this.#values.push(v);
+    if (this.#closed) throw new __Panic("send on closed channel");
+    const waiter = this.#recvQueue.shift();
+    if (waiter) {
+      waiter({ value: v, closed: false });
+      return Promise.resolve();
+    }
+    if (this.#buf.length < this.#capacity) {
+      this.#buf.push(v);
+      return Promise.resolve();
+    }
+    // 満杯かつ受信待ちが居ない: 空きができるまで本当にブロックする
+    return new Promise((resolve) => {
+      this.#sendQueue.push({ value: v, resolve });
+    });
   }
   recv() {
-    if (this.#values.length > 0) return Promise.resolve(this.#values.shift());
-    return new Promise((resolve) => this.#waiters.push(resolve));
+    const immediate = this.tryRecv();
+    if (immediate) return Promise.resolve(immediate);
+    return new Promise((resolve) => this.waitRecv(resolve));
+  }
+  close() {
+    if (this.#closed) throw new __Panic("close of closed channel");
+    this.#closed = true;
+    for (const cb of this.#recvQueue) cb({ value: null, closed: true });
+    this.#recvQueue = [];
+    for (const pending of this.#sendQueue) pending.resolve();
+    this.#sendQueue = [];
   }
 }
+// "channelがcloseされた" を表す一意な値。null(none)やErrorと絶対に衝突しない
+const __CLOSED = Symbol("closed");
+// <-ch は常に T | closed。__Channel.recv() の {value, closed} を Mesh の値に変換する
+const __recv = async (ch) => {
+  const r = await ch.recv();
+  return r.closed ? __CLOSED : r.value;
+};
+// select: 準備できているチャネルがあれば(複数なら擬似ランダムに選び、Goと同じくcase飢餓を防ぐ)
+// 即座にそのハンドラを実行。無ければ default、それも無ければ最初に準備できたチャネルまで待つ
+const __select = async (channels, handlers, defaultHandler) => {
+  const ready = [];
+  for (let i = 0; i < channels.length; i++) {
+    if (channels[i].isReady()) ready.push(i);
+  }
+  if (ready.length > 0) {
+    const i = ready[Math.floor(Math.random() * ready.length)];
+    const result = channels[i].tryRecv();
+    return handlers[i](result.closed ? __CLOSED : result.value);
+  }
+  if (defaultHandler) return defaultHandler();
+  return new Promise((resolve, reject) => {
+    const unregisters = [];
+    let settled = false;
+    channels.forEach((ch, i) => {
+      unregisters.push(
+        ch.waitRecv((result) => {
+          if (settled) return;
+          settled = true;
+          for (const u of unregisters) u();
+          Promise.resolve(handlers[i](result.closed ? __CLOSED : result.value)).then(resolve, reject);
+        }),
+      );
+    });
+  });
+};
 const __panic = (e) => {
   console.error("panic:", e instanceof Error ? e.message : e);
   globalThis.process?.exit?.(1);
@@ -121,6 +215,7 @@ const __reduce = async (arr, f, init) => {
 };
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
+  : v === __CLOSED ? "closed"
   : v instanceof Error ? v.message
   : Array.isArray(v) ? "[" + v.map(__fmt).join(" ") + "]"
   : v instanceof Map
