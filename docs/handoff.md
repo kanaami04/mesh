@@ -1,0 +1,123 @@
+# 引き継ぎ文書(2026-07-18時点)
+
+> 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
+> 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
+
+## このプロジェクトは何か
+
+**Mesh** — 「TypeScriptの型 × Goのシンプルさ・並行処理」を持つ、JavaScriptにトランスパイルされる
+新しいプログラミング言語。単なる「良い言語」ではなく、**「AIが書き、人間が読む」時代を前提に設計する**
+のが核心コンセプト(要件定義 P1〜P6)。言語カード(`src/card.ts`)を渡せば、この会話を知らない
+AIエージェントでもMeshのコードを書ける、という実証実験(`docs/card-experiments.md`)まで行った。
+
+- GitHub: https://github.com/ryota-kanayama/mesh(公開・mainブランチ直push運用)
+- ローカル: `/Users/kanayama/kanaami/language`
+- 実装言語: TypeScript(v0)。将来Rust移植構想あり(未着手)
+- ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
+  ([[user-collaboration-style]] メモリ参照)
+
+## 読む順番(新しいセッションはここから)
+
+1. **README.md** — 言語仕様の外向けまとめ・チュートリアル・組み込み関数表
+2. **docs/requirements.md** — 要件定義書。P1〜P6の設計原則、なぜこの言語を作るのか
+3. **docs/features.md** — 「できる・できない表」。**現在地の一次情報源**。迷ったらまずここ
+4. **docs/design-agenda.md** — 討議中/決着済みの設計論点(B-1〜B-5, C-1〜C-9, E-1〜E-2)
+5. **todo.md** — 次にやることリスト。これも一次情報源
+6. **src/card.ts** — 言語カード本体。`bun run mesh card` で出力。AIにMeshを書かせる際に渡す
+7. **docs/syntax-proposals.md** — 構文採用/不採用会の決定記録(経緯。凍結済み)
+8. **docs/card-experiments.md** — 言語カード実証実験のログ(白紙AIに実タスクを書かせて穴を探す手法)
+9. 永続メモリ([[language-project-goal]] [[user-collaboration-style]] [[mesh-card-experiment]]) —
+   `/Users/kanayama/.claude/projects/-Users-kanayama-kanaami-language/memory/` にあるセッション横断の記憶
+
+## 現在の実装状況(要約。詳細は必ず features.md を見る — ここは古くなりうる)
+
+- コンパイラパイプライン: lexer → parser → checker → codegen(TS製、ランタイム依存ゼロ)
+- **背骨(union路線)**: `T | none` / `T | error` + `is` narrowing + `match`式(網羅性検査つき)。
+  null無し・多値戻り無し・例外無し。文字列リテラル型 + `type` 宣言
+- **struct**: `struct User { name: string }`。Goスタイルのレシーバ構文でメソッド定義可
+  (`fn (u: User) describe() string {...}`)。メソッドの名前空間は自由関数と完全分離
+- **標準ライブラリ3弾**: 配列/map操作(contains/indexOf/keys/values/sort)、文字列操作
+  (split/join/trim/upper/lower/toInt)、高階関数(filter/transform/reduce。`map`は型キーワードと
+  衝突するため使えず`transform`)
+- **構造化並行(2段スコープ)**: `spawn`=囲む関数が所有(関数を抜けるとき暗黙wait、リーク不可能)、
+  `detach`=プログラムが所有(バックグラウンドタスク用エスケープハッチ)、`wait`ブロック(早期待機)
+- **channel仕様完成**: 容量指定(`chan<T>(n)`、Go互換の本物のブロッキング送信)、
+  `close(ch)` + `<-ch`は常に`T | closed`、`select`式(matchの見た目を踏襲した独立構文)
+- **ツール**: CLI(`mesh run/build/check/card`)、`mesh check --json`(AIエージェント向け構造化診断)、
+  ブラウザプレイグラウンド(`mise run playground`)、GitHub Actions CI(push毎にtsc+test+examples)
+- **テスト206件**、CI全green(直近コミット `0dee7de`)
+
+## 中断していたタスク: 判別可能union(discriminated union)
+
+ユーザーから「次はこれ」と言われた直後に引き継ぎ文書作成へ切り替わったため、
+**設計の議論はまだ何もしていない**(トピック名が出ただけの状態)。次のセッションはここから。
+
+### 背景・関連する既存決定
+- design-agenda **C-1**: 「判別可能ユニオン(タグ付きオブジェクトのunion)+ narrowing」。
+  B-1/B-2をunion路線にするなら必須の土台、JSONに透過的に乗るのがP6(フルスタック一体)と好相性、
+  という評価のまま長らく手つかずだった
+- design-agenda **B-5**: struct/type分離の決定時に、「`type X = {...}` と裸で書くのはエラーにし
+  struct を使えと誘導する。ただし `{...}` 型式はunion内では有効」という布石を打ってある
+  (`src/parser.ts` の `parseTypeDecl` を参照。現状 union の中に `{...}` を書く構文自体は**未実装**)
+- concept-memo(別セッション記録)のコード例: `type GetUserResponse = { kind: "ok", user: User }
+  | { kind: "notFound" } | { kind: "unauthorized" }` が判別可能unionの動機そのもの
+
+### 検討が必要な論点(未着手)
+1. **型式としての`{...}`をunion内に実装する** — struct宣言と別に、無名の構造体型リテラルを
+   TypeNode/Typeに追加する必要がある(現状`structType`はstruct宣言経由でしか使われていない)
+2. **タグフィールドでの判別方法** — `match`のパターンに`{kind: "ok", ...}`のような構造分解を
+   足すか、それとも「`kind`フィールドの値(文字列リテラル)で絞り込み→`.value`等でアクセス」という
+   今のnarrowing機構の延長で済ませるか。後者の方がP1(新概念を増やさない)に合いやすいかもしれない
+3. **同一性判定** — features.mdに「v1のstructの同一性は名前ベース。無名`{...}`型式が入るときに
+   構造的比較へ拡張する」と既に予告されている。これの実装がここで必要になる
+4. **narrowingとの統合** — 既存の`is`/`match`は`none`/`error`/`closed`という「単位型」の絞り込み
+   で作られている。判別可能unionは「同じ形の中のフィールド値で分岐する」という質的に違う絞り込み
+   なので、既存のnarrowing実装(`narrowFromCond`, `inferMatch`)にどう統合するか設計が必要
+
+### 進め方の期待値(ユーザーとの合意事項、後述)
+このトピックは既存構文(struct/type/match)と衝突しうる箇所が多いため、
+**実装前に選択肢を提示してAskUserQuestionで確認してから着手する**のが安全。
+
+## 開発の進め方(重要な合意事項 — 必ず守る)
+
+- **段階的に進める**。大きな機能を一気に実装せず「説明→小さく実装→動かして確認→次へ」。
+  過去に一度「一気に実装しすぎた」とフィードバックを受けている
+- **設計判断は先に討議・決定してから実装する**。特に既存構文と衝突する可能性がある場合は、
+  必ず複数の選択肢とトレードオフを具体的なMeshコード例つきで提示し、`AskUserQuestion`で確認する
+  (このセッションでは `map`名の衝突、channel容量、structメソッド構文などをこの形で決めてきた)
+- **実装したら必ず一通り検証してからコミットする**:
+  1. `bun test` → 全パス確認
+  2. `bunx tsc --noEmit` → 型エラーなし確認
+  3. プレイグラウンド(`mise run playground`)で実際に動かして目視確認
+  4. ドキュメント更新: `src/card.ts`(言語カード)/ `docs/features.md` / `todo.md` / `README.md`
+  5. `git add -A && git commit`(決定の経緯・却下した代替案もメッセージに書く)→ `git push`
+  6. `gh run list --limit 1` でCI green確認(`until [ "$(gh run list --limit 1 --json status -q '.[0].status')" = "completed" ]; do sleep 5; done` を`run_in_background: true`で回すと待てる)
+- **無関係な変更は別コミットに分ける**(例: MoonBit調査ドキュメントと機能実装を分けてコミットした)
+- 大きな機能追加後は既存の`<-ch`等の使用箇所が壊れていないか`bun test`で確認し、
+  壊れていたら**個別に narrowing を足して直す**(型を緩めて回避しない)
+
+## 実行コマンド
+
+```sh
+mise run playground     # プレイグラウンド http://localhost:8765(main.tsをその場でバンドル)
+mise run test           # = bun test
+mise run check          # = bunx tsc --noEmit
+mise run run-examples   # examples/*.mesh を全部実行
+
+bun run mesh run   <file.mesh>          # コンパイルして即実行
+bun run mesh build <file.mesh> -o out   # JSを書き出す
+bun run mesh check <file.mesh> [--json] # 型検査のみ
+bun run mesh card                       # 言語カードを出力
+```
+
+## 用語集(初見だと分かりにくい決定)
+
+- **2段スコープ**: `spawn`=関数所有(関数を抜けるとき暗黙にwait)、`detach`=プログラム所有
+  (呼び出し元は待たずに戻れる)。goroutineリークが構文的に存在できない設計
+- **P1〜P6**: requirements.mdの設計原則。P1書き方は一つ、P2暗黙より明示、P3ローカルで読める、
+  P4コンパイラはAIの相棒(機械可読エラー)、P5新規性予算、P6フルスタック一体
+- **union路線**: 「不在(`none`)・失敗(`error`)・close(`closed`)は全部union型+narrowingで表現する」
+  という言語の背骨の決定。null無し、多値戻り無し
+- **言語カード**: `src/card.ts`。AIのコンテキストに貼る前提で設計された圧縮仕様書。
+  「存在しない機能」リストと「よくあるエラー→直し方」が主役。カードの主張はテストで実装と
+  突き合わせている(`tests/e2e.test.ts`の「カードの新項目」テスト群)ので、乖離するとCIが落ちる

@@ -10,6 +10,9 @@
 > 名前の由来: このリポジトリの親ディレクトリ `kanaami`(金網)の英訳。
 > channel で処理を編み込む言語、というイメージも重ねています。
 
+> **開発を引き継ぐ/再開する場合**: まず [docs/handoff.md](docs/handoff.md) を読んでください。
+> 現在の実装状況・進行中のタスク・開発の進め方の合意事項がまとまっています。
+
 ```go
 // examples/channels.mesh
 fn worker(id: int, ch: chan<string>) {
