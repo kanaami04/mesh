@@ -1,5 +1,7 @@
 # Mesh
 
+[![CI](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml)
+
 **TypeScript の型 × Go のシンプルさ・並行処理** を目指した、JavaScript にコンパイルされる言語。
 
 ブラウザでもサーバー(Node/Bun/Deno)でも動く JavaScript を出力するので、
