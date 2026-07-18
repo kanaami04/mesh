@@ -9,24 +9,31 @@ import { compile, formatDiagnostics } from "../src/compiler";
 const EXAMPLES: Record<string, { label: string; source: string }> = {
   channels: {
     label: "channels — 並行処理",
-    source: `// goroutine と channel:
-// go で関数を並行に走らせ、channel で結果を受け取る
+    source: `// 並行処理: spawn で起動し、受取口(task)や channel で結果を受け取る
+
+fn double(n: int) int {
+	sleep(200)
+	return n * 2
+}
 
 fn worker(id: int, ch: chan<string>) {
-	sleep(300 * id)
+	sleep(200 * id)
 	ch <- "worker \${id} done"
 }
 
 fn main() {
+	// spawn は「結果の受取口」を返す
+	task := spawn double(21)
+	print("計算中...")
+	print(<-task)
+
+	// channel で複数タスクの結果を集める
 	ch := chan<string>()
-
 	for i := 1; i <= 3; i++ {
-		go worker(i, ch)
+		spawn worker(i, ch)
 	}
-
 	for i := 0; i < 3; i++ {
-		msg := <-ch
-		print(msg)
+		print(<-ch)
 	}
 }
 `,

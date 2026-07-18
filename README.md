@@ -21,7 +21,7 @@ fn main() {
 	ch := chan<string>()
 
 	for i := 1; i <= 3; i++ {
-		go worker(i, ch)   // goroutine 風の並行実行
+		spawn worker(i, ch)   // goroutine 風の並行実行
 	}
 
 	for i := 0; i < 3; i++ {
@@ -90,13 +90,20 @@ fn half(n: int) int | error {
 }
 ```
 
-### 並行処理: go と channel
+### 並行処理: spawn / wait / channel
 
 ```go
-ch := chan<string>()   // チャネル生成
-go f(1, ch)            // f を並行に走らせる(await せず起動)
-msg := <-ch            // 受信(値が来るまで待つ)
+task := spawn f(1)     // 並行起動して「結果の受取口」を得る
+v := <-task            // 必要になった時点で待つ
+
+wait {                 // ブロック内で起動したタスクを全部待つ
+	spawn g(1)
+	spawn g(2)
+}
+
+ch := chan<string>()   // チャネル: 複数タスクの結果を集めるなど
 ch <- "hello"          // 送信
+msg := <-ch            // 受信(値が来るまで待つ)
 ```
 
 ### 制御構文
@@ -154,7 +161,8 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
 
 - `<-ch`(受信)は `await ch.recv()` になる — Go の「ブロックして待つ」が
   JS の「イベントループに譲って待つ」に対応する
-- `go f(x)` は **await しない** 呼び出しになる — 裏で走り続ける Promise = goroutine
+- `spawn f(x)` は **await しない** 呼び出しになる — 裏で走り続ける Promise = goroutine。
+  Go と違い「結果の受取口」を返すので、`<-task` で後から値を受け取れる
 - `v, err := f()` は `let [v, err] = await f()` の分割代入になる
 
 ### Go との意味論の違い(v0 の割り切り)

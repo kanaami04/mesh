@@ -279,13 +279,10 @@ class Parser {
         return this.parseIf();
       case "for":
         return this.parseFor();
-      case "go": {
+      case "wait": {
         this.next();
-        const call = this.parseExpr();
-        if (call.kind !== "call") {
-          throw new CompileError("'go' must be followed by a function call", t.pos);
-        }
-        return { kind: "go", call: call as CallExpr, pos: t.pos };
+        const body = this.parseBlock();
+        return { kind: "wait", body, pos: t.pos };
       }
       case "break":
         this.next();
@@ -440,6 +437,15 @@ class Parser {
     if (t.type === "<-") {
       this.next();
       return { kind: "recv", channel: this.parseUnary(), pos: t.pos };
+    }
+    // spawn f(x) — 並行起動して受取口を返す式
+    if (t.type === "spawn") {
+      this.next();
+      const call = this.parseUnary();
+      if (call.kind !== "call") {
+        throw new CompileError("'spawn' must be followed by a function call", t.pos);
+      }
+      return { kind: "spawn", call, pos: t.pos };
     }
     return this.parsePostfix(this.parsePrimary());
   }

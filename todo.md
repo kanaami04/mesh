@@ -18,7 +18,7 @@
   - ~~文字列補間 `"${式}"`~~ ✅ 実装済み(2026-07-17)
   - ~~デフォルト不変 + `mut`~~ ✅ 実装済み(2026-07-17)
   - E1 `!` / E2 `or`(union移行とセットで)
-  - `spawn` 式(旧 `go` の改名+受取口を返す拡張)/ `wait` ブロック / `select`(最後)
+  - ~~`spawn` 式 / `wait` ブロック~~ ✅ 実装済み(2026-07-18)/ `select`(残)
   - map型(`m[k]` は `V | none`)/ for range(完全形のみ)
   - 決定記録は [docs/syntax-proposals.md](docs/syntax-proposals.md) と [docs/design-agenda.md](docs/design-agenda.md)
 - [ ] **Rust移植の開始**

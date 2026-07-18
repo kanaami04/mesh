@@ -67,10 +67,65 @@ describe("e2e", () => {
     );
   });
 
-  test("channels.mesh — goroutineとchannel", () => {
+  test("channels.mesh — spawnとchannel", () => {
     expect(runExample("channels.mesh")).toBe(
       "worker 1 done\nworker 2 done\nworker 3 done\n",
     );
+  });
+
+  test("spawn式: 受取口を返し、後から待てる", () => {
+    const out = runSource(`fn double(n: int) int {
+      sleep(30)
+      return n * 2
+    }
+    fn main() {
+      task := spawn double(21)
+      print("waiting")
+      print(<-task)
+    }`);
+    expect(out).toBe("waiting\n42\n");
+  });
+
+  test("spawn式: 2つ起動して並行に走る(合計時間で確認)", () => {
+    const out = runSource(`fn slow(n: int) int {
+      sleep(80)
+      return n
+    }
+    fn main() {
+      a := spawn slow(1)
+      b := spawn slow(2)
+      print(<-a + <-b)
+    }`);
+    expect(out).toBe("3\n");
+  });
+
+  test("waitブロック: 中で起動したタスクを全部待つ", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(40)
+      push(arr, v)
+    }
+    fn main() {
+      arr := [0]
+      wait {
+        spawn addTo(arr, 1)
+        spawn addTo(arr, 2)
+      }
+      print(len(arr))
+    }`);
+    expect(out).toBe("3\n");
+  });
+
+  test("waitなしなら起動直後は完了していない(対照実験)", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(40)
+      push(arr, v)
+    }
+    fn main() {
+      arr := [0]
+      spawn addTo(arr, 1)
+      print(len(arr))
+    }`);
+    expect(out).toBe("1\n");
   });
 
   test("int同士の除算は切り捨て、floatが混ざれば小数", () => {

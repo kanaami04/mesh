@@ -92,13 +92,24 @@ describe("parser", () => {
     expect(infinite.cond).toBeNull();
   });
 
-  test("go はチャネル送受信・呼び出しと組み合わせられる", () => {
-    const stmts = parseBody(`ch := chan<int>()\ngo f(1, ch)\nx := <-ch\nch <- 2`);
-    expect(stmts.map((s) => s.kind)).toEqual(["shortVarDecl", "go", "shortVarDecl", "send"]);
+  test("spawn はチャネル送受信・呼び出しと組み合わせられる", () => {
+    const stmts = parseBody(`ch := chan<int>()\nspawn f(1, ch)\nx := <-ch\nch <- 2`);
+    expect(stmts.map((s) => s.kind)).toEqual(["shortVarDecl", "exprStmt", "shortVarDecl", "send"]);
   });
 
-  test("go の後は関数呼び出しのみ", () => {
-    expect(() => parseBody(`go 1 + 2`)).toThrow(CompileError);
+  test("spawn は式として受取口を返せる(task := spawn f())", () => {
+    const [stmt] = parseBody(`task := spawn f(1)`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    expect(stmt.values[0].kind).toBe("spawn");
+  });
+
+  test("spawn の後は関数呼び出しのみ", () => {
+    expect(() => parseBody(`spawn 1 + 2`)).toThrow(CompileError);
+  });
+
+  test("wait ブロックをパースできる", () => {
+    const [stmt] = parseBody(`wait {\nspawn f(1)\n}`);
+    expect(stmt.kind).toBe("wait");
   });
 
   test("トップレベルは fn のみ", () => {

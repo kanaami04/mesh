@@ -155,11 +155,15 @@ class Codegen {
         break;
       }
 
-      case "go": {
-        // 引数は go 文の時点で評価する(Go と同じ)。関数は await せず起動 = goroutine
-        const callee = this.genExpr(stmt.call.callee);
-        const args = stmt.call.args.map((a) => this.genExpr(a)).join(", ");
-        this.emit(`__go(${callee}, [${args}]);`);
+      case "wait": {
+        // ブロック内で spawn したタスクを集めて、抜けるときに全部待つ。
+        // 早期 return でも待ち漏れないよう try/finally で保証する
+        this.emit("__waitStack.push([]);");
+        this.emit("try {");
+        this.genBlockBody(stmt.body);
+        this.emit("} finally {");
+        this.emit("  await Promise.all(__waitStack.pop());");
+        this.emit("}");
         break;
       }
 
@@ -362,6 +366,13 @@ class Codegen {
 
       case "chanExpr":
         return "new __Channel()";
+
+      case "spawn": {
+        // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す
+        const callee = this.genExpr(expr.call.callee);
+        const args = expr.call.args.map((a) => this.genExpr(a)).join(", ");
+        return `__spawn(${callee}, [${args}])`;
+      }
 
       case "structLit": {
         // User{name: "alice"} → ({ name: "alice" })。文の先頭でもブロックと誤読されないよう括弧で包む

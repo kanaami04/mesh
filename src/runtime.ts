@@ -54,8 +54,18 @@ const __prop = (v) => {
   return v;
 };
 const __or = async (v, fallback) => (v === null || v instanceof Error ? fallback() : v);
-const __go = (f, args) => {
-  Promise.resolve().then(() => f(...args)).catch(__panic);
+// spawn f(x): await せずに起動し、結果の受取口(channel)を返す。
+// wait ブロックの中なら、そのブロックの完了待ちリストにも登録される
+const __waitStack = [];
+const __spawn = (f, args) => {
+  const task = new __Channel();
+  const p = Promise.resolve()
+    .then(() => f(...args))
+    .then((v) => {
+      task.send(v);
+    }, __panic);
+  if (__waitStack.length > 0) __waitStack[__waitStack.length - 1].push(p);
+  return task;
 };
 const __sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const __fmt = (v) =>

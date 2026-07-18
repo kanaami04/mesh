@@ -1,5 +1,5 @@
-// goroutine と channel:
-// go で関数を並行に走らせ、channel で結果を受け取る
+// 並行処理と channel:
+// spawn で関数を並行に走らせ、channel で結果を受け取る
 
 fn worker(id: int, ch: chan<string>) {
 	sleep(10 * id)
@@ -10,7 +10,7 @@ fn main() {
 	ch := chan<string>()
 
 	for i := 1; i <= 3; i++ {
-		go worker(i, ch)
+		spawn worker(i, ch)
 	}
 
 	for i := 0; i < 3; i++ {

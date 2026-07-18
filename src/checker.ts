@@ -352,8 +352,8 @@ class Checker {
         this.popScope();
         break;
       }
-      case "go":
-        this.checkExpr(stmt.call);
+      case "wait":
+        this.checkBlock(stmt.body);
         break;
       case "send": {
         const ch = this.checkExprSingle(stmt.channel);
@@ -482,6 +482,13 @@ class Checker {
 
       case "match":
         return this.inferMatch(expr);
+
+      case "spawn": {
+        const ret = this.checkExpr(expr.call);
+        // 戻り値なしの関数の spawn は「起動するだけ」(受取口なし=文としてのみ意味を持つ)
+        if (typeEquals(ret, VOID)) return VOID;
+        return { kind: "chan", elem: ret };
+      }
 
       case "orElse": {
         const t = this.checkExprSingle(expr.left);

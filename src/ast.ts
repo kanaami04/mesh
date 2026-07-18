@@ -63,7 +63,7 @@ export type Stmt =
   | ReturnStmt
   | IfStmt
   | ForStmt
-  | GoStmt
+  | WaitStmt
   | SendStmt
   | IncDecStmt
   | BreakStmt
@@ -113,9 +113,9 @@ export interface ForStmt {
   pos: Pos;
 }
 
-export interface GoStmt {
-  kind: "go"; // go f(x)
-  call: CallExpr;
+export interface WaitStmt {
+  kind: "wait"; // wait { spawn f()  spawn g() } — 中で起動したタスクを全部待つ
+  body: Block;
   pos: Pos;
 }
 
@@ -171,7 +171,8 @@ export type Expr =
   | PropExpr
   | OrElseExpr
   | MatchExpr
-  | StructLit;
+  | StructLit
+  | SpawnExpr;
 
 export interface IntLit extends ExprBase {
   kind: "int";
@@ -260,6 +261,10 @@ export interface OrElseExpr extends ExprBase {
   kind: "orElse"; // f() or fallback — none/error なら右辺の値を使う
   left: Expr;
   right: Expr;
+}
+export interface SpawnExpr extends ExprBase {
+  kind: "spawn"; // task := spawn f(x) — 並行起動して結果の受取口(chan<T>)を返す
+  call: CallExpr;
 }
 export interface StructLit extends ExprBase {
   kind: "structLit"; // User{name: "alice", age: 30}
