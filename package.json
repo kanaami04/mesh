@@ -1,0 +1,15 @@
+{
+  "name": "mesh-lang",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Mesh — TypeScript の型 × Go のシンプルさ・並行処理を持つ、JavaScript にコンパイルされる言語",
+  "scripts": {
+    "mesh": "bun src/cli.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,27 @@
+# Mesh 開発に必要なツールのバージョン固定
+# セットアップ: mise install
+
+[tools]
+bun = "1.3.9"   # コンパイラの実行・テスト (bun test)
+node = "24"     # 生成された JavaScript の実行確認用
+
+[tasks.test]
+description = "コンパイラのテストを実行"
+run = "bun test"
+
+[tasks.check]
+description = "TypeScript の型チェック"
+run = "bunx tsc --noEmit"
+
+[tasks.playground]
+description = "ブラウザプレイグラウンドを起動 (http://localhost:8765)"
+run = "bun playground/serve.ts"
+
+[tasks."run-examples"]
+description = "サンプルを全部実行して動作確認"
+run = """
+for f in examples/*.mesh; do
+  echo "=== $f ==="
+  bun src/cli.ts run "$f"
+done
+"""

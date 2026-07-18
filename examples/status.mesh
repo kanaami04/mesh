@@ -1,0 +1,18 @@
+// type宣言 + 文字列リテラル型 + match:
+// 「AIのタイポがコンパイルエラーになる」union路線の完成形。
+// label("actev") と書くと cannot use "actev" as "active" | ... で即座に弾かれる
+
+type Status = "active" | "banned" | "pending"
+
+fn label(s: Status) string {
+	return match s {
+		"active" => "ようこそ"
+		"banned", "pending" => "アクセス不可"
+	}
+	// アームを1つ消すと: match is not exhaustive — missing: "pending"
+}
+
+fn main() {
+	print(label("active"))
+	print(label("pending"))
+}

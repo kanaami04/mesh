@@ -1,0 +1,4 @@
+node_modules/
+*.mjs
+!tests/**/*.mjs
+.mesh-cache/

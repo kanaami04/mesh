@@ -1,0 +1,32 @@
+// struct + union + match — Mesh の型システムの全部乗せ。
+// フィールド名のタイポ(u.nmae)も、アーム漏れも、コンパイル時に捕まる
+
+struct User {
+	name: string
+	age: int
+}
+
+fn find(id: int) User | none | error {
+	if id < 0 {
+		return error("invalid id: ${id}")
+	}
+	if id == 1 {
+		return User{name: "alice", age: 30}
+	}
+	return none
+}
+
+fn label(id: int) string {
+	u := find(id)
+	return match u {
+		User => "hello ${u.name} (${u.age})"
+		none => "404 not found"
+		error => "500: ${u}"
+	}
+}
+
+fn main() {
+	print(label(1))
+	print(label(2))
+	print(label(-1))
+}

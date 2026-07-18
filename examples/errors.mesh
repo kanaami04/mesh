@@ -1,0 +1,34 @@
+// union型のエラーハンドリング(2026-07-17 背骨決定):
+// 失敗し得る関数は T | error を返し、呼び出し側は is で絞り込む。
+// 絞り込む前に値として使おうとするとコンパイルエラーになる。
+
+fn divide(a: int, b: int) int | error {
+	if b == 0 {
+		return error("division by zero")
+	}
+	return a / b
+}
+
+fn main() {
+	result := divide(10, 3)
+	if result is error {
+		print("error:", result)
+		return
+	}
+	print("10 / 3 =", result)
+
+	fallback := divide(1, 0) or 0
+	print("fallback: ${fallback}")
+
+	bad := divide(1, 0)
+	if bad is error {
+		print("caught: ${bad}")
+	}
+
+	// match式: union を網羅的に分解する(アームが足りないとコンパイルエラー)
+	r := divide(9, 3)
+	print(match r {
+		error => "failed: ${r}"
+		int => "match says: ${r}"
+	})
+}

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh Playground</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #1b1c20;
+    --pane: #242529;
+    --border: #35363c;
+    --text: #e8e8ea;
+    --dim: #9a9aa2;
+    --accent: #4fd1c5;
+    --error: #ff7b72;
+    --ok: #7ee787;
+    --mono: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  header h1 { font-size: 18px; font-weight: 700; }
+  header h1 .sub { color: var(--accent); font-weight: 400; }
+  header .spacer { flex: 1; }
+  select {
+    background: var(--pane);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  button#run {
+    background: var(--accent);
+    color: #0b2b28;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 18px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  button#run:hover { filter: brightness(1.1); }
+  button#run:disabled { background: var(--border); color: var(--dim); cursor: not-allowed; }
+  button#new-file {
+    background: var(--pane);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button#new-file:hover { border-color: var(--accent); color: var(--accent); }
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    min-height: 0;
+  }
+  .right {
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    min-height: 0;
+  }
+  .pane {
+    background: var(--pane);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .pane-title {
+    flex: none;
+    padding: 8px 14px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  #status { font-size: 12px; text-transform: none; letter-spacing: 0; }
+  #status.running { color: var(--accent); }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--error); }
+  textarea, pre {
+    flex: 1;
+    min-height: 0;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    padding: 14px;
+    overflow: auto;
+  }
+  textarea {
+    background: transparent;
+    color: var(--text);
+    border: none;
+    outline: none;
+    resize: none;
+    tab-size: 4;
+    white-space: pre;
+  }
+  pre { white-space: pre; color: #c9d1d9; }
+  pre.error { color: var(--error); }
+  pre#output .errline { color: var(--error); }
+  .hint { font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Mesh <span class="sub">Playground</span></h1>
+    <button id="new-file" title="空のファイルから書き始める">＋ 新規作成</button>
+    <select id="examples" title="サンプルを選ぶ"></select>
+    <span class="hint">⌘⏎ / Ctrl+Enter でも実行できます</span>
+    <span class="spacer"></span>
+    <button id="run">▶ 実行</button>
+  </header>
+  <main>
+    <section class="pane">
+      <div class="pane-title">Mesh コード</div>
+      <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
+    </section>
+    <div class="right">
+      <section class="pane">
+        <div class="pane-title">生成された JavaScript</div>
+        <pre id="js"></pre>
+      </section>
+      <section class="pane">
+        <div class="pane-title">実行結果 <span id="status"></span></div>
+        <pre id="output"></pre>
+      </section>
+    </div>
+  </main>
+  <script src="./bundle.js"></script>
+</body>
+</html>

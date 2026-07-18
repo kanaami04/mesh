@@ -1,0 +1,174 @@
+# Mesh
+
+**TypeScript の型 × Go のシンプルさ・並行処理** を目指した、JavaScript にコンパイルされる言語。
+
+ブラウザでもサーバー(Node/Bun/Deno)でも動く JavaScript を出力するので、
+フロントエンドとバックエンドの両方を1つの言語で書けます。
+
+> 名前の由来: このリポジトリの親ディレクトリ `kanaami`(金網)の英訳。
+> channel で処理を編み込む言語、というイメージも重ねています。
+
+```go
+// examples/channels.mesh
+fn worker(id: int, ch: chan<string>) {
+	sleep(10 * id)
+	ch <- "worker ${id} done"   // 文字列補間
+}
+
+fn main() {
+	ch := chan<string>()
+
+	for i := 1; i <= 3; i++ {
+		go worker(i, ch)   // goroutine 風の並行実行
+	}
+
+	for i := 0; i < 3; i++ {
+		print(<-ch)
+	}
+}
+```
+
+## 使い方
+
+ツールは [mise](https://mise.jdx.dev/) で管理しています。初回は `mise install` を実行してください。
+
+```sh
+mise run playground     # ブラウザプレイグラウンド (http://localhost:8765)
+mise run test           # コンパイラのテスト
+mise run check          # TypeScript の型チェック
+mise run run-examples   # サンプルを全部実行
+
+bun run mesh run   examples/hello.mesh   # コンパイルして即実行
+bun run mesh build examples/hello.mesh   # hello.mjs を書き出す
+bun run mesh check examples/hello.mesh   # 型検査のみ
+```
+
+## 言語ツアー
+
+### 変数と型
+
+```go
+name := "mesh"        // := で宣言。型は右辺から推論される
+count := 0            // int
+ratio := 1.5          // float
+ok := true            // bool
+nums := [1, 2, 3]     // int[]
+```
+
+型: `int` `float` `string` `bool` `error` `any` / 配列 `T[]` / チャネル `chan<T>` / 関数
+
+### エラーと不在は union 型で(言語の背骨)
+
+例外も null もありません。失敗し得る関数は `T | error`、無いかもしれない値は `T | none` を
+返し、`is` で絞り込んでから使います。**絞り込む前に使うとコンパイルエラー**です。
+
+```go
+fn divide(a: int, b: int) int | error {
+	if b == 0 {
+		return error("division by zero")
+	}
+	return a / b
+}
+
+fn main() {
+	result := divide(10, 3)
+	if result is error {
+		print("error:", result)
+		return
+	}
+	print(result)                 // ここでは int に絞り込み済み
+
+	safe := divide(1, 0) or 0     // or: 失敗なら既定値
+	print(safe)
+}
+
+// ! は「自分も失敗し得る関数」の中で使う: 失敗なら呼び出し元へ即伝播
+fn half(n: int) int | error {
+	return divide(n, 2)!
+}
+```
+
+### 並行処理: go と channel
+
+```go
+ch := chan<string>()   // チャネル生成
+go f(1, ch)            // f を並行に走らせる(await せず起動)
+msg := <-ch            // 受信(値が来るまで待つ)
+ch <- "hello"          // 送信
+```
+
+### 制御構文
+
+```go
+if x > 10 { ... } else if x > 5 { ... } else { ... }   // 条件に丸括弧は不要
+
+for i := 0; i < 10; i++ { ... }   // C スタイル
+for x < 100 { ... }               // while 相当
+for { ... }                       // 無限ループ(break で脱出)
+```
+
+### 組み込み関数
+
+| 関数 | 意味 |
+|---|---|
+| `print(...)` | 標準出力(none は `none`、error はメッセージを表示) |
+| `str(x)` | 文字列化(`"id: " + str(42)`) |
+| `len(x)` | 文字列・配列の長さ |
+| `push(arr, v)` | 配列に追加 |
+| `error(msg)` | エラー値を作る |
+| `sleep(ms)` | ミリ秒待つ |
+
+### 意図的にオミットしているもの(Go 流のシンプルさ)
+
+- セミコロン(行末に自動挿入)
+- `while` / `do-while`(`for` に統一)
+- 例外・try/catch(エラーは `T | error` の union で返す)
+- `null` / `undefined`(不在は `T | none` の union で型に現す)
+- 多値戻り `(T, error)`(union に置換)
+- クラス・継承(v1 で struct を予定)
+
+## コンパイラの仕組み
+
+```
+ソースコード (.mesh)
+   │
+   ▼  src/lexer.ts    ── 文字列をトークン列に分解(Go式セミコロン自動挿入もここ)
+トークン列
+   │
+   ▼  src/parser.ts   ── 再帰下降構文解析で AST(構文木)を構築
+AST
+   │
+   ▼  src/checker.ts  ── 型推論・型検査。式に型を書き込み codegen へ引き継ぐ
+検査済み AST
+   │
+   ▼  src/codegen.ts  ── JavaScript を出力(+ src/runtime.ts のランタイムを同梱)
+JavaScript (.mjs)
+```
+
+### goroutine → Promise 変換の仕掛け
+
+Mesh の関数はすべて `async function` として出力され、呼び出しは常に `await` されます。
+これにより:
+
+- `<-ch`(受信)は `await ch.recv()` になる — Go の「ブロックして待つ」が
+  JS の「イベントループに譲って待つ」に対応する
+- `go f(x)` は **await しない** 呼び出しになる — 裏で走り続ける Promise = goroutine
+- `v, err := f()` は `let [v, err] = await f()` の分割代入になる
+
+### Go との意味論の違い(v0 の割り切り)
+
+- チャネルは**容量無制限バッファ付き**(送信はブロックしない)。Go のような同期チャネルは今後
+- 並行処理は**シングルスレッド**(JS のイベントループ上)。並列(マルチコア)ではない
+- `int` は JS の number(53bit 整数)。`int` 同士の除算は切り捨て
+
+## ロードマップ
+
+- [x] v0: lexer / parser / 型検査 / JS codegen / go・channel
+- [x] ブラウザで動くプレイグラウンド(`mise run playground`)
+- [x] union路線コア: `T | none` / `T | error` / `is` narrowing / `!` / `or` / 文字列補間 /
+      デフォルト不変+`mut` / ランタイム検査(範囲外・ゼロ除算は位置つき panic)
+- [x] match式(網羅性検査)/ 文字列リテラル型 / `type` 宣言 / struct
+- [ ] 判別可能union(インライン `{...}` 型式)と構造的型付けの完全化
+- [ ] チャネルの容量指定・select 文
+- [ ] 標準ライブラリ(http, json など JS API のラッパー)
+- [ ] コンパイラを Rust に移植(v0 と同じテストが通ることをゴールにする)
