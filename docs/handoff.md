@@ -45,38 +45,23 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   `close(ch)` + `<-ch`は常に`T | closed`、`select`式(matchの見た目を踏襲した独立構文)
 - **ツール**: CLI(`mesh run/build/check/card`)、`mesh check --json`(AIエージェント向け構造化診断)、
   ブラウザプレイグラウンド(`mise run playground`)、GitHub Actions CI(push毎にtsc+test+examples)
-- **テスト206件**、CI全green(直近コミット `0dee7de`)
+- **判別可能union(discriminated union)完成**(2026-07-19実装、design-agenda **C-1**): `type X =
+  { kind: "ok", user: User } | { kind: "notFound" }`。union内だけで無名`{...}`型式が書ける。
+  構築は union自身の名前をstructリテラル名に流用(`X{kind: "ok", ...}`)、matchは部分構造
+  パターン`{kind: "ok"}`で絞り込み。この実装のため struct の同一性を名前ベース→全面的な
+  構造的比較に変更(構造的型付けの前倒し実装)。自己参照する判別可能union(木構造等)は未対応
+  (`type alias cycle`。将来課題)
+- **テスト220件**、CI確認は直近push分を要確認(直近コミット `aeed8f6`)
 
-## 中断していたタスク: 判別可能union(discriminated union)
+## 次にやるとしたら(未着手のトピック)
 
-ユーザーから「次はこれ」と言われた直後に引き継ぎ文書作成へ切り替わったため、
-**設計の議論はまだ何もしていない**(トピック名が出ただけの状態)。次のセッションはここから。
-
-### 背景・関連する既存決定
-- design-agenda **C-1**: 「判別可能ユニオン(タグ付きオブジェクトのunion)+ narrowing」。
-  B-1/B-2をunion路線にするなら必須の土台、JSONに透過的に乗るのがP6(フルスタック一体)と好相性、
-  という評価のまま長らく手つかずだった
-- design-agenda **B-5**: struct/type分離の決定時に、「`type X = {...}` と裸で書くのはエラーにし
-  struct を使えと誘導する。ただし `{...}` 型式はunion内では有効」という布石を打ってある
-  (`src/parser.ts` の `parseTypeDecl` を参照。現状 union の中に `{...}` を書く構文自体は**未実装**)
-- concept-memo(別セッション記録)のコード例: `type GetUserResponse = { kind: "ok", user: User }
-  | { kind: "notFound" } | { kind: "unauthorized" }` が判別可能unionの動機そのもの
-
-### 検討が必要な論点(未着手)
-1. **型式としての`{...}`をunion内に実装する** — struct宣言と別に、無名の構造体型リテラルを
-   TypeNode/Typeに追加する必要がある(現状`structType`はstruct宣言経由でしか使われていない)
-2. **タグフィールドでの判別方法** — `match`のパターンに`{kind: "ok", ...}`のような構造分解を
-   足すか、それとも「`kind`フィールドの値(文字列リテラル)で絞り込み→`.value`等でアクセス」という
-   今のnarrowing機構の延長で済ませるか。後者の方がP1(新概念を増やさない)に合いやすいかもしれない
-3. **同一性判定** — features.mdに「v1のstructの同一性は名前ベース。無名`{...}`型式が入るときに
-   構造的比較へ拡張する」と既に予告されている。これの実装がここで必要になる
-4. **narrowingとの統合** — 既存の`is`/`match`は`none`/`error`/`closed`という「単位型」の絞り込み
-   で作られている。判別可能unionは「同じ形の中のフィールド値で分岐する」という質的に違う絞り込み
-   なので、既存のnarrowing実装(`narrowFromCond`, `inferMatch`)にどう統合するか設計が必要
-
-### 進め方の期待値(ユーザーとの合意事項、後述)
-このトピックは既存構文(struct/type/match)と衝突しうる箇所が多いため、
-**実装前に選択肢を提示してAskUserQuestionで確認してから着手する**のが安全。
+- **自己参照する判別可能union**(木構造・ASTノード等) — 上記実装時に知恵の輪(knot-tying)を
+  試したが、mutual-recursiveな純粋union(struct経由でない直接再帰)で`unionOf`のflatten処理が
+  未完成のplaceholderを読んでしまい型情報が消える不具合を発見し撤回した。struct knot-tying
+  (`resolveAlias`の`node.kind === "structType"`分岐)とは違い、union側は「先に器を登録→後から
+  埋める」だけでは済まず、flatten処理自体を遅延評価にするなど設計し直しが必要
+- `is` のさらなる対象拡大(部分構造パターンへの対応。今回はmatchのみ実装)
+- todo.md・features.md の他の未着手項目(標準ライブラリ層分け、モジュールシステム等)
 
 ## 開発の進め方(重要な合意事項 — 必ず守る)
 

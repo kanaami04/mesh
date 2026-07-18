@@ -20,6 +20,35 @@ describe("parser", () => {
     expect(ret.members.length).toBe(3);
   });
 
+  test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
+    const program = parse(
+      `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,
+    );
+    const decl = program.types.find((t) => t.name === "GetUserResponse");
+    if (decl?.node.kind !== "union") throw new Error("unexpected");
+    expect(decl.node.members.length).toBe(2);
+    expect(decl.node.members[0].kind).toBe("structType");
+    if (decl.node.members[0].kind !== "structType") throw new Error("unexpected");
+    expect(decl.node.members[0].fields.map((f) => f.name)).toEqual(["kind", "user"]);
+  });
+
+  test("判別可能union: 単独の裸{...}はB-5どおりエラー(structを使えと誘導)", () => {
+    expect(() => parse(`type Resp = { kind: "ok" }\nfn main() {}`)).toThrow(
+      "use 'struct Resp { ... }'",
+    );
+  });
+
+  test("判別可能union: matchパターンに部分構造{...}を書ける", () => {
+    const [stmt] = parseBody(`x := match res {\n{ kind: "ok" } => 1\n_ => 0\n}`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const m = stmt.values[0];
+    if (m.kind !== "match") throw new Error("unexpected");
+    const pattern = m.arms[0].patterns[0];
+    expect(pattern.kind).toBe("type");
+    if (pattern.kind !== "type") throw new Error("unexpected");
+    expect(pattern.type.kind).toBe("structType");
+  });
+
   test("多値戻りはエラーになる(union路線で廃止)", () => {
     expect(() => parse(`fn f() (int, error) { return 1 }`)).toThrow("multiple return values");
     expect(() => parse(`fn main() { return 1, 2 }`)).toThrow("multiple return values");

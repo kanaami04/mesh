@@ -56,11 +56,17 @@ export function typeToString(t: Type): string {
     case "union":
       return t.members.map(typeToString).join(" | ");
     case "struct":
-      return t.name;
+      // 無名struct(判別可能unionのメンバー)は名前ではなく形を表示する。エラーメッセージで
+      // 「missing: (anonymous)」のような読めない表示にならないようにするため
+      return t.name === "(anonymous)"
+        ? `{ ${t.fields.map((f) => `${f.name}: ${typeToString(f.type)}`).join(", ")} }`
+        : t.name;
   }
 }
 
-export function typeEquals(a: Type, b: Type): boolean {
+// seen: 比較中の struct ペアを覚えておく(再帰struct同士の無限再帰を止めるための「知恵の輪」ガード。
+// 一度比較を始めたペアはその場では「等しいと仮定」して先に進む — 等再帰型の同値判定の定石)
+export function typeEquals(a: Type, b: Type, seen: Array<[Type, Type]> = []): boolean {
   if (a.kind !== b.kind) return false;
   switch (a.kind) {
     case "prim":
@@ -73,28 +79,39 @@ export function typeEquals(a: Type, b: Type): boolean {
       return a.value === (b as typeof a).value;
     case "array":
     case "chan":
-      return typeEquals(a.elem, (b as typeof a).elem);
+      return typeEquals(a.elem, (b as typeof a).elem, seen);
     case "map": {
       const bm = b as typeof a;
-      return typeEquals(a.key, bm.key) && typeEquals(a.value, bm.value);
+      return typeEquals(a.key, bm.key, seen) && typeEquals(a.value, bm.value, seen);
     }
     case "fn": {
       const bf = b as typeof a;
       return (
         a.params.length === bf.params.length &&
-        typeEquals(a.ret, bf.ret) &&
-        a.params.every((p, i) => typeEquals(p, bf.params[i]))
+        typeEquals(a.ret, bf.ret, seen) &&
+        a.params.every((p, i) => typeEquals(p, bf.params[i], seen))
       );
     }
     case "union": {
       const bu = b as typeof a;
       return (
         a.members.length === bu.members.length &&
-        a.members.every((m) => bu.members.some((n) => typeEquals(m, n)))
+        a.members.every((m) => bu.members.some((n) => typeEquals(m, n, seen)))
       );
     }
-    case "struct":
-      return a.name === (b as typeof a).name;
+    case "struct": {
+      // 構造的型付け(2026-07-17決定分の実装): struct の同一性は名前ではなく形で決まる。
+      // 無名 {...} 型式(判別可能union のメンバー)も、名前付き struct 同士も同じ規則で比較する
+      const bs = b as typeof a;
+      if (a === bs) return true;
+      if (seen.some(([sa, sb]) => sa === a && sb === bs)) return true;
+      if (a.fields.length !== bs.fields.length) return false;
+      const nextSeen: Array<[Type, Type]> = [...seen, [a, bs]];
+      return a.fields.every((fa) => {
+        const fb = bs.fields.find((f) => f.name === fa.name);
+        return fb !== undefined && typeEquals(fa.type, fb.type, nextSeen);
+      });
+    }
   }
 }
 

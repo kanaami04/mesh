@@ -743,38 +743,86 @@ class Checker {
       }
 
       case "structLit": {
-        const t = this.resolveAlias(expr.name, expr.pos);
+        const resolved = this.resolveAlias(expr.name, expr.pos);
+        // フィールド値は先に1回だけ検査する(候補メンバーの絞り込みにも使うので二重評価しない)
+        const fieldTypes = expr.fields.map((f) => this.checkExprSingle(f.value));
+
+        let t = resolved;
+        // 判別可能union(C-1): GetUserResponse{kind: "ok", user: u} のように、union型の
+        // 名前をそのまま struct リテラルの名前として使う。書かれたフィールド集合が
+        // ちょうど一致するメンバーへ絞り込み、複数残るならフィールド値の型(判別フィールドの
+        // 文字列リテラル値など)でさらに絞り込んで1つに特定する
+        if (resolved.kind === "union") {
+          const fieldNameSet = new Set(expr.fields.map((f) => f.name));
+          const structMembers = resolved.members.filter((m) => m.kind === "struct");
+          let candidates = structMembers.filter((m) => {
+            if (m.kind !== "struct") return false;
+            const memberNames = new Set(m.fields.map((f) => f.name));
+            return memberNames.size === fieldNameSet.size && [...fieldNameSet].every((n) => memberNames.has(n));
+          });
+          if (candidates.length > 1) {
+            candidates = candidates.filter(
+              (m) =>
+                m.kind === "struct" &&
+                expr.fields.every((f, i) => {
+                  const decl = m.fields.find((d) => d.name === f.name);
+                  return decl !== undefined && assignable(fieldTypes[i], decl.type);
+                }),
+            );
+          }
+          if (candidates.length !== 1) {
+            const shapes = structMembers
+              .map((m) => (m.kind === "struct" ? `{ ${m.fields.map((f) => f.name).join(", ")} }` : ""))
+              .join(" | ");
+            this.error(
+              expr.pos,
+              candidates.length === 0
+                ? `no member of '${expr.name}' matches the field(s) {${[...fieldNameSet].join(", ")}}` +
+                    (shapes ? ` (union members: ${shapes})` : "")
+                : `ambiguous — multiple members of '${expr.name}' match the field(s) {${[...fieldNameSet].join(", ")}}`,
+            );
+            return ANY;
+          }
+          t = candidates[0];
+        }
         if (t.kind !== "struct") {
           this.error(expr.pos, `'${expr.name}' is not a struct`);
-          for (const f of expr.fields) this.checkExprSingle(f.value);
           return ANY;
         }
+        // エラーメッセージ上の名前: union経由なら union の名前(メンバーは無名なので)、
+        // 普通の struct ならそのまま struct 名
+        const structType = t; // const に束縛し直して、以降 struct であることの絞り込みを効かせる
+        const displayName = resolved.kind === "union" ? expr.name : structType.name;
         const seen = new Set<string>();
-        for (const f of expr.fields) {
+        expr.fields.forEach((f, i) => {
           if (seen.has(f.name)) {
             this.error(f.pos, `duplicate field '${f.name}'`);
-            continue;
+            return;
           }
           seen.add(f.name);
-          const decl = t.fields.find((d) => d.name === f.name);
-          const vt = this.checkExprSingle(f.value);
+          const decl = structType.fields.find((d) => d.name === f.name);
           if (!decl) {
             this.error(
               f.pos,
-              `${t.name} has no field '${f.name}' (fields: ${t.fields.map((d) => d.name).join(", ")})`,
+              `${displayName} has no field '${f.name}' (fields: ${structType.fields.map((d) => d.name).join(", ")})`,
             );
-            continue;
+            return;
           }
-          if (!assignable(vt, decl.type)) {
-            this.error(f.value.pos, `field '${f.name}': cannot use ${typeToString(vt)} as ${typeToString(decl.type)}`);
+          if (!assignable(fieldTypes[i], decl.type)) {
+            this.error(
+              f.value.pos,
+              `field '${f.name}': cannot use ${typeToString(fieldTypes[i])} as ${typeToString(decl.type)}`,
+            );
           }
-        }
+        });
         // 全フィールド必須(v1。ゼロ値・デフォルト値は導入しない)
-        const missing = t.fields.filter((d) => !seen.has(d.name));
+        const missing = structType.fields.filter((d) => !seen.has(d.name));
         if (missing.length > 0) {
-          this.error(expr.pos, `missing field(s) in ${t.name}: ${missing.map((d) => d.name).join(", ")}`);
+          this.error(expr.pos, `missing field(s) in ${displayName}: ${missing.map((d) => d.name).join(", ")}`);
         }
-        return t;
+        // 式全体の型は union 自体(narrow なメンバー型ではない)。match/is で絞り込むまでは
+        // 常に union として扱う(mut var再代入・widening等を新規に考えなくて済むようにする)
+        return resolved.kind === "union" ? resolved : t;
       }
 
       case "fnExpr": {
@@ -857,6 +905,17 @@ class Checker {
     return ANY;
   }
 
+  // 判別可能union用: パターンが構造体型メンバーの「部分形」として一致するか。
+  // パターンに書かれたフィールドが全部あって型が一致すればよい(書かれてないフィールドは無視。
+  // { kind: "ok" } は user フィールドの有無を問わず kind: "ok" を持つメンバーに一致する)
+  private structPatternMatches(member: Type, pattern: Type): boolean {
+    if (member.kind !== "struct" || pattern.kind !== "struct") return typeEquals(member, pattern);
+    return pattern.fields.every((pf) => {
+      const mf = member.fields.find((f) => f.name === pf.name);
+      return mf !== undefined && typeEquals(mf.type, pf.type);
+    });
+  }
+
   // match式: 型パターンで union を分解する。網羅性検査とアーム内 narrowing はここ
   private inferMatch(expr: Expr & { kind: "match" }): Type {
     const subject = this.checkExprSingle(expr.subject);
@@ -892,15 +951,28 @@ class Checker {
           continue;
         }
         const pt = this.resolveType(p.type);
-        if (members) {
-          if (!members.some((m) => typeEquals(m, pt))) {
-            this.error(arm.pos, `${typeToString(subject)} can never be ${typeToString(pt)}`);
-          } else if (covered.some((c) => typeEquals(c, pt))) {
-            this.error(arm.pos, `unreachable pattern — ${typeToString(pt)} is already covered`);
-          }
+        // 判別可能union: { kind: "ok" } のような部分構造パターンは、書かれたフィールドが
+        // 一致する union メンバー(具体的な形)へ解決してから、通常の型パターンと同じに扱う
+        // (1個のパターンが複数メンバーに一致することもある — その場合は両方カバーしたことにする)。
+        // 通常の型パターン(int/error/...)は今まで通り「union の実メンバーか」をそのまま検査する
+        let resolvedPatterns: Type[];
+        if (pt.kind === "struct" && members) {
+          resolvedPatterns = members.filter((m) => this.structPatternMatches(m, pt));
+        } else if (members && !members.some((m) => typeEquals(m, pt))) {
+          resolvedPatterns = [];
+        } else {
+          resolvedPatterns = [pt];
         }
-        covered.push(pt);
-        patternTypes.push(pt);
+        if (members && resolvedPatterns.length === 0) {
+          this.error(arm.pos, `${typeToString(subject)} can never be ${typeToString(pt)}`);
+        }
+        for (const rp of resolvedPatterns) {
+          if (members && covered.some((c) => typeEquals(c, rp))) {
+            this.error(arm.pos, `unreachable pattern — ${typeToString(rp)} is already covered`);
+          }
+          covered.push(rp);
+          patternTypes.push(rp);
+        }
       }
 
       // アーム内の型: 型パターンならその union、ワイルドカードなら「残り全部」
@@ -994,7 +1066,7 @@ class Checker {
         }
         this.error(
           member.pos,
-          `${targetType.name} has no field or method '${member.name}'` +
+          `${typeToString(targetType)} has no field or method '${member.name}'` +
             ` (fields: ${targetType.fields.map((f) => f.name).join(", ") || "none"})`,
         );
         member.resolvedType = ANY;
@@ -1025,7 +1097,7 @@ class Checker {
       }
       this.error(
         member.pos,
-        `${targetType.name} has no field '${member.name}'` +
+        `${typeToString(targetType)} has no field '${member.name}'` +
           ` (fields: ${targetType.fields.map((f) => f.name).join(", ")})`,
       );
       return ANY;

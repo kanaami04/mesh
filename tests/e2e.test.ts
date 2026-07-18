@@ -379,6 +379,37 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
       compile(`fn main() { ch := chan<int>()\nv := <-ch\nprint(v + 1) }`).code,
     ).toBe(null);
   });
+
+  test("カードの新項目: 判別可能union(タグ付きstruct形式)", () => {
+    const out = runSource(`struct User { name: string }
+    type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+    fn getUser(id: string) GetUserResponse {
+      if id == "1" { return GetUserResponse{ kind: "ok", user: User{name: "alice"} } }
+      return GetUserResponse{ kind: "notFound" }
+    }
+    fn main() {
+      print(match getUser("1") {
+        { kind: "ok" } => "hi"
+        _ => "?"
+      })
+      r := getUser("2")
+      print(match r {
+        { kind: "ok" } => "hi \${r.user.name}"
+        { kind: "notFound" } => "not found"
+        { kind: "unauthorized" } => "unauthorized"
+      })
+    }`);
+    expect(out).toBe("hi\nnot found\n");
+    // カードどおり、裸の { ... } は struct を使えと誘導される(union内でのみ有効)
+    expect(compile(`type X = { a: int }\nfn main() {}`).diagnostics[0]?.message).toContain(
+      "use 'struct X { ... }'",
+    );
+    // カードどおり、自己参照する判別可能unionはcycleエラーになる(未対応)
+    expect(
+      compile(`type Tree = { kind: "leaf" } | { kind: "node", left: Tree, right: Tree }\nfn main() {}`)
+        .diagnostics[0]?.message,
+    ).toContain("type alias cycle");
+  });
 });
 
 describe("e2e", () => {
@@ -409,6 +440,12 @@ describe("e2e", () => {
   test("users.mesh — struct+union+match", () => {
     expect(runExample("users.mesh")).toBe(
       "hello alice (30)\n404 not found\n500: invalid id: -1\n",
+    );
+  });
+
+  test("discriminated_union.mesh — タグ付きstruct形式のunion", () => {
+    expect(runExample("discriminated_union.mesh")).toBe(
+      "found: alice\nnot found\nunauthorized\n",
     );
   });
 
@@ -765,6 +802,46 @@ describe("e2e", () => {
       print(sum(list))
     }`);
     expect(out).toBe("6\n");
+  });
+
+  test("判別可能union: 宣言・構築・matchでの絞り込み・実行結果", () => {
+    const out = runSource(`struct User {
+      name: string
+    }
+    type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+    fn getUser(id: string) GetUserResponse {
+      if id == "1" {
+        return GetUserResponse{ kind: "ok", user: User{name: "alice"} }
+      }
+      if id == "2" {
+        return GetUserResponse{ kind: "unauthorized" }
+      }
+      return GetUserResponse{ kind: "notFound" }
+    }
+    fn describe(res: GetUserResponse) string {
+      return match res {
+        { kind: "ok" } => "found: \${res.user.name}"
+        { kind: "notFound" } => "not found"
+        { kind: "unauthorized" } => "unauthorized"
+      }
+    }
+    fn main() {
+      print(describe(getUser("1")))
+      print(describe(getUser("2")))
+      print(describe(getUser("3")))
+    }`);
+    expect(out).toBe("found: alice\nunauthorized\nnot found\n");
+  });
+
+  test("判別可能union: 構造的型付けにより形が同じ別structが代入できる", () => {
+    const out = runSource(`struct A { name: string }
+    struct B { name: string }
+    fn describeA(a: A) string { return a.name }
+    fn main() {
+      b := B{ name: "x" }
+      print(describeA(b))
+    }`);
+    expect(out).toBe("x\n");
   });
 
   test("struct: match の型パターンで分解できる", () => {

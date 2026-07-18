@@ -45,6 +45,9 @@ values, so a function mutating one (e.g. \`push(items, x)\`) is visible to the c
         age: int
     }
     type Status = "active" | "banned"   // union/alias naming (NOT for data shapes)
+    type Resp = { kind: "ok", user: User } | { kind: "notFound" }
+                       // discriminated union: { field: Type, ... } ONLY valid inside a union
+                       // (see "Discriminated unions" below — do not write it bare)
 
 ## Absence & failure — THE core pattern (no null, no exceptions)
 
@@ -92,6 +95,38 @@ Building an optional result imperatively (e.g. "the best so far"):
 - match subjects must be union-typed. Patterns: type names (\`User\`, \`none\`, \`error\`, \`int\`, ...),
   string literals (\`"active"\`), or \`_\` (last arm only). Multiple patterns: \`"a", "b" => ...\`.
 - \`x == none\` is a compile error — use \`is none\` (it narrows; \`==\` does not).
+
+## Discriminated unions (tagged struct shapes)
+
+    type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+
+    fn getUser(id: string) GetUserResponse {
+        u := findUser(id)
+        if u is none { return GetUserResponse{ kind: "notFound" } }
+        return GetUserResponse{ kind: "ok", user: u }
+    }
+
+    msg := match res {
+        { kind: "ok" } => "found: \${res.user.name}"    // res.user only exists in this arm
+        { kind: "notFound" } => "not found"
+        { kind: "unauthorized" } => "unauthorized"
+    }
+
+- \`{ field: Type, ... }\` (an anonymous struct shape) is ONLY valid inside a \`type X = A | B\`
+  union. Writing it alone (\`type X = { ... }\`) is a compile error — use \`struct X { ... }\`
+  for a standalone shape.
+- Build a value using the UNION's own name as the struct-literal name; the given field set
+  picks which member you meant (no separate name needed per member).
+- Narrow with \`match\` using a partial-shape pattern — name only the field(s) you need to pick
+  the member (usually just the tag, e.g. \`kind\`). After narrowing, access the rest of that
+  member's fields normally (\`res.user\`); accessing a field from a different member is a
+  compile error, same as any other unnarrowed union access.
+- Struct identity is STRUCTURAL, not by name: two \`struct\` declarations with the same fields
+  (same names, same types) are interchangeable, and a named \`struct\` literal can be used
+  wherever an anonymous \`{ ... }\` union member with the same fields is expected.
+- Self-referential discriminated unions (e.g. a tree: \`{ kind: "leaf" } | { kind: "node", left: Tree, right: Tree }\`)
+  are NOT supported yet — the type resolver reports \`type alias cycle\`. Use a named recursive
+  \`struct\` (with a \`kind: string\` field checked at runtime, or separate optional fields) instead.
 
 ## Structs, maps & methods
 
@@ -285,7 +320,9 @@ methods on non-struct types (int/string/array — struct only) / function-type a
 (a variable CAN hold a function value, e.g. \`f := fn(x: int) int {...}\`, but you cannot
 write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration) /
 Go's close/comma-ok idiom (\`v, ok := <-ch\`) — use \`v := <-ch\` then narrow with \`is closed\` /
-send-case / default-send in select (select only reacts to RECEIVE readiness, not send readiness)
+send-case / default-send in select (select only reacts to RECEIVE readiness, not send readiness) /
+self-referential discriminated unions (a union member's field cannot name the union's own type —
+use a named recursive \`struct\` instead)
 
 ## Common compile errors → how to fix
 
@@ -305,6 +342,13 @@ send-case / default-send in select (select only reacts to RECEIVE readiness, not
     panic: file:line:col: index N out of range      → check len() before indexing
     expected '<' after 'map', but got '('           → you wrote map(arr, f); use transform(arr, f)
                                                         ('map' is the map<K, V> type keyword)
+    use 'struct X { ... }' to define a data shape   → you wrote type X = { ... } alone; either use
+                                                        struct, or add a union: type X = {...} | {...}
+    no member of 'X' matches the field(s) {...}     → the fields you wrote don't match any member of X;
+                                                        check spelling and which fields that member needs
+    ambiguous — multiple members of 'X' match       → add/change a field so only one member's shape fits
+    type alias cycle involving 'X'                  → a discriminated union can't reference its own type
+                                                        name inside a member; use a named recursive struct
 
 ## Verify your code (agents: do this after every edit)
 

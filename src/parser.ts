@@ -147,19 +147,49 @@ class Parser {
   }
 
   // type Status = "active" | "banned"
+  // type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } — 判別可能union
+  // (C-1)。無名の {...} 型式は union の中でだけ有効(B-5): 単独で書いたら struct を使えと誘導する
   private parseTypeDecl(): TypeDecl {
     const start = this.expect("type", "at start of type declaration");
     const name = this.expect("ident", "as type name").value;
     this.expect("=", "after type name");
-    if (this.check("{")) {
-      // B-5決定: データの形は struct で定義する(typeの右辺に裸の {...} は書けない)
-      throw new CompileError(
-        `use 'struct ${name} { ... }' to define a data shape ('type' is for unions and aliases)`,
-        this.peek().pos,
-      );
+    const first = this.parseUnionMember();
+    if (!this.check("|")) {
+      if (first.kind === "structType") {
+        throw new CompileError(
+          `use 'struct ${name} { ... }' to define a data shape ('{...}' alone is only allowed inside a union)`,
+          first.pos,
+        );
+      }
+      return { kind: "typeDecl", name, node: first, pos: start.pos };
     }
-    const node = this.parseType();
-    return { kind: "typeDecl", name, node, pos: start.pos };
+    const members: TypeNode[] = [first];
+    while (this.match("|")) members.push(this.parseUnionMember());
+    return { kind: "typeDecl", name, node: { kind: "union", members, pos: first.pos }, pos: start.pos };
+  }
+
+  // union の1メンバー: 無名struct型 {...}(判別可能union用)か、通常の単一型
+  private parseUnionMember(): TypeNode {
+    if (this.check("{")) return this.parseInlineStructType();
+    return this.parseSingleType();
+  }
+
+  // { kind: "ok", user: User } — 無名の構造体型リテラル。フィールドはカンマまたは改行区切り
+  // (struct宣言は改行区切りのみだが、union内では1行に並べて書きたいのでカンマも許可する)
+  private parseInlineStructType(): TypeNode {
+    const start = this.expect("{", "at start of inline struct type");
+    this.skipSemis();
+    const fields: StructFieldNode[] = [];
+    while (!this.check("}") && !this.check("eof")) {
+      const fname = this.expect("ident", "as field name");
+      this.expect(":", "after field name");
+      const type = this.parseType();
+      fields.push({ name: fname.value, type, pos: fname.pos });
+      this.match(",");
+      this.skipSemis();
+    }
+    this.expect("}", "at end of inline struct type");
+    return { kind: "structType", fields, pos: start.pos };
   }
 
   private parseFnDecl(): FnDecl {
@@ -235,6 +265,11 @@ class Parser {
     if (t.type === "ident" && t.value === "_") {
       this.next();
       return { kind: "wildcard", pos: t.pos };
+    }
+    // 判別可能union用の部分構造パターン: { kind: "ok" }。書いたフィールドが一致する
+    // union メンバーへ絞り込む(絞り込んだ後は subject.field で普通にアクセスする)
+    if (t.type === "{") {
+      return { kind: "type", type: this.parseInlineStructType() };
     }
     return { kind: "type", type: this.parseSingleType() };
   }

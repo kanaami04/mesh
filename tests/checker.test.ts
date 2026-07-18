@@ -338,6 +338,98 @@ fn main() {
     expect(errors).toEqual([]);
   });
 
+  test("判別可能union: 宣言・構築・matchでの絞り込み・フィールドアクセスが通る", () => {
+    const errors = errorsOf(`struct User {
+	name: string
+}
+type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+fn getUser(ok: bool) GetUserResponse {
+	if ok {
+		return GetUserResponse{ kind: "ok", user: User{name: "alice"} }
+	}
+	return GetUserResponse{ kind: "notFound" }
+}
+fn describe(res: GetUserResponse) string {
+	return match res {
+		{ kind: "ok" } => "found: \${res.user.name}"
+		{ kind: "notFound" } => "not found"
+		{ kind: "unauthorized" } => "unauthorized"
+	}
+}
+fn main() { print(describe(getUser(true))) }`);
+    expect(errors).toEqual([]);
+  });
+
+  test("判別可能union: matchが網羅的でないと不足メンバーの形を名指しで報告する", () => {
+    const errors = errorsOf(`type Resp = { kind: "ok" } | { kind: "notFound" }
+fn describe(res: Resp) string {
+	return match res {
+		{ kind: "ok" } => "ok"
+	}
+}
+fn main() { print(describe(Resp{kind: "ok"})) }`);
+    expect(errors).toEqual([expect.stringContaining(`missing: { kind: "notFound" }`)]);
+  });
+
+  test("判別可能union: 絞り込んだ枝以外のフィールドにはアクセスできない", () => {
+    const errors = errorsOf(`struct User { name: string }
+type Resp = { kind: "ok", user: User } | { kind: "notFound" }
+fn describe(res: Resp) string {
+	return match res {
+		{ kind: "notFound" } => res.user.name
+		{ kind: "ok" } => "ok"
+	}
+}
+fn main() { print(describe(Resp{kind: "notFound"})) }`);
+    expect(errors).toEqual([
+      expect.stringContaining(`{ kind: "notFound" } has no field 'user'`),
+    ]);
+  });
+
+  test("判別可能union: フィールド集合がどのメンバーにも一致しないと構築エラー", () => {
+    const errors = errorsOf(`type Resp = { kind: "ok" } | { kind: "notFound" }
+fn main() {
+	r := Resp{kind: "ok", extra: 1}
+	print(r)
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining("no member of 'Resp' matches the field(s) {kind, extra}"),
+    ]);
+  });
+
+  test("判別可能union: 複数メンバーに一致すると曖昧エラー(int/floatの拡大が重なるケース)", () => {
+    const errors = errorsOf(`type Resp = { x: int } | { x: float }
+fn main() {
+	r := Resp{x: 1}
+	print(r)
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining("ambiguous — multiple members of 'Resp' match the field(s) {x}"),
+    ]);
+  });
+
+  test("struct: 構造的型付け — 名前が違っても形が同じなら互換になる", () => {
+    const errors = errorsOf(`struct A { name: string }
+struct B { name: string }
+fn describeA(a: A) string { return a.name }
+fn main() {
+	b := B{ name: "x" }
+	print(describeA(b))
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("struct: 構造的型付けでも形が違えば依然として弾かれる", () => {
+    const errors = errorsOf(`struct A { name: string }
+struct B { name: string age: int }
+fn describeA(a: A) string { return a.name }
+fn main() {
+	b := B{ name: "x", age: 1 }
+	print(describeA(b))
+}`);
+    expect(errors).toEqual([expect.stringContaining("cannot use B as A")]);
+  });
+
   test("map: 読みは V | none なので絞り込み前に使うとエラー", () => {
     expect(inMain(`ages := map<string, int>{"a": 1}\nprint(ages["a"] + 1)`)).toEqual([
       expect.stringContaining("invalid operation"),

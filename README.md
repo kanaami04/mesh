@@ -130,6 +130,50 @@ print(Todo{title: "x", done: false}.complete().render())  // 連鎖(左から右
 ——同じ操作の呼び方が2通り存在することはありません。この分離のおかげで、`User`にも`Order`にも
 `describe()`という同名メソッドを両方持たせられます(自由関数だと名前が衝突します)。
 
+struct の同一性は**構造的**です。名前が違っても、フィールドの名前と型がそろっていれば
+同じ型として扱われます(`struct A { name: string }` と `struct B { name: string }` は互換)。
+
+### 判別可能union(discriminated union)
+
+タグ付きのstructをunionにまとめた形です。無名の `{ ... }` 型式は `type` 宣言のunionの中でだけ
+書けます(裸で `type X = { ... }` と書くのは今まで通りエラーで、単一の形なら `struct` を使えと
+誘導されます)。
+
+```go
+struct User {
+	name: string
+}
+
+type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+
+fn getUser(id: string) GetUserResponse {
+	u := findUser(id)
+	if u is none {
+		return GetUserResponse{ kind: "notFound" }
+	}
+	return GetUserResponse{ kind: "ok", user: u }
+}
+
+fn describe(res: GetUserResponse) string {
+	return match res {
+		{ kind: "ok" } => "found: ${res.user.name}"
+		{ kind: "notFound" } => "not found"
+		{ kind: "unauthorized" } => "unauthorized"
+	}
+}
+```
+
+値を作るときは **union自身の名前**をstructリテラル名としてそのまま使います
+(`GetUserResponse{kind: "ok", user: u}`)——書いたフィールドの組み合わせから該当メンバーを
+特定するので、メンバーごとに別名のstructを用意する必要はありません。`match`は部分構造パターン
+`{ kind: "ok" }` でメンバーを絞り込みます(パターンに書いたフィールドだけで判定し、それ以外は
+問いません)。フィールドをその場で束縛する構文は無く、絞り込んだ後は`res.user`のように
+普通のフィールドアクセスを使います。
+
+自己参照する判別可能union(`{ kind: "node", left: Tree, right: Tree }` のような木構造)は
+現状未対応です(`type alias cycle` エラーになります)。再帰的な形が必要なときは、代わりに
+名前付きの再帰 `struct` を使ってください。
+
 ### 並行処理: spawn / wait / channel
 
 ```go

@@ -288,23 +288,34 @@ class Codegen {
   // match の型パターンを実行時テストに変換する(__m は match 対象の値)
   private genMatchTest(pattern: MatchPattern): string {
     if (pattern.kind === "wildcard") return "true";
-    const t: TypeNode = pattern.type;
-    if (t.kind === "literal") return `(__m === ${JSON.stringify(t.value)})`;
-    if (t.kind === "array") return "Array.isArray(__m)";
-    if (t.kind === "chan") return "(__m instanceof __Channel)";
-    if (t.kind === "union" || t.kind === "structType") return "false"; // checker が弾いている(単一型のみ)
-    if (t.kind === "mapType") return "(__m instanceof Map)";
+    return this.genTypeTest("__m", pattern.type);
+  }
+
+  // ref(式の文字列)が型ノード t に合致するかの実行時テストを組み立てる。
+  // 判別可能unionの部分構造パターン({ kind: "ok" } 等)ではフィールドごとに
+  // ref.fieldName を対象に再帰して、全フィールドの一致を && でつなぐ
+  private genTypeTest(ref: string, t: TypeNode): string {
+    if (t.kind === "literal") return `(${ref} === ${JSON.stringify(t.value)})`;
+    if (t.kind === "array") return `Array.isArray(${ref})`;
+    if (t.kind === "chan") return `(${ref} instanceof __Channel)`;
+    if (t.kind === "union") return "false"; // checker が弾いている(単一型のみ)
+    if (t.kind === "mapType") return `(${ref} instanceof Map)`;
+    if (t.kind === "structType") {
+      const objTest = `(typeof ${ref} === "object" && ${ref} !== null && !(${ref} instanceof Error) && !Array.isArray(${ref}))`;
+      const fieldTests = t.fields.map((f) => this.genTypeTest(`${ref}.${f.name}`, f.type));
+      return [objTest, ...fieldTests].join(" && ");
+    }
     switch (t.name) {
-      case "none": return "(__m === null)";
-      case "closed": return "(__m === __CLOSED)";
-      case "error": return "(__m instanceof Error)";
-      case "int": return "Number.isInteger(__m)";
-      case "float": return '(typeof __m === "number")';
-      case "string": return '(typeof __m === "string")';
-      case "bool": return '(typeof __m === "boolean")';
+      case "none": return `(${ref} === null)`;
+      case "closed": return `(${ref} === __CLOSED)`;
+      case "error": return `(${ref} instanceof Error)`;
+      case "int": return `Number.isInteger(${ref})`;
+      case "float": return `(typeof ${ref} === "number")`;
+      case "string": return `(typeof ${ref} === "string")`;
+      case "bool": return `(typeof ${ref} === "boolean")`;
       default:
         // ユーザー定義のstruct: JSオブジェクト(null/error/配列以外)かどうかで判定
-        return '(typeof __m === "object" && __m !== null && !(__m instanceof Error) && !Array.isArray(__m))';
+        return `(typeof ${ref} === "object" && ${ref} !== null && !(${ref} instanceof Error) && !Array.isArray(${ref}))`;
     }
   }
 

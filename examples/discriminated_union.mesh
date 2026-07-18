@@ -1,0 +1,41 @@
+// 判別可能union(discriminated union) — タグ付きstruct形式のunion。
+// type宣言のunion内だけで無名の{...}型式が書ける。値はunion自身の名前で作り、
+// matchは部分構造パターン({kind: "..."}) でメンバーを絞り込む
+
+struct User {
+	name: string
+}
+
+type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+
+fn findUser(id: string) User | none {
+	if id == "1" {
+		return User{name: "alice"}
+	}
+	return none
+}
+
+fn getUser(id: string) GetUserResponse {
+	if id == "banned" {
+		return GetUserResponse{ kind: "unauthorized" }
+	}
+	u := findUser(id)
+	if u is none {
+		return GetUserResponse{ kind: "notFound" }
+	}
+	return GetUserResponse{ kind: "ok", user: u }
+}
+
+fn describe(res: GetUserResponse) string {
+	return match res {
+		{ kind: "ok" } => "found: ${res.user.name}"
+		{ kind: "notFound" } => "not found"
+		{ kind: "unauthorized" } => "unauthorized"
+	}
+}
+
+fn main() {
+	print(describe(getUser("1")))
+	print(describe(getUser("2")))
+	print(describe(getUser("banned")))
+}
