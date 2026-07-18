@@ -7,14 +7,14 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { compile, formatDiagnostics } from "./compiler";
+import { compile, diagnosticsToJson, formatDiagnostics } from "./compiler";
 
 const USAGE = `Mesh compiler v0.1.0
 
 Usage:
   mesh run   <file.mesh>            compile and run
   mesh build <file.mesh> [-o out]   compile to JavaScript
-  mesh check <file.mesh>            type-check only
+  mesh check <file.mesh> [--json]   type-check only (--json: AIエージェント向けの構造化出力)
 `;
 
 function compileFile(file: string): string {
@@ -61,6 +61,19 @@ function main() {
       break;
     }
     case "check": {
+      if (rest.includes("--json")) {
+        // AIエージェント向け: 成否にかかわらず構造化JSONを stdout に出す
+        let source: string;
+        try {
+          source = readFileSync(file, "utf8");
+        } catch {
+          console.error(`error: cannot read file '${file}'`);
+          process.exit(1);
+        }
+        const result = compile(source, file);
+        console.log(diagnosticsToJson(file, result.diagnostics));
+        process.exit(result.diagnostics.length > 0 ? 1 : 0);
+      }
       compileFile(file);
       console.log(`${file}: no errors`);
       break;

@@ -43,6 +43,7 @@ mise run run-examples   # サンプルを全部実行
 bun run mesh run   examples/hello.mesh   # コンパイルして即実行
 bun run mesh build examples/hello.mesh   # hello.mjs を書き出す
 bun run mesh check examples/hello.mesh   # 型検査のみ
+bun run mesh check prog.mesh --json      # AIエージェント向けの構造化診断(JSON)
 ```
 
 ## 言語ツアー

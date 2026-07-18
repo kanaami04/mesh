@@ -40,6 +40,49 @@ function runSourceExpectPanic(source: string): string {
   return proc.stderr;
 }
 
+describe("mesh check --json", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+  function checkJson(source: string): { exit: number | null; parsed: any } {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-json-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, source);
+    const proc = spawnSync(process.execPath, [CLI, "check", path, "--json"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    return { exit: proc.status, parsed: JSON.parse(proc.stdout) };
+  }
+
+  test("エラーなし: ok=true / exit 0", () => {
+    const { exit, parsed } = checkJson(`fn main() { print("hi") }`);
+    expect(exit).toBe(0);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diagnostics).toEqual([]);
+  });
+
+  test("エラーあり: 位置つき診断の配列 / exit 1", () => {
+    const { exit, parsed } = checkJson(`fn main() {\n\tprint(nothing)\n\tx := "a" + 1\n}`);
+    expect(exit).toBe(1);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics.length).toBe(2);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      line: 2,
+      severity: "error",
+      message: expect.stringContaining("undefined: 'nothing'"),
+    });
+    expect(parsed.diagnostics[0].col).toBeGreaterThan(0);
+    expect(parsed.diagnostics[0].file).toContain("prog.mesh");
+  });
+
+  test("構文エラーもJSONで返る", () => {
+    const { exit, parsed } = checkJson(`fn main( {`);
+    expect(exit).toBe(1);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics.length).toBe(1);
+  });
+});
+
 describe("e2e", () => {
   test("hello.mesh", () => {
     expect(runExample("hello.mesh")).toBe("Hello, Mesh!\n");

@@ -30,3 +30,23 @@ export function formatDiagnostics(file: string, diagnostics: Diagnostic[]): stri
     .map((d) => `${file}:${d.pos.line}:${d.pos.col}: error: ${d.message}`)
     .join("\n");
 }
+
+// AIエージェント向けの構造化出力(mesh check --json)。
+// 安定した機械可読フォーマットとして、フィールドの削除・改名はしない方針
+export function diagnosticsToJson(file: string, diagnostics: Diagnostic[]): string {
+  return JSON.stringify(
+    {
+      file,
+      ok: diagnostics.length === 0,
+      diagnostics: diagnostics.map((d) => ({
+        file,
+        line: d.pos.line,
+        col: d.pos.col,
+        severity: "error",
+        message: d.message,
+      })),
+    },
+    null,
+    2,
+  );
+}
