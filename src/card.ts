@@ -161,15 +161,20 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
 
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
     contains(arr, v)  indexOf(arr, v)  keys(m)  values(m)  sort(arr)
+    split(s, sep)  join(arr, sep)  trim(s)  upper(s)  lower(s)  toInt(s)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
 - push, not append. \`contains\`/\`indexOf\` work on arrays; \`indexOf\` returns \`int | none\`
   (narrow it, same as any other union). \`keys\`/\`values\` return arrays from a map (insertion
   order). \`sort(arr)\` is NON-mutating — it returns a NEW sorted array (\`int[]\`, \`float[]\` or
   \`string[]\` only, ascending); the argument is unchanged.
-- There are no methods on values other than struct fields, and nothing beyond the list above:
-  no filter/map/reduce, no string split/join/trim/upper/lower, no parseInt. Write these by
-  hand with \`for ... range\` until they land in the standard library.
+- \`split(s, sep)\` always returns \`string[]\` (never fails — no separator found means a
+  one-element array). \`join(arr, sep)\` takes \`string[]\`. \`trim\`/\`upper\`/\`lower\` are
+  string → string. \`toInt(s)\` DOES fail on non-numeric input, so it returns \`int | error\`
+  — narrow it like any other failable call: \`n := toInt(s)!\` or \`n := toInt(s) or 0\`.
+- There are no methods on values other than struct fields, and nothing beyond the lists above:
+  no filter/map/reduce, no regex, no string formatting/padding. Write these by hand with
+  \`for ... range\` until they land in the standard library.
 
 ## Does NOT exist in Mesh — never write these
 

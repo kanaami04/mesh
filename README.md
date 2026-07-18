@@ -140,6 +140,9 @@ for { ... }                       // 無限ループ(break で脱出)
 | `indexOf(arr, v)` | 配列内の位置(`int \| none`) |
 | `keys(m)` / `values(m)` | mapのキー/値の配列(挿入順) |
 | `sort(arr)` | 昇順に並べた**新しい**配列を返す(非破壊。`int[]`/`float[]`/`string[]`のみ) |
+| `split(s, sep)` / `join(arr, sep)` | 文字列分割(常に`string[]`)/ 結合 |
+| `trim(s)` / `upper(s)` / `lower(s)` | 前後空白除去 / 大文字化 / 小文字化 |
+| `toInt(s)` | 文字列→整数(`int \| error`。パース失敗時は`error`) |
 
 ### 意図的にオミットしているもの(Go 流のシンプルさ)
 

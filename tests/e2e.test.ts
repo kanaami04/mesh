@@ -252,6 +252,28 @@ fn main() {
     }`);
     expect(out).toBe("true\nmissing\n[b a]\n[2 1]\n[1 2 3]\n[3 1 2]\n");
   });
+
+  test("カードの新項目: 標準ライブラリ第二弾(split/join/trim/upper/lower/toInt)", () => {
+    const out = runSource(`fn parseAge(s: string) int | error {
+      return toInt(s)!   // toInt() DOES fail — ! で呼び出し元へ伝播できる
+    }
+    fn main() {
+      csv := "  Alice, Bob ,Carol  "
+      names := split(csv, ",")
+      mut cleaned: string[] = []
+      for _, n := range names {
+        push(cleaned, upper(trim(n)))
+      }
+      print(join(cleaned, " | "))
+
+      age := parseAge("30")
+      if age is error {
+        return
+      }
+      print(age)
+    }`);
+    expect(out).toBe("ALICE | BOB | CAROL\n30\n");
+  });
 });
 
 describe("e2e", () => {
@@ -747,5 +769,53 @@ describe("e2e", () => {
       print(sort(words))
     }`);
     expect(out).toBe("[3 1 2]\n[1 2 3]\n[apple banana cherry]\n");
+  });
+
+  test("標準ライブラリ第二弾: split / join / trim / upper / lower", () => {
+    const out = runSource(`fn main() {
+      parts := split("a,b,c", ",")
+      print(parts)
+      print(join(parts, "-"))
+      print(trim("  hi  "))
+      print(upper("hi"))
+      print(lower("HI"))
+
+      lone := split("no-sep", ",")
+      print(lone)
+    }`);
+    expect(out).toBe("[a b c]\na-b-c\nhi\nHI\nhi\n[no-sep]\n");
+  });
+
+  test("標準ライブラリ第二弾: toIntは成功/失敗の両方をunionで処理", () => {
+    const out = runSource(`fn main() {
+      n := toInt("42")
+      if n is error {
+        return
+      }
+      print(n + 1)
+
+      m := toInt("abc")
+      if m is error {
+        print("failed: \${m}")
+      }
+
+      k := toInt("nope") or -1
+      print(k)
+    }`);
+    expect(out).toBe("43\nfailed: \"abc\" is not a valid int\n-1\n");
+  });
+
+  test("標準ライブラリ第二弾: toIntは符号・境界値も正しく扱う", () => {
+    const out = runSource(`fn main() {
+      a := toInt("-5") or 0
+      print(a)
+      b := toInt("3.14") or -1
+      print(b)
+      c := toInt("") or -1
+      print(c)
+      d := toInt(" 5") or -1
+      print(d)
+    }`);
+    expect(out).toBe("-5\n-1\n-1\n-1\n");
   });
 });

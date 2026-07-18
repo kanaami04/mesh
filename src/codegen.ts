@@ -453,6 +453,18 @@ class Codegen {
           return `Array.from(${args[0]}.values())`;
         case "sort":
           return `__sorted(${args[0]})`;
+        case "split":
+          return `${args[0]}.split(${args[1]})`;
+        case "join":
+          return `${args[0]}.join(${args[1]})`;
+        case "trim":
+          return `${args[0]}.trim()`;
+        case "upper":
+          return `${args[0]}.toUpperCase()`;
+        case "lower":
+          return `${args[0]}.toLowerCase()`;
+        case "toInt":
+          return `__toInt(${args[0]})`;
       }
     }
 

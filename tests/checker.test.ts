@@ -606,4 +606,31 @@ fn main() {
 }`);
     expect(errors).toEqual([expect.stringContaining("sort() requires int[], float[] or string[]")]);
   });
+
+  test("split: 常に string[] を返す(unionではない)", () => {
+    expect(inMain(`parts := split("a,b,c", ",")\nprint(len(parts), parts[0])`)).toEqual([]);
+    expect(inMain(`parts := split(1, ",")`)).toEqual([
+      expect.stringContaining("split() requires a string"),
+    ]);
+  });
+
+  test("join: string[] 以外を弾く", () => {
+    expect(inMain(`words := ["a", "b"]\nprint(join(words, "-"))`)).toEqual([]);
+    expect(inMain(`nums := [1, 2]\nprint(join(nums, "-"))`)).toEqual([
+      expect.stringContaining("join() requires string[]"),
+    ]);
+  });
+
+  test("trim/upper/lower: string → string", () => {
+    expect(inMain(`print(upper(trim(lower(" Hi "))))`)).toEqual([]);
+    expect(inMain(`print(upper(1))`)).toEqual([expect.stringContaining("upper() requires a string")]);
+  });
+
+  test("toInt: 戻り値は int | error なので絞り込みが必要", () => {
+    expect(inMain(`n := toInt("42")\nprint(n + 1)`)).toEqual([
+      expect.stringContaining("invalid operation"),
+    ]);
+    expect(inMain(`n := toInt("42")\nif n is error {\nreturn\n}\nprint(n + 1)`)).toEqual([]);
+    expect(inMain(`n := toInt("42") or 0\nprint(n + 1)`)).toEqual([]);
+  });
 });

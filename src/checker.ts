@@ -38,6 +38,7 @@ export interface Diagnostic {
 export const BUILTINS = new Set([
   "print", "len", "push", "str", "error", "sleep", "delete",
   "contains", "indexOf", "keys", "values", "sort",
+  "split", "join", "trim", "upper", "lower", "toInt",
 ]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
@@ -1052,6 +1053,47 @@ class Checker {
         }
         // 非破壊(new arrayを返す)。引数の配列自体は変わらない
         return args[0]?.kind === "array" ? args[0] : ANY;
+      }
+      case "split": {
+        if (expectArity(2)) {
+          if (!isStringy(args[0])) {
+            this.error(expr.args[0].pos, `split() requires a string, got ${typeToString(args[0])}`);
+          }
+          if (!isStringy(args[1])) {
+            this.error(expr.args[1].pos, `split() separator must be a string, got ${typeToString(args[1])}`);
+          }
+        }
+        return { kind: "array", elem: STRING };
+      }
+      case "join": {
+        if (expectArity(2)) {
+          const arr = args[0];
+          if (arr.kind === "array") {
+            if (!isStringy(arr.elem) && arr.elem.kind !== "any") {
+              this.error(expr.args[0].pos, `join() requires string[], got ${typeToString(arr)}`);
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `join() requires an array, got ${typeToString(arr)}`);
+          }
+          if (!isStringy(args[1])) {
+            this.error(expr.args[1].pos, `join() separator must be a string, got ${typeToString(args[1])}`);
+          }
+        }
+        return STRING;
+      }
+      case "trim":
+      case "upper":
+      case "lower": {
+        if (expectArity(1) && !isStringy(args[0])) {
+          this.error(expr.args[0].pos, `${name}() requires a string, got ${typeToString(args[0])}`);
+        }
+        return STRING;
+      }
+      case "toInt": {
+        if (expectArity(1) && !isStringy(args[0])) {
+          this.error(expr.args[0].pos, `toInt() requires a string, got ${typeToString(args[0])}`);
+        }
+        return unionOf([INT, ERROR]);
       }
       default:
         return ANY;

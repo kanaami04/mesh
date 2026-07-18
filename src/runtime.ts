@@ -78,6 +78,15 @@ const __indexOf = (arr, v) => {
 // sort() は非破壊: 元の配列は変えず、並び替えたコピーを返す。
 // < / > は int・float・string のどれでも正しく比較できるので単一の比較関数で足りる
 const __sorted = (arr) => [...arr].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+// 文字列→int(標準ライブラリ第二弾)。厳密パース: 符号+数字のみ許可(小数点・空白・ゴミは拒否)
+// 注意: このファイルは PRELUDE という1つのテンプレートリテラル文字列なので、
+// 正規表現の中でバックスラッシュ1つの意味で書きたい箇所は、ソース上ではバックスラッシュを
+// 2つ重ねて書く必要がある(外側の文字列リテラルが先に1段エスケープを解決してしまうため。
+// 1つのままだと文字が消えて常に不一致になる)。
+const __toInt = (s) => {
+  if (!/^[+-]?\\d+$/.test(s)) return new Error('"' + s + '" is not a valid int');
+  return parseInt(s, 10);
+};
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v instanceof Error ? v.message
