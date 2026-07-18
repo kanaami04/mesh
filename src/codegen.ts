@@ -103,6 +103,12 @@ class Codegen {
         break;
       }
 
+      case "typedVarDecl": {
+        const kw = stmt.mutable ? "let" : "const";
+        this.emit(`${kw} ${stmt.name} = ${this.genExpr(stmt.value)};`);
+        break;
+      }
+
       case "assign": {
         if (stmt.targets.length === 1) {
           const target = stmt.targets[0];
@@ -238,6 +244,8 @@ class Codegen {
     switch (stmt.kind) {
       case "shortVarDecl":
         return `let ${stmt.names[0]} = ${this.genExpr(stmt.values[0])}`;
+      case "typedVarDecl":
+        return `let ${stmt.name} = ${this.genExpr(stmt.value)}`;
       case "assign":
         return `${this.genLValue(stmt.targets[0])} = ${this.genExpr(stmt.values[0])}`;
       case "incDec":

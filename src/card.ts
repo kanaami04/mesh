@@ -18,6 +18,8 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
     x := 10           // immutable binding (default). Type is inferred.
     mut n := 0        // mutable — only mut bindings can be reassigned or ++/--
     n = n + 1
+    xs: int[] = []    // typed declaration: annotate the type explicitly (name: T = value)
+    mut best: string | none = none   // start "absent", assign a real value later (needs mut)
 
 - No \`var\` / \`let\` / \`const\`. No uninitialized declarations.
 - No shadowing: reusing an outer name (incl. function names) in \`:=\` is a compile error.
@@ -74,6 +76,14 @@ Four ways to consume a union:
         print("failed: \${e}")   // \${error} renders its message; str(e) also works
     }
 
+Building an optional result imperatively (e.g. "the best so far"):
+
+    mut best: string | none = none   // typed declaration lets you start absent
+    for _, w := range words {
+        best = w                     // string assigns fine into string | none
+    }
+    if best is none { return }       // narrow before using it
+
     msg := match v {        // 4) match — exhaustive: missing arms = compile error
         User => "hi \${v.name}"      // v is narrowed inside each arm
         none => "404"
@@ -100,7 +110,8 @@ Four ways to consume a union:
 ## Arrays
 
     xs := [1, 2, 3]        // non-empty literal — element type inferred
-    ys := Todo[]{}         // EMPTY typed array. A bare [] is any[] and won't coerce to Todo[]
+    ys := Todo[]{}         // empty typed array (literal form)
+    zs: Todo[] = []        // empty typed array (typed declaration) — same result, more familiar
     push(xs, 4)            // append in place — mutates xs, returns none (not usable as a value)
     n := len(xs)
     for i, v := range xs { }

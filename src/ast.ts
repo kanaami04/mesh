@@ -59,6 +59,7 @@ export interface Block {
 
 export type Stmt =
   | ShortVarDecl
+  | TypedVarDecl
   | Assign
   | ExprStmt
   | ReturnStmt
@@ -76,6 +77,15 @@ export interface ShortVarDecl {
   names: string[];
   values: Expr[];
   mutable: boolean; // mut 付き宣言なら true(全 names に適用)
+  pos: Pos;
+}
+
+export interface TypedVarDecl {
+  kind: "typedVarDecl"; // x: T = v  /  mut best: string | none = none
+  name: string;
+  typeNode: TypeNode;
+  value: Expr;
+  mutable: boolean;
   pos: Pos;
 }
 

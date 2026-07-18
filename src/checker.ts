@@ -260,6 +260,19 @@ class Checker {
         }
         break;
       }
+      case "typedVarDecl": {
+        // 宣言された型が「正」。値はそれに入れられればよい(none も union なら入る)
+        const declared = this.resolveType(stmt.typeNode);
+        const valueType = this.checkExprSingle(stmt.value);
+        if (!assignable(valueType, declared)) {
+          this.error(
+            stmt.value.pos,
+            `cannot use ${typeToString(valueType)} as ${typeToString(declared)}`,
+          );
+        }
+        this.declare(stmt.name, declared, stmt.pos, stmt.mutable);
+        break;
+      }
       case "assign": {
         const types = this.checkExprList(stmt.values, stmt.targets.length, stmt.pos);
         for (let i = 0; i < stmt.targets.length; i++) {

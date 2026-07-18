@@ -131,6 +131,12 @@ export function assignable(from: Type, to: Type): boolean {
   if (from.kind === "union") {
     return from.members.every((m) => assignable(m, to));
   }
+  // 配列: 要素が any 側なら互換(空配列 [] = any[] を型付き配列へ入れる等)。
+  // 具体型同士は typeEquals(下のフォールバック)なので int[] を string[] には入れられない
+  if (from.kind === "array" && to.kind === "array") {
+    if (from.elem.kind === "any" || to.elem.kind === "any") return true;
+    return typeEquals(from.elem, to.elem);
+  }
   // int は float に暗黙で広げられる(逆は不可)
   if (from.kind === "prim" && from.name === "int" && to.kind === "prim" && to.name === "float") {
     return true;

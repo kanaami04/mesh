@@ -392,6 +392,30 @@ for i := range 3 {
     ).toEqual([]);
   });
 
+  test("型注釈つき宣言: mut best := none 相当が書ける(不在アキュムレータ)", () => {
+    const errors = errorsOf(`fn main() {
+	mut best: string | none = none
+	best = "red"
+	if best is none {
+		return
+	}
+	print(best)
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("型注釈つき宣言: 宣言型に入らない値を弾く", () => {
+    expect(inMain(`x: int = "hello"`)).toEqual([
+      expect.stringContaining(`cannot use "hello" as int`),
+    ]);
+  });
+
+  test("型注釈つき宣言: 不変(mutなし)は再代入できない", () => {
+    expect(inMain(`x: int = 1\nx = 2`)).toEqual([
+      expect.stringContaining("'x' is immutable"),
+    ]);
+  });
+
   test("型付き配列リテラル: 空配列に型が付く", () => {
     // 空の [] は any[] だが、Todo[]{} は Todo[] になる
     const errors = errorsOf(`struct Todo {
@@ -414,15 +438,26 @@ fn main() {
     ]);
   });
 
-  test("素の空配列 [] は型付き変数へ入れられない(Todo[]{} を使う)", () => {
+  test("素の空配列 [] は型注釈があれば型付き配列になる(any[]は互換)", () => {
+    // 型注釈つき宣言 / 戻り値の期待型があれば [] を Todo[] として使える
     const errors = errorsOf(`struct Todo {
 	id: int
 }
 fn make() Todo[] {
 	return []
 }
-fn main() { print(len(make())) }`);
-    expect(errors).toEqual([expect.stringContaining("cannot return any[] as Todo[]")]);
+fn main() {
+	todos: Todo[] = []
+	push(todos, Todo{id: 1})
+	print(len(todos) + len(make()))
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("具体要素型の配列は別の要素型に代入できない(int[] を string[] に不可)", () => {
+    expect(inMain(`xs: string[] = [1, 2]`)).toEqual([
+      expect.stringContaining("cannot use int[] as string[]"),
+    ]);
   });
 
   test("range: 範囲にできない型を弾く", () => {

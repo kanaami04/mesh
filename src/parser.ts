@@ -321,8 +321,18 @@ class Parser {
   private parseSimpleStmt(): Stmt {
     const start = this.peek();
 
-    // mut x := ...(可変宣言)。mut は := 宣言の前にしか置けない
+    // mut x := ...(可変宣言)。mut は := / 型注釈宣言の前にしか置けない
     const mutable = this.match("mut");
+
+    // 型注釈つき宣言: x: T = v  /  mut best: string | none = none
+    if (this.check("ident") && this.peek(1).type === ":") {
+      const nameTok = this.next();
+      this.next(); // :
+      const typeNode = this.parseType();
+      this.expect("=", "in typed declaration ('name: T = value')");
+      const value = this.parseExpr();
+      return { kind: "typedVarDecl", name: nameTok.value, typeNode, value, mutable, pos: start.pos };
+    }
 
     const first = this.parseExpr();
 
