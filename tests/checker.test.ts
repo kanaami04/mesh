@@ -633,4 +633,47 @@ fn main() {
     expect(inMain(`n := toInt("42")\nif n is error {\nreturn\n}\nprint(n + 1)`)).toEqual([]);
     expect(inMain(`n := toInt("42") or 0\nprint(n + 1)`)).toEqual([]);
   });
+
+  test("filter: 正しい述語はエラーなし・パラメータ型/戻り値型の不一致を検出", () => {
+    expect(inMain(`nums := [1, 2, 3]\nevens := filter(nums, fn(n: int) bool { return n % 2 == 0 })\nprint(evens)`)).toEqual(
+      [],
+    );
+    expect(inMain(`nums := [1, 2, 3]\nprint(filter(nums, fn(s: string) bool { return true }))`)).toEqual([
+      expect.stringContaining("filter() callback must take a single int parameter"),
+    ]);
+    expect(inMain(`nums := [1, 2, 3]\nprint(filter(nums, fn(n: int) int { return n }))`)).toEqual([
+      expect.stringContaining("filter() callback must return bool, got int"),
+    ]);
+  });
+
+  test("transform: 戻り値の型が変わってよい(int[] → string[])", () => {
+    expect(
+      inMain(`nums := [1, 2, 3]\nlabels := transform(nums, fn(n: int) string { return str(n) })\nprint(labels[0])`),
+    ).toEqual([]);
+    expect(inMain(`nums := [1, 2, 3]\nprint(transform(nums, fn(s: string) int { return 1 }))`)).toEqual([
+      expect.stringContaining("transform() callback must take a single int parameter"),
+    ]);
+  });
+
+  test("reduce: 初期値・要素・戻り値の型の整合性を検査", () => {
+    expect(inMain(`nums := [1, 2, 3]\ntotal := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)\nprint(total + 1)`)).toEqual(
+      [],
+    );
+    // 蓄積型(Acc)は要素型と別でよい(int[] を string に畳み込む)
+    expect(
+      inMain(`nums := [1, 2, 3]\ns := reduce(nums, fn(acc: string, n: int) string { return acc + str(n) }, "")\nprint(s + "!")`),
+    ).toEqual([]);
+    expect(inMain(`nums := [1, 2, 3]\nprint(reduce(nums, fn(n: int) int { return n }, 0))`)).toEqual([
+      expect.stringContaining("reduce() callback must take (accumulator, element)"),
+    ]);
+    expect(
+      inMain(`nums := [1, 2, 3]\nprint(reduce(nums, fn(acc: string, n: int) string { return acc }, 0))`),
+    ).toEqual([expect.stringContaining("reduce() initial value must be string, got int")]);
+  });
+
+  test("map(...) は 'map' 型キーワードと衝突して構文エラーになる(transformを使う)", () => {
+    expect(() => errorsOf(`nums := [1, 2, 3]\nprint(map(nums, fn(n: int) int { return n }))`)).toThrow(
+      CompileError,
+    );
+  });
 });

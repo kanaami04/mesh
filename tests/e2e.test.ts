@@ -274,6 +274,24 @@ fn main() {
     }`);
     expect(out).toBe("ALICE | BOB | CAROL\n30\n");
   });
+
+  test("カードの新項目: 標準ライブラリ第三弾(filter/transform/reduce)", () => {
+    const out = runSource(`fn isEven(n: int) bool {
+      return n % 2 == 0
+    }
+    fn main() {
+      nums := [1, 2, 3, 4, 5, 6]
+      evens := filter(nums, isEven)              // 名前付き関数を値として渡す
+      doubled := transform(evens, fn(n: int) int { return n * 2 })  // インラインクロージャ
+      total := reduce(doubled, fn(acc: int, n: int) int { return acc + n }, 0)
+      print(total)
+    }`);
+    expect(out).toBe("24\n");
+    // カードどおり map(...) は型キーワードと衝突して構文エラーになる
+    expect(compile(`fn main() { nums := [1]\nprint(map(nums, fn(n: int) int { return n })) }`).code).toBe(
+      null,
+    );
+  });
 });
 
 describe("e2e", () => {
@@ -817,5 +835,69 @@ describe("e2e", () => {
       print(d)
     }`);
     expect(out).toBe("-5\n-1\n-1\n-1\n");
+  });
+
+  test("標準ライブラリ第三弾: filterは名前付き関数を値として渡せる", () => {
+    const out = runSource(`fn isEven(n: int) bool {
+      return n % 2 == 0
+    }
+    fn main() {
+      nums := [1, 2, 3, 4, 5, 6]
+      evens := filter(nums, isEven)
+      print(evens)
+      print(nums)   // filter は非破壊
+    }`);
+    expect(out).toBe("[2 4 6]\n[1 2 3 4 5 6]\n");
+  });
+
+  test("標準ライブラリ第三弾: filterはインラインクロージャで外側のmut変数も捕捉できる", () => {
+    const out = runSource(`fn main() {
+      nums := [1, 2, 3, 4, 5]
+      mut threshold := 3
+      big := filter(nums, fn(n: int) bool { return n > threshold })
+      print(big)
+      threshold = 1
+      print(filter(nums, fn(n: int) bool { return n > threshold }))
+    }`);
+    expect(out).toBe("[4 5]\n[2 3 4 5]\n");
+  });
+
+  test("標準ライブラリ第三弾: transformは要素の型を変えられる(int[] → string[])", () => {
+    const out = runSource(`fn main() {
+      nums := [1, 2, 3]
+      labels := transform(nums, fn(n: int) string { return "n\${n}" })
+      print(labels)
+    }`);
+    expect(out).toBe("[n1 n2 n3]\n");
+  });
+
+  test("標準ライブラリ第三弾: reduceは合計・文字列への畳み込みの両方ができる", () => {
+    const out = runSource(`fn main() {
+      nums := [1, 2, 3, 4]
+      total := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)
+      print(total)
+
+      joined := reduce(nums, fn(acc: string, n: int) string { return acc + str(n) }, "")
+      print(joined)
+    }`);
+    expect(out).toBe("10\n1234\n");
+  });
+
+  test("標準ライブラリ第三弾: filter→transform→reduceのパイプライン", () => {
+    const out = runSource(`fn isEven(n: int) bool {
+      return n % 2 == 0
+    }
+    fn double(n: int) int {
+      return n * 2
+    }
+    fn sum(acc: int, n: int) int {
+      return acc + n
+    }
+    fn main() {
+      nums := [1, 2, 3, 4, 5, 6]
+      result := reduce(transform(filter(nums, isEven), double), sum, 0)
+      print(result)   // (2+4+6)*2 = 24
+    }`);
+    expect(out).toBe("24\n");
   });
 });

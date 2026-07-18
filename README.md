@@ -143,6 +143,9 @@ for { ... }                       // 無限ループ(break で脱出)
 | `split(s, sep)` / `join(arr, sep)` | 文字列分割(常に`string[]`)/ 結合 |
 | `trim(s)` / `upper(s)` / `lower(s)` | 前後空白除去 / 大文字化 / 小文字化 |
 | `toInt(s)` | 文字列→整数(`int \| error`。パース失敗時は`error`) |
+| `filter(arr, pred)` | 条件に合う要素だけの新しい配列 |
+| `transform(arr, f)` | 各要素を変換した新しい配列(要素の型が変わってもよい。`map`の代わり) |
+| `reduce(arr, f, init)` | 畳み込み(`f: fn(Acc, T) Acc`) |
 
 ### 意図的にオミットしているもの(Go 流のシンプルさ)
 

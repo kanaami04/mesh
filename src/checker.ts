@@ -39,6 +39,7 @@ export const BUILTINS = new Set([
   "print", "len", "push", "str", "error", "sleep", "delete",
   "contains", "indexOf", "keys", "values", "sort",
   "split", "join", "trim", "upper", "lower", "toInt",
+  "filter", "transform", "reduce",
 ]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
@@ -1094,6 +1095,92 @@ class Checker {
           this.error(expr.args[0].pos, `toInt() requires a string, got ${typeToString(args[0])}`);
         }
         return unionOf([INT, ERROR]);
+      }
+      case "filter": {
+        if (expectArity(2)) {
+          const arr = args[0];
+          const pred = args[1];
+          if (arr.kind === "array") {
+            if (pred.kind === "fn") {
+              if (pred.params.length !== 1 || !assignable(arr.elem, pred.params[0])) {
+                this.error(
+                  expr.args[1].pos,
+                  `filter() callback must take a single ${typeToString(arr.elem)} parameter`,
+                );
+              }
+              if (!typeEquals(pred.ret, BOOL) && pred.ret.kind !== "any") {
+                this.error(expr.args[1].pos, `filter() callback must return bool, got ${typeToString(pred.ret)}`);
+              }
+            } else if (pred.kind !== "any") {
+              this.error(expr.args[1].pos, `filter() second argument must be a function, got ${typeToString(pred)}`);
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `filter() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        return args[0]?.kind === "array" ? args[0] : ANY;
+      }
+      case "transform": {
+        if (expectArity(2)) {
+          const arr = args[0];
+          const f = args[1];
+          if (arr.kind === "array") {
+            if (f.kind === "fn") {
+              if (f.params.length !== 1 || !assignable(arr.elem, f.params[0])) {
+                this.error(
+                  expr.args[1].pos,
+                  `transform() callback must take a single ${typeToString(arr.elem)} parameter`,
+                );
+              }
+            } else if (f.kind !== "any") {
+              this.error(expr.args[1].pos, `transform() second argument must be a function, got ${typeToString(f)}`);
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `transform() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        const f = args[1];
+        return { kind: "array", elem: f?.kind === "fn" ? f.ret : ANY };
+      }
+      case "reduce": {
+        if (expectArity(3)) {
+          const arr = args[0];
+          const f = args[1];
+          const init = args[2];
+          if (arr.kind === "array") {
+            if (f.kind === "fn") {
+              if (f.params.length !== 2) {
+                this.error(expr.args[1].pos, `reduce() callback must take (accumulator, element)`);
+              } else {
+                if (!assignable(init, f.params[0])) {
+                  this.error(
+                    expr.args[2].pos,
+                    `reduce() initial value must be ${typeToString(f.params[0])}, got ${typeToString(init)}`,
+                  );
+                }
+                if (!assignable(arr.elem, f.params[1])) {
+                  this.error(
+                    expr.args[1].pos,
+                    `reduce() callback's second parameter must accept ${typeToString(arr.elem)}`,
+                  );
+                }
+                if (!assignable(f.ret, f.params[0])) {
+                  this.error(
+                    expr.args[1].pos,
+                    `reduce() callback must return ${typeToString(f.params[0])} (the accumulator type), got ${typeToString(f.ret)}`,
+                  );
+                }
+              }
+            } else if (f.kind !== "any") {
+              this.error(expr.args[1].pos, `reduce() second argument must be a function, got ${typeToString(f)}`);
+            }
+          } else if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, `reduce() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        const f = args[1];
+        if (f?.kind === "fn" && f.params.length === 2) return f.params[0];
+        return args[2] ?? ANY;
       }
       default:
         return ANY;

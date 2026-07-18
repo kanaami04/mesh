@@ -162,6 +162,7 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
     contains(arr, v)  indexOf(arr, v)  keys(m)  values(m)  sort(arr)
     split(s, sep)  join(arr, sep)  trim(s)  upper(s)  lower(s)  toInt(s)
+    filter(arr, pred)  transform(arr, f)  reduce(arr, f, init)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
 - push, not append. \`contains\`/\`indexOf\` work on arrays; \`indexOf\` returns \`int | none\`
@@ -172,8 +173,21 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
   one-element array). \`join(arr, sep)\` takes \`string[]\`. \`trim\`/\`upper\`/\`lower\` are
   string → string. \`toInt(s)\` DOES fail on non-numeric input, so it returns \`int | error\`
   — narrow it like any other failable call: \`n := toInt(s)!\` or \`n := toInt(s) or 0\`.
+- Higher-order functions take a function VALUE as an argument — either a named \`fn\`, or an
+  inline \`fn(...) ... { ... }\` closure (closures can capture outer variables, including
+  \`mut\` ones):
+
+      isEven := fn(n: int) bool { return n % 2 == 0 }
+      evens := filter(nums, isEven)                        // T[]  (same element type)
+      labels := transform(nums, fn(n: int) string { return "n\${n}" })  // can change element type
+      total := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)  // fold to Acc
+
+  \`transform(arr, f)\` is Mesh's map-over-array (named \`transform\`, NOT \`map\` — \`map\` is
+  already the \`map<K, V>\` type keyword, so \`map(arr, f)\` is a parse error; see below).
+  \`reduce(arr, f, init)\` takes the callback before the initial value, matching JS's
+  \`.reduce(callback, initialValue)\` order (with the array moved to the first argument).
 - There are no methods on values other than struct fields, and nothing beyond the lists above:
-  no filter/map/reduce, no regex, no string formatting/padding. Write these by hand with
+  no regex, no string formatting/padding, no array flatten/zip/group. Write these by hand with
   \`for ... range\` until they land in the standard library.
 
 ## Does NOT exist in Mesh — never write these
@@ -195,6 +209,8 @@ comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if)
     cannot use any[] as Todo[] / cannot return any[] → you wrote []; use Todo[]{} for an empty typed array
     this function has no return value (from push)   → push returns none; don't use it as a value
     panic: file:line:col: index N out of range      → check len() before indexing
+    expected '<' after 'map', but got '('           → you wrote map(arr, f); use transform(arr, f)
+                                                        ('map' is the map<K, V> type keyword)
 
 ## Verify your code (agents: do this after every edit)
 

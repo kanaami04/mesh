@@ -43,7 +43,7 @@
 - [ ] **標準ライブラリ** — 言語カード実験(2026-07-18)で必要性が浮上。第一弾・第二弾実装済み
       - [x] 配列/map操作: contains / indexOf(`int | none`)/ keys / values / sort(非破壊)— 2026-07-18
       - [x] 文字列操作: split / join / trim / upper / lower / toInt(`int | error`)— 2026-07-18
-      - [ ] filter/map/reduce(高階関数。実タスクでの関数値の検証が先)
+      - [x] 高階関数: filter / transform(map改名。型キーワードと衝突するため)/ reduce — 2026-07-18
       - [ ] 層分け設計(core共通 / 環境別: http・json・file・DOM)は requirements C-6 / Q3 と統合して検討
 - [ ] チャネルの容量指定 `chan<int>(0)` と同期(ブロックする)送信
 - [ ] defer 文

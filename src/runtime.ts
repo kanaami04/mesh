@@ -87,6 +87,25 @@ const __toInt = (s) => {
   if (!/^[+-]?\\d+$/.test(s)) return new Error('"' + s + '" is not a valid int');
   return parseInt(s, 10);
 };
+// 高階関数(標準ライブラリ第三弾)。渡される関数値は Mesh の関数(すべて async)なので、
+// 呼び出すたびに await する。JS のヘルパー自体も async にする
+const __filter = async (arr, pred) => {
+  const out = [];
+  for (const x of arr) {
+    if (await pred(x)) out.push(x);
+  }
+  return out;
+};
+const __map = async (arr, f) => {
+  const out = [];
+  for (const x of arr) out.push(await f(x));
+  return out;
+};
+const __reduce = async (arr, f, init) => {
+  let acc = init;
+  for (const x of arr) acc = await f(acc, x);
+  return acc;
+};
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v instanceof Error ? v.message

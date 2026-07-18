@@ -167,7 +167,12 @@
       `join`は`string[]`限定 |
 | `trim(s)` / `upper(s)` / `lower(s)` | ✅ | 2026-07-18実装。string → string |
 | `toInt(s)` | ✅ | 2026-07-18実装。`int \| error`。符号つき整数のみ許可(小数点・空白・ゴミは`error`) |
-| `filter` / `map` / `reduce`(高階関数) | ❓ | 関数を値として渡す必要があり、実タスクでの検証がまだ。次の候補 |
+| `filter(arr, pred)` / `transform(arr, f)` / `reduce(arr, f, init)` | ✅ | 2026-07-18実装。関数値(名前付き関数・
+      インラインクロージャどちらも可、`mut`変数の捕捉も可)を引数に取る最初の高階関数。
+      `map`という名前は`map<K,V>`型キーワードと衝突するため使えず、**`transform`に決定**
+      (検討した代替案: `map<K,V>`を改名する/`map`を文脈依存キーワードにする/`collect`と呼ぶ —
+      いずれも既存資産の破壊・言語の一貫性低下・Rustの`collect()`との意味衝突を理由に不採用)。
+      `reduce`はJSの`.reduce(callback, initialValue)`と同じ引数順(配列を先頭に追加しただけ) |
 
 ## ツールチェーン
 

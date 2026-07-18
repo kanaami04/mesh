@@ -465,6 +465,12 @@ class Codegen {
           return `${args[0]}.toLowerCase()`;
         case "toInt":
           return `__toInt(${args[0]})`;
+        case "filter":
+          return `(await __filter(${args[0]}, ${args[1]}))`;
+        case "transform":
+          return `(await __map(${args[0]}, ${args[1]}))`;
+        case "reduce":
+          return `(await __reduce(${args[0]}, ${args[1]}, ${args[2]}))`;
       }
     }
 
