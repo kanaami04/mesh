@@ -319,6 +319,27 @@ fn (t: Todo) render() string { return t.title }
 fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     ).toBe(null);
   });
+
+  test("カードの新項目: 2段スコープ(spawn=関数所有で暗黙wait / detach=プログラム所有)", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(30)
+      push(arr, v)
+    }
+    fn structured(arr: int[]) {
+      spawn addTo(arr, 1)   // 関数を抜けるとき暗黙に待たれる
+    }
+    fn background(arr: int[]) {
+      detach addTo(arr, 2)  // プログラム所有 — この関数は待たずに戻る
+    }
+    fn main() {
+      arr := [0]
+      structured(arr)
+      print(len(arr))       // 2: spawn は待たれた
+      background(arr)
+      print(len(arr))       // 2: detach はまだ完了していない
+    }`);
+    expect(out).toBe("2\n2\n");
+  });
 });
 
 describe("e2e", () => {
@@ -402,7 +423,7 @@ describe("e2e", () => {
     expect(out).toBe("3\n");
   });
 
-  test("waitなしなら起動直後は完了していない(対照実験)", () => {
+  test("spawnの直後の行では完了していない(暗黙waitは関数の出口でだけ効く)", () => {
     const out = runSource(`fn addTo(arr: int[], v: int) {
       sleep(40)
       push(arr, v)
@@ -413,6 +434,69 @@ describe("e2e", () => {
       print(len(arr))
     }`);
     expect(out).toBe("1\n");
+  });
+
+  test("2段スコープ: spawnは関数を抜けるとき暗黙に待たれる(リーク不可能)", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(40)
+      push(arr, v)
+    }
+    fn work(arr: int[]) {
+      spawn addTo(arr, 1)
+      // 明示的な wait は書いていない — それでも work は addTo 完了後に戻る
+    }
+    fn main() {
+      arr := [0]
+      work(arr)
+      print(len(arr))
+    }`);
+    expect(out).toBe("2\n");
+  });
+
+  test("2段スコープ: 早期returnでもspawnは待たれる", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(40)
+      push(arr, v)
+    }
+    fn work(arr: int[]) int {
+      spawn addTo(arr, 1)
+      return 99
+    }
+    fn main() {
+      arr := [0]
+      r := work(arr)
+      print(r, len(arr))
+    }`);
+    expect(out).toBe("99 2\n");
+  });
+
+  test("2段スコープ: detachは関数の外まで生き延びる(呼び出し元は待たない)", () => {
+    const out = runSource(`fn addTo(arr: int[], v: int) {
+      sleep(40)
+      push(arr, v)
+    }
+    fn work(arr: int[]) {
+      detach addTo(arr, 1)
+      // detach はプログラム所有 — work は待たずに即戻る
+    }
+    fn main() {
+      arr := [0]
+      work(arr)
+      print(len(arr))
+    }`);
+    expect(out).toBe("1\n");
+  });
+
+  test("2段スコープ: detachも受取口を返す(spawn と対称)", () => {
+    const out = runSource(`fn slow(n: int) int {
+      sleep(30)
+      return n * 2
+    }
+    fn main() {
+      task := detach slow(21)
+      print(<-task)
+    }`);
+    expect(out).toBe("42\n");
   });
 
   test("int同士の除算は切り捨て、floatが混ざれば小数", () => {

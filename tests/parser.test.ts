@@ -107,6 +107,15 @@ describe("parser", () => {
     expect(() => parseBody(`spawn 1 + 2`)).toThrow(CompileError);
   });
 
+  test("detach は spawn と同形で detached フラグが立つ", () => {
+    const [stmt] = parseBody(`task := detach f(1)`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const expr = stmt.values[0];
+    if (expr.kind !== "spawn") throw new Error("expected spawn node, got " + expr.kind);
+    expect(expr.detached).toBe(true);
+    expect(() => parseBody(`detach 1 + 2`)).toThrow(CompileError);
+  });
+
   test("wait ブロックをパースできる", () => {
     const [stmt] = parseBody(`wait {\nspawn f(1)\n}`);
     expect(stmt.kind).toBe("wait");

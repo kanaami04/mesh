@@ -44,9 +44,10 @@
       - [x] 文字列操作: split / join / trim / upper / lower / toInt(`int | error`)— 2026-07-18
       - [x] 高階関数: filter / transform(map改名。型キーワードと衝突するため)/ reduce — 2026-07-18
       - [ ] 層分け設計(core共通 / 環境別: http・json・file・DOM)は requirements C-6 / Q3 と統合して検討
-- [ ] チャネルの容量指定 `chan<int>(0)` と同期(ブロックする)送信
-      — 先に [design-agenda E-1](docs/design-agenda.md)「channel露出の是非(構造化並行案)」を討議。
-      MoonBit調査([docs/related-languages.md](docs/related-languages.md))で浮上した論点
+- [x] **E-1決着: 2段スコープの構造化並行**(2026-07-18実装)— spawn=関数所有で暗黙wait
+      (リーク構文的に不可能)/ detach=プログラム所有のバックグラウンド。channelは維持。
+      kanayamaの「deferのように後片付けを自動保証」発案が起点。テスト188件
+- [ ] チャネルの容量指定 `chan<int>(0)` と同期(ブロックする)送信 / close設計(C-5)/ select(B-3)
 - [ ] defer 文
 
 ## ツール・品質(中期)

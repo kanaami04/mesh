@@ -173,15 +173,28 @@ There is no ternary \`?:\` — use \`if\` or \`match\`.
     s := "hello \${name}"    // interpolation is always on in "..."; escape \\$ for a literal $
     t := "a" + "b"           // + concatenates strings only — use \${x} or str(x) for other types
 
-## Concurrency
+## Concurrency (structured — every task has an owner, leaks are impossible)
 
     task := spawn f(x)       // run concurrently; returns a receive port (chan<T>)
     v := <-task              // receive = wait for the result
     ch := chan<string>()     // channel: ch <- v sends, <-ch receives
-    wait {                   // block until every task spawned inside has finished
-        spawn a()
+    wait {                   // wait EARLIER than the function exit: block until every
+        spawn a()            // task spawned inside this block has finished
         spawn b()
     }
+    detach logAccess(req)    // program-owned background task (see below)
+
+Two ownership tiers — pick by how long the task should live:
+
+- \`spawn f(x)\` is owned by the CURRENT FUNCTION: when the function returns (even via an
+  early \`return\`), it implicitly waits for every task it spawned. You never need to
+  clean up after spawn — a leaked/forgotten task cannot exist.
+- \`detach f(x)\` is the escape hatch for work that must OUTLIVE the function (send email,
+  write logs, notify): it is owned by the PROGRAM — the caller returns immediately, and
+  the work finishes before the program exits. Same syntax/port as spawn. Use sparingly;
+  reviewers grep for \`detach\` the way they grep for \`mut\`.
+- A long-lived worker that loops forever receiving from a channel must be \`detach\`ed —
+  \`spawn\` would make the enclosing function wait for it forever at its exit.
 
 ## Builtins (complete list)
 

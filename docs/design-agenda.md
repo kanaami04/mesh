@@ -106,7 +106,16 @@ union路線決定後、「`type Status = ...` と `type User { ... }` の2形態
 
 MoonBit調査([related-languages.md](related-languages.md))から出た討議事項。
 
-### E-1. channelを露出すべきか — 構造化並行という対抗案
+### E-1. channelを露出すべきか — ✅ 決着(2026-07-18): 2段スコープ設計を採用(kanayama発案)
+
+決定内容: channel は維持しつつ、**すべてのタスクに所有者を持たせる**。
+`spawn` = 囲む関数が所有(関数を抜けるとき暗黙に待つ=リーク構文的に不可能)/
+`detach` = プログラムが所有(呼び出し元は待たず、プログラム終了までに完了)。
+発端は kanayama の「トランザクションの defer rollback のように、後片付けを自動保証
+できないか」という提案。「waitの中でしかspawnできない」制約案(B案)より強い保証を、
+既存コードを一切壊さず(checker無変更・codegenのみ)実現した。
+Kotlin(GlobalScope非推奨)・Swift(Task.detached)・Python(TaskGroup)と同方向で、
+エスケープハッチが `detach` として可視(grep可能)なのは `mut` と同じ思想。
 
 - **現状のMesh**: Go風 `spawn`/`wait`/channel(実装済み)。残タスクは select(B-3)と容量指定
 - **MoonBitの設計**: channel無し。タスクは task group 内でのみ生成でき、group は全タスク終了後に

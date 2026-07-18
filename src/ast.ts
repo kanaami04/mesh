@@ -300,6 +300,10 @@ export interface MapLit extends ExprBase {
 export interface SpawnExpr extends ExprBase {
   kind: "spawn"; // task := spawn f(x) — 並行起動して結果の受取口(chan<T>)を返す
   call: CallExpr;
+  // 2段スコープ設計(2026-07-18決定):
+  //   spawn  = 今の関数が所有。関数を抜けるとき暗黙に待たれる(リーク不可能)
+  //   detach = プログラムが所有。関数は待たずに戻れる(メール送信等のバックグラウンド用)
+  detached: boolean;
 }
 export interface StructLit extends ExprBase {
   kind: "structLit"; // User{name: "alice", age: 30}

@@ -55,7 +55,8 @@ const __prop = (v) => {
 };
 const __or = async (v, fallback) => (v === null || v instanceof Error ? fallback() : v);
 // spawn f(x): await せずに起動し、結果の受取口(channel)を返す。
-// wait ブロックの中なら、そのブロックの完了待ちリストにも登録される
+// 2段スコープ設計(2026-07-18): spawn は最も内側の wait スコープ
+// (囲む関数の本体、または wait ブロック)に登録され、そのスコープを抜けるとき必ず待たれる。
 const __waitStack = [];
 const __spawn = (f, args) => {
   const task = new __Channel();
@@ -65,6 +66,18 @@ const __spawn = (f, args) => {
       task.send(v);
     }, __panic);
   if (__waitStack.length > 0) __waitStack[__waitStack.length - 1].push(p);
+  return task;
+};
+// detach f(x): プログラム所有のタスク。どの wait スコープにも登録されず、呼び出し元は
+// 待たずに戻れる。JSのイベントループはタイマー等が残る限りプロセスを生かすので、
+// 「プログラム終了時までに完了する」は実行環境が自然に保証する
+const __detach = (f, args) => {
+  const task = new __Channel();
+  Promise.resolve()
+    .then(() => f(...args))
+    .then((v) => {
+      task.send(v);
+    }, __panic);
   return task;
 };
 const __sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

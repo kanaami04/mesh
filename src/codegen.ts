@@ -21,6 +21,9 @@ class Codegen {
   private indent = 0;
   // 関数ごとに「本体で ! を使ったか」を記録する(使った関数だけ try/catch で包む)
   private propStack: boolean[] = [];
+  // 関数ごとに「本体で spawn(detachではない)を使ったか」を記録する。
+  // 使った関数だけ、本体全体を暗黙の wait スコープで包む(2段スコープ設計)
+  private spawnStack: boolean[] = [];
 
   constructor(private file: string) {}
 
@@ -63,26 +66,38 @@ class Codegen {
     return receiver.type.kind === "name" ? receiver.type.name : "(anonymous)";
   }
 
-  // 関数本体を出力する。`!` を使っていたら全体を try/catch で包み、
-  // __Propagate(伝播シグナル)を受け取ったら即 return する
+  // 関数本体を出力する。必要に応じて2種類のラッパーで包む:
+  // - `!` を使っていたら try/catch で包み、__Propagate(伝播シグナル)を受け取ったら即 return
+  // - `spawn` を使っていたら本体全体を暗黙の wait スコープにする(2段スコープ設計)。
+  //   関数を抜けるとき(早期 return でも)自分が spawn したタスクを必ず待つので、
+  //   「発射しっぱなしのタスク」が構文的に存在できない。detach はここに登録されない
   private genFnBody(body: Block) {
     this.propStack.push(false);
+    this.spawnStack.push(false);
     const saved = this.out;
     this.out = [];
     this.genBlockBody(body);
     const lines = this.out;
     this.out = saved;
     const usesProp = this.propStack.pop()!;
+    const usesSpawn = this.spawnStack.pop()!;
 
-    if (!usesProp) {
+    if (!usesProp && !usesSpawn) {
       this.out.push(...lines);
       return;
     }
+    if (usesSpawn) this.emit("  __waitStack.push([]);");
     this.emit("  try {");
     this.out.push(...lines.map((l) => "  " + l));
-    this.emit("  } catch (e) {");
-    this.emit("    if (e instanceof __Propagate) return e.value;");
-    this.emit("    throw e;");
+    if (usesProp) {
+      this.emit("  } catch (e) {");
+      this.emit("    if (e instanceof __Propagate) return e.value;");
+      this.emit("    throw e;");
+    }
+    if (usesSpawn) {
+      this.emit("  } finally {");
+      this.emit("    await Promise.all(__waitStack.pop());");
+    }
     this.emit("  }");
   }
 
@@ -420,9 +435,14 @@ class Codegen {
         return "new __Channel()";
 
       case "spawn": {
-        // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す
+        // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す。
+        // spawn は現在の wait スコープ(=囲む関数 or waitブロック)に登録され、detach はされない
         const callee = this.genExpr(expr.call.callee);
         const args = expr.call.args.map((a) => this.genExpr(a)).join(", ");
+        if (expr.detached) {
+          return `__detach(${callee}, [${args}])`;
+        }
+        this.spawnStack[this.spawnStack.length - 1] = true;
         return `__spawn(${callee}, [${args}])`;
       }
 

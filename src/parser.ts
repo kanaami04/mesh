@@ -495,14 +495,15 @@ class Parser {
       this.next();
       return { kind: "recv", channel: this.parseUnary(), pos: t.pos };
     }
-    // spawn f(x) — 並行起動して受取口を返す式
-    if (t.type === "spawn") {
+    // spawn f(x) / detach f(x) — 並行起動して受取口を返す式。
+    // spawn は今の関数が所有(関数を抜けるとき暗黙wait)、detach はプログラムが所有
+    if (t.type === "spawn" || t.type === "detach") {
       this.next();
       const call = this.parseUnary();
       if (call.kind !== "call") {
-        throw new CompileError("'spawn' must be followed by a function call", t.pos);
+        throw new CompileError(`'${t.type}' must be followed by a function call`, t.pos);
       }
-      return { kind: "spawn", call, pos: t.pos };
+      return { kind: "spawn", call, detached: t.type === "detach", pos: t.pos };
     }
     return this.parsePostfix(this.parsePrimary());
   }

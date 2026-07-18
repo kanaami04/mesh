@@ -19,6 +19,7 @@ export type TokenType =
   | "else"
   | "for"
   | "spawn"
+  | "detach"
   | "wait"
   | "mut"
   | "chan"
@@ -88,6 +89,7 @@ export const KEYWORDS = new Set<TokenType>([
   "else",
   "for",
   "spawn",
+  "detach",
   "wait",
   "mut",
   "chan",
