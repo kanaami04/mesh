@@ -19,7 +19,7 @@
   - ~~デフォルト不変 + `mut`~~ ✅ 実装済み(2026-07-17)
   - E1 `!` / E2 `or`(union移行とセットで)
   - ~~`spawn` 式 / `wait` ブロック~~ ✅ 実装済み(2026-07-18)/ `select`(残)
-  - map型(`m[k]` は `V | none`)/ for range(完全形のみ)
+  - ~~map型(`m[k]` は `V | none`)/ for range(完全形のみ)~~ ✅ 実装済み(2026-07-18)
   - 決定記録は [docs/syntax-proposals.md](docs/syntax-proposals.md) と [docs/design-agenda.md](docs/design-agenda.md)
 - [ ] **Rust移植の開始**
   - 今の37テスト(tests/)を「合格基準」にする

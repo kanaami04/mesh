@@ -55,6 +55,12 @@ describe("e2e", () => {
     expect(runExample("status.mesh")).toBe("ようこそ\nアクセス不可\n");
   });
 
+  test("maps.mesh — mapとfor range", () => {
+    expect(runExample("maps.mesh")).toBe(
+      "alice is 30\ndave is unknown\n2 people\nalice: 30\ncarol: 28\ntotal: 60\ntick 0\ntick 1\ntick 2\n",
+    );
+  });
+
   test("users.mesh — struct+union+match", () => {
     expect(runExample("users.mesh")).toBe(
       "hello alice (30)\n404 not found\n500: invalid id: -1\n",
@@ -354,6 +360,48 @@ describe("e2e", () => {
       print(label(0 - 1))
     }`);
     expect(out).toBe("hello alice\n404\n500\n");
+  });
+
+  test("map: 生成・読み(V|none)・書き・delete・len・print", () => {
+    const out = runSource(`fn main() {
+      ages := map<string, int>{"alice": 30, "bob": 25}
+      ages["carol"] = 28
+
+      print(ages["alice"] or 0)
+      missing := ages["dave"]
+      if missing is none {
+        print("dave? none")
+      }
+
+      delete(ages, "bob")
+      print(len(ages))
+      print(ages)
+    }`);
+    expect(out).toBe("30\ndave? none\n2\nmap{alice: 30, carol: 28}\n");
+  });
+
+  test("range: 配列(i,v / _,v)・map(k,v)・int", () => {
+    const out = runSource(`fn main() {
+      nums := [10, 20, 30]
+      mut total := 0
+      for i, v := range nums {
+        print("\${i}: \${v}")
+      }
+      for _, v := range nums {
+        total = total + v
+      }
+      print(total)
+
+      ages := map<string, int>{"a": 1, "b": 2}
+      for k, v := range ages {
+        print("\${k}=\${v}")
+      }
+
+      for i := range 3 {
+        print(i)
+      }
+    }`);
+    expect(out).toBe("0: 10\n1: 20\n2: 30\n60\na=1\nb=2\n0\n1\n2\n");
   });
 
   test("'or' は失敗時だけ右辺を評価する", () => {

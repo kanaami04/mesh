@@ -9,6 +9,7 @@ export type Type =
   | { kind: "literal"; value: string } // 文字列リテラル型: "active"。string の部分型
   | { kind: "array"; elem: Type }
   | { kind: "chan"; elem: Type }
+  | { kind: "map"; key: Type; value: Type } // map<string, int>。読みは V | none を返す
   | { kind: "fn"; params: Type[]; ret: Type }
   | { kind: "union"; members: Type[] }
   // struct User { name: string }。fields は再帰型(Node | none 等)を許すため
@@ -44,6 +45,8 @@ export function typeToString(t: Type): string {
       return `${typeToString(t.elem)}[]`;
     case "chan":
       return `chan<${typeToString(t.elem)}>`;
+    case "map":
+      return `map<${typeToString(t.key)}, ${typeToString(t.value)}>`;
     case "fn":
       return `fn(${t.params.map(typeToString).join(", ")}) ${typeToString(t.ret)}`;
     case "union":
@@ -66,6 +69,10 @@ export function typeEquals(a: Type, b: Type): boolean {
     case "array":
     case "chan":
       return typeEquals(a.elem, (b as typeof a).elem);
+    case "map": {
+      const bm = b as typeof a;
+      return typeEquals(a.key, bm.key) && typeEquals(a.value, bm.value);
+    }
     case "fn": {
       const bf = b as typeof a;
       return (

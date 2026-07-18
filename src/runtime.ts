@@ -68,13 +68,17 @@ const __spawn = (f, args) => {
   return task;
 };
 const __sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// map の読み取り: 無いキーは none(null)を返す — V | none 型に対応
+const __mget = (m, k) => (m.has(k) ? m.get(k) : null);
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v instanceof Error ? v.message
   : Array.isArray(v) ? "[" + v.map(__fmt).join(" ") + "]"
-  : typeof v === "object"
-    ? "{" + Object.entries(v).map(([k, x]) => k + ": " + __fmt(x)).join(", ") + "}"
-    : String(v);
+  : v instanceof Map
+    ? "map{" + [...v].map(([k, x]) => __fmt(k) + ": " + __fmt(x)).join(", ") + "}"
+    : typeof v === "object"
+      ? "{" + Object.entries(v).map(([k, x]) => k + ": " + __fmt(x)).join(", ") + "}"
+      : String(v);
 const __print = (...args) => console.log(args.map(__fmt).join(" "));
 const __error = (msg) => new Error(msg);
 // ===== end runtime =====

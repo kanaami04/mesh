@@ -12,6 +12,7 @@ export type TypeNode =
   | { kind: "literal"; value: string; pos: Pos } // "active" — 文字列リテラル型
   | { kind: "array"; elem: TypeNode; pos: Pos } // int[]
   | { kind: "chan"; elem: TypeNode; pos: Pos } // chan<int>
+  | { kind: "mapType"; key: TypeNode; value: TypeNode; pos: Pos } // map<string, int>
   | { kind: "union"; members: TypeNode[]; pos: Pos } // int | error
   | { kind: "structType"; fields: StructFieldNode[]; pos: Pos }; // struct 宣言の中身
 
@@ -63,6 +64,7 @@ export type Stmt =
   | ReturnStmt
   | IfStmt
   | ForStmt
+  | RangeForStmt
   | WaitStmt
   | SendStmt
   | IncDecStmt
@@ -115,6 +117,14 @@ export interface ForStmt {
 
 export interface WaitStmt {
   kind: "wait"; // wait { spawn f()  spawn g() } — 中で起動したタスクを全部待つ
+  body: Block;
+  pos: Pos;
+}
+
+export interface RangeForStmt {
+  kind: "rangeFor"; // for i, v := range arr / for k, v := range m / for i := range 10
+  names: string[]; // 1個(int range)または2個。"_" で捨てられる
+  subject: Expr;
   body: Block;
   pos: Pos;
 }
@@ -172,7 +182,8 @@ export type Expr =
   | OrElseExpr
   | MatchExpr
   | StructLit
-  | SpawnExpr;
+  | SpawnExpr
+  | MapLit;
 
 export interface IntLit extends ExprBase {
   kind: "int";
@@ -261,6 +272,12 @@ export interface OrElseExpr extends ExprBase {
   kind: "orElse"; // f() or fallback — none/error なら右辺の値を使う
   left: Expr;
   right: Expr;
+}
+export interface MapLit extends ExprBase {
+  kind: "mapLit"; // map<string, int>{"a": 1, "b": 2}
+  key: TypeNode;
+  value: TypeNode;
+  entries: { key: Expr; value: Expr; pos: Pos }[];
 }
 export interface SpawnExpr extends ExprBase {
   kind: "spawn"; // task := spawn f(x) — 並行起動して結果の受取口(chan<T>)を返す

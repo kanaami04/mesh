@@ -204,6 +204,18 @@ class Parser {
     return { kind: "union", members, pos: first.pos };
   }
 
+  // `for` の直後が「ident (, ident)? := range」の形かを先読みで判定する
+  private isRangeHeader(): boolean {
+    if (this.peek(0).type !== "ident") return false;
+    if (this.peek(1).type === ":=" && this.peek(2).type === "range") return true;
+    return (
+      this.peek(1).type === "," &&
+      this.peek(2).type === "ident" &&
+      this.peek(3).type === ":=" &&
+      this.peek(4).type === "range"
+    );
+  }
+
   private parseMatchPattern(): MatchPattern {
     const t = this.peek();
     if (t.type === "ident" && t.value === "_") {
@@ -228,6 +240,15 @@ class Parser {
       const elem = this.parseType();
       this.expect(">", "after channel element type");
       return { kind: "chan", elem, pos: start.pos };
+    }
+    if (this.check("map")) {
+      const start = this.next();
+      this.expect("<", "after 'map'");
+      const key = this.parseType();
+      this.expect(",", "between map key and value types");
+      const value = this.parseType();
+      this.expect(">", "after map value type");
+      return { kind: "mapType", key, value, pos: start.pos };
     }
     if (this.check("none")) {
       const t = this.next();
@@ -370,6 +391,19 @@ class Parser {
 
     if (this.check("{")) {
       return { kind: "for", init: null, cond: null, post: null, body: this.parseBlock(), pos: start.pos };
+    }
+
+    // range形: for i, v := range arr / for k, v := range m / for i := range 10
+    if (this.isRangeHeader()) {
+      const names: string[] = [this.expect("ident", "as range variable").value];
+      if (this.match(",")) {
+        names.push(this.expect("ident", "as range variable").value);
+      }
+      this.expect(":=", "in range header");
+      this.expect("range", "in range header");
+      const subject = this.withoutStructLit(() => this.parseExpr());
+      const body = this.parseBlock();
+      return { kind: "rangeFor", names, subject, body, pos: start.pos };
     }
 
     const first = this.withoutStructLit(() => this.parseSimpleStmt());
@@ -583,6 +617,29 @@ class Parser {
         this.expect("(", "to create a channel: chan<T>()");
         this.expect(")", "to create a channel: chan<T>()");
         return { kind: "chanExpr", elem, pos: t.pos };
+      }
+      case "map": {
+        // mapリテラル: map<string, int>{"a": 1, "b": 2}(空は {} )
+        this.next();
+        this.expect("<", "after 'map'");
+        const key = this.parseType();
+        this.expect(",", "between map key and value types");
+        const value = this.parseType();
+        this.expect(">", "after map value type");
+        this.expect("{", "to create a map: map<K, V>{ ... }");
+        this.skipSemis();
+        const entries: { key: Expr; value: Expr; pos: Pos }[] = [];
+        while (!this.check("}") && !this.check("eof")) {
+          const entryPos = this.peek().pos;
+          const k = this.parseExpr();
+          this.expect(":", "after map key");
+          const v = this.parseExpr();
+          entries.push({ key: k, value: v, pos: entryPos });
+          this.match(",");
+          this.skipSemis();
+        }
+        this.expect("}", "at end of map literal");
+        return { kind: "mapLit", key, value, entries, pos: t.pos };
       }
       default:
         throw new CompileError(`unexpected '${t.value === "" ? t.type : t.value}'`, t.pos);

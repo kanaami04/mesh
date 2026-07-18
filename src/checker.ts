@@ -35,7 +35,7 @@ export interface Diagnostic {
 }
 
 // 組み込み関数。特殊な検査(可変長引数など)は checkCall 内で行う。
-export const BUILTINS = new Set(["print", "len", "push", "str", "error", "sleep"]);
+export const BUILTINS = new Set(["print", "len", "push", "str", "error", "sleep", "delete"]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
 const RESERVED = new Set([
@@ -118,6 +118,8 @@ class Checker {
         return { kind: "array", elem: this.resolveType(node.elem) };
       case "chan":
         return { kind: "chan", elem: this.resolveType(node.elem) };
+      case "mapType":
+        return { kind: "map", key: this.resolveType(node.key), value: this.resolveType(node.value) };
       case "union":
         return unionOf(node.members.map((m) => this.resolveType(m)));
       case "literal":
@@ -275,9 +277,15 @@ class Checker {
               continue;
             }
           }
+          // map への書き込みは「値の型」に対して検査する(読みの V | none ではなく)
+          let expected = targetType;
+          if (target.kind === "index") {
+            const container = target.target.resolvedType;
+            if (container?.kind === "map") expected = container.value;
+          }
           const valueType = types[i] ?? ANY;
-          if (!assignable(valueType, targetType)) {
-            this.error(stmt.pos, `cannot assign ${typeToString(valueType)} to ${typeToString(targetType)}`);
+          if (!assignable(valueType, expected)) {
+            this.error(stmt.pos, `cannot assign ${typeToString(valueType)} to ${typeToString(expected)}`);
           }
         }
         break;
@@ -355,6 +363,38 @@ class Checker {
       case "wait":
         this.checkBlock(stmt.body);
         break;
+      case "rangeFor": {
+        const subject = this.checkExprSingle(stmt.subject);
+        this.pushScope();
+        const declare2 = (t1: Type, t2: Type, what: string) => {
+          if (stmt.names.length !== 2) {
+            this.error(
+              stmt.pos,
+              `range over ${what} needs two names: 'for a, b := range ...' (use _ to ignore one)`,
+            );
+          }
+          this.declare(stmt.names[0] ?? "_", t1, stmt.pos);
+          this.declare(stmt.names[1] ?? "_", t2, stmt.pos);
+        };
+        if (subject.kind === "array") {
+          declare2(INT, subject.elem, "an array");
+        } else if (subject.kind === "map") {
+          declare2(subject.key, subject.value, "a map");
+        } else if (typeEquals(subject, INT)) {
+          if (stmt.names.length !== 1) {
+            this.error(stmt.pos, "range over an int takes exactly one name: 'for i := range n'");
+          }
+          this.declare(stmt.names[0], INT, stmt.pos);
+        } else if (subject.kind === "any") {
+          for (const n of stmt.names) this.declare(n, ANY, stmt.pos);
+        } else {
+          this.error(stmt.subject.pos, `cannot range over ${typeToString(subject)}`);
+          for (const n of stmt.names) this.declare(n, ANY, stmt.pos);
+        }
+        this.checkBlock(stmt.body);
+        this.popScope();
+        break;
+      }
       case "send": {
         const ch = this.checkExprSingle(stmt.channel);
         const value = this.checkExprSingle(stmt.value);
@@ -583,6 +623,13 @@ class Checker {
       case "index": {
         const target = this.checkExprSingle(expr.target);
         const index = this.checkExprSingle(expr.index);
+        // map の読み取りは V | none を返す(無いキーを無視できない。union路線の帰結)
+        if (target.kind === "map") {
+          if (!assignable(index, target.key)) {
+            this.error(expr.index.pos, `map key must be ${typeToString(target.key)}, got ${typeToString(index)}`);
+          }
+          return unionOf([target.value, NONE]);
+        }
         if (!isNumeric(index) || (index.kind === "prim" && index.name === "float")) {
           if (index.kind !== "any") this.error(expr.index.pos, `index must be int, got ${typeToString(index)}`);
         }
@@ -592,6 +639,22 @@ class Checker {
           this.error(expr.pos, `cannot index into ${typeToString(target)}`);
         }
         return ANY;
+      }
+
+      case "mapLit": {
+        const key = this.resolveType(expr.key);
+        const value = this.resolveType(expr.value);
+        for (const e of expr.entries) {
+          const kt = this.checkExprSingle(e.key);
+          const vt = this.checkExprSingle(e.value);
+          if (!assignable(kt, key)) {
+            this.error(e.key.pos, `map key must be ${typeToString(key)}, got ${typeToString(kt)}`);
+          }
+          if (!assignable(vt, value)) {
+            this.error(e.value.pos, `map value must be ${typeToString(value)}, got ${typeToString(vt)}`);
+          }
+        }
+        return { kind: "map", key, value };
       }
 
       case "member": {
@@ -857,8 +920,8 @@ class Checker {
       case "len": {
         if (expectArity(1)) {
           const t = args[0];
-          const ok = t.kind === "array" || t.kind === "any" || isStringy(t);
-          if (!ok) this.error(expr.args[0].pos, `len() requires string or array, got ${typeToString(t)}`);
+          const ok = t.kind === "array" || t.kind === "map" || t.kind === "any" || isStringy(t);
+          if (!ok) this.error(expr.args[0].pos, `len() requires string, array or map, got ${typeToString(t)}`);
         }
         return INT;
       }
@@ -880,6 +943,19 @@ class Checker {
           this.error(expr.args[0].pos, `error() requires a string message, got ${typeToString(args[0])}`);
         }
         return ERROR;
+      }
+      case "delete": {
+        if (expectArity(2)) {
+          const m = args[0];
+          if (m.kind === "map") {
+            if (!assignable(args[1], m.key)) {
+              this.error(expr.args[1].pos, `map key must be ${typeToString(m.key)}, got ${typeToString(args[1])}`);
+            }
+          } else if (m.kind !== "any") {
+            this.error(expr.args[0].pos, `delete() requires a map, got ${typeToString(m)}`);
+          }
+        }
+        return VOID;
       }
       case "sleep": {
         if (expectArity(1) && !isNumeric(args[0])) {

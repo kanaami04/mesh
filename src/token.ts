@@ -22,6 +22,8 @@ export type TokenType =
   | "wait"
   | "mut"
   | "chan"
+  | "map"
+  | "range"
   | "none"
   | "is"
   | "or"
@@ -89,6 +91,8 @@ export const KEYWORDS = new Set<TokenType>([
   "wait",
   "mut",
   "chan",
+  "map",
+  "range",
   "none",
   "is",
   "or",

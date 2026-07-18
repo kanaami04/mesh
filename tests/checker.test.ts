@@ -338,6 +338,66 @@ fn main() {
     expect(errors).toEqual([]);
   });
 
+  test("map: 読みは V | none なので絞り込み前に使うとエラー", () => {
+    expect(inMain(`ages := map<string, int>{"a": 1}\nprint(ages["a"] + 1)`)).toEqual([
+      expect.stringContaining("invalid operation"),
+    ]);
+  });
+
+  test("map: or / is none で取り出せる", () => {
+    expect(
+      inMain(`ages := map<string, int>{"a": 1}
+x := ages["a"] or 0
+print(x + 1)
+v := ages["b"]
+if v is none {
+	print("missing")
+	return
+}
+print(v * 2)`),
+    ).toEqual([]);
+  });
+
+  test("map: キー・値の型検査", () => {
+    expect(inMain(`ages := map<string, int>{"a": "b"}`)).toEqual([
+      expect.stringContaining(`map value must be int`),
+    ]);
+    expect(inMain(`ages := map<string, int>{}\nprint(ages[1] or 0)`)).toEqual([
+      expect.stringContaining("map key must be string"),
+    ]);
+    expect(inMain(`ages := map<string, int>{}\nages["a"] = none`)).toEqual([
+      expect.stringContaining("cannot assign none to int"),
+    ]);
+  });
+
+  test("range: 配列は完全形が必須(単変数はエラー)", () => {
+    expect(inMain(`nums := [1, 2]\nfor v := range nums {\nprint(v)\n}`)).toEqual([
+      expect.stringContaining("needs two names"),
+    ]);
+  });
+
+  test("range: int は単変数のみ・配列とmapは2変数で型が付く", () => {
+    expect(
+      inMain(`nums := [10, 20]
+for i, v := range nums {
+	print(i + v)
+}
+ages := map<string, int>{"a": 1}
+for k, v := range ages {
+	print("\${k}: \${v * 2}")
+}
+for i := range 3 {
+	print(i)
+}`),
+    ).toEqual([]);
+  });
+
+  test("range: 範囲にできない型を弾く", () => {
+    expect(inMain(`for i, v := range "abc" {\nprint(i, v)\n}`)).toEqual([
+      expect.stringContaining("cannot range over"),
+    ]);
+  });
+
   test("リテラルのゼロ除算はコンパイル時に検出", () => {
     expect(inMain(`print(1 / 0)`)).toEqual([expect.stringContaining("integer division by zero")]);
     expect(inMain(`print(1 % 0)`)).toEqual([expect.stringContaining("integer modulo by zero")]);

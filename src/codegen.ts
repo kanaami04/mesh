@@ -107,7 +107,10 @@ class Codegen {
         if (stmt.targets.length === 1) {
           const target = stmt.targets[0];
           const value = this.genExpr(stmt.values[0]);
-          if (target.kind === "index") {
+          if (target.kind === "index" && target.target.resolvedType?.kind === "map") {
+            // map への書き込みは新キーの追加も正当なので検査なしの set
+            this.emit(`${this.genExpr(target.target)}.set(${this.genExpr(target.index)}, ${value});`);
+          } else if (target.kind === "index") {
             // 添字への書き込みも範囲検査する(範囲外は黙って配列を伸ばさず panic)
             this.emit(
               `__idxset(${this.genExpr(target.target)}, ${this.genExpr(target.index)}, ${value}, ${this.at(target.pos)});`,
@@ -150,6 +153,25 @@ class Codegen {
         const cond = stmt.cond ? this.genExpr(stmt.cond) : "";
         const post = stmt.post ? this.genSimpleStmt(stmt.post) : "";
         this.emit(`for (${init}; ${cond}; ${post}) {`);
+        this.genBlockBody(stmt.body);
+        this.emit("}");
+        break;
+      }
+
+      case "rangeFor": {
+        const subjectType = stmt.subject.resolvedType;
+        const subject = this.genExpr(stmt.subject);
+        const names = stmt.names.map((n) => (n === "_" ? "" : n));
+        if (subjectType?.kind === "map") {
+          this.emit(`for (const [${names.join(", ")}] of ${subject}) {`);
+        } else if (stmt.names.length === 1) {
+          // for i := range n(0..n-1)。上限は最初に一度だけ評価する
+          const i = names[0] === "" ? "__i" : names[0];
+          this.emit(`for (let ${i} = 0, __n = ${subject}; ${i} < __n; ${i}++) {`);
+        } else {
+          // 配列: entries() が [添字, 値] を返す
+          this.emit(`for (const [${names.join(", ")}] of ${subject}.entries()) {`);
+        }
         this.genBlockBody(stmt.body);
         this.emit("}");
         break;
@@ -235,6 +257,7 @@ class Codegen {
     if (t.kind === "array") return "Array.isArray(__m)";
     if (t.kind === "chan") return "(__m instanceof __Channel)";
     if (t.kind === "union" || t.kind === "structType") return "false"; // checker が弾いている(単一型のみ)
+    if (t.kind === "mapType") return "(__m instanceof Map)";
     switch (t.name) {
       case "none": return "(__m === null)";
       case "error": return "(__m instanceof Error)";
@@ -340,8 +363,17 @@ class Codegen {
         return this.genCall(expr);
 
       case "index":
-        // 範囲外アクセスは undefined を返さず panic する(層1)
+        // map の読みは V | none(無いキーは null)。配列・文字列は範囲外で panic(層1)
+        if (expr.target.resolvedType?.kind === "map") {
+          return `__mget(${this.genExpr(expr.target)}, ${this.genExpr(expr.index)})`;
+        }
         return `__idx(${this.genExpr(expr.target)}, ${this.genExpr(expr.index)}, ${this.at(expr.pos)})`;
+
+      case "mapLit": {
+        if (expr.entries.length === 0) return "new Map()";
+        const entries = expr.entries.map((e) => `[${this.genExpr(e.key)}, ${this.genExpr(e.value)}]`);
+        return `new Map([${entries.join(", ")}])`;
+      }
 
       case "member":
         return `${this.genExpr(expr.target)}.${expr.name}`;
@@ -393,9 +425,12 @@ class Codegen {
         case "str":
           return `__fmt(${args[0]})`;
         case "len":
-          return `${args[0]}.length`;
+          // map は .size、配列・文字列は .length
+          return expr.args[0].resolvedType?.kind === "map" ? `${args[0]}.size` : `${args[0]}.length`;
         case "push":
           return `${args[0]}.push(${args[1]})`;
+        case "delete":
+          return `${args[0]}.delete(${args[1]})`;
         case "error":
           return `__error(${args[0]})`;
         case "sleep":

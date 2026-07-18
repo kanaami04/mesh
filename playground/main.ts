@@ -38,6 +38,34 @@ fn main() {
 }
 `,
   },
+  maps: {
+    label: "maps — mapとfor range",
+    source: `// map と for range:
+// m[k] は V | none を返すので「無いキー」を無視できない
+
+fn main() {
+	ages := map<string, int>{"alice": 30, "bob": 25}
+	ages["carol"] = 28
+
+	age := ages["alice"] or 0
+	print("alice is \${age}")
+
+	missing := ages["dave"]
+	if missing is none {
+		print("dave is unknown")
+	}
+
+	delete(ages, "bob")
+	for k, v := range ages {
+		print("\${k}: \${v}")
+	}
+
+	for i := range 3 {
+		print("tick \${i}")
+	}
+}
+`,
+  },
   users: {
     label: "users — struct+union+match",
     source: `// struct + union + match — Mesh の型システムの全部乗せ。
