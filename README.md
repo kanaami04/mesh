@@ -44,7 +44,15 @@ bun run mesh run   examples/hello.mesh   # コンパイルして即実行
 bun run mesh build examples/hello.mesh   # hello.mjs を書き出す
 bun run mesh check examples/hello.mesh   # 型検査のみ
 bun run mesh check prog.mesh --json      # AIエージェント向けの構造化診断(JSON)
+bun run mesh card                        # 言語カード(AIのコンテキストに貼る圧縮仕様書)
 ```
+
+### AIにMeshを書かせるには
+
+`mesh card` の出力を CLAUDE.md やシステムプロンプトに貼ってください。カードは
+「全構文+存在しない機能のリスト+頻出エラーの直し方」を1枚に圧縮した仕様書で、
+エージェントは `mesh check --json` で検証しながら自己修正ループを回せます。
+カードの主張はテストスイートで実装と突き合わせており、乖離するとCIが落ちます。
 
 ## 言語ツアー
 

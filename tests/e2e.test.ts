@@ -83,6 +83,114 @@ describe("mesh check --json", () => {
   });
 });
 
+describe("言語カード(mesh card)", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+  test("mesh card がカードを出力する", () => {
+    const proc = spawnSync(process.execPath, [CLI, "card"], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("# Mesh Language Card");
+    expect(proc.stdout).toContain("Does NOT exist in Mesh");
+    expect(proc.stdout).toContain("mesh check file.mesh --json");
+  });
+
+  test("カードの肯定的な主張がすべてコンパイル・実行できる", () => {
+    const out = runSource(`struct User {
+	name: string
+	age: int
+}
+type Status = "active" | "banned"
+
+fn find(id: int) User | none {
+	if id == 1 {
+		return User{name: "a", age: 1}
+	}
+	return none
+}
+
+fn parse(s: string) int | error {
+	if s == "1" {
+		return 1
+	}
+	return error("bad input: \${s}")
+}
+
+fn doubled(s: string) int | error {
+	v := parse(s)!
+	return v * 2
+}
+
+fn label(s: Status) string {
+	return match s {
+		"active" => "OK"
+		"banned" => "NG"
+	}
+}
+
+fn work(n: int) int {
+	sleep(5)
+	return n
+}
+
+fn main() {
+	v := find(1)
+	if v is none {
+		return
+	}
+	print(v.name)
+	v.age = 31
+
+	x := parse("z") or 0
+	print(x)
+
+	d := doubled("1")
+	if d is error {
+		return
+	}
+	print(d)
+
+	print(label("active"))
+
+	m := map<string, int>{"a": 1}
+	m["b"] = 2
+	delete(m, "b")
+	mv := m["a"]
+	if mv is none {
+		return
+	}
+	print(mv + len(m))
+
+	nums := [1, 2, 3]
+	push(nums, 4)
+	mut total := 0
+	for _, n := range nums {
+		total = total + n
+	}
+	for i := range 2 {
+		total = total + i
+	}
+	print(total)
+
+	task := spawn work(5)
+	print(<-task)
+	wait {
+		spawn work(1)
+	}
+	print("done \${str(true)}")
+}`);
+    expect(out).toBe("a\n0\n2\nOK\n2\n11\n5\ndone true\n");
+  });
+
+  test("カードの『存在しない』リストが実際にエラーになる", () => {
+    const fails = (src: string) => compile(src).code === null;
+    expect(fails(`fn main() { x := null }`)).toBe(true); // null は存在しない
+    expect(fails(`fn main() { try { } }`)).toBe(true); // try/catch は存在しない
+    expect(fails(`fn f() (int, error) { return 1 }\nfn main() {}`)).toBe(true); // 多値戻り
+    expect(fails(`fn main() { m := map<string, int>{}\nv, ok := m["a"]\nprint(v, ok) }`)).toBe(true); // comma-ok
+    expect(fails(`fn main() { while true { } }`)).toBe(true); // while は存在しない
+  });
+});
+
 describe("e2e", () => {
   test("hello.mesh", () => {
     expect(runExample("hello.mesh")).toBe("Hello, Mesh!\n");

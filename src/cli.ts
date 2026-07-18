@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { LANGUAGE_CARD } from "./card";
 import { compile, diagnosticsToJson, formatDiagnostics } from "./compiler";
 
 const USAGE = `Mesh compiler v0.1.0
@@ -15,6 +16,7 @@ Usage:
   mesh run   <file.mesh>            compile and run
   mesh build <file.mesh> [-o out]   compile to JavaScript
   mesh check <file.mesh> [--json]   type-check only (--json: AIエージェント向けの構造化出力)
+  mesh card                         言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
 `;
 
 function compileFile(file: string): string {
@@ -35,6 +37,13 @@ function compileFile(file: string): string {
 
 function main() {
   const [command, file, ...rest] = process.argv.slice(2);
+
+  // card はファイル引数を取らない
+  if (command === "card") {
+    console.log(LANGUAGE_CARD);
+    return;
+  }
+
   if (!command || !file) {
     console.error(USAGE);
     process.exit(1);
