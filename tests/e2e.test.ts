@@ -189,6 +189,28 @@ fn main() {
     expect(fails(`fn main() { m := map<string, int>{}\nv, ok := m["a"]\nprint(v, ok) }`)).toBe(true); // comma-ok
     expect(fails(`fn main() { while true { } }`)).toBe(true); // while は存在しない
   });
+
+  test("カードの新項目: 空配列 Todo[]{} / pushはnone / errメッセージ補間", () => {
+    const out = runSource(`struct Item {
+      name: string
+    }
+    fn parse(s: string) int | error {
+      return error("bad: \${s}")
+    }
+    fn main() {
+      items := Item[]{}          // 空の型付き配列
+      push(items, Item{name: "x"})
+      print(len(items))
+
+      e := parse("z")
+      if e is error {
+        print("failed: \${e}")   // error のメッセージが補間される
+      }
+    }`);
+    expect(out).toBe("1\nfailed: bad: z\n");
+    // 「push を値として使う」はカードどおりエラーになる
+    expect(compile(`fn main() { xs := [1]\ny := push(xs, 2)\nprint(y) }`).code).toBe(null);
+  });
 });
 
 describe("e2e", () => {
@@ -288,6 +310,23 @@ describe("e2e", () => {
   test("int同士の除算は切り捨て、floatが混ざれば小数", () => {
     expect(runSource(`fn main() { print(7 / 2) }`)).toBe("3\n");
     expect(runSource(`fn main() { print(7.0 / 2) }`)).toBe("3.5\n");
+  });
+
+  test("型付き配列リテラル: 空から push で育てる", () => {
+    const out = runSource(`struct Item {
+      name: string
+    }
+    fn main() {
+      items := Item[]{}
+      push(items, Item{name: "a"})
+      push(items, Item{name: "b"})
+      for _, it := range items {
+        print(it.name)
+      }
+      nums := int[]{1, 2, 3}
+      print(len(items), len(nums))
+    }`);
+    expect(out).toBe("a\nb\n2 3\n");
   });
 
   test("配列と len / push", () => {

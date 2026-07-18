@@ -214,8 +214,9 @@ export interface Ident extends ExprBase {
   name: string;
 }
 export interface ArrayLit extends ExprBase {
-  kind: "arrayLit"; // [1, 2, 3]
+  kind: "arrayLit"; // [1, 2, 3]  /  Todo[]{}  /  int[]{1, 2}
   elems: Expr[];
+  elemType?: TypeNode; // T[]{...} で明示された要素型。空配列や型固定に使う
 }
 export interface BinaryExpr extends ExprBase {
   kind: "binary";

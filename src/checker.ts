@@ -579,6 +579,17 @@ class Checker {
       }
 
       case "arrayLit": {
+        // Todo[]{...} / int[]{...} — 要素型が明示された配列リテラル(空にできる)
+        if (expr.elemType) {
+          const elem = this.resolveType(expr.elemType);
+          for (const e of expr.elems) {
+            const t = this.checkExprSingle(e);
+            if (!assignable(t, elem)) {
+              this.error(e.pos, `array element must be ${typeToString(elem)}, got ${typeToString(t)}`);
+            }
+          }
+          return { kind: "array", elem };
+        }
         if (expr.elems.length === 0) return { kind: "array", elem: ANY };
         // 要素のリテラル型は widening する(["a", "b"] は "a"[] ではなく string[])
         const elem = widenLiteral(this.checkExprSingle(expr.elems[0]));

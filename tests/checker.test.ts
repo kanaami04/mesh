@@ -392,6 +392,39 @@ for i := range 3 {
     ).toEqual([]);
   });
 
+  test("型付き配列リテラル: 空配列に型が付く", () => {
+    // 空の [] は any[] だが、Todo[]{} は Todo[] になる
+    const errors = errorsOf(`struct Todo {
+	id: int
+}
+fn make() Todo[] {
+	return Todo[]{}
+}
+fn main() {
+	todos := Todo[]{}
+	push(todos, Todo{id: 1})
+	print(len(todos) + len(make()))
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("型付き配列リテラル: 要素の型を検査する", () => {
+    expect(inMain(`nums := int[]{1, "two"}\nprint(len(nums))`)).toEqual([
+      expect.stringContaining(`array element must be int, got "two"`),
+    ]);
+  });
+
+  test("素の空配列 [] は型付き変数へ入れられない(Todo[]{} を使う)", () => {
+    const errors = errorsOf(`struct Todo {
+	id: int
+}
+fn make() Todo[] {
+	return []
+}
+fn main() { print(len(make())) }`);
+    expect(errors).toEqual([expect.stringContaining("cannot return any[] as Todo[]")]);
+  });
+
   test("range: 範囲にできない型を弾く", () => {
     expect(inMain(`for i, v := range "abc" {\nprint(i, v)\n}`)).toEqual([
       expect.stringContaining("cannot range over"),

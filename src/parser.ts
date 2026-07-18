@@ -487,6 +487,37 @@ class Parser {
   // 呼び出し・添字・メンバアクセス・伝播は後置で連鎖する: f(x)[0].name / f()!
   private parsePostfix(expr: Expr): Expr {
     while (true) {
+      // 型付き配列リテラル: Todo[]{}(空) / int[]{1, 2} / int[][]{...}(多次元)
+      if (
+        expr.kind === "ident" &&
+        this.allowStructLit &&
+        this.check("[") &&
+        this.peek(1).type === "]"
+      ) {
+        // [] の連なりを数え、その後が { なら型付き配列リテラルと確定する
+        let dims = 0;
+        while (this.peek(2 * dims).type === "[" && this.peek(2 * dims + 1).type === "]") dims++;
+        if (this.peek(2 * dims).type === "{") {
+          // 要素型: T を (dims-1) 回 array で包んだもの(int[]{} なら要素は int)
+          let elemType: TypeNode = { kind: "name", name: expr.name, pos: expr.pos };
+          for (let k = 0; k < dims - 1; k++) elemType = { kind: "array", elem: elemType, pos: expr.pos };
+          for (let k = 0; k < dims; k++) {
+            this.next();
+            this.next();
+          }
+          this.next(); // {
+          this.skipSemis();
+          const elems: Expr[] = [];
+          while (!this.check("}") && !this.check("eof")) {
+            elems.push(this.parseExpr());
+            this.match(",");
+            this.skipSemis();
+          }
+          this.expect("}", "at end of array literal");
+          expr = { kind: "arrayLit", elems, elemType, pos: expr.pos };
+          continue;
+        }
+      }
       // structリテラル: User{name: "alice", age: 30}(カンマまたは改行区切り)
       if (expr.kind === "ident" && this.allowStructLit && this.check("{")) {
         const name = expr.name;
