@@ -21,7 +21,13 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 
 - No \`var\` / \`let\` / \`const\`. No uninitialized declarations.
 - No shadowing: reusing an outer name (incl. function names) in \`:=\` is a compile error.
-- Function parameters are always immutable.
+- Function parameters are always immutable (you cannot reassign the parameter itself).
+- \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
+  (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)
+
+There are NO global/module-level variables (top level is only fn/struct/type). To share
+mutable state, pass it as a parameter — arrays, maps, structs, and channels are reference
+values, so a function mutating one (e.g. \`push(items, x)\`) is visible to the caller.
 
 ## Types
 
@@ -85,6 +91,8 @@ Four ways to consume a union:
     m["b"] = 2
     delete(m, "b")
     v := m["a"]                    // type is int | none — narrow it / use \`or\` / match
+    n := len(m)                    // number of keys
+    m[k] = (m[k] or 0) + 1         // count/accumulate idiom (no += , no comma-ok read)
 
 - Structs are reference values: a struct returned from \`find\` is the SAME object stored in
   the array, so writing \`u.age = 31\` to it updates the stored one. (Same for range loop vars.)
@@ -110,6 +118,16 @@ Four ways to consume a union:
 
 \`if\` and \`match\` are the only branching. There is no switch and no while keyword.
 
+## Operators
+
+    + - * / %            arithmetic (int/int stays int; / by 0 panics; + also concatenates strings)
+    == != < <= > >=      comparison → bool
+    && || !              logical: && and ||, and PREFIX ! for negation, e.g. \`if !t.done { }\`
+    -x                   numeric negation
+
+Note: postfix \`x!\` is error/none propagation (see below); prefix \`!x\` is boolean NOT. Different things.
+There is no ternary \`?:\` — use \`if\` or \`match\`.
+
 ## Strings
 
     s := "hello \${name}"    // interpolation is always on in "..."; escape \\$ for a literal $
@@ -129,7 +147,10 @@ Four ways to consume a union:
 
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
 
-(push, not append. There are no methods on values other than struct fields.)
+- \`print\` writes its args separated by spaces and appends a newline (one call = one line).
+- push, not append. There are no methods on values other than struct fields, and no
+  standard library yet: array find/filter/map, string split/join, parseInt, sort etc.
+  must be written by hand (loop with \`for ... range\`).
 
 ## Does NOT exist in Mesh — never write these
 

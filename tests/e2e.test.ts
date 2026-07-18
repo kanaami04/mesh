@@ -190,6 +190,21 @@ fn main() {
     expect(fails(`fn main() { while true { } }`)).toBe(true); // while は存在しない
   });
 
+  test("カードの主張: 配列は参照渡し / 前置! / mut widening / print挙動", () => {
+    // 配列を関数に渡して push すると呼び出し元に反映される(参照値)
+    expect(
+      runSource(`fn addOne(xs: int[]) {\n\tpush(xs, 99)\n}\nfn main() {\n\txs := [1]\n\taddOne(xs)\n\tprint(len(xs))\n}`),
+    ).toBe("2\n");
+    // 前置 ! (否定)
+    expect(runSource(`fn main() {\n\tdone := false\n\tif !done {\n\t\tprint("not done")\n\t}\n}`)).toBe(
+      "not done\n",
+    );
+    // mut s := リテラルは string に widening され再代入できる
+    expect(runSource(`fn main() {\n\tmut s := "a"\n\ts = "b"\n\tprint(s)\n}`)).toBe("b\n");
+    // print は複数引数をスペース区切り + 末尾改行
+    expect(runSource(`fn main() {\n\tprint("a")\n\tprint("b", "c")\n}`)).toBe("a\nb c\n");
+  });
+
   test("カードの新項目: 空配列 Todo[]{} / pushはnone / errメッセージ補間", () => {
     const out = runSource(`struct Item {
       name: string
