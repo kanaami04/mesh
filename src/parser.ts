@@ -275,6 +275,12 @@ class Parser {
   }
 
   private parseSingleType(): TypeNode {
+    const atom = this.parseTypeAtom();
+    return this.parseArraySuffix(atom);
+  }
+
+  // 配列サフィックスを除いた単体の型(chan<T> / map<K,V> / name / リテラル / none)
+  private parseTypeAtom(): TypeNode {
     // 文字列リテラル型: "active"
     if (this.check("string")) {
       const t = this.next();
@@ -304,12 +310,17 @@ class Parser {
       return { kind: "name", name: "none", pos: t.pos };
     }
     const nameTok = this.expect("ident", "as type name");
-    let type: TypeNode = { kind: "name", name: nameTok.value, pos: nameTok.pos };
-    // int[] / int[][] のような配列型
+    return { kind: "name", name: nameTok.value, pos: nameTok.pos };
+  }
+
+  // T[] / T[][] のような配列サフィックス。要素型が chan<T>/map<K,V> でも同じく効く
+  // (chan<int>[] / map<string, int>[] のような「総称型の配列」を書けるようにするため)
+  private parseArraySuffix(base: TypeNode): TypeNode {
+    let type = base;
     while (this.check("[") && this.peek(1).type === "]") {
       this.next();
       this.next();
-      type = { kind: "array", elem: type, pos: nameTok.pos };
+      type = { kind: "array", elem: type, pos: base.pos };
     }
     return type;
   }

@@ -20,6 +20,20 @@ describe("parser", () => {
     expect(ret.members.length).toBe(3);
   });
 
+  test("配列型: chan<T>[] / map<K,V>[] のような総称型を要素にする配列型も書ける", () => {
+    const chanArr = parse(`fn f(x: chan<int>[]) {}`).fns[0].params[0].type;
+    expect(chanArr).toMatchObject({ kind: "array", elem: { kind: "chan", elem: { kind: "name", name: "int" } } });
+
+    const mapArr = parse(`fn f(x: map<string, int>[]) {}`).fns[0].params[0].type;
+    expect(mapArr).toMatchObject({
+      kind: "array",
+      elem: { kind: "mapType", key: { kind: "name", name: "string" }, value: { kind: "name", name: "int" } },
+    });
+
+    const chanArr2d = parse(`fn f(x: chan<int>[][]) {}`).fns[0].params[0].type;
+    expect(chanArr2d).toMatchObject({ kind: "array", elem: { kind: "array", elem: { kind: "chan" } } });
+  });
+
   test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
     const program = parse(
       `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,

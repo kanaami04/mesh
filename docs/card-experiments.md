@@ -49,11 +49,11 @@
   型注釈つき宣言 `mut best: string | none = none` を実装(対策案a)。あわせて空配列も
   `xs: Todo[] = []` で書けるようになった(`any[]` を型付き配列へ入れられるよう assignable を緩和)。
   つまり第1回の空配列問題と第3回の不在アキュムレータ問題が、型注釈宣言1つで両方解決した。
-- **`chan<int>[]` / `map<K,V>[]` がパースできない**(第7回)→ **未解消**。`parser.ts`の
-  `parseSingleType()`で、配列サフィックス`[]`を読む`while`ループが「素の名前(ident)」経由の
-  分岐にしか無く、`chan<T>`/`map<K,V>`分岐は`[]`を見ずにそのままreturnしてしまうのが原因
-  (`/tmp`で`chan<int>[]`・`map<string,int>[]`の両方で同一エラーを再現・確認済み)。並行処理で
-  複数の受取口を配列にまとめて`for`で回収する、という自然な書き方を塞いでいる
+- **`chan<int>[]` / `map<K,V>[]` がパースできない**(第7回)→ **解消(2026-07-19)**。
+  `parser.ts`の`parseSingleType()`を`parseTypeAtom()`(chan/map/name/リテラル/noneを1つ読む)
+  + `parseArraySuffix()`(`[]`サフィックスを読む)に分割し、配列サフィックスをどのatomにも
+  一律に効くようにした。`chan<int>[]`・`map<string,int>[]`・`chan<int>[][]`で解消を確認、
+  fan-out/fan-inパターン(配列で受取口をまとめて`for`で回収・合計55)もe2eテスト化
 
 ### B. カードの記述漏れ(実装は正しく動く)→ 追記で解消済み
 - 配列/map/struct/chan は参照値・関数に渡すと共有(第2回)
@@ -94,5 +94,7 @@
   JSのstrict mode違反で実行時crashする(`RESERVED`セット漏れ)。別タスクとして切り出し済み
   (task_fe00c9b7)
 - 自己参照する判別可能union自体の実装(knot-tying再設計)は別タスクとして todo.md/handoff.md で追跡中
-- **新規: `chan<int>[]`/`map<K,V>[]`のパース対応**(第7回で発見)をどうするか kanayama に確認予定
-- 第8回は標準ライブラリ層(filter/transform/reduce・struct メソッド)、または上記いずれかの修正後に再測定
+- ~~`chan<int>[]`/`map<K,V>[]`のパース対応~~ ✅ **2026-07-19実装**。`parseSingleType()`を
+  atom+配列サフィックスに分割して解消(parser/e2eテスト追加)
+- 第8回は標準ライブラリ層(filter/transform/reduce・struct メソッド)、またはchan配列対応後の
+  並行処理で再測定

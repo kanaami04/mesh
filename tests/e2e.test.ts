@@ -528,6 +528,29 @@ describe("e2e", () => {
     expect(out).toBe("3\n");
   });
 
+  test("配列型: chan<T>[] で受取口をまとめてfan-out/fan-inできる", () => {
+    const out = runSource(`fn compute(n: int) int {
+      return n * n
+    }
+    fn main() {
+      nums := [1, 2, 3, 4, 5]
+      mut tasks: chan<int>[] = []
+      for _, n := range nums {
+        push(tasks, spawn compute(n))
+      }
+      mut sum := 0
+      for _, t := range tasks {
+        v := <-t
+        if v is closed {
+        } else {
+          sum = sum + v
+        }
+      }
+      print(sum)
+    }`);
+    expect(out).toBe("55\n");
+  });
+
   test("waitブロック: 中で起動したタスクを全部待つ", () => {
     const out = runSource(`fn addTo(arr: int[], v: int) {
       sleep(40)
