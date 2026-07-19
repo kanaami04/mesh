@@ -66,6 +66,34 @@ fn main() {
 }
 `,
   },
+  tree: {
+    label: "tree — 判別可能union(木構造)",
+    source: `// 判別可能union — タグ付きstruct形式のunion。自己参照(木構造)もOK。
+// 値は union 自身の名前で作り、match は部分構造パターンで絞り込む
+
+type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+
+fn leaf(v: int) Tree {
+	return Tree{ kind: "leaf", value: v }
+}
+
+fn node(l: Tree, r: Tree) Tree {
+	return Tree{ kind: "node", left: l, right: r }
+}
+
+fn sumTree(t: Tree) int {
+	return match t {
+		{ kind: "leaf" } => t.value
+		{ kind: "node" } => sumTree(t.left) + sumTree(t.right)
+	}
+}
+
+fn main() {
+	tree := node(node(leaf(1), leaf(2)), leaf(3))
+	print(sumTree(tree))
+}
+`,
+  },
   users: {
     label: "users — struct+union+match",
     source: `// struct + union + match — Mesh の型システムの全部乗せ。

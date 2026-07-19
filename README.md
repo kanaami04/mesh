@@ -69,7 +69,8 @@ ok := true            // bool
 nums := [1, 2, 3]     // int[]
 ```
 
-型: `int` `float` `string` `bool` `error` `any` / 配列 `T[]` / チャネル `chan<T>` / 関数
+型: `int` `float` `string` `bool` `error` `none` `any` / 配列 `T[]` / map `map<K, V>` /
+チャネル `chan<T>` / union `A | B` / 文字列リテラル型 `"active"` / 関数
 
 ### エラーと不在は union 型で(言語の背骨)
 
@@ -170,9 +171,24 @@ fn describe(res: GetUserResponse) string {
 問いません)。フィールドをその場で束縛する構文は無く、絞り込んだ後は`res.user`のように
 普通のフィールドアクセスを使います。
 
-自己参照する判別可能union(`{ kind: "node", left: Tree, right: Tree }` のような木構造)は
-現状未対応です(`type alias cycle` エラーになります)。再帰的な形が必要なときは、代わりに
-名前付きの再帰 `struct` を使ってください。
+自己参照する判別可能union(木構造・ASTなど)も書けます——再帰参照がstructフィールドの中に
+あればOKです(再帰structの `next: Node | none` と同じ仕組み):
+
+```go
+// examples/tree.mesh
+type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+
+fn sumTree(t: Tree) int {
+	return match t {
+		{ kind: "leaf" } => t.value
+		{ kind: "node" } => sumTree(t.left) + sumTree(t.right)
+	}
+}
+```
+
+唯一の例外は「union同士がstructを挟まず裸で直接参照し合う」形
+(`type A = B | none` かつ `type B = A | error`)で、これだけは `type alias cycle` エラーに
+なります(必要ならstructフィールドに包んでください)。
 
 ### 並行処理: spawn / wait / channel
 
@@ -288,13 +304,15 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
   JS の「イベントループに譲って待つ」に対応する
 - `spawn f(x)` は **await しない** 呼び出しになる — 裏で走り続ける Promise = goroutine。
   Go と違い「結果の受取口」を返すので、`<-task` で後から値を受け取れる
-- `v, err := f()` は `let [v, err] = await f()` の分割代入になる
+- 容量つきチャネル(`chan<T>(n)`)の送信ブロックも、`await` 可能な Promise として
+  本物のブロッキングを実現している(panic による近似ではない)
 
-### Go との意味論の違い(v0 の割り切り)
+### Go との意味論の違い(割り切り)
 
-- チャネルは**容量無制限バッファ付き**(送信はブロックしない)。Go のような同期チャネルは今後
 - 並行処理は**シングルスレッド**(JS のイベントループ上)。並列(マルチコア)ではない
 - `int` は JS の number(53bit 整数)。`int` 同士の除算は切り捨て
+- チャネルの既定は容量**無制限**バッファ(`chan<T>()`)。Go の既定(容量0の同期)が欲しいときは
+  `chan<T>(0)` と明示する
 
 ## ロードマップ
 
@@ -305,6 +323,7 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
 - [x] match式(網羅性検査)/ 文字列リテラル型 / `type` 宣言 / struct
 - [x] structメソッド(Goスタイルのレシーバ構文)/ 標準ライブラリ第一〜三弾(配列・map・文字列・高階関数)
 - [x] 2段スコープの構造化並行(spawn/detach)/ channel仕様の完成(容量・close・select)
-- [ ] 判別可能union(インライン `{...}` 型式)と構造的型付けの完全化
+- [x] 判別可能union(インライン `{...}` 型式・自己参照対応)と構造的型付け
 - [ ] 標準ライブラリの拡充(http, json など JS API のラッパー)
-- [ ] コンパイラを Rust に移植(v0 と同じテストが通ることをゴールにする)
+- [ ] モジュールシステム(import / export)
+- [ ] コンパイラを Rust に移植(現行テストスイートが通ることをゴールにする)

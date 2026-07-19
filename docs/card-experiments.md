@@ -34,7 +34,7 @@
 | 9 | 2026-07-19 | ログイベント分類(LOGIN/LOGOUT/ERROR/unknown) | **1** | **完全一発成功・エラー0件**。
       判別可能unionを使う価値が本当にある題材(4種の相互排他な形、非再帰)を与えたところ、
       **AIは自発的に判別可能unionを選んで正しく使い切った**(第5回は「使わない」判断、
-      第6回は自己参照で失敗——今回初めて「使うべき時にちゃんと使えて成功する」ケースを確認できた |
+      第6回は自己参照で失敗——今回初めて「使うべき時にちゃんと使えて成功する」ケースを確認できた) |
 | 10 | 2026-07-19 | 成績集計(sort/contains/indexOf/keys/values の実地利用) | **1** | **完全一発成功・
       エラー0件**。これまで未検証だった標準ライブラリ層(`sort`/`contains`/`indexOf`/`keys`/`values`)
       を組み合わせた題材でも穴・記述漏れ無し。`indexOf`の`int \| none`をif/elseで絞り込む、
@@ -132,9 +132,9 @@ AIは自発的に判別可能unionを選び、「4つの相互排他な形・非
 - ~~カードの自己参照union回避策に具体例を足す~~ ✅ **2026-07-19実装**。`struct Expr { kind: string
   val: int | none  left: Expr | none  right: Expr | none }` + 1ifにつき1変数のnarrowingという
   実際に動く例をカードに追加(evalExpr(9)まで動作確認済み・e2eテスト化)
-- 副産物として見つかったバグ: 関数名に `eval`/`arguments` を使うと、コンパイルは通るのに生成JSが
-  JSのstrict mode違反で実行時crashする(`RESERVED`セット漏れ)。別タスクとして切り出し済み
-  (task_fe00c9b7)
+- ~~副産物として見つかったバグ: 関数名に `eval`/`arguments` を使うと、コンパイルは通るのに生成JSが
+  JSのstrict mode違反で実行時crashする(`RESERVED`セット漏れ)~~ ✅ **2026-07-19解消**。
+  別セッションで`RESERVED`に2語を追加(PR #4でマージ済み)
 - ~~自己参照する判別可能union自体の実装(knot-tying再設計)~~ ✅ **2026-07-19実装**。
   structフィールド越しの参照(木構造・AST等)はknot-tyingで解決。structを挟まない裸の
   union同士の相互再帰だけは、flatten時に相手のplaceholderが空で型情報が消える不具合を

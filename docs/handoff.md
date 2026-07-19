@@ -1,4 +1,4 @@
-# 引き継ぎ文書(2026-07-18時点)
+# 引き継ぎ文書(2026-07-19時点)
 
 > 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
 > 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
@@ -10,7 +10,8 @@
 のが核心コンセプト(要件定義 P1〜P6)。言語カード(`src/card.ts`)を渡せば、この会話を知らない
 AIエージェントでもMeshのコードを書ける、という実証実験(`docs/card-experiments.md`)まで行った。
 
-- GitHub: https://github.com/ryota-kanayama/mesh(公開・mainブランチ直push運用)
+- GitHub: https://github.com/ryota-kanayama/mesh(公開。featureブランチ→PR→CI green確認→
+  squash mergeの運用。2026-07-19からこの形。それ以前はmain直push)
 - ローカル: `/Users/kanayama/kanaami/language`
 - 実装言語: TypeScript(v0)。将来Rust移植構想あり(未着手)
 - ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
@@ -56,7 +57,8 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 - **言語カード実証実験 第5〜10回**(2026-07-19)実施。実装バグ6件発見・解消
   (chan配列`chan<int>[]`・複数行配列リテラル・`eval`/`arguments`予約語漏れ等)。
   詳細は docs/card-experiments.md
-- **テスト232件**、CI green(直近コミットは`git log origin/main -1`で確認)
+- **テスト233件**(2026-07-19時点。`bun test`で最新件数を確認)、CI green
+  (直近コミットは`git log origin/main -1`で確認)
 
 ## 次にやるとしたら(未着手のトピック)
 
@@ -70,13 +72,15 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 - **設計判断は先に討議・決定してから実装する**。特に既存構文と衝突する可能性がある場合は、
   必ず複数の選択肢とトレードオフを具体的なMeshコード例つきで提示し、`AskUserQuestion`で確認する
   (このセッションでは `map`名の衝突、channel容量、structメソッド構文などをこの形で決めてきた)
-- **実装したら必ず一通り検証してからコミットする**:
+- **実装したら必ず一通り検証してからコミットする**(2026-07-19からPRフロー):
   1. `bun test` → 全パス確認
   2. `bunx tsc --noEmit` → 型エラーなし確認
   3. プレイグラウンド(`mise run playground`)で実際に動かして目視確認
   4. ドキュメント更新: `src/card.ts`(言語カード)/ `docs/features.md` / `todo.md` / `README.md`
-  5. `git add -A && git commit`(決定の経緯・却下した代替案もメッセージに書く)→ `git push`
-  6. `gh run list --limit 1` でCI green確認(`until [ "$(gh run list --limit 1 --json status -q '.[0].status')" = "completed" ]; do sleep 5; done` を`run_in_background: true`で回すと待てる)
+  5. featureブランチに `git add -A && git commit`(決定の経緯・却下した代替案もメッセージに書く)
+     → `git push` → `gh pr create`
+  6. `gh pr checks <番号> --watch` でCI green確認 → `gh pr merge <番号> --squash`
+     → ローカルブランチを `git rebase origin/main` で追従(squash mergeで履歴が分岐するため)
 - **無関係な変更は別コミットに分ける**(例: MoonBit調査ドキュメントと機能実装を分けてコミットした)
 - 大きな機能追加後は既存の`<-ch`等の使用箇所が壊れていないか`bun test`で確認し、
   壊れていたら**個別に narrowing を足して直す**(型を緩めて回避しない)
