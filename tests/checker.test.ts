@@ -639,6 +639,101 @@ fn main() {
     expect(errors).toEqual([]);
   });
 
+  test("narrowing(F-6): フィールドパス(n.next is none)で絞り込める", () => {
+    const errors = errorsOf(`struct Node {
+	value: int
+	next: Node | none
+}
+fn sum(n: Node) int {
+	if n.next is none {
+		return n.value
+	}
+	return n.value + sum(n.next)
+}
+fn main() {
+	print(sum(Node{value: 1, next: none}))
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("narrowing(F-6): フィールドパスのelse側も絞り込まれる", () => {
+    const errors = errorsOf(`struct Node {
+	value: int
+	next: Node | none
+}
+fn describe(n: Node) string {
+	if n.next is none {
+		return "leaf"
+	} else {
+		return str(n.next.value)
+	}
+}
+fn main() { print(describe(Node{value: 1, next: none})) }`);
+    expect(errors).toEqual([]);
+  });
+
+  test("narrowing(F-6): フィールドへの代入は古いnarrowing事実を無効化する", () => {
+    const errors = errorsOf(`struct Node {
+	value: int
+	next: Node | none
+}
+fn main() {
+	a := Node{value: 1, next: none}
+	if a.next is none {
+		a.next = Node{value: 2, next: none}
+		print(a.next.value)
+	}
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining("cannot access field or method on Node | none — narrow it first"),
+    ]);
+  });
+
+  test("narrowing(F-6): フィールドパスを絞り込まずに使うとエラーのまま", () => {
+    const errors = errorsOf(`struct Node {
+	value: int
+	next: Node | none
+}
+fn bad(n: Node) int { return n.next.value }
+fn main() { print(bad(Node{value: 1, next: none})) }`);
+    expect(errors).toEqual([
+      expect.stringContaining("cannot access field or method on Node | none — narrow it first"),
+    ]);
+  });
+
+  test("narrowing(F-6): && は左の is が右辺とthen節に効く", () => {
+    const errors = errorsOf(`fn f() int | error { return 1 }
+fn main() {
+	x := f()
+	if x is int && x > 0 {
+		print(x + 1)
+	}
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("narrowing(F-6): || は両方falseの側(else)がド・モルガンで絞り込まれる", () => {
+    const errors = errorsOf(`fn main() {
+	l: int | none = 1
+	r: int | none = 2
+	if l is none || r is none {
+		return
+	}
+	print(l + r)
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("narrowing(F-6): ! はド・モルガンでthen節が絞り込まれる", () => {
+    const errors = errorsOf(`fn main() {
+	v: int | none = 5
+	if !(v is none) {
+		print(v + 1)
+	}
+}`);
+    expect(errors).toEqual([]);
+  });
+
   test("== none は 'is none' へ誘導する", () => {
     const errors = errorsOf(`fn f() int | none { return none }\nfn main() { x := f()\nif x == none {\nreturn\n}\nprint(x) }`);
     expect(errors).toEqual([expect.stringContaining("use 'is none'")]);

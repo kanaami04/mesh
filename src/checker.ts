@@ -165,7 +165,13 @@ interface Binding {
 
 class Checker {
   private diagnostics: Diagnostic[] = [];
+  // narrowing(F-6): 変数の型と同じ scope スタックに、フィールドパス("n.next"のような
+  // ドット区切りの文字列キー。識別子には"."を含められないので実変数と衝突しない)を積んで
+  // 絞り込みを表す。ブロックを抜ければ他の変数と同様スコープごと消える
   private scopes: Map<string, Binding>[] = [new Map()];
+  // is式のtarget型(resolveType結果)のメモ化。narrowing事実の再計算(collectFacts)で
+  // resolveTypeを二度呼ぶと診断が重複するため、is式を検査した時点で1回だけキャッシュする
+  private isTargetTypes = new WeakMap<Expr, Type>();
   // 今チェックしている関数の戻り値型(無名関数でネストするのでスタック)
   private retStack: Type[] = [];
   // type 宣言: 名前 → 構文ノード。解決結果は resolvedAliases にメモ化
@@ -495,14 +501,18 @@ class Checker {
     this.popScope();
   }
 
-  // override: narrowing 用に「このブロック内だけ変数の型を差し替える」
-  private checkBlock(block: Block, override?: { name: string; type: Type }) {
+  // facts: narrowing 用に「このブロック内だけパス(変数名 or フィールドパス)の型を差し替える」
+  private checkBlock(block: Block, facts?: Map<string, Type>) {
     this.pushScope();
-    if (override) {
-      this.scopes[this.scopes.length - 1].set(override.name, { type: override.type, mutable: false });
-    }
+    if (facts) this.applyFacts(facts);
     for (const stmt of block.stmts) this.checkStmt(stmt);
     this.popScope();
+  }
+
+  // 事実を「現在のスコープ」に書き込む(呼び出し側が必要なら先に pushScope しておく)
+  private applyFacts(facts: Map<string, Type>) {
+    const scope = this.scopes[this.scopes.length - 1];
+    for (const [path, type] of facts) scope.set(path, { type, mutable: false });
   }
 
   // ブロックが必ず抜ける(return/break/continue で終わる)か — narrowing の継続判定に使う
@@ -542,6 +552,11 @@ class Checker {
         for (let i = 0; i < stmt.targets.length; i++) {
           const target = stmt.targets[i];
           if (target.kind === "ident" && target.name === "_") continue;
+          // narrowing(F-6): `n.next = ...` はフィールド書き込みで、代入先そのものについては
+          // 古い絞り込み事実を先に捨てておく(そうしないと targetType が絞り込み後の型に
+          // なってしまい、代入できるはずの値が弾かれる)
+          const path = this.stablePath(target);
+          if (path !== null) this.invalidatePath(path);
           const targetType = this.checkExpr(target);
           if (target.kind === "ident") {
             const binding = this.lookup(target.name);
@@ -592,31 +607,22 @@ class Checker {
           this.error(stmt.cond.pos, `if condition must be bool, got ${typeToString(cond)}`);
         }
 
-        // narrowing: `if x is none { ... }` — then内は none、else内と(thenが必ず抜ける場合の)
-        // 後続は「union から none を除いた型」として扱う
-        const narrow = this.narrowFromCond(stmt.cond);
-        if (narrow) {
-          const { name, thenType, elseType, binding } = narrow;
-          this.checkBlock(stmt.then, { name, type: thenType });
-          if (stmt.else_) {
-            if (stmt.else_.kind === "if") {
-              this.pushScope();
-              this.scopes[this.scopes.length - 1].set(name, { type: elseType, mutable: false });
-              this.checkStmt(stmt.else_);
-              this.popScope();
-            } else {
-              this.checkBlock(stmt.else_, { name, type: elseType });
-            }
-          } else if (this.blockTerminates(stmt.then)) {
-            binding.type = elseType; // 早期リターン後の残りの行では絞り込みが効き続ける
-          }
-          break;
-        }
-
-        this.checkBlock(stmt.then);
+        // narrowing(F-6): 条件式から then側/else側それぞれで成り立つ事実(パス→絞り込み型)を
+        // 再帰的に集める(is / ! / && / || 、フィールドパスを含む)。事実が無ければ空のMapなので
+        // 以下は「narrowing無し」の旧経路と同じに振る舞う
+        const facts = this.collectFacts(stmt.cond);
+        this.checkBlock(stmt.then, facts.then);
         if (stmt.else_) {
-          if (stmt.else_.kind === "if") this.checkStmt(stmt.else_);
-          else this.checkBlock(stmt.else_);
+          if (stmt.else_.kind === "if") {
+            this.pushScope();
+            this.applyFacts(facts.else);
+            this.checkStmt(stmt.else_);
+            this.popScope();
+          } else {
+            this.checkBlock(stmt.else_, facts.else);
+          }
+        } else if (this.blockTerminates(stmt.then)) {
+          this.applyFacts(facts.else); // 早期リターン後の残りの行では絞り込みが効き続ける
         }
         break;
       }
@@ -713,25 +719,91 @@ class Checker {
     return values.map((v) => this.checkExprSingle(v));
   }
 
-  // narrowing の対象になる条件か: `x is T` で x が不変な union 変数のとき。
-  // パターンは match と同じ扱い(部分構造 { kind: "ok" } は複数メンバーに一致しうる)ので、
-  // then側 = 一致したメンバーのunion / else側 = 残りのunion をここで計算して返す
-  private narrowFromCond(
-    cond: Expr,
-  ): { name: string; thenType: Type; elseType: Type; binding: Binding } | null {
-    if (cond.kind !== "is" || cond.operand.kind !== "ident") return null;
-    const binding = this.lookup(cond.operand.name);
-    if (!binding || binding.mutable || binding.type.kind !== "union") return null;
-    const target = this.resolveType(cond.target);
-    const matched = binding.type.members.filter((m) => this.structPatternMatches(m, target));
-    if (matched.length === 0) return null; // 「can never be」は is の式検査が報告済み
-    const rest = binding.type.members.filter((m) => !matched.includes(m));
-    return {
-      name: cond.operand.name,
-      thenType: unionOf(matched),
-      elseType: unionOf(rest),
-      binding,
-    };
+  // narrowing(F-6)の対象になりうる「安定パス」: 不変な変数から始まる ident/フィールド
+  // アクセスの連鎖("n" / "n.next" / "n.next.left" ...)。mut変数はいつでも再代入されうる
+  // ので対象外(rootが不変でも中間の構造体フィールドは代入可能 — その場合は代入文の側で
+  // invalidatePath して古い事実を捨てる)
+  private stablePath(expr: Expr): string | null {
+    if (expr.kind === "ident") {
+      const binding = this.lookup(expr.name);
+      return binding && !binding.mutable ? expr.name : null;
+    }
+    if (expr.kind === "member") {
+      const base = this.stablePath(expr.target);
+      return base === null ? null : `${base}.${expr.name}`;
+    }
+    return null;
+  }
+
+  // x.f = ... / x = ... のような代入は、重なるパスの narrowing 事実を古くしうるので捨てる。
+  // 代入先そのもの・その子パス(x を代入 → x.f も無効)だけを消す。祖先パス(x.f.g を代入
+  // したときの x.f)はそのまま残す — 中間パスの型自体は変わらないため
+  private invalidatePath(path: string) {
+    for (const scope of this.scopes) {
+      for (const key of scope.keys()) {
+        if (key.includes(".") && (key === path || key.startsWith(`${path}.`))) {
+          scope.delete(key);
+        }
+      }
+    }
+  }
+
+  private noFacts(): { then: Map<string, Type>; else: Map<string, Type> } {
+    return { then: new Map(), else: new Map() };
+  }
+
+  // 条件式から then側/else側それぞれで成り立つ事実(パス→絞り込み型)を再帰的に集める。
+  // 呼び出す前に cond(を含む式)は checkExprSingle 済みで、resolvedType / isTargetTypes が
+  // 埋まっている前提(ここでは resolveType 等の副作用のある呼び出しを一切しない — 診断の
+  // 重複を避けるため)
+  private collectFacts(expr: Expr): { then: Map<string, Type>; else: Map<string, Type> } {
+    if (expr.kind === "is") {
+      const path = this.stablePath(expr.operand);
+      const opType = expr.operand.resolvedType;
+      const target = this.isTargetTypes.get(expr);
+      if (path === null || !opType || opType.kind !== "union" || !target) return this.noFacts();
+      const matched = opType.members.filter((m) => this.structPatternMatches(m, target));
+      if (matched.length === 0) return this.noFacts(); // 「can never be」は is の式検査が報告済み
+      const rest = opType.members.filter((m) => !matched.includes(m));
+      return { then: new Map([[path, unionOf(matched)]]), else: new Map([[path, unionOf(rest)]]) };
+    }
+
+    if (expr.kind === "unary" && expr.op === "!") {
+      // ! はド・モルガン: 内側の then/else をそのまま入れ替える
+      const inner = this.collectFacts(expr.operand);
+      return { then: inner.else, else: inner.then };
+    }
+
+    if (expr.kind === "binary" && (expr.op === "&&" || expr.op === "||")) {
+      const left = this.collectFacts(expr.left);
+      const right = this.collectFacts(expr.right);
+      // && の then側 = 両方成り立つ(積) / || の else側 = 両方不成立(積、ド・モルガン)。
+      // 逆側(&&のelse、||のthen)は一般に単一パスの型へ畳めない(OR)ので事実を作らない
+      return expr.op === "&&"
+        ? { then: this.andFacts(left.then, right.then), else: new Map() }
+        : { then: new Map(), else: this.andFacts(left.else, right.else) };
+    }
+
+    return this.noFacts();
+  }
+
+  // 2組の事実が同時に成り立つ場合を合成する。同じパスに複数の絞り込みが重なったら、
+  // 両方を満たすメンバーの積を取る(全滅すれば「その分岐は到達不能」= 空union = VOID)
+  private andFacts(a: Map<string, Type>, b: Map<string, Type>): Map<string, Type> {
+    if (a.size === 0) return b;
+    if (b.size === 0) return a;
+    const out = new Map(a);
+    for (const [path, t] of b) {
+      const prev = out.get(path);
+      out.set(path, prev ? this.intersectTypes(prev, t) : t);
+    }
+    return out;
+  }
+
+  private intersectTypes(a: Type, b: Type): Type {
+    const am = a.kind === "union" ? a.members : [a];
+    const bm = b.kind === "union" ? b.members : [b];
+    return unionOf(am.filter((m) => bm.some((m2) => typeEquals(m, m2))));
   }
 
   // ---- 式 ----
@@ -768,6 +840,7 @@ class Checker {
         // 部分構造は structPatternMatches で「一致するメンバーがあるか」を判定する
         const t = this.checkExprSingle(expr.operand);
         const target = this.resolveType(expr.target);
+        this.isTargetTypes.set(expr, target); // collectFacts が resolveType を再度呼ばずに済むように
         if (t.kind === "union") {
           if (!t.members.some((m) => this.structPatternMatches(m, target))) {
             this.error(expr.pos, `${typeToString(t)} can never be ${typeToString(target)}`);
@@ -995,7 +1068,11 @@ class Checker {
         const pkgFn = this.tryPackageMember(expr);
         if (pkgFn) return pkgFn;
         const t = this.checkExprSingle(expr.target);
-        return this.memberFieldType(expr, t);
+        // narrowing(F-6): このフィールドパス自体が絞り込み済みなら(`if n.next is none`等)
+        // それを使う。無ければ通常のフィールド型
+        const path = this.stablePath(expr);
+        const override = path === null ? undefined : this.lookup(path);
+        return override ? override.type : this.memberFieldType(expr, t);
       }
 
       case "structLit": {
@@ -1104,18 +1181,28 @@ class Checker {
   }
 
   private inferBinary(expr: Expr & { kind: "binary" }): Type {
-    const left = this.checkExprSingle(expr.left);
-    const right = this.checkExprSingle(expr.right);
     const { op } = expr;
 
+    // narrowing(F-6): 右辺を検査する前に左辺の事実を適用する(&&は左が真のときだけ右を評価
+    // するので then側の事実、||は左が偽のときだけ右を評価するので else側の事実が右辺で使える)
     if (op === "&&" || op === "||") {
-      for (const [t, e] of [[left, expr.left], [right, expr.right]] as const) {
-        if (!typeEquals(t, BOOL) && t.kind !== "any") {
-          this.error(e.pos, `'${op}' requires bool operands, got ${typeToString(t)}`);
-        }
+      const left = this.checkExprSingle(expr.left);
+      if (!typeEquals(left, BOOL) && left.kind !== "any") {
+        this.error(expr.left.pos, `'${op}' requires bool operands, got ${typeToString(left)}`);
+      }
+      const leftFacts = this.collectFacts(expr.left);
+      this.pushScope();
+      this.applyFacts(op === "&&" ? leftFacts.then : leftFacts.else);
+      const right = this.checkExprSingle(expr.right);
+      this.popScope();
+      if (!typeEquals(right, BOOL) && right.kind !== "any") {
+        this.error(expr.right.pos, `'${op}' requires bool operands, got ${typeToString(right)}`);
       }
       return BOOL;
     }
+
+    const left = this.checkExprSingle(expr.left);
+    const right = this.checkExprSingle(expr.right);
 
     if (op === "==" || op === "!=") {
       // none との比較は narrowing が効く 'is' に一本化する(P1)
@@ -1188,11 +1275,8 @@ class Checker {
     }
     const members = subject.kind === "union" ? subject.members : null;
 
-    // 対象が不変な変数なら、アーム内でその変数を絞り込める
-    const narrowName =
-      expr.subject.kind === "ident" && this.lookup(expr.subject.name)?.mutable === false
-        ? expr.subject.name
-        : null;
+    // 対象が安定パス(不変な変数、またはそこからのフィールドアクセス)なら、アーム内で絞り込める
+    const narrowPath = this.stablePath(expr.subject);
 
     const covered: Type[] = [];
     const armTypes: Type[] = [];
@@ -1241,8 +1325,8 @@ class Checker {
         : unionOf(patternTypes.length > 0 ? patternTypes : [ANY]);
 
       this.pushScope();
-      if (narrowName) {
-        this.scopes[this.scopes.length - 1].set(narrowName, { type: narrowedTo, mutable: false });
+      if (narrowPath) {
+        this.scopes[this.scopes.length - 1].set(narrowPath, { type: narrowedTo, mutable: false });
       }
       armTypes.push(this.checkExpr(arm.body));
       this.popScope();

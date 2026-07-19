@@ -605,10 +605,62 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
         print(evalExpr(tree))
     }`);
     expect(out).toBe("9\n");
-    // カードどおり、is を || でつないだ複合条件はまだ絞り込まれない(要調査として記録済み)
-    expect(
-      compile(`fn main() {\nl: int | none = 1\nr: int | none = 2\nif l is none || r is none {\nreturn\n}\nprint(l + r)\n}`).code,
-    ).toBe(null);
+  });
+
+  test("narrowing(F-6): is を || でつないだ複合条件もド・モルガンで絞り込まれる", () => {
+    const out = runSource(`fn main() {
+        l: int | none = 1
+        r: int | none = 2
+        if l is none || r is none {
+            return
+        }
+        print(l + r)
+    }`);
+    expect(out).toBe("3\n");
+  });
+
+  test("narrowing(F-6): && は左のisが右辺とthen節に効く", () => {
+    const out = runSource(`struct Circle { kind: string  r: float }
+    struct Square { kind: string  s: float }
+    type Shape = Circle | Square
+
+    fn main() {
+        c: Shape = Circle{kind: "circle", r: 2.0}
+        if c is Circle && c.r > 1.0 {
+            print("big circle")
+        } else {
+            print("small or not a circle")
+        }
+    }`);
+    expect(out).toBe("big circle\n");
+  });
+
+  test("narrowing(F-6): ! はド・モルガンでnarrowingが効く", () => {
+    const out = runSource(`fn main() {
+        v: int | none = 5
+        if !(v is none) {
+            print(v + 1)
+        }
+    }`);
+    expect(out).toBe("6\n");
+  });
+
+  test("narrowing(F-6): フィールドパス(n.next)を再代入せず直接narrowingできる", () => {
+    const out = runSource(`struct Node { value: int  next: Node | none }
+    fn sum(n: Node) int {
+        total := n.value
+        if n.next is none {
+            return total
+        }
+        return total + sum(n.next)
+    }
+    fn main() {
+        c := Node{value: 3, next: none}
+        b := Node{value: 2, next: c}
+        a := Node{value: 1, next: b}
+        print(sum(a))
+    }`);
+    expect(out).toBe("6\n");
   });
 });
 

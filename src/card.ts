@@ -110,6 +110,12 @@ Building an optional result imperatively (e.g. "the best so far"):
 - match subjects must be union-typed. Patterns: type names (\`User\`, \`none\`, \`error\`, \`int\`, ...),
   string literals (\`"active"\`), or \`_\` (last arm only). Multiple patterns: \`"a", "b" => ...\`.
 - \`x == none\` is a compile error — use \`is none\` (it narrows; \`==\` does not).
+- \`is\` narrowing composes: \`a is Foo && a.value > 0\` narrows \`a\` for the right side of \`&&\`
+  AND inside the \`then\` block; \`a is none || b is none { return }\` narrows both \`a\` and \`b\`
+  (to non-none) in the code after; \`!(a is none)\` narrows its \`then\` block the same way the
+  \`else\` of \`a is none\` would. It also narrows FIELD PATHS directly — \`if n.next is none { ... }\`
+  lets you use \`n.next\` as its narrowed type afterward, no need to copy it into a local
+  variable first (this needs an immutable root, e.g. \`n := ...\`, not \`mut n := ...\`).
 
 ## Discriminated unions (tagged struct shapes)
 
@@ -166,12 +172,12 @@ Building an optional result imperatively (e.g. "the best so far"):
   where \`type B = A | error\` — this reports \`type alias cycle\` (there's no struct field to
   "tie the knot" through). This is a narrow, rarely-needed shape; wrap the reference in a
   struct field instead, as the \`Tree\` example above does.
-- Narrowing a field one \`is\` at a time still applies inside recursive/manual patterns too —
-  combining checks like \`if l is none || r is none\` in a single condition is NOT currently
-  narrowed (each variable needs its own \`is\`-only \`if\`). If you'd rather avoid a fixed set of
-  \`kind\` values (e.g. a string tag checked manually, with no exhaustiveness checking), a plain
-  recursive \`struct\` with \`T | none\` fields per variant works too — same recursion mechanism,
-  just without the compiler verifying every \`kind\`/field combination for you.
+- Narrowing composes here too: \`if l is none || r is none { return }\` narrows both \`l\` and \`r\`
+  afterward, and field paths narrow directly (\`if t.left is none { ... }\`, no local copy
+  needed). If you'd rather avoid a fixed set of \`kind\` values (e.g. a string tag checked
+  manually, with no exhaustiveness checking), a plain recursive \`struct\` with \`T | none\` fields
+  per variant works too — same recursion mechanism, just without the compiler verifying every
+  \`kind\`/field combination for you.
 
 ## Structs, maps & methods
 
@@ -189,6 +195,8 @@ Building an optional result imperatively (e.g. "the best so far"):
 
 - Structs are reference values: a struct returned from \`find\` is the SAME object stored in
   the array, so writing \`u.age = 31\` to it updates the stored one. (Same for range loop vars.)
+- Writing to a field (\`n.next = ...\`) drops any narrowing you'd done on that field/path — the
+  compiler forgets what it was and you narrow it again with \`is\` before using it.
 
 Methods use Go's syntax — a receiver clause right after \`fn\`, before the method name:
 
