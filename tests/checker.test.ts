@@ -640,28 +640,48 @@ fn main() {
     expect(errors).toEqual([expect.stringContaining("use 'is none'")]);
   });
 
-  test("'!' は戻り値型に失敗メンバーが無いと使えない", () => {
+  test("'?' は戻り値型に失敗メンバーが無いと使えない", () => {
     const errors = errorsOf(`fn f() int | error { return 1 }
 fn g() int {
-	return f()!
+	return f()?
 }
 fn main() { print(g()) }`);
-    expect(errors).toEqual([expect.stringContaining("'!' propagates error")]);
+    expect(errors).toEqual([expect.stringContaining("'?' propagates error")]);
   });
 
-  test("'!' は失敗メンバーを含む関数内なら使える", () => {
+  test("'?' は失敗メンバーを含む関数内なら使える", () => {
     const errors = errorsOf(`fn f() int | error { return 1 }
 fn g() int | error {
-	v := f()!
+	v := f()?
 	return v * 2
 }
 fn main() { print(g()) }`);
     expect(errors).toEqual([]);
   });
 
+  test("旧記法の後置 '!' は '?' への誘導エラー(パース時)", () => {
+    expect(() => parse(`fn f() int | error { return 1 }\nfn main() { x := f()!\nprint(x) }`)).toThrow(
+      "postfix '!' was renamed — use '?'",
+    );
+  });
+
   test("'or' のフォールバックは成功型に合わせる", () => {
-    const errors = errorsOf(`fn f() int | error { return 1 }\nfn main() { x := f() or "zero"\nprint(x) }`);
+    const errors = errorsOf(`fn f() int | error { return 1 }\nfn main() { x := f() or _ => "zero"\nprint(x) }`);
     expect(errors).toEqual([expect.stringContaining("'or' fallback must be int")]);
+  });
+
+  test("'or' はerrorを含むと束縛形が必須(Go式の明示性)・束縛形なら通る", () => {
+    const errors = errorsOf(`fn f() int | error { return 1 }\nfn main() { x := f() or 0\nprint(x) }`);
+    expect(errors).toEqual([
+      expect.stringContaining("'or' would silently discard an error"),
+    ]);
+    expect(
+      errorsOf(`fn f() int | error { return 1 }\nfn main() { x := f() or _ => 0\nprint(x) }`),
+    ).toEqual([]);
+    // e には失敗値(error)が束縛される
+    expect(
+      errorsOf(`fn f() int | error { return 1 }\nfn main() { x := f() or e => len("\${e}")\nprint(x) }`),
+    ).toEqual([]);
   });
 
   test("'or' は失敗しない型には使えない", () => {
@@ -754,7 +774,7 @@ fn main() {
       expect.stringContaining("invalid operation"),
     ]);
     expect(inMain(`n := toInt("42")\nif n is error {\nreturn\n}\nprint(n + 1)`)).toEqual([]);
-    expect(inMain(`n := toInt("42") or 0\nprint(n + 1)`)).toEqual([]);
+    expect(inMain(`n := toInt("42") or _ => 0\nprint(n + 1)`)).toEqual([]);
   });
 
   test("filter: 正しい述語はエラーなし・パラメータ型/戻り値型の不一致を検出", () => {

@@ -17,8 +17,13 @@ fn main() {
 	}
 	print("10 / 3 =", result)
 
-	fallback := divide(1, 0) or 0
+	// error を or で吸うときは束縛が必須(Go式の明示性)。捨てるなら _ と痕跡を残す
+	fallback := divide(1, 0) or _ => 0
 	print("fallback: ${fallback}")
+
+	// 失敗値を受け取って使う形。? "文脈" は失敗時に文脈つき error として伝播する
+	logged := divide(1, 0) or e => len("${e}")
+	print("logged: ${logged}")
 
 	bad := divide(1, 0)
 	if bad is error {

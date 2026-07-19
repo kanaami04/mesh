@@ -783,21 +783,31 @@ class Checker {
 
       case "prop": {
         const t = this.checkExprSingle(expr.operand);
+        // 文脈つき: f() ? "line ${i}: bad" — 文脈は文字列(補間可)。失敗はすべて error に
+        // 変換して伝播する(none も error("文脈") へ昇格)ので、戻り値型には error が要る
+        if (expr.context) {
+          const ctx = this.checkExprSingle(expr.context);
+          if (!isStringy(ctx)) {
+            this.error(expr.context.pos, `'?' context must be a string, got ${typeToString(ctx)}`);
+          }
+        }
         if (t.kind === "any") return ANY;
         if (t.kind !== "union") {
-          this.error(expr.pos, `'!' needs a union with none/error, got ${typeToString(t)}`);
+          this.error(expr.pos, `'?' needs a union with none/error, got ${typeToString(t)}`);
           return t;
         }
         const failures = t.members.filter(isFailure);
         if (failures.length === 0) {
-          this.error(expr.pos, `'!' has nothing to propagate — ${typeToString(t)} has no none/error`);
+          this.error(expr.pos, `'?' has nothing to propagate — ${typeToString(t)} has no none/error`);
         }
         const ret = this.retStack[this.retStack.length - 1] ?? VOID;
-        for (const f of failures) {
+        // 文脈つきなら伝播するのは常に error。素の ? は失敗メンバーをそのまま伝播
+        const propagated = expr.context ? (failures.length > 0 ? [ERROR] : []) : failures;
+        for (const f of propagated) {
           if (!assignable(f, ret)) {
             this.error(
               expr.pos,
-              `'!' propagates ${typeToString(f)}, but this function returns ${typeToString(ret)}` +
+              `'?' propagates ${typeToString(f)}, but this function returns ${typeToString(ret)}` +
                 ` — add '${typeToString(f)}' to the return type or handle it with 'is'`,
             );
           }
@@ -817,22 +827,43 @@ class Checker {
 
       case "orElse": {
         const t = this.checkExprSingle(expr.left);
+        const checkRight = (): Type => {
+          // 束縛形 or e => ... は失敗値(none/errorのunion)を e に束縛して右辺を評価する
+          if (expr.binding !== undefined && expr.binding !== "_") {
+            const failures = t.kind === "union" ? t.members.filter(isFailure) : [];
+            this.pushScope();
+            this.declare(expr.binding, failures.length > 0 ? unionOf(failures) : ANY, expr.pos);
+            const r = this.checkExprSingle(expr.right);
+            this.popScope();
+            return r;
+          }
+          return this.checkExprSingle(expr.right);
+        };
         if (t.kind === "any") {
-          this.checkExprSingle(expr.right);
+          checkRight();
           return ANY;
         }
         if (t.kind !== "union" || !t.members.some(isFailure)) {
           this.error(expr.pos, `left side of 'or' never fails — it is ${typeToString(t)}`);
-          this.checkExprSingle(expr.right);
+          checkRight();
           return t;
+        }
+        // Go式の明示性(2026-07-19決定): error を含む union のフォールバックは束縛形が必須。
+        // 捨てる場合も `or _ => ...` と書かせて「握りつぶし」を字面(grep可能)に残す
+        const hasError = t.members.some((m) => m.kind === "prim" && m.name === "error");
+        if (hasError && expr.binding === undefined) {
+          this.error(
+            expr.pos,
+            `'or' would silently discard an error — bind it ('or e => ...') or discard it explicitly ('or _ => ...')`,
+          );
         }
         const rest = unionWithout(t, isFailure);
         if (typeEquals(rest, VOID)) {
           this.error(expr.pos, `left side of 'or' has no success value — handle it with 'is' instead`);
-          this.checkExprSingle(expr.right);
+          checkRight();
           return ANY;
         }
-        const r = this.checkExprSingle(expr.right);
+        const r = checkRight();
         if (!assignable(r, rest)) {
           this.error(
             expr.right.pos,

@@ -93,13 +93,21 @@ fn main() {
 	}
 	print(result)                 // ここでは int に絞り込み済み
 
-	safe := divide(1, 0) or 0     // or: 失敗なら既定値
+	safe := divide(1, 0) or _ => 0   // or: 失敗なら既定値。errorを捨てる痕跡 _ が字面に残る
 	print(safe)
+
+	logged := divide(1, 0) or e => report(e)  // 失敗値を受け取って使う形
+	print(logged)
 }
 
-// ! は「自分も失敗し得る関数」の中で使う: 失敗なら呼び出し元へ即伝播
+// ? は「自分も失敗し得る関数」の中で使う: 失敗なら呼び出し元へ即伝播(Rustの ? と同じ)
 fn half(n: int) int | error {
-	return divide(n, 2)!
+	return divide(n, 2)?
+}
+
+// ? "文脈" — 失敗時に文脈を前置した error として伝播(noneも error に昇格)
+fn readPort(s: string) int | error {
+	return toInt(s) ? "config port"
 }
 ```
 
@@ -342,7 +350,7 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
 
 - [x] v0: lexer / parser / 型検査 / JS codegen / go・channel
 - [x] ブラウザで動くプレイグラウンド(`mise run playground`)
-- [x] union路線コア: `T | none` / `T | error` / `is` narrowing / `!` / `or` / 文字列補間 /
+- [x] union路線コア: `T | none` / `T | error` / `is` narrowing / `?` / `or` / 文字列補間 /
       デフォルト不変+`mut` / ランタイム検査(範囲外・ゼロ除算は位置つき panic)
 - [x] match式(網羅性検査)/ 文字列リテラル型 / `type` 宣言 / struct
 - [x] structメソッド(Goスタイルのレシーバ構文)/ 標準ライブラリ第一〜三弾(配列・map・文字列・高階関数)

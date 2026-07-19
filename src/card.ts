@@ -75,10 +75,17 @@ Four ways to consume a union:
     }
     print(v.name)           //    v is User from here on
 
-    x := parse(s) or 0      // 2) fallback value on none/error
+    v2 := find(2) or defaultUser()   // 2) fallback — the plain form is for none ONLY.
+    x := parse(s) or _ => 0          //    a union containing error REQUIRES a binding:
+    x2 := parse(s) or e => report(e) //    \`or e => expr\` (use it) or \`or _ => expr\`
+                                     //    (discard it — the discard is visible & greppable)
 
-    y := parse(s)!          // 3) propagate none/error to the caller
+    y := parse(s)?          // 3) propagate none/error to the caller
                             //    (the enclosing fn's return type must include it)
+    y2 := parse(s) ? "config port"   // 3b) propagate WITH context: on failure, propagates
+                            //    error("config port: <original message>") — none is upgraded
+                            //    to error("config port") too, so the return type needs error.
+                            //    The context must be a string literal (interpolation is fine)
 
     e := parse(s)           // an error's message: narrow to error, then interpolate it
     if e is error {
@@ -236,8 +243,8 @@ Methods use Go's syntax — a receiver clause right after \`fn\`, before the met
     && || !              logical: && and ||, and PREFIX ! for negation, e.g. \`if !t.done { }\`
     -x                   numeric negation
 
-Note: postfix \`x!\` is error/none propagation (see below); prefix \`!x\` is boolean NOT. Different things.
-There is no ternary \`?:\` — use \`if\` or \`match\`.
+Note: postfix \`x?\` is error/none propagation (like Rust's \`?\`); prefix \`!x\` is boolean NOT.
+There is no ternary \`?:\` and no optional chaining \`?.\` — use \`if\` or \`match\`.
 
 ## Strings
 
@@ -296,7 +303,7 @@ type always includes \`closed\` — you must narrow before using the value, same
     }
 
 \`closed\` is its own type (like \`none\`/\`error\`) — narrow with \`is closed\` or a \`match\` arm
-(\`closed => ...\`). It is NOT swept into \`!\`/\`or\` propagation (a closed channel isn't "this
+(\`closed => ...\`). It is NOT swept into \`?\`/\`or\` propagation (a closed channel isn't "this
 function's own failure"). Sending to an already-closed channel, or closing twice, panics.
 
 ### select — wait on multiple channels, pick whichever is ready first
@@ -328,7 +335,7 @@ form of \`match\`.
 - \`split(s, sep)\` always returns \`string[]\` (never fails — no separator found means a
   one-element array). \`join(arr, sep)\` takes \`string[]\`. \`trim\`/\`upper\`/\`lower\` are
   string → string. \`toInt(s)\` DOES fail on non-numeric input, so it returns \`int | error\`
-  — narrow it like any other failable call: \`n := toInt(s)!\` or \`n := toInt(s) or 0\`.
+  — narrow it like any other failable call: \`n := toInt(s)?\` or \`n := toInt(s) or _ => 0\`.
 - Higher-order functions take a function VALUE as an argument — either a named \`fn\`, or an
   inline \`fn(...) ... { ... }\` closure (closures can capture outer variables, including
   \`mut\` ones):
@@ -411,7 +418,12 @@ struct field instead (self-referential discriminated unions like a tree ARE supp
     'render' is a method — call it like render(...) → you wrote t.render (no parens); add ()
     match is not exhaustive — missing: ...          → add arms for the listed members, or a _ arm
     use 'is none' to test for none                  → replace == none with is none
-    '!' propagates error, but this function returns int → add | error to the return type
+    '?' propagates error, but this function returns int → add | error to the return type
+    postfix '!' was renamed — use '?'               → propagation is now x? (Rust-style); prefix !x
+                                                        is still boolean NOT
+    'or' would silently discard an error            → bind it ('or e => expr') or discard it
+                                                        explicitly ('or _ => expr'); plain 'or expr'
+                                                        is only for none-typed fallbacks
     invalid operation: T + T | closed                → you used <-ch directly; narrow with 'is closed' first
     send on closed channel / close of closed channel → panic: don't send/close after close(ch) already ran
     range over an array needs two names             → for i, v := range arr (use _ to drop one)

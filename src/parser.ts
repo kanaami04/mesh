@@ -609,12 +609,18 @@ class Parser {
         left = { kind: "is", operand: left, target, pos: opTok.pos };
         continue;
       }
-      const right = this.parseBinary(prec + 1); // 左結合
-      // f() or fallback — none/error なら右辺の値
+      // f() or fallback(noneのみ) / f() or e => fallback(失敗値を束縛。errorを含むなら必須)
       if (op === "or") {
-        left = { kind: "orElse", left, right, pos: opTok.pos };
+        let binding: string | undefined;
+        if (this.check("ident") && this.peek(1).type === "=>") {
+          binding = this.next().value;
+          this.next(); // =>
+        }
+        const right = this.parseBinary(prec + 1);
+        left = { kind: "orElse", left, right, binding, pos: opTok.pos };
         continue;
       }
+      const right = this.parseBinary(prec + 1); // 左結合
       left = { kind: "binary", op, left, right, pos: opTok.pos };
     }
   }
@@ -714,9 +720,22 @@ class Parser {
         expr = this.parseStructLitBody(expr.name, expr.pos);
         continue;
       }
-      if (this.match("!")) {
-        expr = { kind: "prop", operand: expr, pos: expr.pos };
+      if (this.match("?")) {
+        // f()? — 伝播。直後が文字列リテラルなら文脈つき: f() ? "line ${i}: bad"
+        // (文脈は文字列リテラル/補間のみ。任意の式を許すと `f()? - 1` 等が曖昧になる)
+        let context: Expr | undefined;
+        if (this.check("string")) {
+          context = this.parsePrimary();
+        }
+        expr = { kind: "prop", operand: expr, context, pos: expr.pos };
         continue;
+      }
+      if (this.check("!")) {
+        // 旧記法(2026-07-19に ? へ改名)。負の転移対策の誘導エラー
+        throw new CompileError(
+          "postfix '!' was renamed — use '?' to propagate none/error to the caller",
+          this.peek().pos,
+        );
       }
       if (this.match("(")) {
         const args: Expr[] = [];

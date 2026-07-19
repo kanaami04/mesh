@@ -132,7 +132,7 @@ fn parse(s: string) int | error {
 }
 
 fn doubled(s: string) int | error {
-	v := parse(s)!
+	v := parse(s)?
 	return v * 2
 }
 
@@ -156,7 +156,7 @@ fn main() {
 	print(v.name)
 	v.age = 31
 
-	x := parse("z") or 0
+	x := parse("z") or _ => 0
 	print(x)
 
 	d := doubled("1")
@@ -271,7 +271,7 @@ fn main() {
 
   test("カードの新項目: 標準ライブラリ第二弾(split/join/trim/upper/lower/toInt)", () => {
     const out = runSource(`fn parseAge(s: string) int | error {
-      return toInt(s)!   // toInt() DOES fail — ! で呼び出し元へ伝播できる
+      return toInt(s)?   // toInt() DOES fail — ? で呼び出し元へ伝播できる
     }
     fn main() {
       csv := "  Alice, Bob ,Carol  "
@@ -479,6 +479,54 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(out).toBe("alice\n404\nfound: bob\nOK\nNG\ntrue\n");
   });
 
+  test("カードの新項目: ? 伝播(旧!)・? \"文脈\"・or束縛形(Go式の明示性)", () => {
+    const out = runSource(`fn parse(s: string) int | error {
+      if s == "1" { return 1 }
+      return error("bad input: \${s}")
+    }
+    fn find(id: int) int | none {
+      if id == 1 { return 10 }
+      return none
+    }
+    fn doubled(s: string) int | error {
+      v := parse(s)?
+      return v * 2
+    }
+    fn withCtx(s: string, line: int) int | error {
+      return parse(s) ? "line \${line}: bad amount"
+    }
+    fn requireFound(id: int) int | error {
+      return find(id) ? "user \${id} missing"    // none も文脈つき error に昇格
+    }
+    fn main() {
+      d := doubled("1")
+      if d is error { return }
+      print(d)
+
+      c := withCtx("x99", 4)
+      if c is error {
+        print("\${c}")
+      }
+
+      r := requireFound(9)
+      if r is error {
+        print("\${r}")
+      }
+
+      print(parse("z") or _ => 0)                  // 意図的に捨てる(痕跡が字面に残る)
+      print(parse("z") or e => len("\${e}"))       // 失敗値を受け取って使う
+      print(find(9) or 7)                          // none のみの union は素の or でOK
+    }`);
+    expect(out).toBe(
+      "2\nline 4: bad amount: bad input: x99\nuser 9 missing\n0\n12\n7\n",
+    );
+    // 素の or で error を吸おうとすると誘導エラー
+    expect(
+      compile(`fn parse(s: string) int | error { return 1 }\nfn main() { x := parse("1") or 0\nprint(x) }`)
+        .diagnostics[0]?.message,
+    ).toContain("'or' would silently discard an error");
+  });
+
   test("カードの新項目: 関数型注釈 fn(int) int — ユーザー定義の高階関数が書ける", () => {
     const out = runSource(`fn apply(f: fn(int) int, x: int) int {
       return f(x)
@@ -511,7 +559,7 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
         if calls < 3 { return error("boom") }
         return 99
       }
-      print(retryInt(flaky, 5) or 0)
+      print(retryInt(flaky, 5) or _ => 0)
 
       add10 := makeAdder(10)
       print(add10(5))
@@ -748,7 +796,7 @@ describe("e2e", () => {
 
   test("errors.mesh — union型エラーハンドリング(is / or / match)", () => {
     expect(runExample("errors.mesh")).toBe(
-      "10 / 3 = 3\nfallback: 0\ncaught: division by zero\nmatch says: 3\n",
+      "10 / 3 = 3\nfallback: 0\nlogged: 16\ncaught: division by zero\nmatch says: 3\n",
     );
   });
 
@@ -992,7 +1040,7 @@ describe("e2e", () => {
       return n
     }
     fn doubled(n: int) int | error {
-      v := parseEven(n)!
+      v := parseEven(n)?
       return v * 2
     }
     fn main() {
@@ -1270,8 +1318,8 @@ describe("e2e", () => {
       return error("boom")
     }
     fn main() {
-      print(f(true) or 0)
-      print(f(false) or 0)
+      print(f(true) or _ => 0)
+      print(f(false) or _ => 0)
     }`);
     expect(out).toBe("10\n0\n");
   });
@@ -1404,7 +1452,7 @@ describe("e2e", () => {
         print("failed: \${m}")
       }
 
-      k := toInt("nope") or -1
+      k := toInt("nope") or _ => -1
       print(k)
     }`);
     expect(out).toBe("43\nfailed: \"abc\" is not a valid int\n-1\n");
@@ -1412,13 +1460,13 @@ describe("e2e", () => {
 
   test("標準ライブラリ第二弾: toIntは符号・境界値も正しく扱う", () => {
     const out = runSource(`fn main() {
-      a := toInt("-5") or 0
+      a := toInt("-5") or _ => 0
       print(a)
-      b := toInt("3.14") or -1
+      b := toInt("3.14") or _ => -1
       print(b)
-      c := toInt("") or -1
+      c := toInt("") or _ => -1
       print(c)
-      d := toInt(" 5") or -1
+      d := toInt(" 5") or _ => -1
       print(d)
     }`);
     expect(out).toBe("-5\n-1\n-1\n-1\n");

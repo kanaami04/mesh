@@ -405,12 +405,17 @@ class Codegen {
 
       case "prop": {
         this.propStack[this.propStack.length - 1] = true;
+        if (expr.context) {
+          return `(await __propCtx(${this.genExpr(expr.operand)}, async () => ${this.genExpr(expr.context)}))`;
+        }
         return `__prop(${this.genExpr(expr.operand)})`;
       }
 
-      case "orElse":
-        // 右辺は失敗時にだけ評価する(遅延評価)
-        return `(await __or(${this.genExpr(expr.left)}, async () => ${this.genExpr(expr.right)}))`;
+      case "orElse": {
+        // 右辺は失敗時にだけ評価する(遅延評価)。束縛形は失敗値を引数で受ける
+        const param = expr.binding !== undefined && expr.binding !== "_" ? expr.binding : "";
+        return `(await __or(${this.genExpr(expr.left)}, async (${param}) => ${this.genExpr(expr.right)}))`;
+      }
 
       case "match": {
         // match r { error => A  int => B } は

@@ -299,13 +299,19 @@ export interface IsExpr extends ExprBase {
   target: TypeNode;
 }
 export interface PropExpr extends ExprBase {
-  kind: "prop"; // f()! — none/error なら呼び出し元へ即伝播
+  kind: "prop"; // f()? — none/error なら呼び出し元へ即伝播
   operand: Expr;
+  // f() ? "line ${i}: bad" — 失敗時だけ評価される文脈(文字列リテラル/補間のみ)。
+  // 付けた場合、none/error どちらの失敗も error("文脈[: 元メッセージ]") として伝播する
+  context?: Expr;
 }
 export interface OrElseExpr extends ExprBase {
-  kind: "orElse"; // f() or fallback — none/error なら右辺の値を使う
+  kind: "orElse"; // f() or fallback — none なら右辺の値を使う(errorには束縛形が必須)
   left: Expr;
   right: Expr;
+  // f() or e => fallback — 失敗値(none/error)を e に束縛して右辺を評価。
+  // error を含む union のフォールバックはこの形が必須("_" で意図的に捨てたことを字面に残す)
+  binding?: string;
 }
 export interface MapLit extends ExprBase {
   kind: "mapLit"; // map<string, int>{"a": 1, "b": 2}

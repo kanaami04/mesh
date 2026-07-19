@@ -173,7 +173,7 @@ fn main() {
 	}
 	print("10 / 3 =", result)
 
-	fallback := divide(1, 0) or 0
+	fallback := divide(1, 0) or _ => 0
 	print("fallback: \${fallback}")
 
 	bad := divide(1, 0)

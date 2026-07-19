@@ -136,8 +136,9 @@ const __imod = (a, b, at) => {
   return a % b;
 };
 // union路線の道具:
-// __prop: f()! — none/error なら __Propagate を投げて呼び出し元へ即 return させる
-// __or:   f() or fallback — none/error なら fallback の値(遅延評価)
+// __prop:    f()? — none/error なら __Propagate を投げて呼び出し元へ即 return させる
+// __propCtx: f() ? "ctx" — 失敗を error("ctx[: 元メッセージ]") に包んで伝播(noneも昇格)
+// __or:      f() or fallback — 失敗なら fallback の値(遅延評価。束縛形は失敗値を引数で受ける)
 class __Propagate {
   constructor(value) {
     this.value = value;
@@ -147,7 +148,14 @@ const __prop = (v) => {
   if (v === null || v instanceof Error) throw new __Propagate(v);
   return v;
 };
-const __or = async (v, fallback) => (v === null || v instanceof Error ? fallback() : v);
+// ctx は失敗時にだけ評価する(or の右辺と同じ遅延評価。補間に関数呼び出しがあっても
+// 成功パスでは走らない)
+const __propCtx = async (v, ctx) => {
+  if (v === null) throw new __Propagate(new Error(await ctx()));
+  if (v instanceof Error) throw new __Propagate(new Error((await ctx()) + ": " + v.message));
+  return v;
+};
+const __or = async (v, fallback) => (v === null || v instanceof Error ? fallback(v) : v);
 // spawn f(x): await せずに起動し、結果の受取口(channel)を返す。
 // 2段スコープ設計(2026-07-18): spawn は最も内側の wait スコープ
 // (囲む関数の本体、または wait ブロック)に登録され、そのスコープを抜けるとき必ず待たれる。

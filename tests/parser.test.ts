@@ -112,10 +112,27 @@ describe("parser", () => {
     expect(() => parse(`fn main() { return 1, 2 }`)).toThrow("multiple return values");
   });
 
-  test("後置の ! と or をパースできる", () => {
-    const [stmt] = parseBody(`x := f()! or 0`);
+  test("後置の ? と or をパースできる(文脈つき・束縛形も)", () => {
+    const [stmt] = parseBody(`x := f()? or _ => 0`);
     if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
-    expect(stmt.values[0].kind).toBe("orElse");
+    const or = stmt.values[0];
+    if (or.kind !== "orElse") throw new Error("unexpected");
+    expect(or.binding).toBe("_");
+    expect(or.left.kind).toBe("prop");
+
+    // 文脈つき伝播: f() ? "ctx"
+    const [stmt2] = parseBody(`x := f() ? "line \${i}: bad"`);
+    if (stmt2.kind !== "shortVarDecl") throw new Error("unexpected");
+    const prop = stmt2.values[0];
+    if (prop.kind !== "prop") throw new Error("unexpected");
+    expect(prop.context).toBeDefined();
+
+    // 束縛形: or e => 式
+    const [stmt3] = parseBody(`x := f() or e => g(e)`);
+    if (stmt3.kind !== "shortVarDecl") throw new Error("unexpected");
+    const or3 = stmt3.values[0];
+    if (or3.kind !== "orElse") throw new Error("unexpected");
+    expect(or3.binding).toBe("e");
   });
 
   test("match式: アーム・複数パターン・ワイルドカード", () => {
