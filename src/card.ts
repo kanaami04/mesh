@@ -205,6 +205,43 @@ Building an optional result imperatively (e.g. "the best so far"):
   per variant works too — same recursion mechanism, just without the compiler verifying every
   \`kind\`/field combination for you.
 
+## Structured errors (discriminated unions that '?'/'or' can propagate)
+
+Plain \`error\` is a message string — fine until you need to branch on WHAT failed (retry a
+timeout, but 404 a not-found). Mark a discriminated union (or a plain struct) with \`error\` and
+\`?\`/\`or\` treat it as a failure, exactly like \`none\`/\`error\`:
+
+    error type DbError = { kind: "notFound", table: string } | { kind: "timeout", ms: int }
+
+    fn find(id: int) User | DbError {
+        if id == 1 { return User{name: "a", age: 1} }
+        return DbError{kind: "notFound", table: "users"}
+    }
+
+    fn useIt(id: int) string | DbError {
+        u := find(id)?               // DbError propagates because DbError was declared 'error type'
+        return u.name
+    }
+
+    x := find(2) or e => match e {   // bound form: e is DbError, branch on its kind
+        { kind: "notFound" } => defaultUser()
+        { kind: "timeout" } => retryUser()
+    }
+
+- \`error type X = { ... } | { ... }\` or the single-shape form \`error struct X { field: T }\` —
+  put \`error\` right before \`type\`/\`struct\`. Members must be struct-shaped (inline \`{ ... }\`,
+  or a fresh \`error struct\`) — you can't retroactively tag an existing named type
+  (\`error type X = SomeOtherStruct\` is a compile error; declare \`error struct SomeOtherStruct\`
+  instead, or use an inline shape).
+- Plain \`?\` (no context) propagates a structured error as-is. The context form
+  (\`f() ? "line \${i}"\`) does NOT work with structured errors — it always converts to a message
+  string, and a structured error has no message to convert. Use plain \`?\`, or narrow it with
+  \`is\`/\`match\` first, and build your own \`error("...")\` if you need a string.
+- \`or\` follows the same explicitness rule as plain \`error\`: a union containing a structured
+  error type requires the bound form (\`or e => ...\` / \`or _ => ...\`); only \`none\`-only unions
+  can use the plain fallback form.
+- This is purely additive — plain \`error\`/\`none\` and existing \`?\`/\`or\` code are unaffected.
+
 ## Structs, maps & methods
 
     u := User{name: "a", age: 1}   // ALL fields required (no zero values / defaults)

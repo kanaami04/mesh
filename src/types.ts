@@ -19,8 +19,10 @@ export type Type =
   | { kind: "typeParam"; name: string }
   // struct User { name: string }。fields は再帰型(Node | none 等)を許すため
   // 宣言の解決時に後から埋められる(knot-tying)。v1 の同一性判定は名前ベース
-  // (無名 {...} 型式が入るときに構造的比較へ拡張する)
-  | { kind: "struct"; name: string; fields: StructField[] };
+  // (無名 {...} 型式が入るときに構造的比較へ拡張する)。
+  // isErrorType(F-2後半): `error type X = ...` / `error struct X { ... }` で宣言されたメンバーに立つ。
+  // '?'/'or' はnone/組み込みerrorに加えてこれも「失敗」として伝播対象にする
+  | { kind: "struct"; name: string; fields: StructField[]; isErrorType?: boolean };
 
 export interface StructField {
   name: string;

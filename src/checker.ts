@@ -189,6 +189,9 @@ class Checker {
   // このパッケージのトップレベル宣言(exports収集用): 名前 → exportedフラグ
   private typeExported = new Map<string, boolean>();
   private fnDecls = new Map<string, { type: Type; exported: boolean }>();
+  // error type X = ... / error struct X { ... }(F-2後半)で宣言された名前の集合。
+  // resolveAliasがこれを見て、そのエイリアスの構造体メンバーに isErrorType を立てる
+  private errorTypeNames = new Set<string>();
 
   constructor(
     // このcheckerが検査するパッケージ名("main" 以外のstruct名は pkg.Name に修飾される)
@@ -354,6 +357,7 @@ class Checker {
       for (const f of node.fields) {
         struct.fields.push({ name: f.name, type: this.resolveType(f.type) });
       }
+      if (this.errorTypeNames.has(name)) this.tagErrorMembers(struct, displayName, name, pos);
       return struct;
     }
     // union も同じ知恵の輪(knot-tying)で解決する。判別可能unionが自分自身を struct フィールド
@@ -380,6 +384,7 @@ class Checker {
         return ANY;
       }
       union.members = flattened.kind === "union" ? flattened.members : [flattened];
+      if (this.errorTypeNames.has(name)) this.tagErrorMembers(union, null, name, pos);
       return union;
     }
     if (this.resolvingAliases.has(name)) {
@@ -390,7 +395,38 @@ class Checker {
     const resolved = this.resolveType(node);
     this.resolvingAliases.delete(name);
     this.resolvedAliases.set(name, resolved);
+    if (this.errorTypeNames.has(name)) this.tagErrorMembers(resolved, null, name, pos);
     return resolved;
+  }
+
+  // error type/struct 宣言(F-2後半)で名付けられたエイリアスの各メンバーに isErrorType を立てる。
+  // 「このエイリアス専用に今まさに作られた struct」だけが対象(無名 {...} 由来、または
+  // struct宣言直下の器そのもの=freshName)。既存の名前付き型への参照にタグを付けると、
+  // その型が使われる他の場所すべてに漏れてしまうので、そこは拒否する
+  private tagErrorMembers(t: Type, freshName: string | null, declName: string, pos: Pos) {
+    const members = t.kind === "union" ? t.members : [t];
+    for (const m of members) {
+      if (m.kind !== "struct") {
+        this.error(
+          pos,
+          `error type '${declName}' members must be struct-shaped (like a discriminated union) — got ${typeToString(m)}`,
+        );
+      } else if (m.name === "(anonymous)" || m.name === freshName) {
+        m.isErrorType = true;
+      } else {
+        this.error(
+          pos,
+          `error type '${declName}' can't tag the existing type '${m.name}' — use an inline struct ` +
+            `shape ({ ... }) or declare a fresh 'error struct ${m.name} { ... }' instead`,
+        );
+      }
+    }
+  }
+
+  // '?'/'or' の伝播対象か: 組み込みのnone/error(isFailure)に加えて、F-2後半のerror
+  // type/structでタグ付けされた構造化エラーもここで「失敗」として扱う
+  private isFailureType(t: Type): boolean {
+    return isFailure(t) || (t.kind === "struct" && t.isErrorType === true);
   }
 
   private fnType(params: { type: TypeNode }[], ret: TypeNode | null): Type {
@@ -425,6 +461,7 @@ class Checker {
         }
         this.typeTable.set(td.name, td.node);
         this.typeExported.set(td.name, td.exported);
+        if (td.isError) this.errorTypeNames.add(td.name);
       }
     }
     // 全エイリアスを解決しておく(未使用でも循環や未知型を報告するため)
@@ -896,26 +933,42 @@ class Checker {
         }
         if (t.kind === "any") return ANY;
         if (t.kind !== "union") {
-          this.error(expr.pos, `'?' needs a union with none/error, got ${typeToString(t)}`);
+          this.error(expr.pos, `'?' needs a union with none/error/an error type, got ${typeToString(t)}`);
           return t;
         }
-        const failures = t.members.filter(isFailure);
+        const failures = t.members.filter((m) => this.isFailureType(m));
         if (failures.length === 0) {
-          this.error(expr.pos, `'?' has nothing to propagate — ${typeToString(t)} has no none/error`);
+          this.error(
+            expr.pos,
+            `'?' has nothing to propagate — ${typeToString(t)} has no none/error/error type`,
+          );
         }
-        const ret = this.retStack[this.retStack.length - 1] ?? VOID;
-        // 文脈つきなら伝播するのは常に error。素の ? は失敗メンバーをそのまま伝播
-        const propagated = expr.context ? (failures.length > 0 ? [ERROR] : []) : failures;
-        for (const f of propagated) {
-          if (!assignable(f, ret)) {
-            this.error(
-              expr.pos,
-              `'?' propagates ${typeToString(f)}, but this function returns ${typeToString(ret)}` +
-                ` — add '${typeToString(f)}' to the return type or handle it with 'is'`,
-            );
+        // 文脈つきは常に error に変換して伝播するので、メッセージを持たない構造化エラー
+        // (F-2後半)は文脈つきでは伝播できない — 素の '?' か 'is'/'match' での分岐に誘導する。
+        // ここで弾いたら戻り値型との突き合わせ(下)はスキップする — ERRORへの変換自体が
+        // 成立しないので「'error'を戻り値型に足せ」という誘導は的外れになるため
+        const structured = failures.filter((f) => f.kind === "struct" && f.isErrorType);
+        if (expr.context && structured.length > 0) {
+          this.error(
+            expr.pos,
+            `'?' with context can't convert ${structured.map(typeToString).join(" | ")} to a message` +
+              ` — use plain '?' (no context) to propagate it as-is, or handle it with 'is'/'match' first`,
+          );
+        } else {
+          const ret = this.retStack[this.retStack.length - 1] ?? VOID;
+          // 文脈つきなら伝播するのは常に error。素の ? は失敗メンバーをそのまま伝播
+          const propagated = expr.context ? (failures.length > 0 ? [ERROR] : []) : failures;
+          for (const f of propagated) {
+            if (!assignable(f, ret)) {
+              this.error(
+                expr.pos,
+                `'?' propagates ${typeToString(f)}, but this function returns ${typeToString(ret)}` +
+                  ` — add '${typeToString(f)}' to the return type or handle it with 'is'`,
+              );
+            }
           }
         }
-        return unionWithout(t, isFailure); // 成功だけが残る(空なら void = 文としてのみ使える)
+        return unionWithout(t, (m) => this.isFailureType(m)); // 成功だけが残る(空ならvoid=文としてのみ使える)
       }
 
       case "match":
@@ -931,9 +984,9 @@ class Checker {
       case "orElse": {
         const t = this.checkExprSingle(expr.left);
         const checkRight = (): Type => {
-          // 束縛形 or e => ... は失敗値(none/errorのunion)を e に束縛して右辺を評価する
+          // 束縛形 or e => ... は失敗値(none/error/error型のunion)を e に束縛して右辺を評価する
           if (expr.binding !== undefined && expr.binding !== "_") {
-            const failures = t.kind === "union" ? t.members.filter(isFailure) : [];
+            const failures = t.kind === "union" ? t.members.filter((m) => this.isFailureType(m)) : [];
             this.pushScope();
             this.declare(expr.binding, failures.length > 0 ? unionOf(failures) : ANY, expr.pos);
             const r = this.checkExprSingle(expr.right);
@@ -946,21 +999,22 @@ class Checker {
           checkRight();
           return ANY;
         }
-        if (t.kind !== "union" || !t.members.some(isFailure)) {
+        if (t.kind !== "union" || !t.members.some((m) => this.isFailureType(m))) {
           this.error(expr.pos, `left side of 'or' never fails — it is ${typeToString(t)}`);
           checkRight();
           return t;
         }
-        // Go式の明示性(2026-07-19決定): error を含む union のフォールバックは束縛形が必須。
-        // 捨てる場合も `or _ => ...` と書かせて「握りつぶし」を字面(grep可能)に残す
-        const hasError = t.members.some((m) => m.kind === "prim" && m.name === "error");
-        if (hasError && expr.binding === undefined) {
+        // Go式の明示性(2026-07-19決定): error(組み込み/F-2後半の構造化error型)を含む union の
+        // フォールバックは束縛形が必須。捨てる場合も `or _ => ...` と書かせて
+        // 「握りつぶし」を字面(grep可能)に残す
+        const hasNonNoneFailure = t.members.some((m) => m.kind !== "none" && this.isFailureType(m));
+        if (hasNonNoneFailure && expr.binding === undefined) {
           this.error(
             expr.pos,
             `'or' would silently discard an error — bind it ('or e => ...') or discard it explicitly ('or _ => ...')`,
           );
         }
-        const rest = unionWithout(t, isFailure);
+        const rest = unionWithout(t, (m) => this.isFailureType(m));
         if (typeEquals(rest, VOID)) {
           this.error(expr.pos, `left side of 'or' has no success value — handle it with 'is' instead`);
           checkRight();
@@ -1187,6 +1241,9 @@ class Checker {
         if (missing.length > 0) {
           this.error(expr.pos, `missing field(s) in ${displayName}: ${missing.map((d) => d.name).join(", ")}`);
         }
+        // F-2後半: このリテラルの具体的な形(union経由なら絞り込んだメンバー)がerror type
+        // としてタグ付けされていれば、codegenが実行時マーカーを埋め込めるようにAST側へ残す
+        expr.isErrorInstance = structType.isErrorType === true;
         // 式全体の型は union 自体(narrow なメンバー型ではない)。match/is で絞り込むまでは
         // 常に union として扱う(mut var再代入・widening等を新規に考えなくて済むようにする)
         return resolved.kind === "union" ? resolved : t;

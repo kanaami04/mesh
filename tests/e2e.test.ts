@@ -723,6 +723,44 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     }`);
     expect(out).toBe("1\n");
   });
+
+  test("構造化エラー(F-2後半): error type の '?'/'or' 伝播が実際に正しい値を運ぶ", () => {
+    const out = runSource(`error type DbError = { kind: "notFound", table: string } | { kind: "timeout", ms: int }
+
+    fn find(id: int) int | DbError {
+        if id == 1 { return 42 }
+        if id == 2 { return DbError{kind: "timeout", ms: 100} }
+        return DbError{kind: "notFound", table: "users"}
+    }
+
+    fn useIt(id: int) int | DbError {
+        v := find(id)?
+        return v + 1
+    }
+
+    fn main() {
+        r1 := useIt(1)
+        if r1 is int { print(r1) } else { print("unexpected error") }
+
+        r2 := useIt(2)
+        if r2 is { kind: "timeout" } {
+            print("timeout after \${r2.ms}ms")
+        } else {
+            print(r2)
+        }
+
+        r3 := useIt(3)
+        match r3 {
+            { kind: "notFound" } => print("not found in \${r3.table}")
+            { kind: "timeout" } => print("timeout")
+            int => print(r3)
+        }
+
+        x := find(3) or e => -1
+        print(x)
+    }`);
+    expect(out).toBe("43\ntimeout after 100ms\nnot found in users\n-1\n");
+  });
 });
 
 describe("モジュールシステム(import / export)", () => {

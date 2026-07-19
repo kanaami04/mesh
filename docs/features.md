@@ -146,6 +146,19 @@
       `'or' would silently discard an error — bind it ...` の誘導エラー。右辺は失敗時のみ評価 |
 | `== none` の禁止 | ✅ | narrowing が効く `is none` に一本化(P1)。`==` で書くと誘導エラー |
 | `error("msg")` でエラー生成 | ✅ | |
+| 構造化エラー(`error type`/`error struct`)の`?`/`or`伝播対象化 | ✅ | 2026-07-19実装(批評F-2後半、kanayama承認: 明示マーカー方式)。
+      `error type DbError = { kind: "notFound", table: string } \| { kind: "timeout", ms: int }` /
+      単体形`error struct DbError { table: string }` — `type`/`struct`宣言に`error`を前置すると、
+      そのメンバーが`none`/組み込み`error`と同じく`?`/`or`の伝播対象になる。「どのunionメンバーが
+      失敗か」を位置(先頭=成功等)ではなく**宣言側の明示マーカー**で決める設計(P2に沿う)。
+      素の`?`はそのまま伝播、`or`は束縛形必須(既存のerror方針と同じ)、束縛した値は`is`/`match`で
+      `kind`ごとに分岐できる。文脈つき`f() ? "ctx"`は構造化エラーを**弾く**(メッセージへ変換
+      できないため、素の`?`か`is`/`match`に誘導)。宣言時に2つ検証: (1) メンバーはstruct形のみ、
+      (2) 既存の名前付き型をそのままタグ付けすることは不可(`error type X = ExistingStruct`は
+      エラー — その型が使われる他の場所すべてに`isErrorType`が漏れるのを防ぐため。無名`{...}`か
+      `error struct`での新規宣言に誘導)。実行時は構造化エラーの struct リテラル生成時に
+      Symbolキー(`__ERR`)で実体マーカーを埋め込み、`__prop`/`__or`がそれを見て判定する
+      (`instanceof Error`を使わないので`__fmt`によるprint表示は普通のstructのまま壊れない) |
 | 例外 try / catch / throw | ❌ | P2: エラーは全てシグネチャに現れる |
 | `panic()` / `recover` | ❌ | requirements 5.5。故障時はランタイムが即停止 |
 | `must()` | ❌ | panic方針の系 |

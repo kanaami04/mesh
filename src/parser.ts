@@ -116,10 +116,17 @@ class Parser {
         throw new CompileError("imports must come before all declarations", this.peek().pos);
       }
       const exported = this.match("export");
+      // error type X = ... / error struct X { ... }(F-2後半): "error" は予約語ではなく
+      // ("error"は組み込み型名としてチェッカー側で守られている)、直後が type/struct のときだけ
+      // マーカーとして読む文脈依存キーワード。1トークン先読みで曖昧さなく判定できる
+      const isError =
+        this.check("ident") && this.peek().value === "error" &&
+        (this.peek(1).type === "type" || this.peek(1).type === "struct");
+      if (isError) this.next();
       if (this.check("type")) {
-        types.push(this.parseTypeDecl(exported));
+        types.push(this.parseTypeDecl(exported, isError));
       } else if (this.check("struct")) {
-        types.push(this.parseStructDecl(exported));
+        types.push(this.parseStructDecl(exported, isError));
       } else if (this.check("fn")) {
         fns.push(this.parseFnDecl(exported));
       } else {
@@ -152,7 +159,7 @@ class Parser {
 
   // struct User { name: string  age: int } — 意味的には型への名付け(typeと同じ)なので
   // TypeDecl として登録する。フィールドは改行区切り
-  private parseStructDecl(exported: boolean): TypeDecl {
+  private parseStructDecl(exported: boolean, isError: boolean): TypeDecl {
     const start = this.expect("struct", "at start of struct declaration");
     const name = this.expect("ident", "as struct name").value;
     this.expect("{", "after struct name");
@@ -171,6 +178,7 @@ class Parser {
       name,
       node: { kind: "structType", fields, pos: start.pos },
       exported,
+      isError,
       pos: start.pos,
     };
   }
@@ -178,7 +186,7 @@ class Parser {
   // type Status = "active" | "banned"
   // type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } — 判別可能union
   // (C-1)。無名の {...} 型式は union の中でだけ有効(B-5): 単独で書いたら struct を使えと誘導する
-  private parseTypeDecl(exported: boolean): TypeDecl {
+  private parseTypeDecl(exported: boolean, isError: boolean): TypeDecl {
     const start = this.expect("type", "at start of type declaration");
     const name = this.expect("ident", "as type name").value;
     this.expect("=", "after type name");
@@ -190,7 +198,7 @@ class Parser {
           first.pos,
         );
       }
-      return { kind: "typeDecl", name, node: first, exported, pos: start.pos };
+      return { kind: "typeDecl", name, node: first, exported, isError, pos: start.pos };
     }
     const members: TypeNode[] = [first];
     while (this.match("|")) members.push(this.parseUnionMember());
@@ -199,6 +207,7 @@ class Parser {
       name,
       node: { kind: "union", members, pos: first.pos },
       exported,
+      isError,
       pos: start.pos,
     };
   }

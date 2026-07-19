@@ -45,6 +45,7 @@ export interface TypeDecl {
   name: string;
   node: TypeNode;
   exported: boolean; // export type X = ... / export struct X { ... }
+  isError: boolean; // error type X = ... / error struct X { ... }(F-2後半): '?'/'or'の伝播対象にする
   pos: Pos;
 }
 
@@ -333,6 +334,9 @@ export interface StructLit extends ExprBase {
   name: string;
   pkg?: string;
   fields: { name: string; value: Expr; pos: Pos }[];
+  // checkerが埋める(F-2後半): このリテラルの型がerror typeとしてマークされていれば、
+  // codegenが実行時マーカーを埋め込んで '?'/'or' が実際の値から判定できるようにする
+  isErrorInstance?: boolean;
 }
 export interface MatchExpr extends ExprBase {
   kind: "match"; // match r { error => "failed"  int => "ok: ${r}" }

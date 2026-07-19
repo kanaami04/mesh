@@ -136,16 +136,23 @@ const __imod = (a, b, at) => {
   return a % b;
 };
 // union路線の道具:
-// __prop:    f()? — none/error なら __Propagate を投げて呼び出し元へ即 return させる
-// __propCtx: f() ? "ctx" — 失敗を error("ctx[: 元メッセージ]") に包んで伝播(noneも昇格)
+// __prop:    f()? — none/error/構造化error型 なら __Propagate を投げて呼び出し元へ即 return させる
+// __propCtx: f() ? "ctx" — 失敗を error("ctx[: 元メッセージ]") に包んで伝播(noneも昇格。
+//            構造化error型はメッセージを持たないのでcheckerがこの形自体を弾く)
 // __or:      f() or fallback — 失敗なら fallback の値(遅延評価。束縛形は失敗値を引数で受ける)
 class __Propagate {
   constructor(value) {
     this.value = value;
   }
 }
+// F-2後半: error type/struct で宣言された構造化エラーの実体マーカー。struct リテラルの生成時に
+// codegen が埋め込む(__errTag参照)。none(null)/組み込みerror(instanceof Error)と違って
+// 構造化エラーはただのオブジェクトなので、Symbolキーで「失敗である」ことを実行時にも残す
+const __ERR = Symbol("meshErrorType");
+const __errTag = (obj) => ((obj[__ERR] = true), obj);
+const __isFailureValue = (v) => v === null || v instanceof Error || (typeof v === "object" && v !== null && v[__ERR] === true);
 const __prop = (v) => {
-  if (v === null || v instanceof Error) throw new __Propagate(v);
+  if (__isFailureValue(v)) throw new __Propagate(v);
   return v;
 };
 // ctx は失敗時にだけ評価する(or の右辺と同じ遅延評価。補間に関数呼び出しがあっても
@@ -155,7 +162,7 @@ const __propCtx = async (v, ctx) => {
   if (v instanceof Error) throw new __Propagate(new Error((await ctx()) + ": " + v.message));
   return v;
 };
-const __or = async (v, fallback) => (v === null || v instanceof Error ? fallback(v) : v);
+const __or = async (v, fallback) => (__isFailureValue(v) ? fallback(v) : v);
 // spawn f(x): await せずに起動し、結果の受取口(channel)を返す。
 // 2段スコープ設計(2026-07-18): spawn は最も内側の wait スコープ
 // (囲む関数の本体、または wait ブロック)に登録され、そのスコープを抜けるとき必ず待たれる。

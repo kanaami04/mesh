@@ -92,6 +92,27 @@ describe("parser", () => {
     expect(fn3.typeParams).toEqual([]);
   });
 
+  test("構造化エラー(F-2後半): error type X = ... / error struct X { ... } の isError フラグ", () => {
+    const t1 = parse(`error type DbError = { kind: "notFound" } | { kind: "timeout" }`).types[0];
+    expect(t1.isError).toBe(true);
+    expect(t1.name).toBe("DbError");
+
+    const t2 = parse(`error struct DbError { table: string }`).types[0];
+    expect(t2.isError).toBe(true);
+    expect(t2.node).toMatchObject({ kind: "structType" });
+
+    // "error" マーカー無しは今まで通り false
+    const t3 = parse(`type Status = "active" | "banned"`).types[0];
+    expect(t3.isError).toBe(false);
+    const t4 = parse(`struct User { name: string }`).types[0];
+    expect(t4.isError).toBe(false);
+
+    // export と組み合わせても読める(export が先)
+    const t5 = parse(`export error type DbError = { kind: "notFound" } | { kind: "timeout" }`).types[0];
+    expect(t5.isError).toBe(true);
+    expect(t5.exported).toBe(true);
+  });
+
   test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
     const program = parse(
       `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,

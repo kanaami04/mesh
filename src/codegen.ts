@@ -519,7 +519,10 @@ class Codegen {
       case "structLit": {
         // User{name: "alice"} → ({ name: "alice" })。文の先頭でもブロックと誤読されないよう括弧で包む
         const fields = expr.fields.map((f) => `${f.name}: ${this.genExpr(f.value)}`);
-        return `({ ${fields.join(", ")} })`;
+        const obj = `{ ${fields.join(", ")} }`;
+        // F-2後半: error type/struct のメンバーは実行時マーカーを付け、'?'/'or' が
+        // 値だけを見て「これは失敗だ」と判定できるようにする(checkerのisErrorInstance参照)
+        return expr.isErrorInstance ? `__errTag(${obj})` : `(${obj})`;
       }
     }
   }

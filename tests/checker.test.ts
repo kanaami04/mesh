@@ -789,6 +789,101 @@ fn main() { print(g()) }`);
     ]);
   });
 
+  describe("構造化エラー(F-2後半): error type/struct と'?'/'or'の和解", () => {
+    test("'?' は error type とタグ付けされたメンバーも伝播できる", () => {
+      const errors = errorsOf(`error type DbError = { kind: "notFound", table: string } | { kind: "timeout", ms: int }
+fn find(id: int) int | DbError {
+	return DbError{kind: "notFound", table: "users"}
+}
+fn useIt(id: int) int | DbError {
+	v := find(id)?
+	return v + 1
+}
+fn main() { print(useIt(1)) }`);
+      expect(errors).toEqual([]);
+    });
+
+    test("'error struct X { ... }' 単体形でも伝播できる", () => {
+      const errors = errorsOf(`error struct DbError { table: string }
+fn find(id: int) int | DbError { return DbError{table: "users"} }
+fn useIt(id: int) int | DbError {
+	v := find(id)?
+	return v
+}
+fn main() { print(useIt(1)) }`);
+      expect(errors).toEqual([]);
+    });
+
+    test("'error' マーカーの無い普通のstructは今まで通り伝播できない", () => {
+      const errors = errorsOf(`struct NotAnError { message: string }
+fn find(id: int) int | NotAnError { return NotAnError{message: "x"} }
+fn useIt(id: int) int | NotAnError {
+	v := find(id)?
+	return v
+}
+fn main() { print(useIt(1)) }`);
+      expect(errors).toEqual([
+        expect.stringContaining("'?' has nothing to propagate — int | NotAnError has no none/error/error type"),
+      ]);
+    });
+
+    test("'or' はerror typeを含むと束縛形が必須で、束縛したら kind で分岐できる", () => {
+      const src = (form: string) => `error type DbError = { kind: "notFound", table: string } | { kind: "timeout", ms: int }
+fn find(id: int) int | DbError { return DbError{kind: "notFound", table: "users"} }
+fn main() {
+	${form}
+	print(x)
+}`;
+      expect(errorsOf(src(`x := find(1) or -1`))).toEqual([
+        expect.stringContaining("'or' would silently discard an error"),
+      ]);
+      expect(
+        errorsOf(src(`x := find(1) or e => match e { { kind: "notFound" } => -1  { kind: "timeout" } => -2 }`)),
+      ).toEqual([]);
+    });
+
+    test("'?' の文脈つき形( f() ? \"ctx\" )は構造化エラーを弾く(メッセージに変換できないため)", () => {
+      const errors = errorsOf(`error struct DbError { table: string }
+fn find(id: int) int | DbError { return DbError{table: "users"} }
+fn useIt(id: int) int | DbError {
+	v := find(id) ? "useIt failed"
+	return v
+}
+fn main() { print(useIt(1)) }`);
+      expect(errors).toEqual([
+        expect.stringContaining("'?' with context can't convert DbError to a message"),
+      ]);
+    });
+
+    test("error type の宣言時検証: メンバーはstruct形でないといけない", () => {
+      const errors = errorsOf(`error type Bad = int\nfn main() { print(1) }`);
+      expect(errors).toEqual([
+        expect.stringContaining("error type 'Bad' members must be struct-shaped"),
+      ]);
+    });
+
+    test("error type の宣言時検証: 既存の名前付き型をそのままタグ付けすることはできない", () => {
+      const errors = errorsOf(`struct Existing { x: int }
+error type Aliased = Existing
+fn main() { print(1) }`);
+      expect(errors).toEqual([
+        expect.stringContaining("error type 'Aliased' can't tag the existing type 'Existing'"),
+      ]);
+    });
+
+    test("既存の none/error の伝播(F-2前半の文脈つき?含む)は今まで通り動く", () => {
+      const errors = errorsOf(`fn parse(s: string) int | error {
+	return toInt(s)
+}
+fn useIt(s: string) int | error {
+	v := parse(s) ? "bad config"
+	return v + 1
+}
+fn main() { print(useIt("41")) }`);
+      expect(errors).toEqual([]);
+    });
+  });
+
   test("if の条件は bool でなければならない", () => {
     expect(inMain(`if 1 {\n}`)).toEqual([expect.stringContaining("must be bool")]);
   });
