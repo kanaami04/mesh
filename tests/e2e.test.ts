@@ -410,6 +410,38 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
         .diagnostics[0]?.message,
     ).toContain("type alias cycle");
   });
+
+  test("カードの新項目: 自己参照する判別可能unionの回避策(名前付き再帰struct+T|noneの疑似optional)", () => {
+    const out = runSource(`struct Expr {
+        kind: string
+        val: int | none
+        left: Expr | none
+        right: Expr | none
+    }
+    fn num(v: int) Expr { return Expr{kind: "num", val: v, left: none, right: none} }
+    fn add(l: Expr, r: Expr) Expr { return Expr{kind: "add", val: none, left: l, right: r} }
+
+    fn evalExpr(e: Expr) int {
+        if e.kind == "num" {
+            return e.val or 0
+        }
+        l := e.left
+        if l is none { return 0 }
+        r := e.right
+        if r is none { return 0 }
+        return evalExpr(l) + evalExpr(r)
+    }
+
+    fn main() {
+        tree := add(num(2), add(num(3), num(4)))
+        print(evalExpr(tree))
+    }`);
+    expect(out).toBe("9\n");
+    // カードどおり、is を || でつないだ複合条件はまだ絞り込まれない(要調査として記録済み)
+    expect(
+      compile(`fn main() {\nl: int | none = 1\nr: int | none = 2\nif l is none || r is none {\nreturn\n}\nprint(l + r)\n}`).code,
+    ).toBe(null);
+  });
 });
 
 describe("e2e", () => {

@@ -127,8 +127,36 @@ Building an optional result imperatively (e.g. "the best so far"):
   (same names, same types) are interchangeable, and a named \`struct\` literal can be used
   wherever an anonymous \`{ ... }\` union member with the same fields is expected.
 - Self-referential discriminated unions (e.g. a tree: \`{ kind: "leaf" } | { kind: "node", left: Tree, right: Tree }\`)
-  are NOT supported yet — the type resolver reports \`type alias cycle\`. Use a named recursive
-  \`struct\` (with a \`kind: string\` field checked at runtime, or separate optional fields) instead.
+  are NOT supported yet — the type resolver reports \`type alias cycle\`. For recursive shapes
+  (ASTs, trees, linked structures), use a named recursive \`struct\` instead, with a plain
+  \`kind: string\` tag checked manually and every variant-specific field typed \`T | none\`
+  (struct recursion through \`T | none\` already works — same pattern as a linked-list \`Node\`):
+
+      struct Expr {
+          kind: string           // "num" or "add" — YOU check this string, the compiler doesn't
+          val: int | none        // set when kind == "num"
+          left: Expr | none      // set when kind == "add"
+          right: Expr | none     // set when kind == "add"
+      }
+      fn num(v: int) Expr { return Expr{kind: "num", val: v, left: none, right: none} }
+      fn add(l: Expr, r: Expr) Expr { return Expr{kind: "add", val: none, left: l, right: r} }
+
+      fn evalExpr(e: Expr) int {
+          if e.kind == "num" {
+              return e.val or 0
+          }
+          l := e.left
+          if l is none { return 0 }        // narrow one field per if — see note below
+          r := e.right
+          if r is none { return 0 }
+          return evalExpr(l) + evalExpr(r)   // recursion works: Expr is a normal named struct
+      }
+
+  This trades the exhaustiveness checking a real discriminated union would give you (the
+  compiler does NOT verify every \`kind\` value is handled, or that the "right" fields are set
+  for a given \`kind\`) for the ability to recurse at all. Narrow ONE field per \`if\` (as above)
+  — combining checks like \`if l is none || r is none\` in a single condition is NOT currently
+  narrowed (each variable needs its own \`is\`-only \`if\`).
 
 ## Structs, maps & methods
 
