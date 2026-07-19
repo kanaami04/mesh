@@ -1,6 +1,10 @@
 // トークン = ソースコードを意味のある最小単位に分解したもの。
 // 例: `x := 10` → [ident "x"] [":="] [int "10"]
 
+// diagnostic-codes.ts も Pos を import type するが、型のみの相互参照なので
+// 実行時の循環importにはならない(import type は型検査後に消える)
+import type { DiagnosticCode, Fix } from "./diagnostic-codes";
+
 export interface Pos {
   line: number;
   col: number;
@@ -114,11 +118,13 @@ export const KEYWORDS = new Set<TokenType>([
   "continue",
 ]);
 
-// コンパイルエラー(構文エラーなど)を位置情報つきで表す
+// コンパイルエラー(構文エラーなど)を位置情報つきで表す(F-13: code必須・fixは任意)
 export class CompileError extends Error {
   constructor(
     message: string,
     public pos: Pos,
+    public code: DiagnosticCode,
+    public fix?: Fix,
   ) {
     super(message);
   }

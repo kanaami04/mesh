@@ -92,7 +92,7 @@ class Parser {
     if (this.check(type)) return this.next();
     const t = this.peek();
     const got = t.type === "eof" ? "end of file" : `'${t.value}'`;
-    throw new CompileError(`expected '${type}' ${context}, but got ${got}`, t.pos);
+    throw new CompileError(`expected '${type}' ${context}, but got ${got}`, t.pos, "syntax-error");
   }
 
   private skipSemis() {
@@ -113,7 +113,7 @@ class Parser {
     }
     while (!this.check("eof")) {
       if (this.check("import")) {
-        throw new CompileError("imports must come before all declarations", this.peek().pos);
+        throw new CompileError("imports must come before all declarations", this.peek().pos, "import-order");
       }
       const exported = this.match("export");
       // error type X = ... / error struct X { ... }(F-2後半): "error" は予約語ではなく
@@ -135,6 +135,7 @@ class Parser {
             ? "'export' must be followed by a 'fn', 'struct' or 'type' declaration"
             : "only 'fn', 'struct' and 'type' declarations are allowed at the top level",
           this.peek().pos,
+          "invalid-top-level-declaration",
         );
       }
       this.skipSemis();
@@ -147,12 +148,16 @@ class Parser {
     const start = this.expect("import", "at start of import");
     const pathTok = this.expect("string", "as import path (like: import \"math\")");
     if (pathTok.parts) {
-      throw new CompileError("import path cannot use string interpolation", pathTok.pos);
+      throw new CompileError(
+        "import path cannot use string interpolation",
+        pathTok.pos,
+        "invalid-import-path",
+      );
     }
     const path = pathTok.value;
     const alias = path.split("/").pop() ?? path;
     if (alias === "") {
-      throw new CompileError("import path cannot be empty", pathTok.pos);
+      throw new CompileError("import path cannot be empty", pathTok.pos, "invalid-import-path");
     }
     return { kind: "importDecl", path, alias, pos: start.pos };
   }
@@ -191,15 +196,31 @@ class Parser {
   private parseTypeDecl(exported: boolean, isError: boolean): TypeDecl {
     const start = this.expect("type", "at start of type declaration");
     const name = this.expect("ident", "as type name").value;
-    this.expect("=", "after type name");
+    const eq = this.expect("=", "after type name");
     const first = this.parseUnionMember();
     const members: TypeNode[] = [first];
     while (this.matchUnionContinuation()) members.push(this.parseUnionMember());
     if (members.length === 1) {
       if (first.kind === "structType") {
+        // fix: `type Name =` を `struct Name` に置き換えれば、続く `{ ... }` はそのまま使える —
+        // ただしこれが安全なのはフィールドが1行1つ(改行区切り)のときだけ。inline struct型は
+        // カンマ区切り1行書きも許すが(union内で使う書式)、struct宣言はカンマを取らないので、
+        // カンマ書きのボディにこの置換をすると壊れる。2つ以上のフィールドが同じ行にあれば
+        // カンマ書きの証拠なので、その場合とisError付き(見た目が紛らわしい)は自動fixを付けない
+        const oneFieldPerLine = first.fields.every(
+          (f, i) => i === 0 || f.pos.line !== first.fields[i - 1].pos.line,
+        );
         throw new CompileError(
           `use 'struct ${name} { ... }' to define a data shape ('{...}' alone is only allowed inside a union)`,
           first.pos,
+          "bare-struct-shape",
+          isError || !oneFieldPerLine
+            ? undefined
+            : {
+                description: `replace 'type ${name} =' with 'struct ${name}'`,
+                range: { start: start.pos, end: { line: eq.pos.line, col: eq.pos.col + 1 } },
+                replacement: `struct ${name}`,
+              },
         );
       }
       return { kind: "typeDecl", name, node: first, exported, isError, pos: start.pos };
@@ -260,6 +281,7 @@ class Parser {
       throw new CompileError(
         "methods are visible wherever their struct is — export the struct instead of the method",
         start.pos,
+        "method-export-redundant",
       );
     }
     const name = this.expect("ident", "as function name").value;
@@ -314,6 +336,7 @@ class Parser {
       throw new CompileError(
         "multiple return values were removed — return one value (use a union type like 'int | error')",
         this.peek().pos,
+        "multiple-return-values-removed",
       );
     }
     return this.parseType();
@@ -389,6 +412,7 @@ class Parser {
           throw new CompileError(
             "parameter names are not used in function types — write the types only, like fn(int, string) bool",
             this.peek().pos,
+            "fn-type-with-param-names",
           );
         }
         params.push(this.parseType());
@@ -402,7 +426,7 @@ class Parser {
     if (this.check("string")) {
       const t = this.next();
       if (t.parts) {
-        throw new CompileError("interpolation cannot be used in a type", t.pos);
+        throw new CompileError("interpolation cannot be used in a type", t.pos, "interpolation-in-type");
       }
       return { kind: "literal", value: t.value, pos: t.pos };
     }
@@ -474,6 +498,7 @@ class Parser {
             throw new CompileError(
               "multiple return values were removed — return one value (use a union type like 'int | error')",
               this.peek().pos,
+              "multiple-return-values-removed",
             );
           }
         }
@@ -526,7 +551,9 @@ class Parser {
 
       if (this.match(":=")) {
         const names = targets.map((e) => {
-          if (e.kind !== "ident") throw new CompileError("left side of ':=' must be a name", e.pos);
+          if (e.kind !== "ident") {
+            throw new CompileError("left side of ':=' must be a name", e.pos, "invalid-assignment-target");
+          }
           return e.name;
         });
         const values = [this.parseExpr()];
@@ -534,13 +561,13 @@ class Parser {
         return { kind: "shortVarDecl", names, values, mutable, pos: start.pos };
       }
       if (mutable) {
-        throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos);
+        throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos, "misplaced-mut");
       }
 
       this.expect("=", "in assignment");
       for (const e of targets) {
         if (e.kind !== "ident" && e.kind !== "index" && e.kind !== "member") {
-          throw new CompileError("invalid assignment target", e.pos);
+          throw new CompileError("invalid assignment target", e.pos, "invalid-assignment-target");
         }
       }
       const values = [this.parseExpr()];
@@ -549,7 +576,7 @@ class Parser {
     }
 
     if (mutable) {
-      throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos);
+      throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos, "misplaced-mut");
     }
 
     // i++ / i--
@@ -603,7 +630,7 @@ class Parser {
 
     if (this.check("{")) {
       if (first.kind !== "exprStmt") {
-        throw new CompileError("for condition must be an expression", start.pos);
+        throw new CompileError("for condition must be an expression", start.pos, "syntax-error");
       }
       return { kind: "for", init: null, cond: first.expr, post: null, body: this.parseBlock(), pos: start.pos };
     }
@@ -623,7 +650,7 @@ class Parser {
     this.skipSemis();
     if (!this.check("eof")) {
       const t = this.peek();
-      throw new CompileError(`unexpected '${t.value}' in string interpolation`, t.pos);
+      throw new CompileError(`unexpected '${t.value}' in string interpolation`, t.pos, "syntax-error");
     }
     return expr;
   }
@@ -678,7 +705,7 @@ class Parser {
       this.next();
       const call = this.parseUnary();
       if (call.kind !== "call") {
-        throw new CompileError(`'${t.type}' must be followed by a function call`, t.pos);
+        throw new CompileError(`'${t.type}' must be followed by a function call`, t.pos, "invalid-spawn-target");
       }
       return { kind: "spawn", call, detached: t.type === "detach", pos: t.pos };
     }
@@ -769,9 +796,16 @@ class Parser {
       }
       if (this.check("!")) {
         // 旧記法(2026-07-19に ? へ改名)。負の転移対策の誘導エラー
+        const bangPos = this.peek().pos;
         throw new CompileError(
           "postfix '!' was renamed — use '?' to propagate none/error to the caller",
-          this.peek().pos,
+          bangPos,
+          "postfix-bang-renamed",
+          {
+            description: "replace '!' with '?'",
+            range: { start: bangPos, end: { line: bangPos.line, col: bangPos.col + 1 } },
+            replacement: "?",
+          },
         );
       }
       if (this.match("(")) {
@@ -886,7 +920,11 @@ class Parser {
           if (this.check("ident") && this.peek().value === "_") {
             this.next();
             if (defaultArm !== null) {
-              throw new CompileError("select can only have one default ('_') arm", armPos);
+              throw new CompileError(
+                "select can only have one default ('_') arm",
+                armPos,
+                "multiple-select-defaults",
+              );
             }
             this.expect("=>", "after '_' in select");
             defaultArm = this.parseExpr();
@@ -939,7 +977,7 @@ class Parser {
         return { kind: "mapLit", key, value, entries, pos: t.pos };
       }
       default:
-        throw new CompileError(`unexpected '${t.value === "" ? t.type : t.value}'`, t.pos);
+        throw new CompileError(`unexpected '${t.value === "" ? t.type : t.value}'`, t.pos, "syntax-error");
     }
   }
 }

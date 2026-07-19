@@ -4,6 +4,7 @@
 // - 検査しながら式に resolvedType を書き込み、Codegen へ引き継ぐ
 
 import type { Block, Expr, FnDecl, FnExpr, MemberExpr, Program, Stmt, TypeNode } from "./ast";
+import type { Diagnostic, DiagnosticCode, Fix } from "./diagnostic-codes";
 import type { Pos } from "./token";
 import {
   ANY,
@@ -32,11 +33,7 @@ const BUILTIN_TYPE_NAMES = new Set([
   "int", "float", "string", "bool", "void", "error", "none", "closed", "any",
 ]);
 
-export interface Diagnostic {
-  pos: Pos;
-  message: string;
-  file?: string; // 複数ファイルコンパイル時にどのファイルのエラーかを示す
-}
+export type { Diagnostic, DiagnosticCode, Fix } from "./diagnostic-codes";
 
 // 組み込み関数。特殊な検査(可変長引数など)は checkCall 内で行う。
 export const BUILTINS = new Set([
@@ -96,17 +93,28 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(imp.alias)) {
           diagnostics.push({
             pos: imp.pos,
+            code: "invalid-package-name",
             file,
             message: `package name '${imp.alias}' cannot be used as an identifier — rename the directory`,
           });
           continue;
         }
         if (imp.alias === pkg) {
-          diagnostics.push({ pos: imp.pos, file, message: `package '${pkg}' cannot import itself` });
+          diagnostics.push({
+            pos: imp.pos,
+            code: "self-import",
+            file,
+            message: `package '${pkg}' cannot import itself`,
+          });
           continue;
         }
         if (!packages.has(imp.alias)) {
-          diagnostics.push({ pos: imp.pos, file, message: `unknown package '${imp.path}'` });
+          diagnostics.push({
+            pos: imp.pos,
+            code: "unknown-package",
+            file,
+            message: `unknown package '${imp.path}'`,
+          });
           continue;
         }
         set.add(imp.alias);
@@ -125,6 +133,7 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
       const cycle = [...chain.slice(chain.indexOf(pkg)), pkg].join(" -> ");
       diagnostics.push({
         pos: { line: 1, col: 1 },
+        code: "import-cycle",
         file: packages.get(pkg)?.[0]?.file,
         message: `import cycle: ${cycle}`,
       });
@@ -209,8 +218,10 @@ class Checker {
 
   // ---- ユーティリティ ----
 
-  private error(pos: Pos, message: string) {
-    this.diagnostics.push({ pos, message, file: this.currentFile });
+  // code は必須(F-13): 呼び出し箇所ごとに省略できてしまうと、いずれ一部の診断だけ
+  // コード無しのまま漏れて「安定した機械可読フォーマット」の契約が崩れるため
+  private error(pos: Pos, code: DiagnosticCode, message: string, fix?: Fix) {
+    this.diagnostics.push({ pos, code, message, file: this.currentFile, fix });
   }
 
   private pushScope() {
@@ -236,26 +247,30 @@ class Checker {
   private declare(name: string, type: Type, pos: Pos, mutable = false) {
     if (name === "_") return; // ブランク識別子は捨てる用
     if (RESERVED.has(name)) {
-      this.error(pos, `'${name}' is a reserved word and cannot be used as a name`);
+      this.error(pos, "reserved-word", `'${name}' is a reserved word and cannot be used as a name`);
       return;
     }
     if (BUILTINS.has(name)) {
-      this.error(pos, `'${name}' is a builtin function and cannot be redeclared`);
+      this.error(pos, "builtin-redeclared", `'${name}' is a builtin function and cannot be redeclared`);
       return;
     }
     if (this.importAliases.has(name)) {
-      this.error(pos, `'${name}' conflicts with an imported package name`);
+      this.error(pos, "name-conflicts-with-package", `'${name}' conflicts with an imported package name`);
       return;
     }
     const scope = this.scopes[this.scopes.length - 1];
     if (scope.has(name)) {
-      this.error(pos, `'${name}' is already declared in this scope`);
+      this.error(pos, "already-declared", `'${name}' is already declared in this scope`);
       return;
     }
     // シャドーイング禁止(2026-07-17決定): 外側スコープ(関数名を含む)に同名があれば
     // 「隠しただけで更新していない」バグの温床になるので拒否する。更新したいなら '=' を使う。
     if (this.lookup(name) !== undefined) {
-      this.error(pos, `'${name}' shadows an outer binding — use '=' to update it, or pick a different name`);
+      this.error(
+        pos,
+        "shadowing",
+        `'${name}' shadows an outer binding — use '=' to update it, or pick a different name`,
+      );
       return;
     }
     scope.set(name, { type, mutable });
@@ -321,17 +336,21 @@ class Checker {
   // importしたパッケージのexported型を引く(math.User / math.Status)
   private resolvePackageType(pkg: string, name: string, pos: Pos): Type {
     if (!this.importAliases.has(pkg)) {
-      this.error(pos, `unknown package '${pkg}' — add: import "${pkg}"`);
+      this.error(pos, "unknown-package", `unknown package '${pkg}' — add: import "${pkg}"`);
       return ANY;
     }
     const symbols = this.registry.get(pkg);
     const entry = symbols?.types.get(name);
     if (!entry) {
-      this.error(pos, `package '${pkg}' has no type '${name}'`);
+      this.error(pos, "unknown-package-type", `package '${pkg}' has no type '${name}'`);
       return ANY;
     }
     if (!entry.exported) {
-      this.error(pos, `'${name}' is not exported by package '${pkg}' — add 'export' to its declaration`);
+      this.error(
+        pos,
+        "not-exported",
+        `'${name}' is not exported by package '${pkg}' — add 'export' to its declaration`,
+      );
       return ANY;
     }
     return entry.type;
@@ -343,7 +362,7 @@ class Checker {
     if (memo) return memo;
     const node = this.typeTable.get(name);
     if (!node) {
-      this.error(pos, `unknown type '${name}'`);
+      this.error(pos, "unknown-type", `unknown type '${name}'`);
       return ANY;
     }
     // struct は「先に器を登録 → 後からフィールドを埋める」(knot-tying)。
@@ -374,7 +393,7 @@ class Checker {
       const rawMembers = node.members.map((m) => this.resolveType(m));
       const unsafe = rawMembers.find((m) => m.kind === "union" && m.members.length === 0);
       if (unsafe) {
-        this.error(pos, `type alias cycle involving '${name}'`);
+        this.error(pos, "type-alias-cycle", `type alias cycle involving '${name}'`);
         this.resolvedAliases.set(name, ANY);
         return ANY;
       }
@@ -388,7 +407,7 @@ class Checker {
       return union;
     }
     if (this.resolvingAliases.has(name)) {
-      this.error(pos, `type alias cycle involving '${name}'`);
+      this.error(pos, "type-alias-cycle", `type alias cycle involving '${name}'`);
       return ANY;
     }
     this.resolvingAliases.add(name);
@@ -409,6 +428,7 @@ class Checker {
       if (m.kind !== "struct") {
         this.error(
           pos,
+          "error-type-must-be-struct",
           `error type '${declName}' members must be struct-shaped (like a discriminated union) — got ${typeToString(m)}`,
         );
       } else if (m.name === "(anonymous)" || m.name === freshName) {
@@ -416,6 +436,7 @@ class Checker {
       } else {
         this.error(
           pos,
+          "error-type-aliases-existing",
           `error type '${declName}' can't tag the existing type '${m.name}' — use an inline struct ` +
             `shape ({ ... }) or declare a fresh 'error struct ${m.name} { ... }' instead`,
         );
@@ -448,15 +469,19 @@ class Checker {
       this.currentFile = file;
       for (const td of program.types) {
         if (BUILTIN_TYPE_NAMES.has(td.name)) {
-          this.error(td.pos, `'${td.name}' is a builtin type and cannot be redeclared`);
+          this.error(td.pos, "builtin-type-redeclared", `'${td.name}' is a builtin type and cannot be redeclared`);
           continue;
         }
         if (this.importAliases.has(td.name)) {
-          this.error(td.pos, `'${td.name}' conflicts with an imported package name`);
+          this.error(
+            td.pos,
+            "name-conflicts-with-package",
+            `'${td.name}' conflicts with an imported package name`,
+          );
           continue;
         }
         if (this.typeTable.has(td.name)) {
-          this.error(td.pos, `type '${td.name}' is already declared`);
+          this.error(td.pos, "already-declared", `type '${td.name}' is already declared`);
           continue;
         }
         this.typeTable.set(td.name, td.node);
@@ -498,12 +523,16 @@ class Checker {
       );
       if (!withMain) {
         this.currentFile = files[0]?.file ?? this.currentFile;
-        this.error({ line: 1, col: 1 }, "missing 'fn main()' — Mesh programs start from main");
+        this.error(
+          { line: 1, col: 1 },
+          "missing-main",
+          "missing 'fn main()' — Mesh programs start from main",
+        );
       } else {
         const main = withMain.program.fns.find((f) => f.name === "main" && !f.receiver)!;
         if (main.params.length > 0 || main.ret !== null) {
           this.currentFile = withMain.file;
-          this.error(main.pos, "'fn main()' must take no parameters and return nothing");
+          this.error(main.pos, "invalid-main-signature", "'fn main()' must take no parameters and return nothing");
         }
       }
     }
@@ -528,15 +557,19 @@ class Checker {
     if (!fn.receiver) return;
     const recvType = this.resolveType(fn.receiver.type);
     if (recvType.kind !== "struct") {
-      this.error(fn.receiver.pos, `method receiver must be a struct type, got ${typeToString(recvType)}`);
+      this.error(
+        fn.receiver.pos,
+        "invalid-receiver-type",
+        `method receiver must be a struct type, got ${typeToString(recvType)}`,
+      );
       return;
     }
     if (BUILTINS.has(fn.name)) {
-      this.error(fn.pos, `'${fn.name}' is a builtin function and cannot be used as a method name`);
+      this.error(fn.pos, "builtin-redeclared", `'${fn.name}' is a builtin function and cannot be used as a method name`);
       return;
     }
     if (recvType.fields.some((f) => f.name === fn.name)) {
-      this.error(fn.pos, `${recvType.name} already has a field named '${fn.name}'`);
+      this.error(fn.pos, "method-field-conflict", `${recvType.name} already has a field named '${fn.name}'`);
       return;
     }
     let methods = this.methodTable.get(recvType.name);
@@ -545,7 +578,7 @@ class Checker {
       this.methodTable.set(recvType.name, methods);
     }
     if (methods.has(fn.name)) {
-      this.error(fn.pos, `${recvType.name} already has a method named '${fn.name}'`);
+      this.error(fn.pos, "duplicate-method", `${recvType.name} already has a method named '${fn.name}'`);
       return;
     }
     const base = this.fnType(fn.params, fn.ret);
@@ -608,6 +641,7 @@ class Checker {
         if (!assignable(valueType, declared)) {
           this.error(
             stmt.value.pos,
+            "type-mismatch",
             `cannot use ${typeToString(valueType)} as ${typeToString(declared)}`,
           );
         }
@@ -631,6 +665,7 @@ class Checker {
             if (!binding.mutable) {
               this.error(
                 target.pos,
+                "immutable-assignment",
                 `'${target.name}' is immutable — declare it with 'mut' to allow reassignment`,
               );
               continue;
@@ -644,7 +679,11 @@ class Checker {
           }
           const valueType = types[i] ?? ANY;
           if (!assignable(valueType, expected)) {
-            this.error(stmt.pos, `cannot assign ${typeToString(valueType)} to ${typeToString(expected)}`);
+            this.error(
+              stmt.pos,
+              "type-mismatch",
+              `cannot assign ${typeToString(valueType)} to ${typeToString(expected)}`,
+            );
           }
         }
         break;
@@ -656,22 +695,26 @@ class Checker {
         const expected = this.retStack[this.retStack.length - 1] ?? VOID;
         if (stmt.value === null) {
           if (!typeEquals(expected, VOID)) {
-            this.error(stmt.pos, `this function must return ${typeToString(expected)}`);
+            this.error(stmt.pos, "missing-return-value", `this function must return ${typeToString(expected)}`);
           }
           break;
         }
         const t = this.checkExprSingle(stmt.value);
         if (typeEquals(expected, VOID)) {
-          this.error(stmt.value.pos, "this function has no return value");
+          this.error(stmt.value.pos, "void-used-as-value", "this function has no return value");
         } else if (!assignable(t, expected)) {
-          this.error(stmt.value.pos, `cannot return ${typeToString(t)} as ${typeToString(expected)}`);
+          this.error(
+            stmt.value.pos,
+            "type-mismatch",
+            `cannot return ${typeToString(t)} as ${typeToString(expected)}`,
+          );
         }
         break;
       }
       case "if": {
         const cond = this.checkExprSingle(stmt.cond);
         if (!typeEquals(cond, BOOL) && cond.kind !== "any") {
-          this.error(stmt.cond.pos, `if condition must be bool, got ${typeToString(cond)}`);
+          this.error(stmt.cond.pos, "not-bool", `if condition must be bool, got ${typeToString(cond)}`);
         }
 
         // narrowing(F-6): 条件式から then側/else側それぞれで成り立つ事実(パス→絞り込み型)を
@@ -701,7 +744,7 @@ class Checker {
         if (stmt.cond) {
           const cond = this.checkExprSingle(stmt.cond);
           if (!typeEquals(cond, BOOL) && cond.kind !== "any") {
-            this.error(stmt.cond.pos, `for condition must be bool, got ${typeToString(cond)}`);
+            this.error(stmt.cond.pos, "not-bool", `for condition must be bool, got ${typeToString(cond)}`);
           }
         }
         if (stmt.post) this.checkStmt(stmt.post);
@@ -719,6 +762,7 @@ class Checker {
           if (stmt.names.length !== 2) {
             this.error(
               stmt.pos,
+              "range-arity",
               `range over ${what} needs two names: 'for a, b := range ...' (use _ to ignore one)`,
             );
           }
@@ -731,13 +775,17 @@ class Checker {
           declare2(subject.key, subject.value, "a map");
         } else if (typeEquals(subject, INT)) {
           if (stmt.names.length !== 1) {
-            this.error(stmt.pos, "range over an int takes exactly one name: 'for i := range n'");
+            this.error(
+              stmt.pos,
+              "range-arity",
+              "range over an int takes exactly one name: 'for i := range n'",
+            );
           }
           this.declare(stmt.names[0], INT, stmt.pos);
         } else if (subject.kind === "any") {
           for (const n of stmt.names) this.declare(n, ANY, stmt.pos);
         } else {
-          this.error(stmt.subject.pos, `cannot range over ${typeToString(subject)}`);
+          this.error(stmt.subject.pos, "not-rangeable", `cannot range over ${typeToString(subject)}`);
           for (const n of stmt.names) this.declare(n, ANY, stmt.pos);
         }
         this.checkBlock(stmt.body);
@@ -749,23 +797,24 @@ class Checker {
         const value = this.checkExprSingle(stmt.value);
         if (ch.kind === "chan") {
           if (!assignable(value, ch.elem)) {
-            this.error(stmt.pos, `cannot send ${typeToString(value)} to ${typeToString(ch)}`);
+            this.error(stmt.pos, "type-mismatch", `cannot send ${typeToString(value)} to ${typeToString(ch)}`);
           }
         } else if (ch.kind !== "any") {
-          this.error(stmt.channel.pos, `cannot send to non-channel type ${typeToString(ch)}`);
+          this.error(stmt.channel.pos, "not-a-channel", `cannot send to non-channel type ${typeToString(ch)}`);
         }
         break;
       }
       case "incDec": {
         const t = this.checkExprSingle(stmt.target);
         if (!isNumeric(t)) {
-          this.error(stmt.pos, `'${stmt.op}' requires int or float, got ${typeToString(t)}`);
+          this.error(stmt.pos, "invalid-operation", `'${stmt.op}' requires int or float, got ${typeToString(t)}`);
         }
         if (stmt.target.kind === "ident") {
           const binding = this.lookup(stmt.target.name);
           if (binding && !binding.mutable) {
             this.error(
               stmt.pos,
+              "immutable-assignment",
               `'${stmt.target.name}' is immutable — declare it with 'mut' to allow '${stmt.op}'`,
             );
           }
@@ -781,7 +830,7 @@ class Checker {
   // `a, b := 1, 2` のような「左辺N個 vs 右辺N個」の型リストを求める
   private checkExprList(values: Expr[], targetCount: number, pos: Pos): Type[] {
     if (values.length !== targetCount) {
-      this.error(pos, `expected ${targetCount} value(s), got ${values.length}`);
+      this.error(pos, "argument-count", `expected ${targetCount} value(s), got ${values.length}`);
     }
     return values.map((v) => this.checkExprSingle(v));
   }
@@ -879,7 +928,7 @@ class Checker {
   private checkExprSingle(expr: Expr): Type {
     const t = this.checkExpr(expr);
     if (t.kind === "prim" && t.name === "void") {
-      this.error(expr.pos, "this function has no return value");
+      this.error(expr.pos, "void-used-as-value", "this function has no return value");
       return ANY;
     }
     return t;
@@ -910,11 +959,12 @@ class Checker {
         this.isTargetTypes.set(expr, target); // collectFacts が resolveType を再度呼ばずに済むように
         if (t.kind === "union") {
           if (!t.members.some((m) => this.structPatternMatches(m, target))) {
-            this.error(expr.pos, `${typeToString(t)} can never be ${typeToString(target)}`);
+            this.error(expr.pos, "impossible-pattern", `${typeToString(t)} can never be ${typeToString(target)}`);
           }
         } else if (t.kind !== "any") {
           this.error(
             expr.operand.pos,
+            "union-required",
             `'is' needs a union-typed value, got ${typeToString(t)}`,
           );
         }
@@ -928,18 +978,23 @@ class Checker {
         if (expr.context) {
           const ctx = this.checkExprSingle(expr.context);
           if (!isStringy(ctx)) {
-            this.error(expr.context.pos, `'?' context must be a string, got ${typeToString(ctx)}`);
+            this.error(expr.context.pos, "prop-context-not-string", `'?' context must be a string, got ${typeToString(ctx)}`);
           }
         }
         if (t.kind === "any") return ANY;
         if (t.kind !== "union") {
-          this.error(expr.pos, `'?' needs a union with none/error/an error type, got ${typeToString(t)}`);
+          this.error(
+            expr.pos,
+            "prop-requires-failure-union",
+            `'?' needs a union with none/error/an error type, got ${typeToString(t)}`,
+          );
           return t;
         }
         const failures = t.members.filter((m) => this.isFailureType(m));
         if (failures.length === 0) {
           this.error(
             expr.pos,
+            "prop-nothing-to-propagate",
             `'?' has nothing to propagate — ${typeToString(t)} has no none/error/error type`,
           );
         }
@@ -951,6 +1006,7 @@ class Checker {
         if (expr.context && structured.length > 0) {
           this.error(
             expr.pos,
+            "prop-context-structured-error",
             `'?' with context can't convert ${structured.map(typeToString).join(" | ")} to a message` +
               ` — use plain '?' (no context) to propagate it as-is, or handle it with 'is'/'match' first`,
           );
@@ -962,6 +1018,7 @@ class Checker {
             if (!assignable(f, ret)) {
               this.error(
                 expr.pos,
+                "prop-return-type-mismatch",
                 `'?' propagates ${typeToString(f)}, but this function returns ${typeToString(ret)}` +
                   ` — add '${typeToString(f)}' to the return type or handle it with 'is'`,
               );
@@ -1000,7 +1057,7 @@ class Checker {
           return ANY;
         }
         if (t.kind !== "union" || !t.members.some((m) => this.isFailureType(m))) {
-          this.error(expr.pos, `left side of 'or' never fails — it is ${typeToString(t)}`);
+          this.error(expr.pos, "or-never-fails", `left side of 'or' never fails — it is ${typeToString(t)}`);
           checkRight();
           return t;
         }
@@ -1011,12 +1068,17 @@ class Checker {
         if (hasNonNoneFailure && expr.binding === undefined) {
           this.error(
             expr.pos,
+            "or-requires-binding",
             `'or' would silently discard an error — bind it ('or e => ...') or discard it explicitly ('or _ => ...')`,
           );
         }
         const rest = unionWithout(t, (m) => this.isFailureType(m));
         if (typeEquals(rest, VOID)) {
-          this.error(expr.pos, `left side of 'or' has no success value — handle it with 'is' instead`);
+          this.error(
+            expr.pos,
+            "or-no-success-value",
+            "left side of 'or' has no success value — handle it with 'is' instead",
+          );
           checkRight();
           return ANY;
         }
@@ -1024,6 +1086,7 @@ class Checker {
         if (!assignable(r, rest)) {
           this.error(
             expr.right.pos,
+            "or-fallback-type-mismatch",
             `'or' fallback must be ${typeToString(rest)}, got ${typeToString(r)}`,
           );
         }
@@ -1042,11 +1105,19 @@ class Checker {
         const binding = this.lookup(expr.name);
         if (!binding) {
           if (BUILTINS.has(expr.name)) {
-            this.error(expr.pos, `'${expr.name}' is a builtin function — call it like ${expr.name}(...)`);
+            this.error(
+              expr.pos,
+              "builtin-as-value",
+              `'${expr.name}' is a builtin function — call it like ${expr.name}(...)`,
+            );
           } else if (this.importAliases.has(expr.name)) {
-            this.error(expr.pos, `'${expr.name}' is a package — use it as a qualifier like ${expr.name}.something`);
+            this.error(
+              expr.pos,
+              "package-as-value",
+              `'${expr.name}' is a package — use it as a qualifier like ${expr.name}.something`,
+            );
           } else {
-            this.error(expr.pos, `undefined: '${expr.name}'`);
+            this.error(expr.pos, "undefined-name", `undefined: '${expr.name}'`);
           }
           return ANY;
         }
@@ -1060,7 +1131,7 @@ class Checker {
           for (const e of expr.elems) {
             const t = this.checkExprSingle(e);
             if (!assignable(t, elem)) {
-              this.error(e.pos, `array element must be ${typeToString(elem)}, got ${typeToString(t)}`);
+              this.error(e.pos, "type-mismatch", `array element must be ${typeToString(elem)}, got ${typeToString(t)}`);
             }
           }
           return { kind: "array", elem };
@@ -1071,7 +1142,11 @@ class Checker {
         for (let i = 1; i < expr.elems.length; i++) {
           const t = this.checkExprSingle(expr.elems[i]);
           if (!assignable(t, elem)) {
-            this.error(expr.elems[i].pos, `array element must be ${typeToString(elem)}, got ${typeToString(t)}`);
+            this.error(
+              expr.elems[i].pos,
+              "type-mismatch",
+              `array element must be ${typeToString(elem)}, got ${typeToString(t)}`,
+            );
           }
         }
         return { kind: "array", elem };
@@ -1084,12 +1159,12 @@ class Checker {
         const t = this.checkExprSingle(expr.operand);
         if (expr.op === "!") {
           if (!typeEquals(t, BOOL) && t.kind !== "any") {
-            this.error(expr.pos, `'!' requires bool, got ${typeToString(t)}`);
+            this.error(expr.pos, "not-bool", `'!' requires bool, got ${typeToString(t)}`);
           }
           return BOOL;
         }
         if (!isNumeric(t)) {
-          this.error(expr.pos, `unary '-' requires int or float, got ${typeToString(t)}`);
+          this.error(expr.pos, "invalid-operation", `unary '-' requires int or float, got ${typeToString(t)}`);
         }
         return t;
       }
@@ -1099,7 +1174,7 @@ class Checker {
         // 受信は常に T | closed(mapの V | none と同じ理由: closeされうることを型で強制する)
         if (ch.kind === "chan") return unionOf([ch.elem, CLOSED]);
         if (ch.kind !== "any") {
-          this.error(expr.pos, `cannot receive from non-channel type ${typeToString(ch)}`);
+          this.error(expr.pos, "not-a-channel", `cannot receive from non-channel type ${typeToString(ch)}`);
         }
         return ANY;
       }
@@ -1116,17 +1191,23 @@ class Checker {
         // map の読み取りは V | none を返す(無いキーを無視できない。union路線の帰結)
         if (target.kind === "map") {
           if (!assignable(index, target.key)) {
-            this.error(expr.index.pos, `map key must be ${typeToString(target.key)}, got ${typeToString(index)}`);
+            this.error(
+              expr.index.pos,
+              "type-mismatch",
+              `map key must be ${typeToString(target.key)}, got ${typeToString(index)}`,
+            );
           }
           return unionOf([target.value, NONE]);
         }
         if (!isNumeric(index) || (index.kind === "prim" && index.name === "float")) {
-          if (index.kind !== "any") this.error(expr.index.pos, `index must be int, got ${typeToString(index)}`);
+          if (index.kind !== "any") {
+            this.error(expr.index.pos, "invalid-index-type", `index must be int, got ${typeToString(index)}`);
+          }
         }
         if (target.kind === "array") return target.elem;
         if (isStringy(target)) return STRING;
         if (target.kind !== "any") {
-          this.error(expr.pos, `cannot index into ${typeToString(target)}`);
+          this.error(expr.pos, "not-indexable", `cannot index into ${typeToString(target)}`);
         }
         return ANY;
       }
@@ -1138,10 +1219,14 @@ class Checker {
           const kt = this.checkExprSingle(e.key);
           const vt = this.checkExprSingle(e.value);
           if (!assignable(kt, key)) {
-            this.error(e.key.pos, `map key must be ${typeToString(key)}, got ${typeToString(kt)}`);
+            this.error(e.key.pos, "type-mismatch", `map key must be ${typeToString(key)}, got ${typeToString(kt)}`);
           }
           if (!assignable(vt, value)) {
-            this.error(e.value.pos, `map value must be ${typeToString(value)}, got ${typeToString(vt)}`);
+            this.error(
+              e.value.pos,
+              "type-mismatch",
+              `map value must be ${typeToString(value)}, got ${typeToString(vt)}`,
+            );
           }
         }
         return { kind: "map", key, value };
@@ -1196,6 +1281,7 @@ class Checker {
               .join(" | ");
             this.error(
               expr.pos,
+              candidates.length === 0 ? "discriminated-union-no-match" : "discriminated-union-ambiguous",
               candidates.length === 0
                 ? `no member of '${expr.name}' matches the field(s) {${[...fieldNameSet].join(", ")}}` +
                     (shapes ? ` (union members: ${shapes})` : "")
@@ -1207,7 +1293,7 @@ class Checker {
         }
         if (t.kind === "any") return ANY; // 解決自体が失敗(未知/未export)— エラーは報告済み
         if (t.kind !== "struct") {
-          this.error(expr.pos, `'${expr.name}' is not a struct`);
+          this.error(expr.pos, "not-a-struct", `'${expr.name}' is not a struct`);
           return ANY;
         }
         // エラーメッセージ上の名前: union経由なら union の名前(メンバーは無名なので)、
@@ -1217,7 +1303,7 @@ class Checker {
         const seen = new Set<string>();
         expr.fields.forEach((f, i) => {
           if (seen.has(f.name)) {
-            this.error(f.pos, `duplicate field '${f.name}'`);
+            this.error(f.pos, "duplicate-field", `duplicate field '${f.name}'`);
             return;
           }
           seen.add(f.name);
@@ -1225,6 +1311,7 @@ class Checker {
           if (!decl) {
             this.error(
               f.pos,
+              "unknown-field",
               `${displayName} has no field '${f.name}' (fields: ${structType.fields.map((d) => d.name).join(", ")})`,
             );
             return;
@@ -1232,6 +1319,7 @@ class Checker {
           if (!assignable(fieldTypes[i], decl.type)) {
             this.error(
               f.value.pos,
+              "type-mismatch",
               `field '${f.name}': cannot use ${typeToString(fieldTypes[i])} as ${typeToString(decl.type)}`,
             );
           }
@@ -1239,7 +1327,11 @@ class Checker {
         // 全フィールド必須(v1。ゼロ値・デフォルト値は導入しない)
         const missing = structType.fields.filter((d) => !seen.has(d.name));
         if (missing.length > 0) {
-          this.error(expr.pos, `missing field(s) in ${displayName}: ${missing.map((d) => d.name).join(", ")}`);
+          this.error(
+            expr.pos,
+            "missing-fields",
+            `missing field(s) in ${displayName}: ${missing.map((d) => d.name).join(", ")}`,
+          );
         }
         // F-2後半: このリテラルの具体的な形(union経由なら絞り込んだメンバー)がerror type
         // としてタグ付けされていれば、codegenが実行時マーカーを埋め込めるようにAST側へ残す
@@ -1259,7 +1351,7 @@ class Checker {
         if (expr.capacity) {
           const cap = this.checkExprSingle(expr.capacity);
           if (!typeEquals(cap, INT) && cap.kind !== "any") {
-            this.error(expr.capacity.pos, `channel capacity must be int, got ${typeToString(cap)}`);
+            this.error(expr.capacity.pos, "type-mismatch", `channel capacity must be int, got ${typeToString(cap)}`);
           }
         }
         return { kind: "chan", elem: this.resolveType(expr.elem) };
@@ -1275,7 +1367,7 @@ class Checker {
     if (op === "&&" || op === "||") {
       const left = this.checkExprSingle(expr.left);
       if (!typeEquals(left, BOOL) && left.kind !== "any") {
-        this.error(expr.left.pos, `'${op}' requires bool operands, got ${typeToString(left)}`);
+        this.error(expr.left.pos, "not-bool", `'${op}' requires bool operands, got ${typeToString(left)}`);
       }
       const leftFacts = this.collectFacts(expr.left);
       this.pushScope();
@@ -1283,7 +1375,7 @@ class Checker {
       const right = this.checkExprSingle(expr.right);
       this.popScope();
       if (!typeEquals(right, BOOL) && right.kind !== "any") {
-        this.error(expr.right.pos, `'${op}' requires bool operands, got ${typeToString(right)}`);
+        this.error(expr.right.pos, "not-bool", `'${op}' requires bool operands, got ${typeToString(right)}`);
       }
       return BOOL;
     }
@@ -1294,11 +1386,25 @@ class Checker {
     if (op === "==" || op === "!=") {
       // none との比較は narrowing が効く 'is' に一本化する(P1)
       if (expr.left.kind === "none" || expr.right.kind === "none") {
-        this.error(expr.pos, `use 'is none' to test for none (== does not narrow the type)`);
+        // fix: `x == none` は演算子を'is'に置き換えるだけで `x is none` になる(none側はそのまま)。
+        // 左辺がnoneや、!=の場合は単純なトークン置換で表現できないのでfix無し
+        const canAutoFix = op === "==" && expr.right.kind === "none";
+        this.error(
+          expr.pos,
+          "use-is-none",
+          `use 'is none' to test for none (== does not narrow the type)`,
+          canAutoFix
+            ? {
+                description: "replace '==' with 'is'",
+                range: { start: expr.pos, end: { line: expr.pos.line, col: expr.pos.col + 2 } },
+                replacement: "is",
+              }
+            : undefined,
+        );
         return BOOL;
       }
       if (!assignable(left, right) && !assignable(right, left)) {
-        this.error(expr.pos, `cannot compare ${typeToString(left)} with ${typeToString(right)}`);
+        this.error(expr.pos, "incomparable-types", `cannot compare ${typeToString(left)} with ${typeToString(right)}`);
       }
       return BOOL;
     }
@@ -1308,7 +1414,7 @@ class Checker {
         (isStringy(left) && isStringy(right)) ||
         left.kind === "any" || right.kind === "any";
       if (!ok) {
-        this.error(expr.pos, `cannot compare ${typeToString(left)} with ${typeToString(right)}`);
+        this.error(expr.pos, "incomparable-types", `cannot compare ${typeToString(left)} with ${typeToString(right)}`);
       }
       return BOOL;
     }
@@ -1323,7 +1429,11 @@ class Checker {
       if (op === "%" && isInt) expr.intMod = true;
       // リテラルの 0 で割るのは実行するまでもなくバグ。コンパイル時に弾く
       if (isInt && (op === "/" || op === "%") && expr.right.kind === "int" && expr.right.value === "0") {
-        this.error(expr.right.pos, `integer ${op === "/" ? "division" : "modulo"} by zero`);
+        this.error(
+          expr.right.pos,
+          "division-by-zero",
+          `integer ${op === "/" ? "division" : "modulo"} by zero`,
+        );
       }
       if (left.kind === "any" || right.kind === "any") return ANY;
       return isInt ? INT : FLOAT;
@@ -1331,6 +1441,7 @@ class Checker {
     if (left.kind === "any" || right.kind === "any") return ANY;
     this.error(
       expr.pos,
+      "invalid-operation",
       `invalid operation: ${typeToString(left)} ${op} ${typeToString(right)}` +
         (op === "+" && (typeEquals(left, STRING) || typeEquals(right, STRING))
           ? " (hint: use str() to convert values to string)"
@@ -1354,11 +1465,15 @@ class Checker {
   private inferMatch(expr: Expr & { kind: "match" }): Type {
     const subject = this.checkExprSingle(expr.subject);
     if (expr.arms.length === 0) {
-      this.error(expr.pos, "match must have at least one arm");
+      this.error(expr.pos, "empty-match", "match must have at least one arm");
       return ANY;
     }
     if (subject.kind !== "union" && subject.kind !== "any") {
-      this.error(expr.subject.pos, `match subject must be a union type, got ${typeToString(subject)}`);
+      this.error(
+        expr.subject.pos,
+        "union-required",
+        `match subject must be a union type, got ${typeToString(subject)}`,
+      );
     }
     const members = subject.kind === "union" ? subject.members : null;
 
@@ -1371,13 +1486,15 @@ class Checker {
 
     for (const arm of expr.arms) {
       if (sawWildcard) {
-        this.error(arm.pos, "unreachable arm — '_' already matches everything before this");
+        this.error(arm.pos, "unreachable-pattern", "unreachable arm — '_' already matches everything before this");
         continue;
       }
       const patternTypes: Type[] = [];
       for (const p of arm.patterns) {
         if (p.kind === "wildcard") {
-          if (arm.patterns.length > 1) this.error(p.pos, "'_' must be the only pattern in its arm");
+          if (arm.patterns.length > 1) {
+            this.error(p.pos, "wildcard-not-alone", "'_' must be the only pattern in its arm");
+          }
           sawWildcard = true;
           continue;
         }
@@ -1395,11 +1512,11 @@ class Checker {
           resolvedPatterns = [pt];
         }
         if (members && resolvedPatterns.length === 0) {
-          this.error(arm.pos, `${typeToString(subject)} can never be ${typeToString(pt)}`);
+          this.error(arm.pos, "impossible-pattern", `${typeToString(subject)} can never be ${typeToString(pt)}`);
         }
         for (const rp of resolvedPatterns) {
           if (members && covered.some((c) => typeEquals(c, rp))) {
-            this.error(arm.pos, `unreachable pattern — ${typeToString(rp)} is already covered`);
+            this.error(arm.pos, "unreachable-pattern", `unreachable pattern — ${typeToString(rp)} is already covered`);
           }
           covered.push(rp);
           patternTypes.push(rp);
@@ -1425,6 +1542,7 @@ class Checker {
       if (missing.length > 0) {
         this.error(
           expr.pos,
+          "match-not-exhaustive",
           `match is not exhaustive — missing: ${missing.map(typeToString).join(", ")}` +
             ` (add arms for them, or a '_' arm)`,
         );
@@ -1435,7 +1553,7 @@ class Checker {
     const voids = armTypes.filter((t) => typeEquals(t, VOID));
     if (voids.length === armTypes.length) return VOID;
     if (voids.length > 0) {
-      this.error(expr.pos, "match arms mix values and void — all arms must return a value, or none");
+      this.error(expr.pos, "mixed-void-arms", "match arms mix values and void — all arms must return a value, or none");
       return ANY;
     }
     return unionOf(armTypes);
@@ -1445,7 +1563,7 @@ class Checker {
   // matchと見た目は揃えるが、パターンは「型」ではなく「どのチャネル操作が先に終わったか」
   private inferSelect(expr: Expr & { kind: "select" }): Type {
     if (expr.arms.length === 0 && !expr.defaultArm) {
-      this.error(expr.pos, "select must have at least one arm");
+      this.error(expr.pos, "empty-select", "select must have at least one arm");
       return ANY;
     }
     const armTypes: Type[] = [];
@@ -1455,7 +1573,7 @@ class Checker {
       if (chType.kind === "chan") {
         bindingType = unionOf([chType.elem, CLOSED]);
       } else if (chType.kind !== "any") {
-        this.error(arm.channel.pos, `select arm requires a channel, got ${typeToString(chType)}`);
+        this.error(arm.channel.pos, "not-a-channel", `select arm requires a channel, got ${typeToString(chType)}`);
       }
       this.pushScope();
       this.declare(arm.name, bindingType, arm.pos);
@@ -1469,7 +1587,7 @@ class Checker {
     const voids = armTypes.filter((t) => typeEquals(t, VOID));
     if (voids.length === armTypes.length) return VOID;
     if (voids.length > 0) {
-      this.error(expr.pos, "select arms mix values and void — all arms must return a value, or none");
+      this.error(expr.pos, "mixed-void-arms", "select arms mix values and void — all arms must return a value, or none");
       return ANY;
     }
     return unionOf(armTypes);
@@ -1489,10 +1607,15 @@ class Checker {
       if (symbols?.types.get(member.name)?.exported) {
         this.error(
           member.pos,
+          "package-symbol-is-a-type",
           `'${member.name}' is a type — use ${alias}.${member.name} in a type position, or ${alias}.${member.name}{...} to construct it`,
         );
       } else {
-        this.error(member.pos, `package '${alias}' has no exported function '${member.name}'`);
+        this.error(
+          member.pos,
+          "unknown-package-function",
+          `package '${alias}' has no exported function '${member.name}'`,
+        );
       }
       member.resolvedPkg = alias;
       return ANY;
@@ -1500,6 +1623,7 @@ class Checker {
     if (!fn.exported) {
       this.error(
         member.pos,
+        "not-exported",
         `'${member.name}' is not exported by package '${alias}' — add 'export' to its declaration`,
       );
       member.resolvedPkg = alias;
@@ -1547,6 +1671,7 @@ class Checker {
         }
         this.error(
           member.pos,
+          "unknown-field",
           `${typeToString(targetType)} has no field or method '${member.name}'` +
             ` (fields: ${targetType.fields.map((f) => f.name).join(", ") || "none"})`,
         );
@@ -1573,11 +1698,12 @@ class Checker {
       const field = targetType.fields.find((f) => f.name === member.name);
       if (field) return field.type;
       if (this.methodTable.get(targetType.name)?.has(member.name)) {
-        this.error(member.pos, `'${member.name}' is a method — call it like ${member.name}(...)`);
+        this.error(member.pos, "method-not-called", `'${member.name}' is a method — call it like ${member.name}(...)`);
         return ANY;
       }
       this.error(
         member.pos,
+        "unknown-field",
         `${typeToString(targetType)} has no field '${member.name}'` +
           ` (fields: ${targetType.fields.map((f) => f.name).join(", ")})`,
       );
@@ -1586,12 +1712,13 @@ class Checker {
     if (targetType.kind === "union") {
       this.error(
         member.pos,
+        "narrow-required",
         `cannot access field or method on ${typeToString(targetType)} — narrow it first (with 'is' or 'match')`,
       );
       return ANY;
     }
     if (targetType.kind !== "any") {
-      this.error(member.pos, `${typeToString(targetType)} has no fields`);
+      this.error(member.pos, "not-a-struct", `${typeToString(targetType)} has no fields`);
     }
     return ANY;
   }
@@ -1605,12 +1732,13 @@ class Checker {
     retType: Type,
   ): Type {
     if (args.length !== paramTypes.length) {
-      this.error(callExpr.pos, `expected ${paramTypes.length} argument(s), got ${args.length}`);
+      this.error(callExpr.pos, "argument-count", `expected ${paramTypes.length} argument(s), got ${args.length}`);
     }
     for (let i = 0; i < Math.min(args.length, paramTypes.length); i++) {
       if (!assignable(args[i], paramTypes[i])) {
         this.error(
           callExpr.args[i].pos,
+          "type-mismatch",
           `argument ${i + 1}: cannot use ${typeToString(args[i])} as ${typeToString(paramTypes[i])}`,
         );
       }
@@ -1631,7 +1759,7 @@ class Checker {
     const args = callExpr.args.map((a) => this.checkExprSingle(a));
     if (calleeType.kind === "any") return ANY;
     if (calleeType.kind !== "fn") {
-      this.error(callExpr.pos, `cannot call non-function type ${typeToString(calleeType)}`);
+      this.error(callExpr.pos, "not-callable", `cannot call non-function type ${typeToString(calleeType)}`);
       return ANY;
     }
     return this.checkArgsAgainst(callExpr, args, calleeType.params, calleeType.ret);
@@ -1646,11 +1774,15 @@ class Checker {
     const seen = new Set<string>();
     for (const name of fn.typeParams) {
       if (BUILTIN_TYPE_NAMES.has(name)) {
-        this.error(fn.pos, `type parameter '${name}' shadows a builtin type name`);
+        this.error(fn.pos, "generic-type-param-conflict", `type parameter '${name}' shadows a builtin type name`);
       } else if (this.typeTable.has(name)) {
-        this.error(fn.pos, `type parameter '${name}' conflicts with an existing type '${name}'`);
+        this.error(
+          fn.pos,
+          "generic-type-param-conflict",
+          `type parameter '${name}' conflicts with an existing type '${name}'`,
+        );
       } else if (seen.has(name)) {
-        this.error(fn.pos, `type parameter '${name}' is declared more than once`);
+        this.error(fn.pos, "generic-type-param-conflict", `type parameter '${name}' is declared more than once`);
       }
       seen.add(name);
     }
@@ -1659,6 +1791,7 @@ class Checker {
       if (!fnT.params.some((p) => this.typeContainsParam(p, name))) {
         this.error(
           fn.pos,
+          "generic-type-param-not-inferable",
           `type parameter '${name}' must appear in a parameter type — it can't be inferred from ` +
             `the call site otherwise (e.g. 'T[]', not just as the return type)`,
         );
@@ -1752,6 +1885,7 @@ class Checker {
     if (missing.length > 0) {
       this.error(
         expr.pos,
+        "generic-inference-failed",
         `cannot infer type parameter(s) ${missing.map((m) => `'${m}'`).join(", ")} of '${name}' from these arguments`,
       );
       return ANY;
@@ -1766,7 +1900,7 @@ class Checker {
     const args = expr.args.map((a) => this.checkExprSingle(a));
     const expectArity = (n: number): boolean => {
       if (args.length !== n) {
-        this.error(expr.pos, `${name}() expects ${n} argument(s), got ${args.length}`);
+        this.error(expr.pos, "argument-count", `${name}() expects ${n} argument(s), got ${args.length}`);
         return false;
       }
       return true;
@@ -1782,7 +1916,9 @@ class Checker {
         if (expectArity(1)) {
           const t = args[0];
           const ok = t.kind === "array" || t.kind === "map" || t.kind === "any" || isStringy(t);
-          if (!ok) this.error(expr.args[0].pos, `len() requires string, array or map, got ${typeToString(t)}`);
+          if (!ok) {
+            this.error(expr.args[0].pos, "builtin-arg-type", `len() requires string, array or map, got ${typeToString(t)}`);
+          }
         }
         return INT;
       }
@@ -1791,17 +1927,25 @@ class Checker {
           const arr = args[0];
           if (arr.kind === "array") {
             if (!assignable(args[1], arr.elem)) {
-              this.error(expr.args[1].pos, `cannot push ${typeToString(args[1])} into ${typeToString(arr)}`);
+              this.error(
+                expr.args[1].pos,
+                "type-mismatch",
+                `cannot push ${typeToString(args[1])} into ${typeToString(arr)}`,
+              );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `push() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `push() requires an array, got ${typeToString(arr)}`);
           }
         }
         return VOID;
       }
       case "error": {
         if (expectArity(1) && !assignable(args[0], STRING)) {
-          this.error(expr.args[0].pos, `error() requires a string message, got ${typeToString(args[0])}`);
+          this.error(
+            expr.args[0].pos,
+            "builtin-arg-type",
+            `error() requires a string message, got ${typeToString(args[0])}`,
+          );
         }
         return ERROR;
       }
@@ -1810,17 +1954,25 @@ class Checker {
           const m = args[0];
           if (m.kind === "map") {
             if (!assignable(args[1], m.key)) {
-              this.error(expr.args[1].pos, `map key must be ${typeToString(m.key)}, got ${typeToString(args[1])}`);
+              this.error(
+                expr.args[1].pos,
+                "type-mismatch",
+                `map key must be ${typeToString(m.key)}, got ${typeToString(args[1])}`,
+              );
             }
           } else if (m.kind !== "any") {
-            this.error(expr.args[0].pos, `delete() requires a map, got ${typeToString(m)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `delete() requires a map, got ${typeToString(m)}`);
           }
         }
         return VOID;
       }
       case "sleep": {
         if (expectArity(1) && !isNumeric(args[0])) {
-          this.error(expr.args[0].pos, `sleep() requires milliseconds (int), got ${typeToString(args[0])}`);
+          this.error(
+            expr.args[0].pos,
+            "builtin-arg-type",
+            `sleep() requires milliseconds (int), got ${typeToString(args[0])}`,
+          );
         }
         return VOID;
       }
@@ -1831,11 +1983,12 @@ class Checker {
             if (!assignable(args[1], arr.elem)) {
               this.error(
                 expr.args[1].pos,
+                "type-mismatch",
                 `contains() second argument must be ${typeToString(arr.elem)}, got ${typeToString(args[1])}`,
               );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `contains() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `contains() requires an array, got ${typeToString(arr)}`);
           }
         }
         return BOOL;
@@ -1847,11 +2000,12 @@ class Checker {
             if (!assignable(args[1], arr.elem)) {
               this.error(
                 expr.args[1].pos,
+                "type-mismatch",
                 `indexOf() second argument must be ${typeToString(arr.elem)}, got ${typeToString(args[1])}`,
               );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `indexOf() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `indexOf() requires an array, got ${typeToString(arr)}`);
           }
         }
         return unionOf([INT, NONE]);
@@ -1860,14 +2014,18 @@ class Checker {
         if (!expectArity(1)) return { kind: "array", elem: ANY };
         const m = args[0];
         if (m.kind === "map") return { kind: "array", elem: m.key };
-        if (m.kind !== "any") this.error(expr.args[0].pos, `keys() requires a map, got ${typeToString(m)}`);
+        if (m.kind !== "any") {
+          this.error(expr.args[0].pos, "builtin-arg-type", `keys() requires a map, got ${typeToString(m)}`);
+        }
         return { kind: "array", elem: ANY };
       }
       case "values": {
         if (!expectArity(1)) return { kind: "array", elem: ANY };
         const m = args[0];
         if (m.kind === "map") return { kind: "array", elem: m.value };
-        if (m.kind !== "any") this.error(expr.args[0].pos, `values() requires a map, got ${typeToString(m)}`);
+        if (m.kind !== "any") {
+          this.error(expr.args[0].pos, "builtin-arg-type", `values() requires a map, got ${typeToString(m)}`);
+        }
         return { kind: "array", elem: ANY };
       }
       case "sort": {
@@ -1877,11 +2035,12 @@ class Checker {
             if (!isNumeric(arr.elem) && !isStringy(arr.elem)) {
               this.error(
                 expr.args[0].pos,
+                "builtin-arg-type",
                 `sort() requires int[], float[] or string[], got ${typeToString(arr)}`,
               );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `sort() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `sort() requires an array, got ${typeToString(arr)}`);
           }
         }
         // 非破壊(new arrayを返す)。引数の配列自体は変わらない
@@ -1890,10 +2049,14 @@ class Checker {
       case "split": {
         if (expectArity(2)) {
           if (!isStringy(args[0])) {
-            this.error(expr.args[0].pos, `split() requires a string, got ${typeToString(args[0])}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `split() requires a string, got ${typeToString(args[0])}`);
           }
           if (!isStringy(args[1])) {
-            this.error(expr.args[1].pos, `split() separator must be a string, got ${typeToString(args[1])}`);
+            this.error(
+              expr.args[1].pos,
+              "builtin-arg-type",
+              `split() separator must be a string, got ${typeToString(args[1])}`,
+            );
           }
         }
         return { kind: "array", elem: STRING };
@@ -1903,13 +2066,17 @@ class Checker {
           const arr = args[0];
           if (arr.kind === "array") {
             if (!isStringy(arr.elem) && arr.elem.kind !== "any") {
-              this.error(expr.args[0].pos, `join() requires string[], got ${typeToString(arr)}`);
+              this.error(expr.args[0].pos, "builtin-arg-type", `join() requires string[], got ${typeToString(arr)}`);
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `join() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `join() requires an array, got ${typeToString(arr)}`);
           }
           if (!isStringy(args[1])) {
-            this.error(expr.args[1].pos, `join() separator must be a string, got ${typeToString(args[1])}`);
+            this.error(
+              expr.args[1].pos,
+              "builtin-arg-type",
+              `join() separator must be a string, got ${typeToString(args[1])}`,
+            );
           }
         }
         return STRING;
@@ -1918,13 +2085,13 @@ class Checker {
       case "upper":
       case "lower": {
         if (expectArity(1) && !isStringy(args[0])) {
-          this.error(expr.args[0].pos, `${name}() requires a string, got ${typeToString(args[0])}`);
+          this.error(expr.args[0].pos, "builtin-arg-type", `${name}() requires a string, got ${typeToString(args[0])}`);
         }
         return STRING;
       }
       case "toInt": {
         if (expectArity(1) && !isStringy(args[0])) {
-          this.error(expr.args[0].pos, `toInt() requires a string, got ${typeToString(args[0])}`);
+          this.error(expr.args[0].pos, "builtin-arg-type", `toInt() requires a string, got ${typeToString(args[0])}`);
         }
         return unionOf([INT, ERROR]);
       }
@@ -1932,7 +2099,7 @@ class Checker {
         if (expectArity(1)) {
           const ch = args[0];
           if (ch.kind !== "chan" && ch.kind !== "any") {
-            this.error(expr.args[0].pos, `close() requires a channel, got ${typeToString(ch)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `close() requires a channel, got ${typeToString(ch)}`);
           }
         }
         return VOID;
@@ -1946,17 +2113,26 @@ class Checker {
               if (pred.params.length !== 1 || !assignable(arr.elem, pred.params[0])) {
                 this.error(
                   expr.args[1].pos,
+                  "callback-signature-mismatch",
                   `filter() callback must take a single ${typeToString(arr.elem)} parameter`,
                 );
               }
               if (!typeEquals(pred.ret, BOOL) && pred.ret.kind !== "any") {
-                this.error(expr.args[1].pos, `filter() callback must return bool, got ${typeToString(pred.ret)}`);
+                this.error(
+                  expr.args[1].pos,
+                  "callback-signature-mismatch",
+                  `filter() callback must return bool, got ${typeToString(pred.ret)}`,
+                );
               }
             } else if (pred.kind !== "any") {
-              this.error(expr.args[1].pos, `filter() second argument must be a function, got ${typeToString(pred)}`);
+              this.error(
+                expr.args[1].pos,
+                "builtin-arg-type",
+                `filter() second argument must be a function, got ${typeToString(pred)}`,
+              );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `filter() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `filter() requires an array, got ${typeToString(arr)}`);
           }
         }
         return args[0]?.kind === "array" ? args[0] : ANY;
@@ -1970,14 +2146,19 @@ class Checker {
               if (f.params.length !== 1 || !assignable(arr.elem, f.params[0])) {
                 this.error(
                   expr.args[1].pos,
+                  "callback-signature-mismatch",
                   `transform() callback must take a single ${typeToString(arr.elem)} parameter`,
                 );
               }
             } else if (f.kind !== "any") {
-              this.error(expr.args[1].pos, `transform() second argument must be a function, got ${typeToString(f)}`);
+              this.error(
+                expr.args[1].pos,
+                "builtin-arg-type",
+                `transform() second argument must be a function, got ${typeToString(f)}`,
+              );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `transform() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `transform() requires an array, got ${typeToString(arr)}`);
           }
         }
         const f = args[1];
@@ -1991,32 +2172,43 @@ class Checker {
           if (arr.kind === "array") {
             if (f.kind === "fn") {
               if (f.params.length !== 2) {
-                this.error(expr.args[1].pos, `reduce() callback must take (accumulator, element)`);
+                this.error(
+                  expr.args[1].pos,
+                  "callback-signature-mismatch",
+                  "reduce() callback must take (accumulator, element)",
+                );
               } else {
                 if (!assignable(init, f.params[0])) {
                   this.error(
                     expr.args[2].pos,
+                    "type-mismatch",
                     `reduce() initial value must be ${typeToString(f.params[0])}, got ${typeToString(init)}`,
                   );
                 }
                 if (!assignable(arr.elem, f.params[1])) {
                   this.error(
                     expr.args[1].pos,
+                    "callback-signature-mismatch",
                     `reduce() callback's second parameter must accept ${typeToString(arr.elem)}`,
                   );
                 }
                 if (!assignable(f.ret, f.params[0])) {
                   this.error(
                     expr.args[1].pos,
+                    "callback-signature-mismatch",
                     `reduce() callback must return ${typeToString(f.params[0])} (the accumulator type), got ${typeToString(f.ret)}`,
                   );
                 }
               }
             } else if (f.kind !== "any") {
-              this.error(expr.args[1].pos, `reduce() second argument must be a function, got ${typeToString(f)}`);
+              this.error(
+                expr.args[1].pos,
+                "builtin-arg-type",
+                `reduce() second argument must be a function, got ${typeToString(f)}`,
+              );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, `reduce() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `reduce() requires an array, got ${typeToString(arr)}`);
           }
         }
         const f = args[1];

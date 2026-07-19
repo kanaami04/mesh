@@ -85,6 +85,7 @@ describe("mesh check --json", () => {
     expect(parsed.diagnostics[0]).toMatchObject({
       line: 2,
       severity: "error",
+      code: "undefined-name",
       message: expect.stringContaining("undefined: 'nothing'"),
     });
     expect(parsed.diagnostics[0].col).toBeGreaterThan(0);
@@ -96,6 +97,45 @@ describe("mesh check --json", () => {
     expect(exit).toBe(1);
     expect(parsed.ok).toBe(false);
     expect(parsed.diagnostics.length).toBe(1);
+    expect(parsed.diagnostics[0].code).toBe("syntax-error");
+  });
+
+  test("F-13: 機械適用可能な診断にはfixパッチが付く(code+fix)", () => {
+    const { parsed } = checkJson(`fn main() {\n\tx: int | none = 1\n\tif x == none {\n\t}\n}`);
+    expect(parsed.diagnostics[0].code).toBe("use-is-none");
+    expect(parsed.diagnostics[0].fix).toEqual({
+      description: "replace '==' with 'is'",
+      range: { start: { line: 3, col: 7 }, end: { line: 3, col: 9 } },
+      replacement: "is",
+    });
+  });
+
+  test("F-13: fixを持たない診断は fix フィールド自体が無い(undefinedを送らない)", () => {
+    const { parsed } = checkJson(`fn main() {\n\tprint(nothing)\n}`);
+    expect("fix" in parsed.diagnostics[0]).toBe(false);
+  });
+});
+
+describe("mesh explain <code>(F-13)", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+  test("既知のcodeは説明文を1行以上返す(exit 0)", () => {
+    const proc = spawnSync(process.execPath, [CLI, "explain", "use-is-none"], { encoding: "utf8" });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("is none");
+  });
+
+  test("未知のcodeはエラーで案内する(exit 1)", () => {
+    const proc = spawnSync(process.execPath, [CLI, "explain", "not-a-real-code"], { encoding: "utf8" });
+    expect(proc.status).toBe(1);
+    expect(proc.stderr).toContain("unknown diagnostic code");
+  });
+
+  test("引数無しは全コード一覧を返す(mesh check --jsonが返すcodeは必ず載っている)", () => {
+    const proc = spawnSync(process.execPath, [CLI, "explain"], { encoding: "utf8" });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("use-is-none");
+    expect(proc.stdout).toContain("undefined-name");
   });
 });
 

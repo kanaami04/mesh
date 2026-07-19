@@ -15,15 +15,18 @@ import {
   type CompileResult,
   type ModuleSource,
 } from "./compiler";
+import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "./diagnostic-codes";
 import { parse } from "./parser";
 
 const USAGE = `Mesh compiler v0.1.0
 
 Usage:
-  mesh run   <file.mesh>            compile and run
-  mesh build <file.mesh> [-o out]   compile to JavaScript
-  mesh check <file.mesh> [--json]   type-check only (--json: AIエージェント向けの構造化出力)
-  mesh card                         言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
+  mesh run     <file.mesh>            compile and run
+  mesh build   <file.mesh> [-o out]   compile to JavaScript
+  mesh check   <file.mesh> [--json]   type-check only (--json: AIエージェント向けの構造化出力。
+                                       診断ごとに code と、機械適用可能なら fix パッチを含む)
+  mesh explain <code>                 診断コードの意味を説明する(引数無しで全コード一覧)
+  mesh card                           言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
 `;
 
 // エントリファイルと、そこから(推移的に)importされたパッケージのソースを集める。
@@ -105,6 +108,23 @@ function main() {
   // card はファイル引数を取らない
   if (command === "card") {
     console.log(LANGUAGE_CARD);
+    return;
+  }
+
+  // explain の第2引数はファイルではなく診断コード(F-13)。引数無しなら全コード一覧を出す
+  if (command === "explain") {
+    const code = file;
+    if (!code) {
+      const codes = Object.keys(DIAGNOSTIC_EXPLANATIONS).sort();
+      console.log(`${codes.length} diagnostic codes. Run 'mesh explain <code>' for details.\n`);
+      console.log(codes.join("\n"));
+      return;
+    }
+    if (!Object.hasOwn(DIAGNOSTIC_EXPLANATIONS, code)) {
+      console.error(`error: unknown diagnostic code '${code}' (run 'mesh explain' with no code to list them all)`);
+      process.exit(1);
+    }
+    console.log(DIAGNOSTIC_EXPLANATIONS[code as DiagnosticCode]);
     return;
   }
 

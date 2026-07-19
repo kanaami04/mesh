@@ -92,10 +92,12 @@ export function lex(source: string, startPos?: Pos): Token[] {
       const parts: StringPart[] = [];
       let text = "";
       while (i < source.length && source[i] !== '"') {
-        if (source[i] === "\n") throw new CompileError("string literal not terminated", start);
+        if (source[i] === "\n") throw new CompileError("string literal not terminated", start, "unterminated-string");
         if (source[i] === "\\") {
           const esc = ESCAPES[source[i + 1]];
-          if (esc === undefined) throw new CompileError(`unknown escape \\${source[i + 1]}`, pos());
+          if (esc === undefined) {
+            throw new CompileError(`unknown escape \\${source[i + 1]}`, pos(), "unknown-escape");
+          }
           text += esc;
           advance(2);
           continue;
@@ -122,7 +124,7 @@ export function lex(source: string, startPos?: Pos): Token[] {
                 }
               }
               if (i >= source.length || source[i] === "\n") {
-                throw new CompileError("string literal not terminated", exprPos);
+                throw new CompileError("string literal not terminated", exprPos, "unterminated-string");
               }
               exprSrc += '"';
               advance();
@@ -137,11 +139,15 @@ export function lex(source: string, startPos?: Pos): Token[] {
             advance();
           }
           if (depth > 0) {
-            throw new CompileError("interpolation not terminated — missing '}'", exprPos);
+            throw new CompileError(
+              "interpolation not terminated — missing '}'",
+              exprPos,
+              "unterminated-interpolation",
+            );
           }
           advance(); // 閉じの }
           if (exprSrc.trim() === "") {
-            throw new CompileError("empty interpolation '${}'", exprPos);
+            throw new CompileError("empty interpolation '${}'", exprPos, "empty-interpolation");
           }
           if (text !== "") {
             parts.push({ kind: "text", text });
@@ -153,7 +159,9 @@ export function lex(source: string, startPos?: Pos): Token[] {
         text += source[i];
         advance();
       }
-      if (i >= source.length) throw new CompileError("string literal not terminated", start);
+      if (i >= source.length) {
+        throw new CompileError("string literal not terminated", start, "unterminated-string");
+      }
       advance(); // 閉じの "
       if (parts.length > 0) {
         if (text !== "") parts.push({ kind: "text", text });
@@ -209,7 +217,7 @@ export function lex(source: string, startPos?: Pos): Token[] {
       continue;
     }
 
-    throw new CompileError(`unexpected character '${ch}'`, pos());
+    throw new CompileError(`unexpected character '${ch}'`, pos(), "unexpected-character");
   }
 
   // 最終行の文もセミコロンで閉じる

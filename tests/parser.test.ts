@@ -359,4 +359,52 @@ fn main() {}`);
     const lit = stmt.values[0];
     expect(lit).toMatchObject({ kind: "structLit", name: "Point", pkg: "math" });
   });
+
+  describe("診断コード(F-13): CompileErrorのcode/fix", () => {
+    const throwsWith = (src: string): CompileError => {
+      try {
+        parse(src);
+      } catch (e) {
+        if (e instanceof CompileError) return e;
+        throw e;
+      }
+      throw new Error("expected parse() to throw");
+    };
+
+    test("旧記法の後置 '!' は postfix-bang-renamed + '?'へのfixを持つ", () => {
+      const e = throwsWith(`fn f() int | error { return 1 }\nfn main() { x := f()!\nprint(x) }`);
+      expect(e.code).toBe("postfix-bang-renamed");
+      // f()! の '!' 一文字だけを '?' に置き換える(周りのテキストは変えない)
+      expect(e.fix).toEqual({
+        description: "replace '!' with '?'",
+        range: { start: { line: 2, col: 21 }, end: { line: 2, col: 22 } },
+        replacement: "?",
+      });
+    });
+
+    test("裸の{...}は bare-struct-shape。フィールドが改行区切りならfix付き、カンマ書きならfix無し", () => {
+      const oneLinePerField = throwsWith(`type Point = {\n\tx: int\n\ty: int\n}\nfn main() {}`);
+      expect(oneLinePerField.code).toBe("bare-struct-shape");
+      expect(oneLinePerField.fix).toEqual({
+        description: "replace 'type Point =' with 'struct Point'",
+        range: { start: { line: 1, col: 1 }, end: { line: 1, col: 13 } },
+        replacement: "struct Point",
+      });
+
+      // 1行にカンマ区切りで書いたフィールドは、struct宣言(カンマ非対応)に変換すると壊れるのでfix無し
+      const commaForm = throwsWith(`type Point = { x: int, y: int }\nfn main() {}`);
+      expect(commaForm.code).toBe("bare-struct-shape");
+      expect(commaForm.fix).toBeUndefined();
+
+      // error type も見た目が紛らわしくなるのでfix無し(コードは付く)
+      const errorForm = throwsWith(`error type Point = {\n\tx: int\n}\nfn main() {}`);
+      expect(errorForm.code).toBe("bare-struct-shape");
+      expect(errorForm.fix).toBeUndefined();
+    });
+
+    test("構文エラーの一般形はsyntax-errorコードを持つ", () => {
+      const e = throwsWith(`fn main() { x := }`);
+      expect(e.code).toBe("syntax-error");
+    });
+  });
 });

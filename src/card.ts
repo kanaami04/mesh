@@ -495,6 +495,16 @@ two union types referencing each other directly as bare members with nothing wra
 reference (e.g. \`type A = B | none\` where \`type B = A | error\`) — wrap the reference in a
 struct field instead (self-referential discriminated unions like a tree ARE supported, see above)
 
+## Diagnostic codes, explanations, and machine-applicable fixes
+
+\`mesh check <file> --json\` gives every diagnostic a stable \`code\` (e.g. \`"use-is-none"\`), and,
+when the fix is safe and mechanical, a \`fix\` field: \`{ description, range: {start, end}, replacement }\`
+— a single text replacement you can apply directly, no parsing required. Diagnostics without an
+obvious one-token fix omit the \`fix\` field entirely (don't invent one). Run \`mesh explain <code>\`
+for a longer explanation of what a code means and how to think about it; run it with no code to
+list every known code. The table below is the same information in prose form, keyed by message
+instead of by code — use whichever is more convenient.
+
 ## Common compile errors → how to fix
 
     'x' is immutable — declare it with 'mut'        → change x := ... to mut x := ...
@@ -535,6 +545,7 @@ struct field instead (self-referential discriminated unions like a tree ARE supp
 
 ## Verify your code (agents: do this after every edit)
 
-    mesh check file.mesh --json    # {ok, diagnostics: [{file, line, col, severity, message}]}
+    mesh check file.mesh --json    # {ok, diagnostics: [{file, line, col, severity, code, message, fix?}]}
+    mesh explain <code>            # longer explanation of a diagnostic code (no code = list them all)
     mesh run file.mesh             # compile and execute
 `;

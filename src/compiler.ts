@@ -32,7 +32,7 @@ export function compileModules(modules: ModuleSource[]): CompileResult {
       parsed.push({ pkg: m.pkg, file: m.file, program: parse(m.source) });
     } catch (e) {
       if (e instanceof CompileError) {
-        parseErrors.push({ pos: e.pos, message: e.message, file: m.file });
+        parseErrors.push({ pos: e.pos, code: e.code, message: e.message, file: m.file, fix: e.fix });
       } else {
         throw e;
       }
@@ -47,12 +47,15 @@ export function compileModules(modules: ModuleSource[]): CompileResult {
 
 export function formatDiagnostics(file: string, diagnostics: Diagnostic[]): string {
   return diagnostics
-    .map((d) => `${d.file ?? file}:${d.pos.line}:${d.pos.col}: error: ${d.message}`)
+    .map((d) => `${d.file ?? file}:${d.pos.line}:${d.pos.col}: error[${d.code}]: ${d.message}`)
     .join("\n");
 }
 
 // AIエージェント向けの構造化出力(mesh check --json)。
-// 安定した機械可読フォーマットとして、フィールドの削除・改名はしない方針
+// 安定した機械可読フォーマットとして、フィールドの削除・改名はしない方針(F-13でcode/fixを追加。
+// 既存フィールドはそのままなので既存の消費者への破壊的変更ではない)。
+// code は `mesh explain <code>` の入力。fix は機械適用可能な単一range置換(無ければundefined —
+// 安全に自動化できない診断は無理にfixを作らない)
 export function diagnosticsToJson(file: string, diagnostics: Diagnostic[]): string {
   return JSON.stringify(
     {
@@ -63,7 +66,9 @@ export function diagnosticsToJson(file: string, diagnostics: Diagnostic[]): stri
         line: d.pos.line,
         col: d.pos.col,
         severity: "error",
+        code: d.code,
         message: d.message,
+        fix: d.fix,
       })),
     },
     null,

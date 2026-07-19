@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { check } from "../src/checker";
+import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "../src/diagnostic-codes";
 import { parse } from "../src/parser";
 import { CompileError } from "../src/token";
 
+const diagnosticsOf = (src: string) => check(parse(src));
 const errorsOf = (src: string) => check(parse(src)).map((d) => d.message);
 const inMain = (body: string) => errorsOf(`fn main() {\n${body}\n}`);
 
@@ -1328,6 +1330,68 @@ fn main() {
 	print(r)
 }`);
       expect(errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("診断コード(F-13): code/fixの付与", () => {
+    test("代表的な診断にそれぞれ意味のあるcodeが付く", () => {
+      const cases: { src: string; code: DiagnosticCode }[] = [
+        { src: `x := notDefined`, code: "undefined-name" },
+        { src: `x := 1\nx := 2`, code: "already-declared" },
+        { src: `x := 1\nx = 2`, code: "immutable-assignment" },
+        { src: `x := "a" + 1`, code: "invalid-operation" },
+        { src: `x := 1\nif x == none { }`, code: "use-is-none" },
+      ];
+      for (const { src, code } of cases) {
+        const diags = diagnosticsOf(`fn main() {\n${src}\n}`);
+        expect(diags.length).toBeGreaterThan(0);
+        expect(diags[0].code).toBe(code);
+      }
+
+      // 複数関数にまたがる/型宣言が絡むケースは fn main() で包めないので個別プログラムで確認
+      expect(
+        diagnosticsOf(`fn f(a: int) int { return a }\nfn main() { print(f(1, 2)) }`)[0].code,
+      ).toBe("argument-count");
+      expect(
+        diagnosticsOf(`struct User { name: string }\nfn main() { u := User{name: "a"}\nprint(u.age) }`)[0]
+          .code,
+      ).toBe("unknown-field");
+    });
+
+    test("'== none' のfixは '==' を 'is' に置き換える単一range置換になる", () => {
+      const diags = diagnosticsOf(`fn main() {\n\tx: int | none = 1\n\tif x == none {\n\t}\n}`);
+      expect(diags[0].code).toBe("use-is-none");
+      // 3行目 "\tif x == none {" — タブも1桁として数えるので '==' は7〜8桁目
+      expect(diags[0].fix).toEqual({
+        description: "replace '==' with 'is'",
+        range: { start: { line: 3, col: 7 }, end: { line: 3, col: 9 } },
+        replacement: "is",
+      });
+    });
+
+    test("'!= none' や 'none == x' はトークン置換で表現できないのでfix無し(codeは付く)", () => {
+      const d1 = diagnosticsOf(`fn main() {\n\tx: int | none = 1\n\tif x != none {\n\t}\n}`);
+      expect(d1[0].code).toBe("use-is-none");
+      expect(d1[0].fix).toBeUndefined();
+
+      const d2 = diagnosticsOf(`fn main() {\n\tx: int | none = 1\n\tif none == x {\n\t}\n}`);
+      expect(d2[0].code).toBe("use-is-none");
+      expect(d2[0].fix).toBeUndefined();
+    });
+
+    test("DIAGNOSTIC_EXPLANATIONS はcheckerが実際に出す全codeを説明できる(型で保証されるが実測でも確認)", () => {
+      // 代表的な失敗パターンを一通り集めて発火させ、出てきたcodeが全部説明表にあることを確認する
+      const programs = [
+        `fn main() {\n\tx := notDefined\n\tprint(x)\n}`,
+        `fn main() {\n\tx := 1\n\tx := 2\n\tprint(x)\n}`,
+        `error type X = int\nfn main() { print(1) }`,
+        `fn f<T>() T { return 1 }\nfn main() { print(f()) }`,
+      ];
+      for (const program of programs) {
+        for (const d of diagnosticsOf(program)) {
+          expect(Object.hasOwn(DIAGNOSTIC_EXPLANATIONS, d.code)).toBe(true);
+        }
+      }
     });
   });
 });
