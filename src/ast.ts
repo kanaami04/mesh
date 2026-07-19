@@ -14,7 +14,10 @@ export type TypeNode =
   | { kind: "chan"; elem: TypeNode; pos: Pos } // chan<int>
   | { kind: "mapType"; key: TypeNode; value: TypeNode; pos: Pos } // map<string, int>
   | { kind: "union"; members: TypeNode[]; pos: Pos } // int | error
-  | { kind: "structType"; fields: StructFieldNode[]; pos: Pos }; // struct 宣言の中身
+  | { kind: "structType"; fields: StructFieldNode[]; pos: Pos } // struct 宣言の中身
+  // fn(int, string) bool — 関数型。宣言と同じ読み(戻り値のunionは戻り値側に束縛)。
+  // ret が null なら戻り値なし(void)。パラメータ名は書かない(型のみ)
+  | { kind: "fnType"; params: TypeNode[]; ret: TypeNode | null; pos: Pos };
 
 export interface StructFieldNode {
   name: string;

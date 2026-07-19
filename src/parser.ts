@@ -322,8 +322,45 @@ class Parser {
     return this.parseArraySuffix(atom);
   }
 
-  // 配列サフィックスを除いた単体の型(chan<T> / map<K,V> / name / リテラル / none)
+  // このトークンから型が始まりうるか(fn型の「戻り値があるか」の判定に使う)
+  private canStartType(): boolean {
+    const t = this.peek().type;
+    return (
+      t === "ident" || t === "string" || t === "chan" || t === "map" ||
+      t === "none" || t === "fn" || t === "("
+    );
+  }
+
+  // 配列サフィックスを除いた単体の型(chan<T> / map<K,V> / fn(..) / name / リテラル / none / 括弧)
   private parseTypeAtom(): TypeNode {
+    // (T) — グループ化。fn型をunionに入れる時などの曖昧さ解消用: (fn(int) int) | none
+    if (this.check("(")) {
+      this.next();
+      const inner = this.parseType();
+      this.expect(")", "after type");
+      return inner;
+    }
+    // fn(int, string) bool — 関数型。関数宣言と同じ読みで、戻り値のunionは戻り値側に束縛される
+    // (fn(int) int | error の戻り値は int | error。関数自体をunionに入れるなら括弧で包む)
+    if (this.check("fn")) {
+      const start = this.next();
+      this.expect("(", "after 'fn' in a function type");
+      const params: TypeNode[] = [];
+      while (!this.check(")")) {
+        // パラメータ名は書かない(型のみ)。書いたら書き方1通りへ誘導する
+        if (this.check("ident") && this.peek(1).type === ":") {
+          throw new CompileError(
+            "parameter names are not used in function types — write the types only, like fn(int, string) bool",
+            this.peek().pos,
+          );
+        }
+        params.push(this.parseType());
+        if (!this.check(")")) this.expect(",", "between parameter types");
+      }
+      this.expect(")", "after parameter types");
+      const ret = this.canStartType() ? this.parseType() : null;
+      return { kind: "fnType", params, ret, pos: start.pos };
+    }
     // 文字列リテラル型: "active"
     if (this.check("string")) {
       const t = this.next();

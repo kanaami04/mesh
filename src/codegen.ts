@@ -336,6 +336,7 @@ class Codegen {
     if (t.kind === "chan") return `(${ref} instanceof __Channel)`;
     if (t.kind === "union") return "false"; // checker が弾いている(単一型のみ)
     if (t.kind === "mapType") return `(${ref} instanceof Map)`;
+    if (t.kind === "fnType") return `(typeof ${ref} === "function")`;
     if (t.kind === "structType") {
       const objTest = `(typeof ${ref} === "object" && ${ref} !== null && !(${ref} instanceof Error) && !Array.isArray(${ref}))`;
       const fieldTests = t.fields.map((f) => this.genTypeTest(`${ref}.${f.name}`, f.type));

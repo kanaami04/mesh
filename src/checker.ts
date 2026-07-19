@@ -263,6 +263,12 @@ class Checker {
           fields: node.fields.map((f) => ({ name: f.name, type: this.resolveType(f.type) })),
         };
       }
+      case "fnType":
+        return {
+          kind: "fn",
+          params: node.params.map((p) => this.resolveType(p)),
+          ret: node.ret ? this.resolveType(node.ret) : VOID,
+        };
       case "name":
         // math.User — importしたパッケージのexported型
         if (node.pkg) return this.resolvePackageType(node.pkg, node.name, node.pos);

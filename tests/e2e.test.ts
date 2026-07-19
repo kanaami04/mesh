@@ -479,6 +479,58 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(out).toBe("alice\n404\nfound: bob\nOK\nNG\ntrue\n");
   });
 
+  test("カードの新項目: 関数型注釈 fn(int) int — ユーザー定義の高階関数が書ける", () => {
+    const out = runSource(`fn apply(f: fn(int) int, x: int) int {
+      return f(x)
+    }
+    fn retryInt(f: fn() int | error, maxAttempts: int) int | error {
+      for i := 1; i <= maxAttempts; i++ {
+        v := f()
+        if v is error { continue }
+        return v
+      }
+      return error("gave up after \${maxAttempts}")
+    }
+    fn makeAdder(n: int) fn(int) int {
+      return fn(x: int) int { return x + n }
+    }
+    struct Handler {
+      onHit: fn(int) int
+    }
+    fn run(cb: (fn(int) int) | none, x: int) int {
+      if cb is none { return x }
+      return cb(x)
+    }
+    fn main() {
+      double: fn(int) int = fn(x: int) int { return x * 2 }
+      print(apply(double, 21))
+
+      mut calls := 0
+      flaky := fn() int | error {
+        calls = calls + 1
+        if calls < 3 { return error("boom") }
+        return 99
+      }
+      print(retryInt(flaky, 5) or 0)
+
+      add10 := makeAdder(10)
+      print(add10(5))
+
+      h := Handler{onHit: double}
+      print(h.onHit(50))
+
+      print(run(none, 7))
+      print(run(add10, 7))
+    }`);
+    expect(out).toBe("42\n99\n15\n100\n7\n17\n");
+    // 引数の数が合わない関数値はコンパイルエラー
+    expect(
+      compile(
+        `fn apply(f: fn(int) int, x: int) int { return f(x) }\nfn main() { print(apply(fn(a: int, b: int) int { return a + b }, 1)) }`,
+      ).diagnostics[0]?.message,
+    ).toContain("cannot use fn(int, int) int as fn(int) int");
+  });
+
   test("カードの新項目: 自己参照する判別可能unionの回避策(名前付き再帰struct+T|noneの疑似optional)", () => {
     const out = runSource(`struct Expr {
         kind: string

@@ -49,6 +49,35 @@ describe("parser", () => {
     expect(arr2.elems.length).toBe(2);
   });
 
+  test("関数型注釈: fn(int, string) bool をパースできる(void戻り・greedy union戻り・括弧グループ化)", () => {
+    const p1 = parse(`fn f(g: fn(int, string) bool) {}`).fns[0].params[0].type;
+    expect(p1).toMatchObject({
+      kind: "fnType",
+      params: [{ kind: "name", name: "int" }, { kind: "name", name: "string" }],
+      ret: { kind: "name", name: "bool" },
+    });
+
+    // 戻り値なし
+    const p2 = parse(`fn f(g: fn(int)) {}`).fns[0].params[0].type;
+    expect(p2).toMatchObject({ kind: "fnType", ret: null });
+
+    // 宣言と同じ読み: fn(int) int | error の union は戻り値側に束縛
+    const p3 = parse(`fn f(g: fn(int) int | error) {}`).fns[0].params[0].type;
+    expect(p3).toMatchObject({ kind: "fnType", ret: { kind: "union" } });
+
+    // 関数自体をunionに入れるなら括弧: (fn(int) int) | none
+    const p4 = parse(`fn f(g: (fn(int) int) | none) {}`).fns[0].params[0].type;
+    if (p4.kind !== "union") throw new Error("unexpected");
+    expect(p4.members[0].kind).toBe("fnType");
+    expect(p4.members[1]).toMatchObject({ kind: "name", name: "none" });
+  });
+
+  test("関数型注釈: パラメータ名を書くと型のみへ誘導エラー", () => {
+    expect(() => parse(`fn f(g: fn(x: int) int) {}`)).toThrow(
+      "parameter names are not used in function types",
+    );
+  });
+
   test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
     const program = parse(
       `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,

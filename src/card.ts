@@ -39,6 +39,10 @@ values, so a function mutating one (e.g. \`push(items, x)\`) is visible to the c
     chan<T>            // channel: ch := chan<string>()
     A | B              // union
     "active"           // string literal type (subtype of string)
+    fn(int, string) bool   // function type — types only, no parameter names.
+                       // Reads like declarations: in fn(int) int | error the union is the
+                       // RETURN type; to put the function itself in a union, parenthesize:
+                       // (fn(int) int) | none
 
     struct User {      // data shape (one field per line, no commas)
         name: string
@@ -338,6 +342,23 @@ form of \`match\`.
   already the \`map<K, V>\` type keyword, so \`map(arr, f)\` is a parse error; see below).
   \`reduce(arr, f, init)\` takes the callback before the initial value, matching JS's
   \`.reduce(callback, initialValue)\` order (with the array moved to the first argument).
+- You can write your OWN higher-order functions with function types (\`fn(T) U\` — see Types):
+
+      fn apply(f: fn(int) int, x: int) int { return f(x) }
+      fn retryInt(f: fn() int | error, tries: int) int | error {
+          for i := 1; i <= tries; i++ {
+              v := f()
+              if v is error { continue }
+              return v
+          }
+          return error("gave up after \${tries}")
+      }
+      fn makeAdder(n: int) fn(int) int { return fn(x: int) int { return x + n } }
+
+  Function types also work as struct fields (\`onHit: fn(int) int\`), in typed declarations
+  (\`double: fn(int) int = fn(x: int) int { return x * 2 }\`), and in channels
+  (\`chan<fn(int) int>\`). They are still MONOMORPHIC — no generics yet, so a helper that
+  should work for any element type must be written per-type (or use the builtins above).
 - There are no methods on values other than struct fields, and nothing beyond the lists above:
   no regex, no string formatting/padding, no array flatten/zip/group. Write these by hand with
   \`for ... range\` until they land in the standard library.
@@ -371,12 +392,10 @@ in a package directory and import it:
 ## Does NOT exist in Mesh — never write these
 
 null, undefined, nil / try, catch, throw, exceptions / panic(), recover /
-class, inheritance, interfaces, generics / switch, while, do-while /
+class, inheritance, interfaces, generics (monomorphic function types like \`fn(int) int\` DO exist — see Types) / switch, while, do-while /
 (T, error) multi-value returns / enum (use unions) / default args, overloads /
 semicolons / backtick strings / comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if) /
-methods on non-struct types (int/string/array — struct only) / function-type annotations
-(a variable CAN hold a function value, e.g. \`f := fn(x: int) int {...}\`, but you cannot
-write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration) /
+methods on non-struct types (int/string/array — struct only) /
 Go's close/comma-ok idiom (\`v, ok := <-ch\`) — use \`v := <-ch\` then narrow with \`is closed\` /
 send-case / default-send in select (select only reacts to RECEIVE readiness, not send readiness) /
 two union types referencing each other directly as bare members with nothing wrapping the
