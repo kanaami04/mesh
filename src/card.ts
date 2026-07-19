@@ -140,6 +140,9 @@ Building an optional result imperatively (e.g. "the best so far"):
 
 - match subjects must be union-typed. Patterns: type names (\`User\`, \`none\`, \`error\`, \`int\`, ...),
   string literals (\`"active"\`), or \`_\` (last arm only). Multiple patterns: \`"a", "b" => ...\`.
+- A match arm's body is a single EXPRESSION — there is no block body and no "do nothing" arm
+  (\`none => {}\` is a compile error). When some cases should do nothing, use \`if x is ...\`
+  instead of match.
 - \`x == none\` is a compile error — use \`is none\` (it narrows; \`==\` does not).
 - \`is\` narrowing composes: \`a is Foo && a.value > 0\` narrows \`a\` for the right side of \`&&\`
   AND inside the \`then\` block; \`a is none || b is none { return }\` narrows both \`a\` and \`b\`
