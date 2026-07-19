@@ -1228,15 +1228,28 @@ describe("e2e", () => {
     expect(out).toBe("found: alice\nunauthorized\nnot found\n");
   });
 
-  test("判別可能union: 構造的型付けにより形が同じ別structが代入できる", () => {
-    const out = runSource(`struct A { name: string }
-    struct B { name: string }
-    fn describeA(a: A) string { return a.name }
+  test("struct: 名前的型付け(F-3) — 同形でも別名は弾かれ、無名メンバーには渡せる", () => {
+    // 名前付き同士: 形が同じでも別の型(コンパイルエラー)
+    expect(
+      compile(`struct Meters { value: float }
+struct Dollars { value: float }
+fn charge(amount: Dollars) { print(amount.value) }
+fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
+    ).toContain("cannot use Meters as Dollars");
+
+    // 無名{...}メンバー(判別可能union)の場所には、同形の名前付きstructを渡せる(実行まで確認)
+    const out = runSource(`struct Ok { kind: "ok" }
+    type Resp = { kind: "ok" } | { kind: "ng" }
+    fn describe(r: Resp) string {
+      return match r {
+        { kind: "ok" } => "OK"
+        { kind: "ng" } => "NG"
+      }
+    }
     fn main() {
-      b := B{ name: "x" }
-      print(describeA(b))
+      print(describe(Ok{ kind: "ok" }))
     }`);
-    expect(out).toBe("x\n");
+    expect(out).toBe("OK\n");
   });
 
   test("struct: match の型パターンで分解できる", () => {

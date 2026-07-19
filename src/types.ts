@@ -100,10 +100,16 @@ export function typeEquals(a: Type, b: Type, seen: Array<[Type, Type]> = []): bo
       );
     }
     case "struct": {
-      // 構造的型付け(2026-07-17決定分の実装): struct の同一性は名前ではなく形で決まる。
-      // 無名 {...} 型式(判別可能union のメンバー)も、名前付き struct 同士も同じ規則で比較する
+      // 名前的型付け(2026-07-19 F-3決定): 名前付き struct 同士は名前で判定する。
+      // 形が同じでも Meters と Dollars は別の型(単位型・ID型の取り違えをコンパイルエラーにする)。
+      // 無名 {...} 型式(判別可能union のメンバー)が絡むときだけ構造的に比較する
+      // — 名前がそもそも無いので、形で比べる以外に方法がないため。これにより
+      // 「名前付き struct を無名メンバーの場所に渡す」互換は維持される
       const bs = b as typeof a;
       if (a === bs) return true;
+      const aAnon = a.name === "(anonymous)";
+      const bAnon = bs.name === "(anonymous)";
+      if (!aAnon && !bAnon) return a.name === bs.name;
       if (seen.some(([sa, sb]) => sa === a && sb === bs)) return true;
       if (a.fields.length !== bs.fields.length) return false;
       const nextSeen: Array<[Type, Type]> = [...seen, [a, bs]];

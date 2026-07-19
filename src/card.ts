@@ -140,9 +140,11 @@ Building an optional result imperatively (e.g. "the best so far"):
 
       if res is { kind: "notFound" } { return "404" }
       return "found: \${res.user.name}"   // res narrowed to the remaining member(s) here
-- Struct identity is STRUCTURAL, not by name: two \`struct\` declarations with the same fields
-  (same names, same types) are interchangeable, and a named \`struct\` literal can be used
-  wherever an anonymous \`{ ... }\` union member with the same fields is expected.
+- Struct identity is NOMINAL (by name): two \`struct\` declarations with the same fields are
+  DIFFERENT types — \`struct Meters { value: float }\` is rejected where \`Dollars\` is expected,
+  so unit/ID wrapper structs actually protect you. The one place comparison is structural is
+  where no name exists: anonymous \`{ ... }\` union members — a NAMED struct value can still be
+  used where an anonymous member with the same fields is expected.
 - Discriminated unions CAN be self-referential (trees, ASTs, linked structures) as long as the
   recursive reference sits inside a struct-shaped member's FIELD — the union's own name works
   as an ordinary type reference there, same as a recursive \`struct\`'s \`next: Node | none\`:

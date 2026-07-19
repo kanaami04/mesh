@@ -139,8 +139,10 @@ print(Todo{title: "x", done: false}.complete().render())  // 連鎖(左から右
 ——同じ操作の呼び方が2通り存在することはありません。この分離のおかげで、`User`にも`Order`にも
 `describe()`という同名メソッドを両方持たせられます(自由関数だと名前が衝突します)。
 
-struct の同一性は**構造的**です。名前が違っても、フィールドの名前と型がそろっていれば
-同じ型として扱われます(`struct A { name: string }` と `struct B { name: string }` は互換)。
+struct の同一性は**名前的**です。形が同じでも `Meters` と `Dollars` は別の型として扱われ、
+取り違えはコンパイルエラーになります(単位型・ID型のラッパーがちゃんと守ってくれる、
+Go/Rustと同じ方式)。名前を持たない判別可能unionの `{ ... }` メンバーが絡む比較だけ、
+形で判定します。
 
 ### 判別可能union(discriminated union)
 

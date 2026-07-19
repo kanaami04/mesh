@@ -439,26 +439,30 @@ fn main() {
     ]);
   });
 
-  test("struct: 構造的型付け — 名前が違っても形が同じなら互換になる", () => {
-    const errors = errorsOf(`struct A { name: string }
-struct B { name: string }
-fn describeA(a: A) string { return a.name }
+  test("struct: 名前的型付け(F-3) — 形が同じでも名前が違えば別の型(単位型の事故を防ぐ)", () => {
+    const errors = errorsOf(`struct Meters { value: float }
+struct Dollars { value: float }
+fn charge(amount: Dollars) { print(amount.value) }
 fn main() {
-	b := B{ name: "x" }
-	print(describeA(b))
+	distance := Meters{ value: 100.0 }
+	charge(distance)
 }`);
-    expect(errors).toEqual([]);
+    expect(errors).toEqual([expect.stringContaining("cannot use Meters as Dollars")]);
   });
 
-  test("struct: 構造的型付けでも形が違えば依然として弾かれる", () => {
-    const errors = errorsOf(`struct A { name: string }
-struct B { name: string age: int }
-fn describeA(a: A) string { return a.name }
+  test("struct: 名前的でも、無名{...}メンバーの場所には同形の名前付きstructを渡せる", () => {
+    const errors = errorsOf(`struct Ok { kind: "ok" }
+type Resp = { kind: "ok" } | { kind: "ng" }
+fn describe(r: Resp) string {
+	return match r {
+		{ kind: "ok" } => "OK"
+		{ kind: "ng" } => "NG"
+	}
+}
 fn main() {
-	b := B{ name: "x", age: 1 }
-	print(describeA(b))
+	print(describe(Ok{ kind: "ok" }))
 }`);
-    expect(errors).toEqual([expect.stringContaining("cannot use B as A")]);
+    expect(errors).toEqual([]);
   });
 
   test("map: 読みは V | none なので絞り込み前に使うとエラー", () => {
