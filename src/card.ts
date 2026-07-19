@@ -77,7 +77,9 @@ Four ways to consume a union:
     e := parse(s)           // an error's message: narrow to error, then interpolate it
     if e is error {
         print("failed: \${e}")   // \${error} renders its message; str(e) also works
-    }
+    } else {
+        print("ok: \${e}")       // if/else narrows BOTH branches, not just the early-return form —
+    }                            // e is int here, no extra narrowing needed
 
 Building an optional result imperatively (e.g. "the best so far"):
 
