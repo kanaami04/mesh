@@ -761,6 +761,28 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     }`);
     expect(out).toBe("43\ntimeout after 100ms\nnot found in users\n-1\n");
   });
+
+  test("行頭 | の複数行union: ベンチ第1ラウンドの実提出コード形が末尾まで動く", () => {
+    const out = runSource(`type Expr = { kind: "num", value: int }
+    | { kind: "add", left: Expr, right: Expr }
+    | { kind: "mul", left: Expr, right: Expr }
+    | { kind: "neg", operand: Expr }
+
+    fn evaluate(expr: Expr) int {
+        return match expr {
+            { kind: "num" } => expr.value
+            { kind: "add" } => evaluate(expr.left) + evaluate(expr.right)
+            { kind: "mul" } => evaluate(expr.left) * evaluate(expr.right)
+            { kind: "neg" } => -evaluate(expr.operand)
+        }
+    }
+
+    fn main() {
+        e := Expr{kind: "neg", operand: Expr{kind: "add", left: Expr{kind: "num", value: 1}, right: Expr{kind: "num", value: 1}}}
+        print(evaluate(e))
+    }`);
+    expect(out).toBe("-2\n");
+  });
 });
 
 describe("モジュールシステム(import / export)", () => {

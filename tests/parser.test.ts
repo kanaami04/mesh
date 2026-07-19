@@ -92,6 +92,35 @@ describe("parser", () => {
     expect(fn3.typeParams).toEqual([]);
   });
 
+  test("union宣言: 行頭 | の複数行フォーマット(TSの定番)で書ける", () => {
+    // ベンチ第1ラウンドでMeshが唯一落ちた負転移パターン(bench/tasks/04参照)
+    const t1 = parse(`type Expr = { kind: "num", value: int }
+    | { kind: "add", left: Expr, right: Expr }
+    | { kind: "neg", operand: Expr }`).types[0];
+    expect(t1.node).toMatchObject({ kind: "union" });
+    if (t1.node.kind !== "union") throw new Error("unexpected");
+    expect(t1.node.members.length).toBe(3);
+
+    // 行末 | スタイル(| はASI対象外なので従来から可)も引き続き動く
+    const t2 = parse(`type Status = "active" |
+    "banned"`).types[0];
+    if (t2.node.kind !== "union") throw new Error("unexpected");
+    expect(t2.node.members.length).toBe(2);
+
+    // error type マーカーとの組み合わせ
+    const t3 = parse(`error type DbError = { kind: "notFound", table: string }
+    | { kind: "timeout", ms: int }`).types[0];
+    expect(t3.isError).toBe(true);
+    if (t3.node.kind !== "union") throw new Error("unexpected");
+    expect(t3.node.members.length).toBe(2);
+
+    // 継続と誤読しないこと: type宣言の直後に別の宣言が続く通常ケース
+    const prog = parse(`type Status = "active" | "banned"
+fn main() {}`);
+    expect(prog.types.length).toBe(1);
+    expect(prog.fns.length).toBe(1);
+  });
+
   test("構造化エラー(F-2後半): error type X = ... / error struct X { ... } の isError フラグ", () => {
     const t1 = parse(`error type DbError = { kind: "notFound" } | { kind: "timeout" }`).types[0];
     expect(t1.isError).toBe(true);

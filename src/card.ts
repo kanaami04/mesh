@@ -23,6 +23,11 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 
 - No \`var\` / \`let\` / \`const\`. No uninitialized declarations.
 - No shadowing: reusing an outer name (incl. function names) in \`:=\` is a compile error.
+- JS reserved words can NOT be used as variable or function names (Mesh compiles to JS):
+  \`await async function const let var class new this typeof instanceof in of yield delete
+  void switch case default do while with export import extends super null undefined try
+  catch finally throw eval arguments\`. Naming a function \`eval\` is a compile error —
+  pick another name (e.g. \`evaluate\`).
 - Function parameters are always immutable (you cannot reassign the parameter itself).
 - \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
   (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)
@@ -145,7 +150,12 @@ Building an optional result imperatively (e.g. "the best so far"):
 
 ## Discriminated unions (tagged struct shapes)
 
-    type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } | { kind: "unauthorized" }
+    type GetUserResponse = { kind: "ok", user: User }
+        | { kind: "notFound" }
+        | { kind: "unauthorized" }
+
+Long union declarations can be split across lines — continuation lines start with \`|\`
+(as above), or the line can end with \`|\`; both work in \`type\` declarations.
 
     fn getUser(id: string) GetUserResponse {
         u := findUser(id)

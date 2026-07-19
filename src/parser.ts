@@ -185,13 +185,17 @@ class Parser {
 
   // type Status = "active" | "banned"
   // type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } — 判別可能union
-  // (C-1)。無名の {...} 型式は union の中でだけ有効(B-5): 単独で書いたら struct を使えと誘導する
+  // (C-1)。無名の {...} 型式は union の中でだけ有効(B-5): 単独で書いたら struct を使えと誘導する。
+  // 長いunionは複数行に折れる — 行末 `|`(ASI対象外なので元々可)と行頭 `|`(TSの定番
+  // フォーマット。ベンチ第1ラウンドで負転移として実測)の両方を許す
   private parseTypeDecl(exported: boolean, isError: boolean): TypeDecl {
     const start = this.expect("type", "at start of type declaration");
     const name = this.expect("ident", "as type name").value;
     this.expect("=", "after type name");
     const first = this.parseUnionMember();
-    if (!this.check("|")) {
+    const members: TypeNode[] = [first];
+    while (this.matchUnionContinuation()) members.push(this.parseUnionMember());
+    if (members.length === 1) {
       if (first.kind === "structType") {
         throw new CompileError(
           `use 'struct ${name} { ... }' to define a data shape ('{...}' alone is only allowed inside a union)`,
@@ -200,8 +204,6 @@ class Parser {
       }
       return { kind: "typeDecl", name, node: first, exported, isError, pos: start.pos };
     }
-    const members: TypeNode[] = [first];
-    while (this.match("|")) members.push(this.parseUnionMember());
     return {
       kind: "typeDecl",
       name,
@@ -210,6 +212,17 @@ class Parser {
       isError,
       pos: start.pos,
     };
+  }
+
+  // union の継続 `|` を読む。行頭 `|` スタイルでは直前の改行がASIで ';' になっているので、
+  // ';' の並びの先に `|` があればそこまでまとめて消費して継続とみなす。
+  // `|` はトップレベル宣言の先頭になり得ないため、この先読みが他の宣言と曖昧になることはない
+  private matchUnionContinuation(): boolean {
+    let i = 0;
+    while (this.peek(i).type === ";") i++;
+    if (this.peek(i).type !== "|") return false;
+    for (let j = 0; j <= i; j++) this.next(); // ';' × i 個と '|' を消費
+    return true;
   }
 
   // union の1メンバー: 無名struct型 {...}(判別可能union用)か、通常の単一型
