@@ -8,7 +8,7 @@ import type { Type } from "./types";
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
 export type TypeNode =
-  | { kind: "name"; name: string; pos: Pos } // int, string, error, none, Status(alias)など
+  | { kind: "name"; name: string; pkg?: string; pos: Pos } // int, string, Status など。pkg付きは math.User(別パッケージのexported型)
   | { kind: "literal"; value: string; pos: Pos } // "active" — 文字列リテラル型
   | { kind: "array"; elem: TypeNode; pos: Pos } // int[]
   | { kind: "chan"; elem: TypeNode; pos: Pos } // chan<int>
@@ -25,14 +25,23 @@ export interface StructFieldNode {
 // ---- 宣言 ----
 export interface Program {
   kind: "program";
+  imports: ImportDecl[];
   types: TypeDecl[];
   fns: FnDecl[];
+}
+
+export interface ImportDecl {
+  kind: "importDecl"; // import "math" — プロジェクトルート直下のディレクトリをパッケージとして取り込む
+  path: string;
+  alias: string; // 修飾に使う名前(= パスの最終セグメント。v1は単一セグメントのみ)
+  pos: Pos;
 }
 
 export interface TypeDecl {
   kind: "typeDecl"; // type Status = "active" | "banned"
   name: string;
   node: TypeNode;
+  exported: boolean; // export type X = ... / export struct X { ... }
   pos: Pos;
 }
 
@@ -49,6 +58,7 @@ export interface FnDecl {
   params: Param[];
   ret: TypeNode | null; // 戻り値なし = null。失敗し得るなら `int | error` のような union
   body: Block;
+  exported: boolean; // export fn ...(メソッドは対象外 — structのexportに従う)
   pos: Pos;
 }
 
@@ -267,6 +277,7 @@ export interface MemberExpr extends ExprBase {
   kind: "member"; // obj.name
   target: Expr;
   name: string;
+  resolvedPkg?: string; // math.add のようなパッケージ修飾参照と checker が解決したら入る(codegen用)
 }
 export interface FnExpr extends ExprBase {
   kind: "fnExpr"; // 無名関数: fn(x: int) int { return x * 2 }
@@ -308,8 +319,9 @@ export interface SpawnExpr extends ExprBase {
   detached: boolean;
 }
 export interface StructLit extends ExprBase {
-  kind: "structLit"; // User{name: "alice", age: 30}
+  kind: "structLit"; // User{name: "alice", age: 30} / math.Point{x: 1, y: 2}(パッケージ修飾)
   name: string;
+  pkg?: string;
   fields: { name: string; value: Expr; pos: Pos }[];
 }
 export interface MatchExpr extends ExprBase {

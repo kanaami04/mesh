@@ -13,7 +13,14 @@ import { PRELUDE } from "./runtime";
 import type { Pos } from "./token";
 
 export function generate(program: Program, file = "main.mesh"): string {
-  return new Codegen(file).generate(program);
+  return generateModules([{ pkg: "main", file, program }]);
+}
+
+// 全パッケージを1つの.mjsへまとめて出力する(バンドル)。
+// 非mainパッケージのトップレベル関数は `pkg$name` に改名して衝突を防ぐ
+// (Meshの識別子に $ は使えないので、ユーザーコードと衝突しない)
+export function generateModules(modules: { pkg: string; file: string; program: Program }[]): string {
+  return new Codegen().generateAll(modules);
 }
 
 class Codegen {
@@ -24,8 +31,12 @@ class Codegen {
   // 関数ごとに「本体で spawn(detachではない)を使ったか」を記録する。
   // 使った関数だけ、本体全体を暗黙の wait スコープで包む(2段スコープ設計)
   private spawnStack: boolean[] = [];
-
-  constructor(private file: string) {}
+  // 今出力中のモジュールの文脈(パニック位置・関数名のマングルに使う)
+  private file = "main.mesh";
+  private pkg = "main";
+  // 今のパッケージのトップレベル関数名(同一パッケージ内の参照もマングルするため。
+  // 別ファイルの同パッケージ関数も含む)
+  private localFns = new Set<string>();
 
   private emit(line: string) {
     this.out.push("  ".repeat(this.indent) + line);
@@ -36,34 +47,59 @@ class Codegen {
     return JSON.stringify(`${this.file}:${pos.line}:${pos.col}`);
   }
 
-  generate(program: Program): string {
+  generateAll(modules: { pkg: string; file: string; program: Program }[]): string {
+    // パッケージごとのトップレベル関数名を先に集める(ファイル横断)
+    const fnsByPkg = new Map<string, Set<string>>();
+    for (const m of modules) {
+      const set = fnsByPkg.get(m.pkg) ?? new Set();
+      for (const fn of m.program.fns) {
+        if (!fn.receiver) set.add(fn.name);
+      }
+      fnsByPkg.set(m.pkg, set);
+    }
+
     this.out.push(PRELUDE.trimEnd());
     this.out.push("");
-    for (const fn of program.fns) {
-      this.genFnDecl(fn);
-      this.out.push("");
+    for (const m of modules) {
+      this.file = m.file;
+      this.pkg = m.pkg;
+      this.localFns = fnsByPkg.get(m.pkg) ?? new Set();
+      for (const fn of m.program.fns) {
+        this.genFnDecl(fn);
+        this.out.push("");
+      }
     }
     this.out.push("main().catch(__panic);");
     return this.out.join("\n") + "\n";
   }
 
+  // トップレベル関数の生成JS名: mainパッケージは素の名前、それ以外は pkg$name
+  private fnJsName(pkg: string, name: string): string {
+    return pkg === "main" ? name : `${pkg}$${name}`;
+  }
+
   private genFnDecl(fn: FnDecl) {
     const recvParams = fn.receiver ? [fn.receiver.name] : [];
     const params = [...recvParams, ...fn.params.map((p) => p.name)].join(", ");
-    const name = fn.receiver ? this.methodJsName(this.receiverStructName(fn.receiver), fn.name) : fn.name;
+    const name = fn.receiver
+      ? this.methodJsName(this.receiverStructName(fn.receiver), fn.name)
+      : this.fnJsName(this.pkg, fn.name);
     this.emit(`async function ${name}(${params}) {`);
     this.genFnBody(fn.body);
     this.emit("}");
   }
 
-  // メソッドの生成JS名: struct名+メソッド名で一意にする(他structの同名メソッドと衝突しないように)
+  // メソッドの生成JS名: struct名+メソッド名で一意にする(他structの同名メソッドと衝突しないように)。
+  // struct名はパッケージ修飾で "math.User" の形になりうるので、JS識別子に使えるよう "." を "$" にする
   private methodJsName(structName: string, methodName: string): string {
-    return `__m_${structName}_${methodName}`;
+    return `__m_${structName.replace(/\./g, "$")}_${methodName}`;
   }
 
-  // レシーバの型は checker が struct であることを保証済み(v1は名前で直接参照する形のみ)
+  // レシーバの型は checker が struct であることを保証済み(v1は名前で直接参照する形のみ)。
+  // 呼び出し側は checker が解決した修飾名(math.User)でメソッドを引くので、宣言側も揃える
   private receiverStructName(receiver: NonNullable<FnDecl["receiver"]>): string {
-    return receiver.type.kind === "name" ? receiver.type.name : "(anonymous)";
+    const bare = receiver.type.kind === "name" ? receiver.type.name : "(anonymous)";
+    return this.pkg === "main" ? bare : `${this.pkg}.${bare}`;
   }
 
   // 関数本体を出力する。必要に応じて2種類のラッパーで包む:
@@ -350,6 +386,9 @@ class Codegen {
       case "none":
         return "null"; // none の実行時表現は null(JSON にもそのまま乗る)
       case "ident":
+        // 非mainパッケージ内では、自パッケージのトップレベル関数への参照もマングル名になる
+        // (シャドーイング禁止により、同名のローカル変数は存在し得ない)
+        if (this.localFns.has(expr.name)) return this.fnJsName(this.pkg, expr.name);
         return expr.name;
 
       case "is": {
@@ -434,6 +473,8 @@ class Codegen {
       }
 
       case "member":
+        // math.add のようなパッケージ修飾参照(checkerが解決済み)はマングル名への直接参照
+        if (expr.resolvedPkg) return this.fnJsName(expr.resolvedPkg, expr.name);
         return `${this.genExpr(expr.target)}.${expr.name}`;
 
       case "fnExpr": {
@@ -479,6 +520,12 @@ class Codegen {
 
   private genCall(expr: Expr & { kind: "call" }): string {
     const args = expr.args.map((a) => this.genExpr(a));
+
+    // パッケージ修飾の関数呼び出し: math.add(args) → (await math$add(args))
+    if (expr.callee.kind === "member" && expr.callee.resolvedPkg) {
+      const jsName = this.fnJsName(expr.callee.resolvedPkg, expr.callee.name);
+      return `(await ${jsName}(${args.join(", ")}))`;
+    }
 
     // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)。
     // struct のフィールドが関数値のケース(recv.fieldFn(args))とは checker が既に区別済みで、

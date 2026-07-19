@@ -32,6 +32,8 @@ export type TokenType =
   | "select"
   | "type"
   | "struct"
+  | "import"
+  | "export"
   | "true"
   | "false"
   | "break"
@@ -103,6 +105,8 @@ export const KEYWORDS = new Set<TokenType>([
   "select",
   "type",
   "struct",
+  "import",
+  "export",
   "true",
   "false",
   "break",

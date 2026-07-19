@@ -1,0 +1,16 @@
+// モジュールシステム — パッケージ(ディレクトリ)を import して使う。
+// パッケージ mathutil の中身は examples/mathutil/*.mesh(全ファイルで1つの名前空間)。
+// 使うときは常に mathutil.add のようにパッケージ名で修飾する
+
+import "mathutil"
+
+fn main() {
+	print(mathutil.add(1, 2))
+	print(mathutil.quadruple(3))
+
+	p := mathutil.Point{x: 3, y: 4}
+	print(p.magnitudeSq())
+
+	q: mathutil.Point = mathutil.origin()
+	print(q.x, q.y)
+}

@@ -212,4 +212,41 @@ describe("parser", () => {
   test("トップレベルは fn のみ", () => {
     expect(() => parse(`x := 1`)).toThrow(CompileError);
   });
+
+  test("モジュール: import宣言とexport修飾をパースできる", () => {
+    const program = parse(`import "mathutil"
+
+export fn add(a: int, b: int) int { return a + b }
+fn helper() int { return 1 }
+export struct Point { x: int }
+export type Status = "on" | "off"
+fn main() {}`);
+    expect(program.imports).toEqual([
+      expect.objectContaining({ kind: "importDecl", path: "mathutil", alias: "mathutil" }),
+    ]);
+    expect(program.fns.find((f) => f.name === "add")?.exported).toBe(true);
+    expect(program.fns.find((f) => f.name === "helper")?.exported).toBe(false);
+    expect(program.types.find((t) => t.name === "Point")?.exported).toBe(true);
+    expect(program.types.find((t) => t.name === "Status")?.exported).toBe(true);
+  });
+
+  test("モジュール: importは宣言より前に置く必要がある", () => {
+    expect(() => parse(`fn main() {}\nimport "x"`)).toThrow("imports must come before");
+  });
+
+  test("モジュール: メソッドへのexportはstructをexportしろと誘導", () => {
+    expect(() => parse(`struct T { x: int }\nexport fn (t: T) m() int { return t.x }\nfn main() {}`)).toThrow(
+      "export the struct instead",
+    );
+  });
+
+  test("モジュール: 修飾型名(math.User)と修飾structリテラル(math.Point{...})をパースできる", () => {
+    const param = parse(`fn f(u: math.User) {}`).fns[0].params[0].type;
+    expect(param).toMatchObject({ kind: "name", name: "User", pkg: "math" });
+
+    const [stmt] = parseBody(`p := math.Point{x: 1, y: 2}`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const lit = stmt.values[0];
+    expect(lit).toMatchObject({ kind: "structLit", name: "Point", pkg: "math" });
+  });
 });

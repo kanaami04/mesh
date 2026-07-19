@@ -10,7 +10,7 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 
 ## Program structure
 
-- Top level allows only \`fn\`, \`struct\`, \`type\` declarations. Entry point: \`fn main()\` (required, no params, no return type).
+- Top level allows only \`import\`, \`fn\`, \`struct\`, \`type\` declarations (imports first). Entry point: \`fn main()\` (required, no params, no return type).
 - No semicolons (statements end at newline). Blocks always use braces. Comments: \`//\`.
 
 ## Bindings (immutable by default)
@@ -342,6 +342,32 @@ form of \`match\`.
   no regex, no string formatting/padding, no array flatten/zip/group. Write these by hand with
   \`for ... range\` until they land in the standard library.
 
+## Modules (import / export)
+
+A package is a DIRECTORY under the project root (= the entry file's directory); the directory
+name is the package name. All .mesh files inside one package share one flat namespace — no
+import between them. The entry program is the single entry .mesh file; to split code, put it
+in a package directory and import it:
+
+    // mathutil/ops.mesh
+    export fn add(a: int, b: int) int { return a + b }   // export = visible to importers
+    fn helper(n: int) int { return n * 2 }               // no export = package-private
+
+    // app.mesh (the entry file)
+    import "mathutil"                     // imports go at the top, before all declarations
+    fn main() {
+        print(mathutil.add(1, 2))         // always qualified: pkg.symbol (one way to call)
+        p := mathutil.Point{x: 1, y: 2}   // exported structs construct with the qualifier
+        q: mathutil.Point = mathutil.origin()   // qualify in type positions too
+    }
+
+- \`export\` goes on top-level \`fn\` / \`struct\` / \`type\`. Methods are NOT exported
+  individually — they work wherever their struct is usable (export the struct).
+- Accessing an unexported symbol, importing an unknown package, and import cycles are all
+  compile errors. A package cannot import itself.
+- v1 limits: package paths are single directory names (no \`"a/b"\` nesting), and there are
+  no standard-library packages yet (\`"mesh/..."\` is reserved for the future stdlib).
+
 ## Does NOT exist in Mesh — never write these
 
 null, undefined, nil / try, catch, throw, exceptions / panic(), recover /
@@ -384,6 +410,11 @@ struct field instead (self-referential discriminated unions like a tree ARE supp
                                                         with nothing wrapping the reference; wrap it in
                                                         a struct field instead (self-reference through
                                                         a struct field, e.g. a tree, works fine)
+    'x' is not exported by package 'y'              → add 'export' to its declaration in y/
+    unknown package 'x'                             → the entry file's directory needs an x/ folder
+                                                        with .mesh files (and: import "x" at the top)
+    imports must come before all declarations       → move every import to the very top of the file
+    'x' is a package — use it as a qualifier        → write x.something; a package name alone isn't a value
 
 ## Verify your code (agents: do this after every edit)
 

@@ -4,11 +4,18 @@
 //   mesh check file.mesh          型検査のみ
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { LANGUAGE_CARD } from "./card";
-import { compile, diagnosticsToJson, formatDiagnostics } from "./compiler";
+import {
+  compileModules,
+  diagnosticsToJson,
+  formatDiagnostics,
+  type CompileResult,
+  type ModuleSource,
+} from "./compiler";
+import { parse } from "./parser";
 
 const USAGE = `Mesh compiler v0.1.0
 
@@ -19,15 +26,72 @@ Usage:
   mesh card                         言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
 `;
 
-function compileFile(file: string): string {
-  let source: string;
+// エントリファイルと、そこから(推移的に)importされたパッケージのソースを集める。
+// プロジェクトルート = エントリファイルのディレクトリ。パッケージ = ルート直下のディレクトリで、
+// その中の全 .mesh ファイルが1パッケージの名前空間を成す(エントリ自身は "main" の1ファイル)。
+// import パスの発見のためだけに軽くパースする(構文エラーはここでは無視し、
+// compileModules 側で正式に報告させる)
+function loadModules(entryFile: string): ModuleSource[] {
+  let entrySource: string;
   try {
-    source = readFileSync(file, "utf8");
+    entrySource = readFileSync(entryFile, "utf8");
   } catch {
-    console.error(`error: cannot read file '${file}'`);
+    console.error(`error: cannot read file '${entryFile}'`);
     process.exit(1);
   }
-  const result = compile(source, file);
+  const root = dirname(entryFile);
+  const modules: ModuleSource[] = [{ pkg: "main", file: entryFile, source: entrySource }];
+
+  const importsOf = (source: string): string[] => {
+    try {
+      return parse(source).imports.map((i) => i.path);
+    } catch {
+      return []; // 構文エラーは compileModules が位置つきで報告する
+    }
+  };
+
+  const loaded = new Set<string>();
+  const queue = importsOf(entrySource);
+  while (queue.length > 0) {
+    const path = queue.shift()!;
+    if (loaded.has(path)) continue;
+    loaded.add(path);
+    if (path === "mesh" || path.startsWith("mesh/")) {
+      console.error(`error: standard-library modules ('${path}') are not available yet`);
+      process.exit(1);
+    }
+    if (path.includes("/")) {
+      console.error(
+        `error: nested package paths ('${path}') are not supported yet — packages are single directories under the project root`,
+      );
+      process.exit(1);
+    }
+    const dir = join(root, path);
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+      console.error(`error: cannot find package '${path}' (expected directory '${dir}' with .mesh files)`);
+      process.exit(1);
+    }
+    const files = readdirSync(dir).filter((f) => f.endsWith(".mesh")).sort();
+    if (files.length === 0) {
+      console.error(`error: package '${path}' has no .mesh files (in '${dir}')`);
+      process.exit(1);
+    }
+    for (const f of files) {
+      const filePath = join(dir, f);
+      const source = readFileSync(filePath, "utf8");
+      modules.push({ pkg: path, file: filePath, source });
+      queue.push(...importsOf(source));
+    }
+  }
+  return modules;
+}
+
+function compileEntry(file: string): CompileResult {
+  return compileModules(loadModules(file));
+}
+
+function compileFile(file: string): string {
+  const result = compileEntry(file);
   if (result.code === null) {
     console.error(formatDiagnostics(file, result.diagnostics));
     process.exit(1);
@@ -72,14 +136,7 @@ function main() {
     case "check": {
       if (rest.includes("--json")) {
         // AIエージェント向け: 成否にかかわらず構造化JSONを stdout に出す
-        let source: string;
-        try {
-          source = readFileSync(file, "utf8");
-        } catch {
-          console.error(`error: cannot read file '${file}'`);
-          process.exit(1);
-        }
-        const result = compile(source, file);
+        const result = compileEntry(file);
         console.log(diagnosticsToJson(file, result.diagnostics));
         process.exit(result.diagnostics.length > 0 ? 1 : 0);
       }

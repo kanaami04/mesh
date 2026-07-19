@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compile } from "../src/compiler";
+import { compile, compileModules, type ModuleSource } from "../src/compiler";
 
 function runSource(source: string): string {
   const result = compile(source);
@@ -23,6 +23,22 @@ function runSource(source: string): string {
 
 const runExample = (name: string) =>
   runSource(readFileSync(join(import.meta.dir, "..", "examples", name), "utf8"));
+
+// 複数モジュール(パッケージ)をコンパイルして実行する
+function runModules(modules: ModuleSource[]): string {
+  const result = compileModules(modules);
+  if (result.code === null) {
+    throw new Error("compile failed:\n" + result.diagnostics.map((d) => d.message).join("\n"));
+  }
+  const dir = mkdtempSync(join(tmpdir(), "mesh-test-"));
+  const path = join(dir, "out.mjs");
+  writeFileSync(path, result.code);
+  const proc = spawnSync(process.execPath, [path], { encoding: "utf8", timeout: 10_000 });
+  if (proc.status !== 0) {
+    throw new Error(`program exited with ${proc.status}:\n${proc.stderr}`);
+  }
+  return proc.stdout;
+}
 
 // panic で異常終了することを期待するヘルパ。stderr を返す
 function runSourceExpectPanic(source: string): string {
@@ -493,6 +509,147 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(
       compile(`fn main() {\nl: int | none = 1\nr: int | none = 2\nif l is none || r is none {\nreturn\n}\nprint(l + r)\n}`).code,
     ).toBe(null);
+  });
+});
+
+describe("モジュールシステム(import / export)", () => {
+  const util: ModuleSource = {
+    pkg: "util",
+    file: "util/u.mesh",
+    source: `export fn pub() int { return 10 }
+fn priv() int { return 20 }
+export struct Vec { x: int }
+struct Hidden { x: int }
+export fn make(x: int) Vec { return Vec{x: x} }`,
+  };
+
+  test("パッケージのexported関数・struct・メソッド・型注釈が使える", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "mathutil"
+fn main() {
+	print(mathutil.add(1, 2))
+	p := mathutil.Point{x: 3, y: 4}
+	print(p.magnitudeSq())
+	q: mathutil.Point = mathutil.origin()
+	print(q.x, q.y)
+	f := mathutil.add
+	print(f(10, 20))
+}`,
+      },
+      {
+        pkg: "mathutil",
+        file: "mathutil/ops.mesh",
+        source: `export fn add(a: int, b: int) int { return a + b }`,
+      },
+      {
+        pkg: "mathutil",
+        file: "mathutil/point.mesh",
+        source: `export struct Point { x: int  y: int }
+fn (p: Point) magnitudeSq() int { return p.x * p.x + p.y * p.y }
+export fn origin() Point { return Point{x: 0, y: 0} }`,
+      },
+    ]);
+    expect(out).toBe("3\n25\n0 0\n30\n");
+  });
+
+  test("同一パッケージ内の複数ファイルはimport不要で互いに見える(未export関数も)", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "lib"\nfn main() { print(lib.compose(5)) }`,
+      },
+      { pkg: "lib", file: "lib/a.mesh", source: `export fn compose(n: int) int { return helper(n) + 1 }` },
+      { pkg: "lib", file: "lib/b.mesh", source: `fn helper(n: int) int { return n * 2 }` },
+    ]);
+    expect(out).toBe("11\n");
+  });
+
+  test("P6: exported型をパッケージ越しに共有できる(判別可能unionも)", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "api"
+fn main() {
+	res := api.getUser("1")
+	print(match res {
+		{ kind: "ok" } => "found: \${res.name}"
+		{ kind: "notFound" } => "404"
+	})
+	print(match api.getUser("9") {
+		{ kind: "ok" } => "?"
+		{ kind: "notFound" } => "404"
+	})
+}`,
+      },
+      {
+        pkg: "api",
+        file: "api/api.mesh",
+        source: `export type UserResult = { kind: "ok", name: string } | { kind: "notFound" }
+export fn getUser(id: string) UserResult {
+	if id == "1" { return UserResult{kind: "ok", name: "alice"} }
+	return UserResult{kind: "notFound"}
+}`,
+      },
+    ]);
+    expect(out).toBe("found: alice\n404\n");
+  });
+
+  test("可視性: 未exportの関数・struct・型へのアクセスはエラー", () => {
+    const err = (source: string) => {
+      const r = compileModules([{ pkg: "main", file: "app.mesh", source }, util]);
+      expect(r.code).toBe(null);
+      return r.diagnostics.map((d) => d.message).join("\n");
+    };
+    expect(err(`import "util"\nfn main() { print(util.priv()) }`)).toContain(
+      "'priv' is not exported by package 'util'",
+    );
+    expect(err(`import "util"\nfn main() { h := util.Hidden{x: 1}\nprint(h) }`)).toContain(
+      "'Hidden' is not exported by package 'util'",
+    );
+    expect(err(`import "util"\nfn main() { print(util.nope()) }`)).toContain(
+      "package 'util' has no exported function 'nope'",
+    );
+  });
+
+  test("誘導エラー: パッケージ名を値に使う・型を関数のように呼ぶ・alias衝突", () => {
+    const err = (source: string) => {
+      const r = compileModules([{ pkg: "main", file: "app.mesh", source }, util]);
+      return r.diagnostics.map((d) => d.message).join("\n");
+    };
+    expect(err(`import "util"\nfn main() { print(util) }`)).toContain(
+      "'util' is a package — use it as a qualifier",
+    );
+    expect(err(`import "util"\nfn main() { print(util.Vec()) }`)).toContain("'Vec' is a type");
+    expect(err(`import "util"\nfn main() { util := 1\nprint(util) }`)).toContain(
+      "conflicts with an imported package name",
+    );
+  });
+
+  test("import循環と未知パッケージはコンパイルエラー", () => {
+    const cyc = compileModules([
+      { pkg: "main", file: "app.mesh", source: `import "a"\nfn main() { print(a.f()) }` },
+      { pkg: "a", file: "a/a.mesh", source: `import "b"\nexport fn f() int { return b.g() }` },
+      { pkg: "b", file: "b/b.mesh", source: `import "a"\nexport fn g() int { return 1 }` },
+    ]);
+    expect(cyc.diagnostics.map((d) => d.message).join("\n")).toContain("import cycle: a -> b -> a");
+
+    const unknown = compileModules([
+      { pkg: "main", file: "app.mesh", source: `import "nothere"\nfn main() {}` },
+    ]);
+    expect(unknown.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'nothere'");
+  });
+
+  test("modules_demo.mesh — CLI経由でimportがディスクから解決される", () => {
+    const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+    const example = join(import.meta.dir, "..", "examples", "modules_demo.mesh");
+    const proc = spawnSync(process.execPath, [CLI, "run", example], { encoding: "utf8", timeout: 15_000 });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toBe("3\n12\n25\n0 0\n");
   });
 });
 

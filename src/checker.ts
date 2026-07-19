@@ -3,7 +3,7 @@
 // - 関数呼び出しの引数の数と型を照合する
 // - 検査しながら式に resolvedType を書き込み、Codegen へ引き継ぐ
 
-import type { Block, Expr, FnDecl, FnExpr, Program, Stmt, TypeNode } from "./ast";
+import type { Block, Expr, FnDecl, FnExpr, MemberExpr, Program, Stmt, TypeNode } from "./ast";
 import type { Pos } from "./token";
 import {
   ANY,
@@ -35,6 +35,7 @@ const BUILTIN_TYPE_NAMES = new Set([
 export interface Diagnostic {
   pos: Pos;
   message: string;
+  file?: string; // 複数ファイルコンパイル時にどのファイルのエラーかを示す
 }
 
 // 組み込み関数。特殊な検査(可変長引数など)は checkCall 内で行う。
@@ -55,8 +56,105 @@ const RESERVED = new Set([
   "eval", "arguments",
 ]);
 
+// ---- 複数パッケージのコンパイル単位 ----
+
+export interface ParsedModule {
+  pkg: string; // パッケージ名(= ディレクトリ名。エントリは "main")
+  file: string;
+  program: Program;
+}
+
+// パッケージが外へ見せる(または隠している)シンボル。exported フラグごと持つことで
+// 「存在しない」と「exportされていない」を別のエラーメッセージにできる(P4)
+interface PackageSymbols {
+  types: Map<string, { type: Type; exported: boolean }>;
+  fns: Map<string, { type: Type; exported: boolean }>;
+}
+
+// 単一ファイル(従来のAPI)。"main" パッケージ1ファイルとして検査する
 export function check(program: Program): Diagnostic[] {
-  return new Checker().checkProgram(program);
+  return checkModules([{ pkg: "main", file: "main.mesh", program }]);
+}
+
+export function checkModules(modules: ParsedModule[]): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+
+  // パッケージごとにファイルをまとめる(同一パッケージ内はimport不要のフラット名前空間)
+  const packages = new Map<string, ParsedModule[]>();
+  for (const m of modules) {
+    const list = packages.get(m.pkg) ?? [];
+    list.push(m);
+    packages.set(m.pkg, list);
+  }
+
+  // import グラフの検証: 未知のパッケージ・不正なパッケージ名・循環
+  const deps = new Map<string, Set<string>>();
+  for (const [pkg, files] of packages) {
+    const set = new Set<string>();
+    for (const { file, program } of files) {
+      for (const imp of program.imports) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(imp.alias)) {
+          diagnostics.push({
+            pos: imp.pos,
+            file,
+            message: `package name '${imp.alias}' cannot be used as an identifier — rename the directory`,
+          });
+          continue;
+        }
+        if (imp.alias === pkg) {
+          diagnostics.push({ pos: imp.pos, file, message: `package '${pkg}' cannot import itself` });
+          continue;
+        }
+        if (!packages.has(imp.alias)) {
+          diagnostics.push({ pos: imp.pos, file, message: `unknown package '${imp.path}'` });
+          continue;
+        }
+        set.add(imp.alias);
+      }
+    }
+    deps.set(pkg, set);
+  }
+  if (diagnostics.length > 0) return diagnostics;
+
+  // 依存順(importされる側が先)に並べる + 循環検出
+  const order: string[] = [];
+  const state = new Map<string, "visiting" | "done">();
+  const visit = (pkg: string, chain: string[]): boolean => {
+    if (state.get(pkg) === "done") return true;
+    if (state.get(pkg) === "visiting") {
+      const cycle = [...chain.slice(chain.indexOf(pkg)), pkg].join(" -> ");
+      diagnostics.push({
+        pos: { line: 1, col: 1 },
+        file: packages.get(pkg)?.[0]?.file,
+        message: `import cycle: ${cycle}`,
+      });
+      return false;
+    }
+    state.set(pkg, "visiting");
+    for (const dep of deps.get(pkg) ?? []) {
+      if (!visit(dep, [...chain, pkg])) return false;
+    }
+    state.set(pkg, "done");
+    order.push(pkg);
+    return true;
+  };
+  for (const pkg of packages.keys()) {
+    if (!visit(pkg, [])) return diagnostics;
+  }
+
+  // 依存順に検査。メソッド表は全パッケージ共有(struct名はパッケージ修飾済みで衝突しない)
+  const registry = new Map<string, PackageSymbols>();
+  const sharedMethods = new Map<string, Map<string, Type>>();
+  for (const pkg of order) {
+    const files = packages.get(pkg)!;
+    const importAliases = new Set<string>();
+    for (const { program } of files) {
+      for (const imp of program.imports) importAliases.add(imp.alias);
+    }
+    const checker = new Checker(pkg, registry, sharedMethods, importAliases);
+    diagnostics.push(...checker.checkPackage(files, { requireMain: pkg === "main" }));
+  }
+  return diagnostics;
 }
 
 // 変数1つ分の情報。mutable は「mut 宣言されたか」(デフォルト不変、B-4決定)
@@ -74,15 +172,30 @@ class Checker {
   private typeTable = new Map<string, TypeNode>();
   private resolvedAliases = new Map<string, Type>();
   private resolvingAliases = new Set<string>(); // 循環検出用
-  // メソッド: struct名 → (メソッド名 → 関数型 [レシーバを含む])。
-  // 自由関数のグローバル scope とは別の名前空間(P1: recv.method() と method(recv) が両方
-  // 使える「二通りの書き方」を作らないため、メソッド名はここにしか登録しない)
-  private methodTable = new Map<string, Map<string, Type>>();
+  // 今検査中のファイル(診断のfile属性づけ用)
+  private currentFile = "main.mesh";
+  // このパッケージのトップレベル宣言(exports収集用): 名前 → exportedフラグ
+  private typeExported = new Map<string, boolean>();
+  private fnDecls = new Map<string, { type: Type; exported: boolean }>();
+
+  constructor(
+    // このcheckerが検査するパッケージ名("main" 以外のstruct名は pkg.Name に修飾される)
+    private pkg: string,
+    // 検査済みパッケージのシンボル表(依存順に検査するので、importする側から常に見える)
+    private registry: Map<string, PackageSymbols>,
+    // メソッド: struct名(修飾済み) → (メソッド名 → 関数型 [レシーバを含む])。
+    // 自由関数のグローバル scope とは別の名前空間(P1: recv.method() と method(recv) が両方
+    // 使える「二通りの書き方」を作らないため、メソッド名はここにしか登録しない)。
+    // 全パッケージで共有し、exportされたstructのメソッドをパッケージ越しに呼べるようにする
+    private methodTable: Map<string, Map<string, Type>>,
+    // このパッケージのファイル群がimportしたパッケージ名(修飾アクセスの解決に使う)
+    private importAliases: Set<string>,
+  ) {}
 
   // ---- ユーティリティ ----
 
   private error(pos: Pos, message: string) {
-    this.diagnostics.push({ pos, message });
+    this.diagnostics.push({ pos, message, file: this.currentFile });
   }
 
   private pushScope() {
@@ -101,6 +214,10 @@ class Checker {
     }
     if (BUILTINS.has(name)) {
       this.error(pos, `'${name}' is a builtin function and cannot be redeclared`);
+      return;
+    }
+    if (this.importAliases.has(name)) {
+      this.error(pos, `'${name}' conflicts with an imported package name`);
       return;
     }
     const scope = this.scopes[this.scopes.length - 1];
@@ -147,6 +264,8 @@ class Checker {
         };
       }
       case "name":
+        // math.User — importしたパッケージのexported型
+        if (node.pkg) return this.resolvePackageType(node.pkg, node.name, node.pos);
         switch (node.name) {
           case "int": return INT;
           case "float": return FLOAT;
@@ -163,6 +282,25 @@ class Checker {
     }
   }
 
+  // importしたパッケージのexported型を引く(math.User / math.Status)
+  private resolvePackageType(pkg: string, name: string, pos: Pos): Type {
+    if (!this.importAliases.has(pkg)) {
+      this.error(pos, `unknown package '${pkg}' — add: import "${pkg}"`);
+      return ANY;
+    }
+    const symbols = this.registry.get(pkg);
+    const entry = symbols?.types.get(name);
+    if (!entry) {
+      this.error(pos, `package '${pkg}' has no type '${name}'`);
+      return ANY;
+    }
+    if (!entry.exported) {
+      this.error(pos, `'${name}' is not exported by package '${pkg}' — add 'export' to its declaration`);
+      return ANY;
+    }
+    return entry.type;
+  }
+
   // type 宣言された名前の解決(メモ化+循環検出)
   private resolveAlias(name: string, pos: Pos): Type {
     const memo = this.resolvedAliases.get(name);
@@ -173,9 +311,12 @@ class Checker {
       return ANY;
     }
     // struct は「先に器を登録 → 後からフィールドを埋める」(knot-tying)。
-    // これにより struct Node { next: Node | none } のような再帰型が書ける
+    // これにより struct Node { next: Node | none } のような再帰型が書ける。
+    // struct名は "main" 以外では pkg.Name に修飾する(表示・メソッド表のキーが
+    // パッケージ間で衝突しないように。同一性は構造的なので意味論には影響しない)
     if (node.kind === "structType") {
-      const struct: Type = { kind: "struct", name, fields: [] };
+      const displayName = this.pkg === "main" ? name : `${this.pkg}.${name}`;
+      const struct: Type = { kind: "struct", name: displayName, fields: [] };
       this.resolvedAliases.set(name, struct);
       for (const f of node.fields) {
         struct.fields.push({ name: f.name, type: this.resolveType(f.type) });
@@ -227,43 +368,82 @@ class Checker {
     };
   }
 
-  // ---- プログラム全体 ----
+  // ---- パッケージ全体 ----
+  // 同一パッケージ内の複数ファイルはフラットな1名前空間として検査する。
+  // フェーズ順は単一ファイル時代と同じ(型登録→エイリアス解決→関数登録→本体)を
+  // 全ファイル横断に広げただけ — ファイルをまたぐ前方参照・相互再帰も自然に許される
 
-  checkProgram(program: Program): Diagnostic[] {
+  checkPackage(files: { file: string; program: Program }[], opts: { requireMain: boolean }): Diagnostic[] {
     // 先に type 宣言を登録する(関数シグネチャがエイリアスを参照できるように)
-    for (const td of program.types) {
-      if (BUILTIN_TYPE_NAMES.has(td.name)) {
-        this.error(td.pos, `'${td.name}' is a builtin type and cannot be redeclared`);
-        continue;
+    for (const { file, program } of files) {
+      this.currentFile = file;
+      for (const td of program.types) {
+        if (BUILTIN_TYPE_NAMES.has(td.name)) {
+          this.error(td.pos, `'${td.name}' is a builtin type and cannot be redeclared`);
+          continue;
+        }
+        if (this.importAliases.has(td.name)) {
+          this.error(td.pos, `'${td.name}' conflicts with an imported package name`);
+          continue;
+        }
+        if (this.typeTable.has(td.name)) {
+          this.error(td.pos, `type '${td.name}' is already declared`);
+          continue;
+        }
+        this.typeTable.set(td.name, td.node);
+        this.typeExported.set(td.name, td.exported);
       }
-      if (this.typeTable.has(td.name)) {
-        this.error(td.pos, `type '${td.name}' is already declared`);
-        continue;
-      }
-      this.typeTable.set(td.name, td.node);
     }
     // 全エイリアスを解決しておく(未使用でも循環や未知型を報告するため)
-    for (const td of program.types) {
-      if (this.typeTable.get(td.name) === td.node) this.resolveAlias(td.name, td.pos);
+    for (const { file, program } of files) {
+      this.currentFile = file;
+      for (const td of program.types) {
+        if (this.typeTable.get(td.name) === td.node) this.resolveAlias(td.name, td.pos);
+      }
     }
 
     // 先に全関数/メソッドのシグネチャを登録する(前方参照・相互再帰を許すため)
-    for (const fn of program.fns) {
-      if (fn.receiver) {
-        this.declareMethod(fn);
-      } else {
-        this.declare(fn.name, this.fnType(fn.params, fn.ret), fn.pos);
+    for (const { file, program } of files) {
+      this.currentFile = file;
+      for (const fn of program.fns) {
+        if (fn.receiver) {
+          this.declareMethod(fn);
+        } else {
+          const t = this.fnType(fn.params, fn.ret);
+          this.declare(fn.name, t, fn.pos);
+          this.fnDecls.set(fn.name, { type: t, exported: fn.exported });
+        }
       }
     }
 
-    const main = program.fns.find((f) => f.name === "main" && !f.receiver);
-    if (!main) {
-      this.error({ line: 1, col: 1 }, "missing 'fn main()' — Mesh programs start from main");
-    } else if (main.params.length > 0 || main.ret !== null) {
-      this.error(main.pos, "'fn main()' must take no parameters and return nothing");
+    if (opts.requireMain) {
+      const withMain = files.find(({ program }) =>
+        program.fns.some((f) => f.name === "main" && !f.receiver),
+      );
+      if (!withMain) {
+        this.currentFile = files[0]?.file ?? this.currentFile;
+        this.error({ line: 1, col: 1 }, "missing 'fn main()' — Mesh programs start from main");
+      } else {
+        const main = withMain.program.fns.find((f) => f.name === "main" && !f.receiver)!;
+        if (main.params.length > 0 || main.ret !== null) {
+          this.currentFile = withMain.file;
+          this.error(main.pos, "'fn main()' must take no parameters and return nothing");
+        }
+      }
     }
 
-    for (const fn of program.fns) this.checkFn(fn);
+    for (const { file, program } of files) {
+      this.currentFile = file;
+      for (const fn of program.fns) this.checkFn(fn);
+    }
+
+    // このパッケージのシンボル表を登録(後続のパッケージから import で参照される)
+    const types = new Map<string, { type: Type; exported: boolean }>();
+    for (const [name, exported] of this.typeExported) {
+      const type = this.resolvedAliases.get(name);
+      if (type) types.set(name, { type, exported });
+    }
+    this.registry.set(this.pkg, { types, fns: this.fnDecls });
     return this.diagnostics;
   }
 
@@ -669,6 +849,8 @@ class Checker {
         if (!binding) {
           if (BUILTINS.has(expr.name)) {
             this.error(expr.pos, `'${expr.name}' is a builtin function — call it like ${expr.name}(...)`);
+          } else if (this.importAliases.has(expr.name)) {
+            this.error(expr.pos, `'${expr.name}' is a package — use it as a qualifier like ${expr.name}.something`);
           } else {
             this.error(expr.pos, `undefined: '${expr.name}'`);
           }
@@ -772,12 +954,18 @@ class Checker {
       }
 
       case "member": {
+        // math.add のようなパッケージ修飾参照(関数値としての参照)を先に解決する
+        const pkgFn = this.tryPackageMember(expr);
+        if (pkgFn) return pkgFn;
         const t = this.checkExprSingle(expr.target);
         return this.memberFieldType(expr, t);
       }
 
       case "structLit": {
-        const resolved = this.resolveAlias(expr.name, expr.pos);
+        // math.Point{...} はimportしたパッケージのexported型から、User{...} は自パッケージから
+        const resolved = expr.pkg
+          ? this.resolvePackageType(expr.pkg, expr.name, expr.pos)
+          : this.resolveAlias(expr.name, expr.pos);
         // フィールド値は先に1回だけ検査する(候補メンバーの絞り込みにも使うので二重評価しない)
         const fieldTypes = expr.fields.map((f) => this.checkExprSingle(f.value));
 
@@ -819,6 +1007,7 @@ class Checker {
           }
           t = candidates[0];
         }
+        if (t.kind === "any") return ANY; // 解決自体が失敗(未知/未export)— エラーは報告済み
         if (t.kind !== "struct") {
           this.error(expr.pos, `'${expr.name}' is not a struct`);
           return ANY;
@@ -1078,10 +1267,53 @@ class Checker {
     return unionOf(armTypes);
   }
 
+  // math.add のようなパッケージ修飾メンバー参照の解決を試みる。
+  // target がimportしたパッケージ名(かつローカル束縛に無い)ときだけ成立し、
+  // exported関数の型を返す(codegen用に resolvedPkg も書き込む)。それ以外は null
+  private tryPackageMember(member: MemberExpr): Type | null {
+    if (member.target.kind !== "ident") return null;
+    const alias = member.target.name;
+    if (this.lookup(alias) !== undefined) return null; // ローカル束縛が優先(declareが衝突を防いでいる)
+    if (!this.importAliases.has(alias)) return null;
+    const symbols = this.registry.get(alias);
+    const fn = symbols?.fns.get(member.name);
+    if (!fn) {
+      if (symbols?.types.get(member.name)?.exported) {
+        this.error(
+          member.pos,
+          `'${member.name}' is a type — use ${alias}.${member.name} in a type position, or ${alias}.${member.name}{...} to construct it`,
+        );
+      } else {
+        this.error(member.pos, `package '${alias}' has no exported function '${member.name}'`);
+      }
+      member.resolvedPkg = alias;
+      return ANY;
+    }
+    if (!fn.exported) {
+      this.error(
+        member.pos,
+        `'${member.name}' is not exported by package '${alias}' — add 'export' to its declaration`,
+      );
+      member.resolvedPkg = alias;
+      return ANY;
+    }
+    member.resolvedPkg = alias;
+    return fn.type;
+  }
+
   private inferCall(expr: Expr & { kind: "call" }): Type {
     // 組み込み関数(シャドーイング禁止なので名前で判定できる)
     if (expr.callee.kind === "ident" && BUILTINS.has(expr.callee.name)) {
       return this.inferBuiltinCall(expr.callee.name, expr);
+    }
+
+    // math.add(args) — パッケージ修飾の関数呼び出しを先に解決する
+    if (expr.callee.kind === "member") {
+      const pkgFn = this.tryPackageMember(expr.callee);
+      if (pkgFn) {
+        expr.callee.resolvedType = pkgFn;
+        return this.checkCallOfValue(expr, pkgFn);
+      }
     }
 
     // recv.method(args) — struct のメソッドとして解決を試みる。

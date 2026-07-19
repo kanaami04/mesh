@@ -1,0 +1,15 @@
+// パッケージ mathutil — ディレクトリ名がそのままパッケージ名になる。
+// export を付けた宣言だけが外(importした側)から見える
+
+export fn add(a: int, b: int) int {
+	return a + b
+}
+
+// export の無い関数はパッケージ内限定(main からは呼べない)
+fn double(n: int) int {
+	return n * 2
+}
+
+export fn quadruple(n: int) int {
+	return double(double(n))
+}

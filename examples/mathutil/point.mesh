@@ -1,0 +1,15 @@
+// 同じディレクトリ(= 同じパッケージ)のファイル同士は import 不要で互いに見える。
+// struct を export すればメソッドも一緒に使えるようになる(メソッド個別の export は無い)
+
+export struct Point {
+	x: int
+	y: int
+}
+
+fn (p: Point) magnitudeSq() int {
+	return p.x * p.x + p.y * p.y
+}
+
+export fn origin() Point {
+	return Point{x: 0, y: 0}
+}

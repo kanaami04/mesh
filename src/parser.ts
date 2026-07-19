@@ -8,6 +8,7 @@ import type {
   Expr,
   FnDecl,
   IfStmt,
+  ImportDecl,
   InterpSegment,
   MatchArm,
   MatchPattern,
@@ -101,30 +102,57 @@ class Parser {
   // ---- 宣言 ----
 
   parseProgram(): Program {
+    const imports: ImportDecl[] = [];
     const fns: FnDecl[] = [];
     const types: TypeDecl[] = [];
     this.skipSemis();
+    // import はファイル先頭にまとめる(宣言が始まったら以後の import はエラー)
+    while (this.check("import")) {
+      imports.push(this.parseImportDecl());
+      this.skipSemis();
+    }
     while (!this.check("eof")) {
+      if (this.check("import")) {
+        throw new CompileError("imports must come before all declarations", this.peek().pos);
+      }
+      const exported = this.match("export");
       if (this.check("type")) {
-        types.push(this.parseTypeDecl());
+        types.push(this.parseTypeDecl(exported));
       } else if (this.check("struct")) {
-        types.push(this.parseStructDecl());
+        types.push(this.parseStructDecl(exported));
       } else if (this.check("fn")) {
-        fns.push(this.parseFnDecl());
+        fns.push(this.parseFnDecl(exported));
       } else {
         throw new CompileError(
-          "only 'fn', 'struct' and 'type' declarations are allowed at the top level",
+          exported
+            ? "'export' must be followed by a 'fn', 'struct' or 'type' declaration"
+            : "only 'fn', 'struct' and 'type' declarations are allowed at the top level",
           this.peek().pos,
         );
       }
       this.skipSemis();
     }
-    return { kind: "program", types, fns };
+    return { kind: "program", imports, types, fns };
+  }
+
+  // import "math" — パッケージ(プロジェクトルート直下のディレクトリ)の取り込み
+  private parseImportDecl(): ImportDecl {
+    const start = this.expect("import", "at start of import");
+    const pathTok = this.expect("string", "as import path (like: import \"math\")");
+    if (pathTok.parts) {
+      throw new CompileError("import path cannot use string interpolation", pathTok.pos);
+    }
+    const path = pathTok.value;
+    const alias = path.split("/").pop() ?? path;
+    if (alias === "") {
+      throw new CompileError("import path cannot be empty", pathTok.pos);
+    }
+    return { kind: "importDecl", path, alias, pos: start.pos };
   }
 
   // struct User { name: string  age: int } — 意味的には型への名付け(typeと同じ)なので
   // TypeDecl として登録する。フィールドは改行区切り
-  private parseStructDecl(): TypeDecl {
+  private parseStructDecl(exported: boolean): TypeDecl {
     const start = this.expect("struct", "at start of struct declaration");
     const name = this.expect("ident", "as struct name").value;
     this.expect("{", "after struct name");
@@ -142,6 +170,7 @@ class Parser {
       kind: "typeDecl",
       name,
       node: { kind: "structType", fields, pos: start.pos },
+      exported,
       pos: start.pos,
     };
   }
@@ -149,7 +178,7 @@ class Parser {
   // type Status = "active" | "banned"
   // type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" } — 判別可能union
   // (C-1)。無名の {...} 型式は union の中でだけ有効(B-5): 単独で書いたら struct を使えと誘導する
-  private parseTypeDecl(): TypeDecl {
+  private parseTypeDecl(exported: boolean): TypeDecl {
     const start = this.expect("type", "at start of type declaration");
     const name = this.expect("ident", "as type name").value;
     this.expect("=", "after type name");
@@ -161,11 +190,17 @@ class Parser {
           first.pos,
         );
       }
-      return { kind: "typeDecl", name, node: first, pos: start.pos };
+      return { kind: "typeDecl", name, node: first, exported, pos: start.pos };
     }
     const members: TypeNode[] = [first];
     while (this.match("|")) members.push(this.parseUnionMember());
-    return { kind: "typeDecl", name, node: { kind: "union", members, pos: first.pos }, pos: start.pos };
+    return {
+      kind: "typeDecl",
+      name,
+      node: { kind: "union", members, pos: first.pos },
+      exported,
+      pos: start.pos,
+    };
   }
 
   // union の1メンバー: 無名struct型 {...}(判別可能union用)か、通常の単一型
@@ -192,16 +227,24 @@ class Parser {
     return { kind: "structType", fields, pos: start.pos };
   }
 
-  private parseFnDecl(): FnDecl {
+  private parseFnDecl(exported: boolean): FnDecl {
     const start = this.expect("fn", "at start of function declaration");
     // fn (u: User) describe() ... — 直後が '(' ならメソッドのレシーバ節(Goスタイル)。
     // 関数名は常に ident なので、'(' との1トークン先読みで曖昧さなく判定できる
     const receiver = this.check("(") ? this.parseReceiver() : null;
+    if (exported && receiver) {
+      // メソッドの可視性は struct に従う(structが見える場所ならメソッドも呼べる)ので
+      // 個別の export は意味を持たない。書き方を1通りに保つため誘導エラーにする
+      throw new CompileError(
+        "methods are visible wherever their struct is — export the struct instead of the method",
+        start.pos,
+      );
+    }
     const name = this.expect("ident", "as function name").value;
     const params = this.parseParams();
     const ret = this.parseReturnType();
     const body = this.parseBlock();
-    return { kind: "fnDecl", name, receiver, params, ret, body, pos: start.pos };
+    return { kind: "fnDecl", name, receiver, params, ret, body, exported, pos: start.pos };
   }
 
   private parseReceiver(): Receiver {
@@ -310,6 +353,12 @@ class Parser {
       return { kind: "name", name: "none", pos: t.pos };
     }
     const nameTok = this.expect("ident", "as type name");
+    // math.User — パッケージ修飾された型名(import したパッケージの exported 型)
+    if (this.check(".") && this.peek(1).type === "ident") {
+      this.next();
+      const typeName = this.next();
+      return { kind: "name", name: typeName.value, pkg: nameTok.value, pos: nameTok.pos };
+    }
     return { kind: "name", name: nameTok.value, pos: nameTok.pos };
   }
 
@@ -556,6 +605,27 @@ class Parser {
     return this.parsePostfix(this.parsePrimary());
   }
 
+  // structリテラルの中身 `{ field: value, ... }` を読む(名前の直後の `{` から)。
+  // 素の User{...} と修飾つき math.Point{...} の両方から使う共通部分
+  private parseStructLitBody(name: string, pos: Pos): Extract<Expr, { kind: "structLit" }> {
+    this.next(); // {
+    this.skipSemis();
+    const fields: { name: string; value: Expr; pos: Pos }[] = [];
+    const saved = this.allowStructLit;
+    this.allowStructLit = true; // フィールド値の中では再び許可(ネストした literal 用)
+    while (!this.check("}") && !this.check("eof")) {
+      const fname = this.expect("ident", "as field name");
+      this.expect(":", "after field name");
+      const value = this.parseExpr();
+      fields.push({ name: fname.value, value, pos: fname.pos });
+      this.match(",");
+      this.skipSemis();
+    }
+    this.allowStructLit = saved;
+    this.expect("}", "at end of struct literal");
+    return { kind: "structLit", name, fields, pos };
+  }
+
   // 呼び出し・添字・メンバアクセス・伝播は後置で連鎖する: f(x)[0].name / f()!
   private parsePostfix(expr: Expr): Expr {
     while (true) {
@@ -590,25 +660,21 @@ class Parser {
           continue;
         }
       }
+      // 修飾structリテラル: math.Point{x: 1, y: 2}(import したパッケージの exported struct)
+      if (
+        expr.kind === "member" &&
+        expr.target.kind === "ident" &&
+        this.allowStructLit &&
+        this.check("{")
+      ) {
+        const lit = this.parseStructLitBody(expr.name, expr.pos);
+        lit.pkg = expr.target.name;
+        expr = lit;
+        continue;
+      }
       // structリテラル: User{name: "alice", age: 30}(カンマまたは改行区切り)
       if (expr.kind === "ident" && this.allowStructLit && this.check("{")) {
-        const name = expr.name;
-        this.next();
-        this.skipSemis();
-        const fields: { name: string; value: Expr; pos: Pos }[] = [];
-        const saved = this.allowStructLit;
-        this.allowStructLit = true; // フィールド値の中では再び許可(ネストした literal 用)
-        while (!this.check("}") && !this.check("eof")) {
-          const fname = this.expect("ident", "as field name");
-          this.expect(":", "after field name");
-          const value = this.parseExpr();
-          fields.push({ name: fname.value, value, pos: fname.pos });
-          this.match(",");
-          this.skipSemis();
-        }
-        this.allowStructLit = saved;
-        this.expect("}", "at end of struct literal");
-        expr = { kind: "structLit", name, fields, pos: expr.pos };
+        expr = this.parseStructLitBody(expr.name, expr.pos);
         continue;
       }
       if (this.match("!")) {

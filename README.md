@@ -190,6 +190,30 @@ fn sumTree(t: Tree) int {
 (`type A = B | none` かつ `type B = A | error`)で、これだけは `type alias cycle` エラーに
 なります(必要ならstructフィールドに包んでください)。
 
+### モジュール(import / export)
+
+パッケージ = ディレクトリです。ディレクトリ名がそのままパッケージ名になり(`package`宣言は
+ありません)、`export`を付けたトップレベル宣言だけが外から見えます。
+
+```go
+// mathutil/ops.mesh
+export fn add(a: int, b: int) int { return a + b }  // exportで公開
+fn helper(n: int) int { return n * 2 }               // 無印はパッケージ内限定
+
+// app.mesh(エントリファイル)
+import "mathutil"
+
+fn main() {
+	print(mathutil.add(1, 2))          // 常に パッケージ名.シンボル で修飾
+	p := mathutil.Point{x: 3, y: 4}    // exportされたstructの生成も同様
+}
+```
+
+同じパッケージ内の複数`.mesh`ファイルはimport不要で互いに見えます(フラットな1名前空間)。
+メソッドに個別のexportは無く、structをexportすればメソッドも使えます。
+未exportへのアクセス・未知のパッケージ・import循環はコンパイルエラーです。
+サンプル: [examples/modules_demo.mesh](examples/modules_demo.mesh)
+
 ### 並行処理: spawn / wait / channel
 
 ```go
@@ -324,6 +348,6 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
 - [x] structメソッド(Goスタイルのレシーバ構文)/ 標準ライブラリ第一〜三弾(配列・map・文字列・高階関数)
 - [x] 2段スコープの構造化並行(spawn/detach)/ channel仕様の完成(容量・close・select)
 - [x] 判別可能union(インライン `{...}` 型式・自己参照対応)と構造的型付け
-- [ ] 標準ライブラリの拡充(http, json など JS API のラッパー)
-- [ ] モジュールシステム(import / export)
+- [x] モジュールシステム(import / export、パッケージ=ディレクトリ)
+- [ ] 標準ライブラリの拡充と層分け(core共通 / 環境別: http・json・DOM など)
 - [ ] コンパイラを Rust に移植(現行テストスイートが通ることをゴールにする)
