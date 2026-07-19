@@ -37,6 +37,25 @@ describe("checker", () => {
     expect(inMain(`x := 1\nx := 2`)).toEqual([expect.stringContaining("already declared")]);
   });
 
+  test("予約語 'eval' は変数名に使えない(strict modeでJS構文エラーになるため)", () => {
+    expect(inMain(`eval := 1`)).toEqual([
+      expect.stringContaining("'eval' is a reserved word and cannot be used as a name"),
+    ]);
+  });
+
+  test("予約語 'arguments' は変数名に使えない(strict modeでJS構文エラーになるため)", () => {
+    expect(inMain(`arguments := 1`)).toEqual([
+      expect.stringContaining("'arguments' is a reserved word and cannot be used as a name"),
+    ]);
+  });
+
+  test("予約語 'eval' は関数名に使えない", () => {
+    const errors = errorsOf(`fn eval(e: int) int { return e }\nfn main() {}`);
+    expect(errors).toEqual([
+      expect.stringContaining("'eval' is a reserved word and cannot be used as a name"),
+    ]);
+  });
+
   test("シャドーイングを検出: 内側スコープで外側の変数を隠す", () => {
     expect(inMain(`x := 1\nif x > 0 {\nx := 2\nprint(x)\n}`)).toEqual([
       expect.stringContaining("shadows an outer binding"),

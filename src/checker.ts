@@ -53,6 +53,7 @@ const RESERVED = new Set([
   "typeof", "instanceof", "in", "of", "yield", "delete", "void", "switch",
   "case", "default", "do", "while", "with", "export", "import", "extends",
   "super", "null", "undefined", "try", "catch", "finally", "throw",
+  "eval", "arguments",
 ]);
 
 export function check(program: Program): Diagnostic[] {
