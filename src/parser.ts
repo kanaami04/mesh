@@ -241,10 +241,25 @@ class Parser {
       );
     }
     const name = this.expect("ident", "as function name").value;
+    // fn first<T>(...) — メソッド(receiver付き)には generics を許さない(v1はfn限定)
+    const typeParams = receiver ? [] : this.parseTypeParams();
     const params = this.parseParams();
     const ret = this.parseReturnType();
     const body = this.parseBlock();
-    return { kind: "fnDecl", name, receiver, params, ret, body, exported, pos: start.pos };
+    return { kind: "fnDecl", name, receiver, typeParams, params, ret, body, exported, pos: start.pos };
+  }
+
+  // fn first<T>(...) / fn zip<A, B>(...) の <T, ...> 部分。無ければ空配列
+  private parseTypeParams(): string[] {
+    if (!this.check("<")) return [];
+    this.next();
+    const names: string[] = [];
+    while (!this.check(">")) {
+      names.push(this.expect("ident", "as type parameter name").value);
+      if (!this.check(">")) this.expect(",", "between type parameters");
+    }
+    this.expect(">", "after type parameters");
+    return names;
   }
 
   private parseReceiver(): Receiver {

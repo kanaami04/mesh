@@ -174,6 +174,12 @@ class Checker {
   private isTargetTypes = new WeakMap<Expr, Type>();
   // 今チェックしている関数の戻り値型(無名関数でネストするのでスタック)
   private retStack: Type[] = [];
+  // ジェネリック関数(F-1後半)の型パラメータ名。今そのシグネチャ/本体を解決している間だけ
+  // resolveTypeが"typeParam"として認識する(ネストは実際には起きないが retStack と同じ形で安全に)
+  private typeParamStack: Set<string>[] = [];
+  // ジェネリック関数の宣言: 名前 → (型パラメータ名の並び, typeParamを含んだ抽象fn型)。
+  // 呼び出し側はここを引いて unifyTypeParam → substituteTypeParams で具体化する
+  private genericFns = new Map<string, { typeParams: string[]; type: Type }>();
   // type 宣言: 名前 → 構文ノード。解決結果は resolvedAliases にメモ化
   private typeTable = new Map<string, TypeNode>();
   private resolvedAliases = new Map<string, Type>();
@@ -210,6 +216,18 @@ class Checker {
 
   private popScope() {
     this.scopes.pop();
+  }
+
+  private pushTypeParams(names: string[]) {
+    this.typeParamStack.push(new Set(names));
+  }
+
+  private popTypeParams() {
+    this.typeParamStack.pop();
+  }
+
+  private isTypeParam(name: string): boolean {
+    return this.typeParamStack.some((s) => s.has(name));
   }
 
   private declare(name: string, type: Type, pos: Pos, mutable = false) {
@@ -289,6 +307,9 @@ class Checker {
           case "closed": return CLOSED;
           case "any": return ANY;
           default:
+            // ジェネリック関数(F-1後半)の型パラメータ: fn first<T>(...) の T のような名前は
+            // 通常のtype宣言より先に「今アクティブな型パラメータか」を確認する
+            if (this.isTypeParam(node.name)) return { kind: "typeParam", name: node.name };
             return this.resolveAlias(node.name, node.pos);
         }
     }
@@ -421,7 +442,13 @@ class Checker {
         if (fn.receiver) {
           this.declareMethod(fn);
         } else {
+          this.pushTypeParams(fn.typeParams); // <T>のTをこのシグネチャ解決の間だけ型として認識
           const t = this.fnType(fn.params, fn.ret);
+          this.popTypeParams();
+          if (fn.typeParams.length > 0) {
+            this.validateTypeParams(fn, t);
+            this.genericFns.set(fn.name, { typeParams: fn.typeParams, type: t });
+          }
           this.declare(fn.name, t, fn.pos);
           this.fnDecls.set(fn.name, { type: t, exported: fn.exported });
         }
@@ -491,6 +518,8 @@ class Checker {
 
   private checkFn(fn: FnDecl | FnExpr) {
     this.pushScope();
+    // ジェネリック関数(F-1後半)の本体・パラメータ・戻り値型からも <T> の T を参照できるように
+    this.pushTypeParams(fn.kind === "fnDecl" ? fn.typeParams : []);
     if (fn.kind === "fnDecl" && fn.receiver) {
       this.declare(fn.receiver.name, this.resolveType(fn.receiver.type), fn.receiver.pos);
     }
@@ -498,6 +527,7 @@ class Checker {
     this.retStack.push(fn.ret ? this.resolveType(fn.ret) : VOID);
     this.checkBlock(fn.body);
     this.retStack.pop();
+    this.popTypeParams();
     this.popScope();
   }
 
@@ -1428,6 +1458,13 @@ class Checker {
       return this.inferBuiltinCall(expr.callee.name, expr);
     }
 
+    // ジェネリック関数(F-1後半): name(args) の直接呼び出しだけ対応(shadowing禁止なので
+    // 名前で判定できる。変数へ代入してから呼ぶ・コールバックとして渡す等は非対応 — その場合
+    // 型パラメータがtypeParamのまま残り、代入不可として自然にエラーになる)
+    if (expr.callee.kind === "ident" && this.genericFns.has(expr.callee.name)) {
+      return this.inferGenericCall(expr, expr.callee.name);
+    }
+
     // math.add(args) — パッケージ修飾の関数呼び出しを先に解決する
     if (expr.callee.kind === "member") {
       const pkgFn = this.tryPackageMember(expr.callee);
@@ -1502,10 +1539,14 @@ class Checker {
     return ANY;
   }
 
-  // 引数リストを既知の paramTypes と照合する(メソッド呼び出し用。callee自体は常にfnなので
-  // 「呼べない型」チェックは不要)
-  private checkCallArgs(callExpr: Expr & { kind: "call" }, paramTypes: Type[], retType: Type): Type {
-    const args = callExpr.args.map((a) => this.checkExprSingle(a));
+  // 引数(検査済みの型)を paramTypes と照合する共通部分。checkCallArgs / checkCallOfValue /
+  // ジェネリック呼び出し(inferGenericCall)がここに集約する
+  private checkArgsAgainst(
+    callExpr: Expr & { kind: "call" },
+    args: Type[],
+    paramTypes: Type[],
+    retType: Type,
+  ): Type {
     if (args.length !== paramTypes.length) {
       this.error(callExpr.pos, `expected ${paramTypes.length} argument(s), got ${args.length}`);
     }
@@ -1520,6 +1561,13 @@ class Checker {
     return retType;
   }
 
+  // 引数リストを既知の paramTypes と照合する(メソッド呼び出し用。callee自体は常にfnなので
+  // 「呼べない型」チェックは不要)
+  private checkCallArgs(callExpr: Expr & { kind: "call" }, paramTypes: Type[], retType: Type): Type {
+    const args = callExpr.args.map((a) => this.checkExprSingle(a));
+    return this.checkArgsAgainst(callExpr, args, paramTypes, retType);
+  }
+
   // callee の型が分かっている状態からの呼び出し検査(通常の関数呼び出し・
   // structフィールドが関数値のケースの両方で使う)
   private checkCallOfValue(callExpr: Expr & { kind: "call" }, calleeType: Type): Type {
@@ -1529,18 +1577,132 @@ class Checker {
       this.error(callExpr.pos, `cannot call non-function type ${typeToString(calleeType)}`);
       return ANY;
     }
-    if (args.length !== calleeType.params.length) {
-      this.error(callExpr.pos, `expected ${calleeType.params.length} argument(s), got ${args.length}`);
+    return this.checkArgsAgainst(callExpr, args, calleeType.params, calleeType.ret);
+  }
+
+  // ---- ジェネリック関数(F-1後半) ----
+
+  // 宣言時の検査: 型パラメータ名の衝突と、「呼び出し側の引数から推論できる位置に
+  // 最低1回は現れているか」(型パラメータが戻り値型にしか現れないと呼び出し側で
+  // 推論しようがないので、宣言の時点で拒否する — 毎回の呼び出しで謎エラーになるのを防ぐ)
+  private validateTypeParams(fn: FnDecl, fnT: Type) {
+    const seen = new Set<string>();
+    for (const name of fn.typeParams) {
+      if (BUILTIN_TYPE_NAMES.has(name)) {
+        this.error(fn.pos, `type parameter '${name}' shadows a builtin type name`);
+      } else if (this.typeTable.has(name)) {
+        this.error(fn.pos, `type parameter '${name}' conflicts with an existing type '${name}'`);
+      } else if (seen.has(name)) {
+        this.error(fn.pos, `type parameter '${name}' is declared more than once`);
+      }
+      seen.add(name);
     }
-    for (let i = 0; i < Math.min(args.length, calleeType.params.length); i++) {
-      if (!assignable(args[i], calleeType.params[i])) {
+    if (fnT.kind !== "fn") return;
+    for (const name of fn.typeParams) {
+      if (!fnT.params.some((p) => this.typeContainsParam(p, name))) {
         this.error(
-          callExpr.args[i].pos,
-          `argument ${i + 1}: cannot use ${typeToString(args[i])} as ${typeToString(calleeType.params[i])}`,
+          fn.pos,
+          `type parameter '${name}' must appear in a parameter type — it can't be inferred from ` +
+            `the call site otherwise (e.g. 'T[]', not just as the return type)`,
         );
       }
     }
-    return calleeType.ret;
+  }
+
+  // unifyTypeParam が実際に辿れる形とそろえた「Tがこの型の中に(推論可能な位置で)現れるか」。
+  // union/struct の中は辿らない(unifyもそこは辿らないので、そろえないと「宣言は通るのに
+  // 呼び出しは毎回推論失敗する」という罠になる)
+  private typeContainsParam(t: Type, name: string): boolean {
+    switch (t.kind) {
+      case "typeParam":
+        return t.name === name;
+      case "array":
+      case "chan":
+        return this.typeContainsParam(t.elem, name);
+      case "map":
+        return this.typeContainsParam(t.key, name) || this.typeContainsParam(t.value, name);
+      case "fn":
+        return t.params.some((p) => this.typeContainsParam(p, name)) || this.typeContainsParam(t.ret, name);
+      default:
+        return false;
+    }
+  }
+
+  // 呼び出し引数から型パラメータを推論する。paramType(Tを含みうる)とargType(検査済みの
+  // 具体型)を並行に辿り、typeParamに初めて出会った位置の実引数型をそのまま束縛する
+  // (2回目以降の出現は上書きしない — 食い違いは後段のcheckArgsAgainstが通常の代入不可
+  // エラーとして報告する)。union型の中までは辿らない(typeContainsParamと同じ制限)
+  private unifyTypeParam(paramType: Type, argType: Type, bindings: Map<string, Type>) {
+    if (paramType.kind === "typeParam") {
+      if (!bindings.has(paramType.name)) bindings.set(paramType.name, argType);
+      return;
+    }
+    if (paramType.kind === "array" && argType.kind === "array") {
+      this.unifyTypeParam(paramType.elem, argType.elem, bindings);
+    } else if (paramType.kind === "chan" && argType.kind === "chan") {
+      this.unifyTypeParam(paramType.elem, argType.elem, bindings);
+    } else if (paramType.kind === "map" && argType.kind === "map") {
+      this.unifyTypeParam(paramType.key, argType.key, bindings);
+      this.unifyTypeParam(paramType.value, argType.value, bindings);
+    } else if (paramType.kind === "fn" && argType.kind === "fn") {
+      const n = Math.min(paramType.params.length, argType.params.length);
+      for (let i = 0; i < n; i++) this.unifyTypeParam(paramType.params[i], argType.params[i], bindings);
+      this.unifyTypeParam(paramType.ret, argType.ret, bindings);
+    }
+  }
+
+  // 集めた束縛を型に適用してtypeParamを具体型へ置き換える
+  private substituteTypeParams(t: Type, bindings: Map<string, Type>): Type {
+    switch (t.kind) {
+      case "typeParam":
+        return bindings.get(t.name) ?? ANY;
+      case "array":
+        return { kind: "array", elem: this.substituteTypeParams(t.elem, bindings) };
+      case "chan":
+        return { kind: "chan", elem: this.substituteTypeParams(t.elem, bindings) };
+      case "map":
+        return {
+          kind: "map",
+          key: this.substituteTypeParams(t.key, bindings),
+          value: this.substituteTypeParams(t.value, bindings),
+        };
+      case "union":
+        return unionOf(t.members.map((m) => this.substituteTypeParams(m, bindings)));
+      case "fn":
+        return {
+          kind: "fn",
+          params: t.params.map((p) => this.substituteTypeParams(p, bindings)),
+          ret: this.substituteTypeParams(t.ret, bindings),
+        };
+      default:
+        return t;
+    }
+  }
+
+  // ジェネリック関数の直接呼び出し: 引数から型パラメータを推論 → paramTypes/retTypeへ
+  // 代入 → 通常の呼び出しと同じ照合(checkArgsAgainst)に合流する
+  private inferGenericCall(expr: Expr & { kind: "call" }, name: string): Type {
+    const generic = this.genericFns.get(name);
+    if (!generic || generic.type.kind !== "fn") return ANY; // 到達しないはず(登録時にfn型のみ入れる)
+    const { typeParams, type: fnT } = generic;
+
+    const args = expr.args.map((a) => this.checkExprSingle(a));
+    const bindings = new Map<string, Type>();
+    const n = Math.min(args.length, fnT.params.length);
+    for (let i = 0; i < n; i++) this.unifyTypeParam(fnT.params[i], args[i], bindings);
+
+    const missing = typeParams.filter((p) => !bindings.has(p));
+    if (missing.length > 0) {
+      this.error(
+        expr.pos,
+        `cannot infer type parameter(s) ${missing.map((m) => `'${m}'`).join(", ")} of '${name}' from these arguments`,
+      );
+      return ANY;
+    }
+
+    const paramTypes = fnT.params.map((p) => this.substituteTypeParams(p, bindings));
+    const retType = this.substituteTypeParams(fnT.ret, bindings);
+    return this.checkArgsAgainst(expr, args, paramTypes, retType);
   }
 
   private inferBuiltinCall(name: string, expr: Expr & { kind: "call" }): Type {

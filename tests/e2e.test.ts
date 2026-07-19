@@ -662,6 +662,67 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     }`);
     expect(out).toBe("6\n");
   });
+
+  test("ジェネリクス(F-1後半): user-defined first/filter/contains run correctly at all instantiations", () => {
+    const out = runSource(`struct User { name: string  age: int }
+
+    fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+        for _, v := range arr {
+            if pred(v) { return v }
+        }
+        return none
+    }
+
+    fn myFilter<T>(arr: T[], pred: fn(T) bool) T[] {
+        out := T[]{}
+        for _, v := range arr {
+            if pred(v) { push(out, v) }
+        }
+        return out
+    }
+
+    fn myContains<T>(arr: T[], x: T) bool {
+        for _, v := range arr {
+            if v == x { return true }
+        }
+        return false
+    }
+
+    fn main() {
+        nums := [1, 2, 3, 4, 5]
+        r := first(nums, fn(n: int) bool { return n > 3 })
+        if r is none { return }
+        print(r)
+
+        print(myFilter(nums, fn(n: int) bool { return n % 2 == 0 }))
+        print(myContains(nums, 3))
+        print(myContains(nums, 99))
+        print(myContains(["alice", "bob"], "bob"))
+
+        users := [User{name: "a", age: 1}, User{name: "b", age: 2}]
+        adult := first(users, fn(u: User) bool { return u.age > 1 })
+        if adult is none { return }
+        print(adult.name)
+    }`);
+    expect(out).toBe("4\n[2 4]\ntrue\nfalse\ntrue\nb\n");
+  });
+
+  test("ジェネリクス(F-1後半): 別のジェネリック関数を呼ぶネストした推論も通る", () => {
+    const out = runSource(`fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+        for _, v := range arr { if pred(v) { return v } }
+        return none
+    }
+    fn firstPositive<T>(arr: T[], pred: fn(T) bool) T | none {
+        return first(arr, pred)
+    }
+    fn main() {
+        nums := [1, -2, 3]
+        r := firstPositive(nums, fn(n: int) bool { return n > 0 })
+        if r is none { return }
+        print(r)
+    }`);
+    expect(out).toBe("1\n");
+  });
 });
 
 describe("モジュールシステム(import / export)", () => {

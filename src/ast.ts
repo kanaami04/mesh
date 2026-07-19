@@ -58,6 +58,7 @@ export interface FnDecl {
   kind: "fnDecl";
   name: string;
   receiver: Receiver | null; // fn (u: User) describe() ... — Goスタイルのメソッドレシーバ
+  typeParams: string[]; // fn first<T>(...) — トップレベル関数限定(F-1後半)。無ければ空配列
   params: Param[];
   ret: TypeNode | null; // 戻り値なし = null。失敗し得るなら `int | error` のような union
   body: Block;

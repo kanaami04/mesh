@@ -78,6 +78,20 @@ describe("parser", () => {
     );
   });
 
+  test("ジェネリクス(F-1後半): fn first<T>(...) の型パラメータをパースできる", () => {
+    const fn1 = parse(`fn first<T>(arr: T[], pred: fn(T) bool) T | none { return none }`).fns[0];
+    expect(fn1.typeParams).toEqual(["T"]);
+    expect(fn1.params[0].type).toMatchObject({ kind: "array", elem: { kind: "name", name: "T" } });
+
+    // 複数の型パラメータ
+    const fn2 = parse(`fn mapKeys<K, V>(m: map<K, V>) K[] { return [] }`).fns[0];
+    expect(fn2.typeParams).toEqual(["K", "V"]);
+
+    // <> 無しは空配列(通常の関数と同じ)
+    const fn3 = parse(`fn plain(x: int) int { return x }`).fns[0];
+    expect(fn3.typeParams).toEqual([]);
+  });
+
   test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
     const program = parse(
       `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,

@@ -53,6 +53,32 @@ values, so a function mutating one (e.g. \`push(items, x)\`) is visible to the c
                        // discriminated union: { field: Type, ... } ONLY valid inside a union
                        // (see "Discriminated unions" below — do not write it bare)
 
+## Generic functions
+
+    fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+        for _, v := range arr {
+            if pred(v) { return v }
+        }
+        return none
+    }
+
+    nums := [1, 2, 3, 4]
+    r := first(nums, fn(n: int) bool { return n > 2 })   // T=int inferred from the arguments —
+                                                          // call it like any other function, no <int>
+
+- Only top-level \`fn\` declarations can have type parameters (\`fn name<T, U>(...)\`) — no generic
+  \`struct\`/\`type\`, no generic methods, no generic \`fn(...){...}\` closures.
+- \`T\` is fully abstract inside the body: you can move values of type \`T\` around (store them,
+  pass them to other functions, return them, put them in \`T[]\`/\`T | none\`, compare two \`T\`s
+  with \`==\`/\`!=\`) but NOT do type-specific operations on them (\`T + 1\`, \`t.field\`, \`t < 0\`).
+  This is why \`sort\` stays a built-in — it needs \`<\`, which a bare \`T\` doesn't support.
+- Every type parameter MUST appear in at least one parameter type (\`T[]\`, \`fn(T) bool\`, ...,
+  not just the return type) — the compiler infers \`T\` from the call's arguments, there is no
+  \`first<int>(...)\` explicit-instantiation syntax. \`fn zero<T>() T\` is a compile error for
+  exactly this reason (nothing in the call \`zero()\` tells the compiler what \`T\` is).
+- Call it by name directly — \`first(nums, pred)\`. Assigning a generic function to a variable
+  first (\`f := first\`) and calling that isn't supported; \`T\` stays unresolved and the call fails.
+
 ## Absence & failure — THE core pattern (no null, no exceptions)
 
 Failable functions return unions. You CANNOT use the value before narrowing it.

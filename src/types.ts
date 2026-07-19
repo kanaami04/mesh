@@ -13,6 +13,10 @@ export type Type =
   | { kind: "map"; key: Type; value: Type } // map<string, int>。読みは V | none を返す
   | { kind: "fn"; params: Type[]; ret: Type }
   | { kind: "union"; members: Type[] }
+  // ジェネリック関数(F-1後半)の宣言側でだけ現れる抽象型パラメータ。呼び出し側の
+  // 引数からunifyTypeParamで具体型を推論し、substituteTypeParamsで置き換える。
+  // 同名同士以外には代入できない(assignableはtypeEqualsへフォールバックする)
+  | { kind: "typeParam"; name: string }
   // struct User { name: string }。fields は再帰型(Node | none 等)を許すため
   // 宣言の解決時に後から埋められる(knot-tying)。v1 の同一性判定は名前ベース
   // (無名 {...} 型式が入るときに構造的比較へ拡張する)
@@ -61,6 +65,8 @@ export function typeToString(t: Type): string {
       return t.name === "(anonymous)"
         ? `{ ${t.fields.map((f) => `${f.name}: ${typeToString(f.type)}`).join(", ")} }`
         : t.name;
+    case "typeParam":
+      return t.name;
   }
 }
 
@@ -75,6 +81,8 @@ export function typeEquals(a: Type, b: Type, seen: Array<[Type, Type]> = []): bo
     case "none":
     case "closed":
       return true;
+    case "typeParam":
+      return a.name === (b as typeof a).name;
     case "literal":
       return a.value === (b as typeof a).value;
     case "array":

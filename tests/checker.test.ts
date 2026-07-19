@@ -1141,4 +1141,98 @@ fn main() { print(describe(Resp{kind: "notFound"})) }`);
 }`);
     expect(errors).toEqual([]);
   });
+
+  describe("ジェネリクス(F-1後半)", () => {
+    test("引数の型からTを推論できる(配列+関数値の2箇所とも一致)", () => {
+      const errors = errorsOf(`fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+	for _, v := range arr {
+		if pred(v) { return v }
+	}
+	return none
+}
+fn main() {
+	nums := [1, 2, 3]
+	r := first(nums, fn(n: int) bool { return n > 1 })
+	if r is none { return }
+	print(r + 1)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("複数の型パラメータ(map<K, V>)を同時に推論できる", () => {
+      const errors = errorsOf(`fn mapKeys<K, V>(m: map<K, V>) K[] {
+	return keys(m)
+}
+fn main() {
+	m := map<string, int>{"a": 1}
+	print(mapKeys(m))
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("struct型でもTを推論でき、絞り込み後にフィールドアクセスできる", () => {
+      const errors = errorsOf(`struct User { name: string  age: int }
+fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+	for _, v := range arr {
+		if pred(v) { return v }
+	}
+	return none
+}
+fn main() {
+	users := [User{name: "a", age: 1}, User{name: "b", age: 2}]
+	u := first(users, fn(u: User) bool { return u.age > 1 })
+	if u is none { return }
+	print(u.name)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("同じTが2引数に出てくる場合、食い違いを通常の代入不可エラーとして報告する", () => {
+      const errors = errorsOf(`fn pair<T>(a: T, b: T) T { return a }
+fn main() { print(pair(1, "x")) }`);
+      expect(errors).toEqual([expect.stringContaining(`argument 2: cannot use "x" as int`)]);
+    });
+
+    test("型パラメータが戻り値型にしか現れないと宣言時にエラー(呼び出し側から推論できないため)", () => {
+      const errors = errorsOf(`fn zero<T>() T { return 0 }\nfn main() { print(zero()) }`);
+      expect(errors).toEqual([
+        expect.stringContaining("type parameter 'T' must appear in a parameter type"),
+        expect.stringContaining("cannot return int as T"),
+        expect.stringContaining("cannot infer type parameter(s) 'T'"),
+      ]);
+    });
+
+    test("型パラメータ名が組み込み型と衝突するとエラー", () => {
+      const errors = errorsOf(`fn f<int>(x: int) int { return x }\nfn main() { print(f(1)) }`);
+      expect(errors).toEqual(
+        expect.arrayContaining([expect.stringContaining("shadows a builtin type name")]),
+      );
+    });
+
+    test("同じ型パラメータ名を2回宣言するとエラー", () => {
+      const errors = errorsOf(`fn f<T, T>(a: T, b: T) T { return a }\nfn main() { print(f(1, 2)) }`);
+      expect(errors).toEqual(
+        expect.arrayContaining([expect.stringContaining("'T' is declared more than once")]),
+      );
+    });
+
+    test("型パラメータは抽象型として扱われ、+のような演算はできない(パラメトリシティ)", () => {
+      const errors = errorsOf(`fn addOne<T>(x: T) T { return x + 1 }\nfn main() { print(addOne(1)) }`);
+      expect(errors).toEqual([expect.stringContaining("invalid operation: T + int")]);
+    });
+
+    test("ジェネリック関数を変数へ代入してから呼ぶのは非対応(Tのまま残りエラーになる)", () => {
+      const errors = errorsOf(`fn first<T>(arr: T[], pred: fn(T) bool) T | none {
+	for _, v := range arr { if pred(v) { return v } }
+	return none
+}
+fn main() {
+	f := first
+	nums := [1, 2, 3]
+	r := f(nums, fn(n: int) bool { return n > 1 })
+	print(r)
+}`);
+      expect(errors.length).toBeGreaterThan(0);
+    });
+  });
 });
