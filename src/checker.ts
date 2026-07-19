@@ -183,6 +183,32 @@ class Checker {
       }
       return struct;
     }
+    // union も同じ知恵の輪(knot-tying)で解決する。判別可能unionが自分自身を struct フィールド
+    // 越しに参照する再帰型(木構造など: { kind: "leaf" } | { kind: "node", left: Tree, right: Tree })
+    // を許すため。ただし「struct/array等に包まれない裸のunion参照同士の相互再帰」
+    // (例: type A = B | none  type B = A | error)は、flatten時に相手がまだ空のplaceholderで
+    // 型情報が消える不具合が過去にあったため、今まで通り循環エラーにする。
+    // 完成した union は必ずメンバー2個以上を持つ(unionOfが1個以下を単独の型に潰すため)ので、
+    // 「kind: "union" かつ members が空」は「まだ解決中のplaceholderが裸で出てきた」ことの
+    // 確実な目印になる
+    if (node.kind === "union") {
+      const union: Type = { kind: "union", members: [] };
+      this.resolvedAliases.set(name, union);
+      const rawMembers = node.members.map((m) => this.resolveType(m));
+      const unsafe = rawMembers.find((m) => m.kind === "union" && m.members.length === 0);
+      if (unsafe) {
+        this.error(pos, `type alias cycle involving '${name}'`);
+        this.resolvedAliases.set(name, ANY);
+        return ANY;
+      }
+      const flattened = unionOf(rawMembers);
+      if (flattened.kind === "any") {
+        this.resolvedAliases.set(name, ANY);
+        return ANY;
+      }
+      union.members = flattened.kind === "union" ? flattened.members : [flattened];
+      return union;
+    }
     if (this.resolvingAliases.has(name)) {
       this.error(pos, `type alias cycle involving '${name}'`);
       return ANY;

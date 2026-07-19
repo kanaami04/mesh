@@ -1,0 +1,40 @@
+// 自己参照する判別可能union(木構造)。structフィールド越しの参照
+// (left: Tree, right: Tree)なら、判別可能union自身が自分自身を参照できる。
+// structを挟まない裸のunion同士の相互再帰だけは今も未対応(type alias cycle)
+
+type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+
+fn leaf(v: int) Tree {
+	return Tree{ kind: "leaf", value: v }
+}
+
+fn node(l: Tree, r: Tree) Tree {
+	return Tree{ kind: "node", left: l, right: r }
+}
+
+fn sumTree(t: Tree) int {
+	return match t {
+		{ kind: "leaf" } => t.value
+		{ kind: "node" } => sumTree(t.left) + sumTree(t.right)
+	}
+}
+
+fn depth(t: Tree) int {
+	return match t {
+		{ kind: "leaf" } => 1
+		{ kind: "node" } => 1 + max(depth(t.left), depth(t.right))
+	}
+}
+
+fn max(a: int, b: int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+fn main() {
+	tree := node(node(leaf(1), leaf(2)), leaf(3))
+	print(sumTree(tree))
+	print(depth(tree))
+}

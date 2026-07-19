@@ -126,37 +126,33 @@ Building an optional result imperatively (e.g. "the best so far"):
 - Struct identity is STRUCTURAL, not by name: two \`struct\` declarations with the same fields
   (same names, same types) are interchangeable, and a named \`struct\` literal can be used
   wherever an anonymous \`{ ... }\` union member with the same fields is expected.
-- Self-referential discriminated unions (e.g. a tree: \`{ kind: "leaf" } | { kind: "node", left: Tree, right: Tree }\`)
-  are NOT supported yet — the type resolver reports \`type alias cycle\`. For recursive shapes
-  (ASTs, trees, linked structures), use a named recursive \`struct\` instead, with a plain
-  \`kind: string\` tag checked manually and every variant-specific field typed \`T | none\`
-  (struct recursion through \`T | none\` already works — same pattern as a linked-list \`Node\`):
+- Discriminated unions CAN be self-referential (trees, ASTs, linked structures) as long as the
+  recursive reference sits inside a struct-shaped member's FIELD — the union's own name works
+  as an ordinary type reference there, same as a recursive \`struct\`'s \`next: Node | none\`:
 
-      struct Expr {
-          kind: string           // "num" or "add" — YOU check this string, the compiler doesn't
-          val: int | none        // set when kind == "num"
-          left: Expr | none      // set when kind == "add"
-          right: Expr | none     // set when kind == "add"
-      }
-      fn num(v: int) Expr { return Expr{kind: "num", val: v, left: none, right: none} }
-      fn add(l: Expr, r: Expr) Expr { return Expr{kind: "add", val: none, left: l, right: r} }
+      type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
 
-      fn evalExpr(e: Expr) int {
-          if e.kind == "num" {
-              return e.val or 0
+      fn leaf(v: int) Tree { return Tree{kind: "leaf", value: v} }
+      fn node(l: Tree, r: Tree) Tree { return Tree{kind: "node", left: l, right: r} }
+
+      fn sumTree(t: Tree) int {
+          return match t {
+              { kind: "leaf" } => t.value
+              { kind: "node" } => sumTree(t.left) + sumTree(t.right)   // recursion works
           }
-          l := e.left
-          if l is none { return 0 }        // narrow one field per if — see note below
-          r := e.right
-          if r is none { return 0 }
-          return evalExpr(l) + evalExpr(r)   // recursion works: Expr is a normal named struct
       }
 
-  This trades the exhaustiveness checking a real discriminated union would give you (the
-  compiler does NOT verify every \`kind\` value is handled, or that the "right" fields are set
-  for a given \`kind\`) for the ability to recurse at all. Narrow ONE field per \`if\` (as above)
-  — combining checks like \`if l is none || r is none\` in a single condition is NOT currently
-  narrowed (each variable needs its own \`is\`-only \`if\`).
+  What's still NOT supported: two union types referencing each other DIRECTLY as bare members
+  with nothing (no struct/array/map/chan) wrapping the reference, e.g. \`type A = B | none\`
+  where \`type B = A | error\` — this reports \`type alias cycle\` (there's no struct field to
+  "tie the knot" through). This is a narrow, rarely-needed shape; wrap the reference in a
+  struct field instead, as the \`Tree\` example above does.
+- Narrowing a field one \`is\` at a time still applies inside recursive/manual patterns too —
+  combining checks like \`if l is none || r is none\` in a single condition is NOT currently
+  narrowed (each variable needs its own \`is\`-only \`if\`). If you'd rather avoid a fixed set of
+  \`kind\` values (e.g. a string tag checked manually, with no exhaustiveness checking), a plain
+  recursive \`struct\` with \`T | none\` fields per variant works too — same recursion mechanism,
+  just without the compiler verifying every \`kind\`/field combination for you.
 
 ## Structs, maps & methods
 
@@ -351,8 +347,9 @@ methods on non-struct types (int/string/array — struct only) / function-type a
 write \`f: fn(int) int = ...\` — the type must be inferred from a \`:=\` declaration) /
 Go's close/comma-ok idiom (\`v, ok := <-ch\`) — use \`v := <-ch\` then narrow with \`is closed\` /
 send-case / default-send in select (select only reacts to RECEIVE readiness, not send readiness) /
-self-referential discriminated unions (a union member's field cannot name the union's own type —
-use a named recursive \`struct\` instead)
+two union types referencing each other directly as bare members with nothing wrapping the
+reference (e.g. \`type A = B | none\` where \`type B = A | error\`) — wrap the reference in a
+struct field instead (self-referential discriminated unions like a tree ARE supported, see above)
 
 ## Common compile errors → how to fix
 
@@ -377,8 +374,10 @@ use a named recursive \`struct\` instead)
     no member of 'X' matches the field(s) {...}     → the fields you wrote don't match any member of X;
                                                         check spelling and which fields that member needs
     ambiguous — multiple members of 'X' match       → add/change a field so only one member's shape fits
-    type alias cycle involving 'X'                  → a discriminated union can't reference its own type
-                                                        name inside a member; use a named recursive struct
+    type alias cycle involving 'X'                  → two unions reference each other as bare members
+                                                        with nothing wrapping the reference; wrap it in
+                                                        a struct field instead (self-reference through
+                                                        a struct field, e.g. a tree, works fine)
 
 ## Verify your code (agents: do this after every edit)
 

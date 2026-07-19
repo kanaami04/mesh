@@ -49,17 +49,17 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   { kind: "ok", user: User } | { kind: "notFound" }`。union内だけで無名`{...}`型式が書ける。
   構築は union自身の名前をstructリテラル名に流用(`X{kind: "ok", ...}`)、matchは部分構造
   パターン`{kind: "ok"}`で絞り込み。この実装のため struct の同一性を名前ベース→全面的な
-  構造的比較に変更(構造的型付けの前倒し実装)。自己参照する判別可能union(木構造等)は未対応
-  (`type alias cycle`。将来課題)
-- **テスト220件**、CI確認は直近push分を要確認(直近コミット `aeed8f6`)
+  構造的比較に変更(構造的型付けの前倒し実装)。**自己参照(木構造・AST等)も同日中に追加実装**
+  ——structフィールド越しの参照(`{kind:"node", left: Tree, right: Tree}`)なら知恵の輪
+  (knot-tying)で解決できる。structを挟まない「union同士が裸で直接参照し合う」形だけは
+  意図的に`type alias cycle`のまま(下記参照)
+- **言語カード実証実験 第5〜10回**(2026-07-19)実施。実装バグ6件発見・解消
+  (chan配列`chan<int>[]`・複数行配列リテラル・`eval`/`arguments`予約語漏れ等)。
+  詳細は docs/card-experiments.md
+- **テスト232件**、CI green(直近コミットは`git log origin/main -1`で確認)
 
 ## 次にやるとしたら(未着手のトピック)
 
-- **自己参照する判別可能union**(木構造・ASTノード等) — 上記実装時に知恵の輪(knot-tying)を
-  試したが、mutual-recursiveな純粋union(struct経由でない直接再帰)で`unionOf`のflatten処理が
-  未完成のplaceholderを読んでしまい型情報が消える不具合を発見し撤回した。struct knot-tying
-  (`resolveAlias`の`node.kind === "structType"`分岐)とは違い、union側は「先に器を登録→後から
-  埋める」だけでは済まず、flatten処理自体を遅延評価にするなど設計し直しが必要
 - `is` のさらなる対象拡大(部分構造パターンへの対応。今回はmatchのみ実装)
 - todo.md・features.md の他の未着手項目(標準ライブラリ層分け、モジュールシステム等)
 

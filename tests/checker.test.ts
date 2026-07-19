@@ -237,6 +237,18 @@ fn main() {
     expect(errors).toEqual([expect.stringContaining("type alias cycle")]);
   });
 
+  test("type宣言: unionが自分自身を裸で参照する場合も循環エラー(1件のみ)", () => {
+    const errors = errorsOf(`type A = A | int\nfn main() {}`);
+    expect(errors).toEqual([expect.stringContaining("type alias cycle involving 'A'")]);
+  });
+
+  test("判別可能union: 自己参照(木構造)はstructフィールド越しなら循環エラーにならない", () => {
+    const errors = errorsOf(
+      `type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }\nfn main() {}`,
+    );
+    expect(errors).toEqual([]);
+  });
+
   test("match: リテラルunion の網羅性検査(不足リテラルを名指し)", () => {
     const errors = errorsOf(`type Status = "active" | "banned" | "pending"
 fn label(s: Status) string {

@@ -31,8 +31,11 @@
       リテラル名として使う(`GetUserResponse{kind: "ok", user: u}`) — フィールド集合(曖昧なら
       さらに値の型)から該当メンバーを特定。match は部分構造パターン `{ kind: "ok" }` で
       絞り込む(フィールド束縛はなし、絞り込み後は普通のフィールドアクセス)。
-      **自己参照する判別可能union(木構造など)は今回未対応**(`type alias cycle`エラーになる。
-      名前付きの再帰structを使うこと。将来課題) |
+      **自己参照(木構造・ASTなど)は2026-07-19実装済み** — structフィールド越しの参照
+      (`{ kind: "node", left: Tree, right: Tree }`)なら知恵の輪(knot-tying)で解決できる。
+      structを挟まない「union同士が裸で直接参照し合う」形(`type A = B \| none` かつ
+      `type B = A \| error`)だけは引き続き `type alias cycle` エラー(flatten時に相手の
+      placeholderがまだ空で型情報が消える不具合を避けるため、意図的に据え置き) |
 | union 型(**言語の背骨**) | ✅ | 2026-07-17実装。`int \| error`、`string \| none` などの union が型注釈に書ける |
 | 文字列リテラル型 | ✅ | 2026-07-17実装。`"active"` は string の部分型。リテラルは不変宣言でリテラル型のまま、
       mut 宣言・配列要素では string に widening。**タイポは `cannot use "actev" as ...` で即検出** |

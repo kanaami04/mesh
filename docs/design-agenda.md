@@ -87,8 +87,10 @@ union路線決定後、「`type Status = ...` と `type User { ... }` の2形態
       フィールド集合で該当メンバーを特定)。narrowingは既存のmatch機構を拡張した部分構造パターン
       `{ kind: "ok" }` で行い、絞り込み後は普通のフィールドアクセス(新しい束縛構文は増やさない、
       P1)。この実装のために struct の同一性判定を名前ベース→全面的な構造的比較に変更した
-      (design-agendaの「構造的型付け」項目を前倒しで実装)。自己参照する判別可能union(木構造等)
-      は未対応(`type alias cycle`。将来課題) |
+      (design-agendaの「構造的型付け」項目を前倒しで実装)。自己参照(木構造・AST等)も同日中に
+      追加実装 — structフィールド越しの参照はknot-tyingで解決。structを挟まない裸のunion同士の
+      相互再帰(`type A = B | none` かつ `type B = A | error`)だけは、flatten時に相手の
+      placeholderがまだ空で型情報が消える不具合を避けるため、意図的に`type alias cycle`のまま |
 | C-2 | **matchガード**(`case x if x > 0`相当) | 小さい追加。match採用済みなので自然な拡張 |
 | C-3 | **named args**(`createUser(name: "x", age: 3)`) | AIの引数順ミス対策として有効。呼び方が2通りになるならP1と緊張。「引数2個以上は必須」等の一律ルールなら整合 |
 | C-4 | **let/mut(デフォルト不変)** | B-4 に統合 |

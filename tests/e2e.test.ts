@@ -404,11 +404,31 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(compile(`type X = { a: int }\nfn main() {}`).diagnostics[0]?.message).toContain(
       "use 'struct X { ... }'",
     );
-    // カードどおり、自己参照する判別可能unionはcycleエラーになる(未対応)
-    expect(
-      compile(`type Tree = { kind: "leaf" } | { kind: "node", left: Tree, right: Tree }\nfn main() {}`)
-        .diagnostics[0]?.message,
-    ).toContain("type alias cycle");
+  });
+
+  test("判別可能union: 自己参照(木構造)がstructフィールド越しなら再帰できる", () => {
+    const out = runSource(`type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+    fn leaf(v: int) Tree { return Tree{kind: "leaf", value: v} }
+    fn node(l: Tree, r: Tree) Tree { return Tree{kind: "node", left: l, right: r} }
+    fn sumTree(t: Tree) int {
+      return match t {
+        { kind: "leaf" } => t.value
+        { kind: "node" } => sumTree(t.left) + sumTree(t.right)
+      }
+    }
+    fn main() {
+      tree := node(node(leaf(1), leaf(2)), leaf(3))
+      print(sumTree(tree))
+    }`);
+    expect(out).toBe("6\n");
+  });
+
+  test("判別可能union: 裸のunion同士の相互再帰は今まで通りcycleエラー(structに包まれない危険な形)", () => {
+    // type A = B | none; type B = A | error — どちらもstruct等に包まれない裸の相互参照。
+    // これを許すとflatten時に相手のplaceholderがまだ空で型情報が消えるため、引き続き弾く
+    const result = compile(`type A = B | none\ntype B = A | error\nfn main() {}`);
+    expect(result.diagnostics.length).toBe(1);
+    expect(result.diagnostics[0]?.message).toContain("type alias cycle");
   });
 
   test("カードの新項目: 自己参照する判別可能unionの回避策(名前付き再帰struct+T|noneの疑似optional)", () => {
@@ -479,6 +499,10 @@ describe("e2e", () => {
     expect(runExample("discriminated_union.mesh")).toBe(
       "found: alice\nnot found\nunauthorized\n",
     );
+  });
+
+  test("tree.mesh — 自己参照する判別可能union(木構造)", () => {
+    expect(runExample("tree.mesh")).toBe("6\n3\n");
   });
 
   test("errors.mesh — union型エラーハンドリング(is / or / match)", () => {
