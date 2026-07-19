@@ -45,7 +45,7 @@ export const BUILTINS = new Set([
 ]);
 
 // 生成される JavaScript で意味を持ってしまう名前は変数名として禁止する
-const RESERVED = new Set([
+export const RESERVED = new Set([
   "await", "async", "function", "const", "let", "var", "class", "new", "this",
   "typeof", "instanceof", "in", "of", "yield", "delete", "void", "switch",
   "case", "default", "do", "while", "with", "export", "import", "extends",

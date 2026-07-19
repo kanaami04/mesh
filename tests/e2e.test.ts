@@ -150,6 +150,29 @@ describe("言語カード(mesh card)", () => {
     expect(proc.stdout).toContain("mesh check file.mesh --json");
   });
 
+  test("mesh card --for <file>(F-13後半): 使っている機能だけに絞った縮小版を返す", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-card-for-"));
+    const path = join(dir, "simple.mesh");
+    writeFileSync(path, `fn main() {\n\tx := 1\n\tprint(x + 2)\n}`);
+
+    const proc = spawnSync(process.execPath, [CLI, "card", "--for", path], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    const full = spawnSync(process.execPath, [CLI, "card"], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("PROJECT-SCOPED SUBSET");
+    expect(proc.stdout).toContain("## Program structure");
+    expect(proc.stdout).not.toContain("## Concurrency");
+    expect(proc.stdout.length).toBeLessThan(full.stdout.length * 0.6);
+  });
+
+  test("mesh card --for に引数無しはエラー(exit 1)", () => {
+    const proc = spawnSync(process.execPath, [CLI, "card", "--for"], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(1);
+    expect(proc.stderr).toContain("usage: mesh card --for");
+  });
+
   test("カードの肯定的な主張がすべてコンパイル・実行できる", () => {
     const out = runSource(`struct User {
 	name: string

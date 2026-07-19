@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFile
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { LANGUAGE_CARD } from "./card";
+import { buildSubsetCard } from "./card-subset";
 import {
   compileModules,
   diagnosticsToJson,
@@ -27,6 +28,8 @@ Usage:
                                        診断ごとに code と、機械適用可能なら fix パッチを含む)
   mesh explain <code>                 診断コードの意味を説明する(引数無しで全コード一覧)
   mesh card                           言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
+  mesh card --for <file.mesh>...      渡したソースが使っている機能のセクションだけに絞った
+                                       縮小版カードを出力(トークン節約。完全版ではない旨を明記)
 `;
 
 // エントリファイルと、そこから(推移的に)importされたパッケージのソースを集める。
@@ -105,8 +108,25 @@ function compileFile(file: string): string {
 function main() {
   const [command, file, ...rest] = process.argv.slice(2);
 
-  // card はファイル引数を取らない
+  // card は通常ファイル引数を取らない。--for <file...>(F-13後半)のときだけ、
+  // 渡したソースが使っている機能のセクションに絞った縮小版を返す
   if (command === "card") {
+    if (file === "--for") {
+      if (rest.length === 0) {
+        console.error("usage: mesh card --for <file.mesh> [<file2.mesh> ...]");
+        process.exit(1);
+      }
+      const sources = rest.map((f) => {
+        try {
+          return readFileSync(f, "utf8");
+        } catch {
+          console.error(`error: cannot read file '${f}'`);
+          return process.exit(1);
+        }
+      });
+      console.log(buildSubsetCard(sources));
+      return;
+    }
     console.log(LANGUAGE_CARD);
     return;
   }
