@@ -675,10 +675,12 @@ class Parser {
       }
       case "[": {
         this.next();
+        this.skipSemis(); // 複数行の配列リテラルで、要素末尾のASI挿入セミコロンを読み飛ばす
         const elems: Expr[] = [];
-        while (!this.check("]")) {
+        while (!this.check("]") && !this.check("eof")) {
           elems.push(this.parseExpr());
-          if (!this.check("]")) this.expect(",", "between array elements");
+          this.match(",");
+          this.skipSemis();
         }
         this.expect("]", "after array elements");
         return { kind: "arrayLit", elems, pos: t.pos };

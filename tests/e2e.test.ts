@@ -826,6 +826,33 @@ describe("e2e", () => {
     expect(out).toBe("5\n");
   });
 
+  test("配列リテラル: 複数行(末尾カンマ無し)でstructの要素を書ける", () => {
+    const out = runSource(`struct Order {
+      id: int
+      amount: float
+      status: string
+    }
+    fn (o: Order) summary() string {
+      return "Order \${o.id}: \${o.amount} (\${o.status})"
+    }
+    fn main() {
+      orders := [
+        Order{id: 1, amount: 100.0, status: "paid"},
+        Order{id: 2, amount: 50.0, status: "pending"},
+        Order{id: 3, amount: 200.0, status: "paid"}
+      ]
+      isPaid := fn(o: Order) bool { return o.status == "paid" }
+      paid := filter(orders, isPaid)
+      discounted := transform(paid, fn(o: Order) float { return o.amount * 0.9 })
+      total := reduce(discounted, fn(acc: float, x: float) float { return acc + x }, 0.0)
+      for _, o := range paid {
+        print(o.summary())
+      }
+      print(total)
+    }`);
+    expect(out).toBe("Order 1: 100 (paid)\nOrder 3: 200 (paid)\n270\n");
+  });
+
   test("struct: 生成・アクセス・フィールド更新・print", () => {
     const out = runSource(`struct User {
       name: string

@@ -34,6 +34,21 @@ describe("parser", () => {
     expect(chanArr2d).toMatchObject({ kind: "array", elem: { kind: "array", elem: { kind: "chan" } } });
   });
 
+  test("配列リテラル: 複数行でも末尾カンマ無しでパースできる(struct/mapリテラルと同じくASIを読み飛ばす)", () => {
+    const [stmt] = parseBody(`xs := [\n1,\n2,\n3\n]`);
+    if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
+    const arr = stmt.values[0];
+    if (arr.kind !== "arrayLit") throw new Error("unexpected");
+    expect(arr.elems.length).toBe(3);
+
+    // struct リテラルを要素にした複数行配列(末尾カンマ無し)も同様に通る
+    const [stmt2] = parseBody(`ys := [\nUser{name: "a"},\nUser{name: "b"}\n]`);
+    if (stmt2.kind !== "shortVarDecl") throw new Error("unexpected");
+    const arr2 = stmt2.values[0];
+    if (arr2.kind !== "arrayLit") throw new Error("unexpected");
+    expect(arr2.elems.length).toBe(2);
+  });
+
   test("判別可能union: type宣言のunion内に無名{...}型式を書ける", () => {
     const program = parse(
       `type GetUserResponse = { kind: "ok", user: User } | { kind: "notFound" }\nfn main() {}`,
