@@ -64,7 +64,9 @@ Failable functions return unions. You CANNOT use the value before narrowing it.
 Four ways to consume a union:
 
     v := find(1)
-    if v is none {          // 1) narrow with \`is\` (only \`is none\` / \`is error\`)
+    if v is none {          // 1) narrow with \`is\` — accepts the SAME patterns as match:
+                            //    none / error / closed, type names (is User, is int),
+                            //    string literals (is "active"), partial shapes (is { kind: "ok" })
         return
     }
     print(v.name)           //    v is User from here on
@@ -123,6 +125,10 @@ Building an optional result imperatively (e.g. "the best so far"):
   the member (usually just the tag, e.g. \`kind\`). After narrowing, access the rest of that
   member's fields normally (\`res.user\`); accessing a field from a different member is a
   compile error, same as any other unnarrowed union access.
+- \`is\` accepts the same partial-shape patterns, so guard-clause style works too:
+
+      if res is { kind: "notFound" } { return "404" }
+      return "found: \${res.user.name}"   // res narrowed to the remaining member(s) here
 - Struct identity is STRUCTURAL, not by name: two \`struct\` declarations with the same fields
   (same names, same types) are interchangeable, and a named \`struct\` literal can be used
   wherever an anonymous \`{ ... }\` union member with the same fields is expected.

@@ -17,7 +17,6 @@ import {
   VOID,
   assignable,
   isFailure,
-  isNarrowTarget,
   isNumeric,
   isStringy,
   typeEquals,
@@ -411,20 +410,19 @@ class Checker {
         // 後続は「union から none を除いた型」として扱う
         const narrow = this.narrowFromCond(stmt.cond);
         if (narrow) {
-          const { name, member, binding } = narrow;
-          const rest = unionWithout(binding.type, (m) => typeEquals(m, member));
-          this.checkBlock(stmt.then, { name, type: member });
+          const { name, thenType, elseType, binding } = narrow;
+          this.checkBlock(stmt.then, { name, type: thenType });
           if (stmt.else_) {
             if (stmt.else_.kind === "if") {
               this.pushScope();
-              this.scopes[this.scopes.length - 1].set(name, { type: rest, mutable: false });
+              this.scopes[this.scopes.length - 1].set(name, { type: elseType, mutable: false });
               this.checkStmt(stmt.else_);
               this.popScope();
             } else {
-              this.checkBlock(stmt.else_, { name, type: rest });
+              this.checkBlock(stmt.else_, { name, type: elseType });
             }
           } else if (this.blockTerminates(stmt.then)) {
-            binding.type = rest; // 早期リターン後の残りの行では絞り込みが効き続ける
+            binding.type = elseType; // 早期リターン後の残りの行では絞り込みが効き続ける
           }
           break;
         }
@@ -529,14 +527,25 @@ class Checker {
     return values.map((v) => this.checkExprSingle(v));
   }
 
-  // narrowing の対象になる条件か: `x is T` で x が不変な union 変数のとき
+  // narrowing の対象になる条件か: `x is T` で x が不変な union 変数のとき。
+  // パターンは match と同じ扱い(部分構造 { kind: "ok" } は複数メンバーに一致しうる)ので、
+  // then側 = 一致したメンバーのunion / else側 = 残りのunion をここで計算して返す
   private narrowFromCond(
     cond: Expr,
-  ): { name: string; member: Type; binding: Binding } | null {
+  ): { name: string; thenType: Type; elseType: Type; binding: Binding } | null {
     if (cond.kind !== "is" || cond.operand.kind !== "ident") return null;
     const binding = this.lookup(cond.operand.name);
     if (!binding || binding.mutable || binding.type.kind !== "union") return null;
-    return { name: cond.operand.name, member: this.resolveType(cond.target), binding };
+    const target = this.resolveType(cond.target);
+    const matched = binding.type.members.filter((m) => this.structPatternMatches(m, target));
+    if (matched.length === 0) return null; // 「can never be」は is の式検査が報告済み
+    const rest = binding.type.members.filter((m) => !matched.includes(m));
+    return {
+      name: cond.operand.name,
+      thenType: unionOf(matched),
+      elseType: unionOf(rest),
+      binding,
+    };
   }
 
   // ---- 式 ----
@@ -569,14 +578,12 @@ class Checker {
       case "none": return NONE;
 
       case "is": {
+        // is のパターンは match と同じ(型名・文字列リテラル・部分構造 { kind: "ok" })。
+        // 部分構造は structPatternMatches で「一致するメンバーがあるか」を判定する
         const t = this.checkExprSingle(expr.operand);
         const target = this.resolveType(expr.target);
-        if (!isNarrowTarget(target)) {
-          this.error(expr.pos, "right side of 'is' must be 'none', 'error', or 'closed' (for now)");
-          return BOOL;
-        }
         if (t.kind === "union") {
-          if (!t.members.some((m) => typeEquals(m, target))) {
+          if (!t.members.some((m) => this.structPatternMatches(m, target))) {
             this.error(expr.pos, `${typeToString(t)} can never be ${typeToString(target)}`);
           }
         } else if (t.kind !== "any") {

@@ -518,7 +518,8 @@ class Parser {
       const opTok = this.next();
       // x is none — 右辺は式ではなく型
       if (op === "is") {
-        const target = this.parseSingleType();
+        // is の右辺は match のパターンと同じ: 型名・文字列リテラル・部分構造 { kind: "ok" }
+        const target = this.check("{") ? this.parseInlineStructType() : this.parseSingleType();
         left = { kind: "is", operand: left, target, pos: opTok.pos };
         continue;
       }

@@ -142,11 +142,6 @@ export function isFailure(t: Type): boolean {
   return t.kind === "none" || (t.kind === "prim" && t.name === "error");
 }
 
-// `is` で絞り込める対象か(none / error / closed)
-export function isNarrowTarget(t: Type): boolean {
-  return isFailure(t) || t.kind === "closed";
-}
-
 // from の値を to の場所に入れてよいか
 export function assignable(from: Type, to: Type): boolean {
   if (from.kind === "any" || to.kind === "any") return true;

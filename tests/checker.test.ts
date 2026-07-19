@@ -931,9 +931,53 @@ fn main() {
     ).toEqual([]);
   });
 
-  test("is は none / error / closed のみ許可", () => {
-    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v is int)`)).toEqual([
-      expect.stringContaining("right side of 'is' must be 'none', 'error', or 'closed'"),
+  test("is: 型名パターンで絞り込める(matchと同じパターン)", () => {
+    expect(inMain(`ch := chan<int>()\nv := <-ch\nif v is int {\nprint(v + 1)\n}`)).toEqual([]);
+    const errors = errorsOf(`struct User { name: string }
+fn find(id: int) User | none | error {
+	if id == 1 { return User{name: "a"} }
+	return none
+}
+fn main() {
+	u := find(1)
+	if u is User {
+		print(u.name)
+	}
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("is: 文字列リテラルパターンで絞り込め、else側は残りのメンバーになる", () => {
+    const errors = errorsOf(`type Status = "active" | "banned" | "pending"
+fn label(s: Status) string {
+	if s is "active" {
+		return "OK"
+	}
+	return match s {
+		"banned" => "NG"
+		"pending" => "WAIT"
+	}
+}
+fn main() { print(label("active")) }`);
+    expect(errors).toEqual([]);
+  });
+
+  test("is: 部分構造パターンでガード節が書ける(判別可能union)", () => {
+    const errors = errorsOf(`struct User { name: string }
+type Resp = { kind: "ok", user: User } | { kind: "notFound" }
+fn describe(res: Resp) string {
+	if res is { kind: "notFound" } {
+		return "404"
+	}
+	return "found: \${res.user.name}"
+}
+fn main() { print(describe(Resp{kind: "notFound"})) }`);
+    expect(errors).toEqual([]);
+  });
+
+  test("is: unionに無い型は can never be エラー", () => {
+    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v is string)`)).toEqual([
+      expect.stringContaining("can never be string"),
     ]);
   });
 

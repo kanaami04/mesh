@@ -431,6 +431,38 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(result.diagnostics[0]?.message).toContain("type alias cycle");
   });
 
+  test("カードの新項目: is はmatchと同じパターンを受け付ける(型名・リテラル・部分構造)", () => {
+    const out = runSource(`struct User { name: string }
+    type Resp = { kind: "ok", user: User } | { kind: "notFound" }
+    fn find(id: int) User | none | error {
+      if id == 1 { return User{name: "alice"} }
+      return none
+    }
+    fn describe(res: Resp) string {
+      if res is { kind: "notFound" } {
+        return "404"
+      }
+      return "found: \${res.user.name}"
+    }
+    type Status = "active" | "banned"
+    fn label(s: Status) string {
+      if s is "active" { return "OK" }
+      return "NG"
+    }
+    fn main() {
+      u := find(1)
+      if u is User {
+        print(u.name)
+      }
+      print(describe(Resp{kind: "notFound"}))
+      print(describe(Resp{kind: "ok", user: User{name: "bob"}}))
+      print(label("active"))
+      print(label("banned"))
+      print(find(2) is none)
+    }`);
+    expect(out).toBe("alice\n404\nfound: bob\nOK\nNG\ntrue\n");
+  });
+
   test("カードの新項目: 自己参照する判別可能unionの回避策(名前付き再帰struct+T|noneの疑似optional)", () => {
     const out = runSource(`struct Expr {
         kind: string

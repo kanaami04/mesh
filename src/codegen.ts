@@ -353,15 +353,14 @@ class Codegen {
         return expr.name;
 
       case "is": {
+        // is のパターンは match と同じなので実行時テストも genTypeTest を共用する。
+        // テストが operand を複数回参照しうる(structパターン・struct名の判定)ため、
+        // 変数名でない operand は一度だけ評価して束縛してからテストする
         const operand = this.genExpr(expr.operand);
-        // v1 の is は none / error / closed のみ(checker が保証)
-        if (expr.target.kind === "name" && expr.target.name === "none") {
-          return `(${operand} === null)`;
+        if (expr.operand.kind !== "ident") {
+          return `((__v) => ${this.genTypeTest("__v", expr.target)})(${operand})`;
         }
-        if (expr.target.kind === "name" && expr.target.name === "closed") {
-          return `(${operand} === __CLOSED)`;
-        }
-        return `(${operand} instanceof Error)`;
+        return this.genTypeTest(operand, expr.target);
       }
 
       case "prop": {
