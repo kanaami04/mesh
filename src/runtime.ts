@@ -109,8 +109,18 @@ const __select = async (channels, handlers, defaultHandler) => {
     });
   });
 };
+// F-15フォローアップ: mesh test実行中はspawn/detachの中で起きたpanicも__panicを経由するが、
+// ここでプロセスをexitさせると「1件の失敗として隔離する」という約束(runtests参照)を破る。
+// __panicSinkが立っている間(mesh testの実行中だけ)はexitせず記録だけする
+let __panicSink = null;
+let __bgTasks = null;
 const __panic = (e) => {
-  console.error("panic:", e instanceof Error ? e.message : e);
+  const msg = e instanceof Error ? e.message : String(e);
+  if (__panicSink) {
+    __panicSink.push(msg);
+    return;
+  }
+  console.error("panic:", msg);
   globalThis.process?.exit?.(1);
 };
 // ランタイム検査(層1): バグは黙って進まず、位置つきで即停止する
@@ -184,6 +194,7 @@ const __spawn = (f, args) => {
       task.send(v);
     }, __panic);
   if (__waitStack.length > 0) __waitStack[__waitStack.length - 1].push(p);
+  if (__bgTasks) __bgTasks.push(p); // mesh test実行中: 決着をrunTestsが待てるように登録
   return task;
 };
 // detach f(x): プログラム所有のタスク。どの wait スコープにも登録されず、呼び出し元は
@@ -191,11 +202,12 @@ const __spawn = (f, args) => {
 // 「プログラム終了時までに完了する」は実行環境が自然に保証する
 const __detach = (f, args) => {
   const task = new __Channel();
-  Promise.resolve()
+  const p = Promise.resolve()
     .then(() => f(...args))
     .then((v) => {
       task.send(v);
     }, __panic);
+  if (__bgTasks) __bgTasks.push(p); // mesh test実行中: どのwaitにも入らないのでここで拾う
   return task;
 };
 const __sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -219,6 +231,15 @@ const __sorted = (arr) => [...arr].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 const __toInt = (s) => {
   if (!/^[+-]?\\d+$/.test(s)) return new Error('"' + s + '" is not a valid int');
   return parseInt(s, 10);
+};
+// float→int(round/floor/ceil。レビュー起点 — 逆方向のtoFloatしか無く、json.Value.nのような
+// floatを配列添字/ループ境界のintへ戻す手段が無かった)。F-10と同じ理由で、丸めた結果が
+// safe integer範囲を超えていたら無音の精度崩れを許さずpanicする
+const __toIntSafe = (n, at) => {
+  if (!Number.isSafeInteger(n)) {
+    throw new __Panic(at + ": rounded result " + n + " exceeds the safe integer range");
+  }
+  return n;
 };
 // 高階関数(標準ライブラリ第三弾)。渡される関数値は Mesh の関数(すべて async)なので、
 // 呼び出すたびに await する。JS のヘルパー自体も async にする
@@ -293,8 +314,18 @@ const __error = (msg) => new Error(msg);
 // F-15: mesh test — 各テスト関数を順に呼ぶ。戻り値がnone(合格)かerror(失敗)かを見る。
 // panicも1件の失敗として隔離する(他のテストは続行する — 1つのバグでテストラン全体が
 // 落ちないように。requirements.md 5.5「障害分離」方針をここで初めて実地適用した)。
-// 結果は常に構造化JSONで標準出力へ1行書く(素の表示にするか--jsonのまま出すかはCLI側の仕事)
+// 結果は常に構造化JSONで標準出力へ1行書く(素の表示にするか--jsonのまま出すかはCLI側の仕事)。
+//
+// 隔離はtry/catchできる範囲(awaitされたテスト本体)だけでは不十分 — spawn/detachした
+// タスクの失敗は別の非同期経路(__panic)を通り、try/catchに一切届かない。
+// __panicSink/__bgTasksを立てて(1) __panicにプロセスを落とさせず記録だけさせ、
+// (2) spawn/detachされた全タスクの決着をここで待ってから結果を確定させることで、
+// 「バックグラウンドで起きたpanicがtrue判定に紛れて消える」ことを防ぐ。
+// 個々のテストとの対応は取れない(detachは元々どのスコープにも属さないので不可能)ため、
+// 単一の "(background task)" エントリとして可視化する — 隠すより不正確でも見せる方を選ぶ
 const __runTests = async (tests) => {
+  __panicSink = [];
+  __bgTasks = [];
   const results = [];
   for (const t of tests) {
     try {
@@ -312,6 +343,10 @@ const __runTests = async (tests) => {
         message: e instanceof Error ? e.message : String(e),
       });
     }
+  }
+  await Promise.all(__bgTasks); // spawn/detachした背景タスクの決着を待つ(いずれも拒否はしない)
+  if (__panicSink.length > 0) {
+    results.push({ name: "(background task)", file: "", pass: false, message: __panicSink.join("; ") });
   }
   const ok = results.every((r) => r.pass);
   console.log(JSON.stringify({ ok, tests: results }));

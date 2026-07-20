@@ -278,6 +278,18 @@ function main() {
         console.error(`mesh test: internal error — could not read test results\n${proc.stdout}${proc.stderr}`);
         process.exit(1);
       }
+      // 防衛的な二重チェック: __runTests側の隔離ロジックに将来また穴があっても、
+      // JSONの ok を盲信してプロセスの実際の終了コードと食い違うまま緑判定にはしない
+      if (report.ok && proc.status !== 0) {
+        report.ok = false;
+        report.tests.push({
+          name: "(process)",
+          file,
+          pass: false,
+          message: `test process exited with code ${proc.status} despite reporting success` +
+            (proc.stderr.trim() ? ` — stderr: ${proc.stderr.trim()}` : ""),
+        });
+      }
       if (jsonMode) {
         console.log(JSON.stringify(report));
       } else if (report.tests.length === 0) {

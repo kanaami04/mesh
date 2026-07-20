@@ -1014,10 +1014,13 @@ class Parser {
         return { kind: "chanExpr", elem, capacity, pos: t.pos };
       }
       case "map": {
-        // F-8: 'map' は文脈依存キーワード。型位置と同じ '<' が続けばmapリテラル/型構築、
-        // '(' が続けば式位置の組み込み関数 map(arr, f)(高階関数のmap-over-array。旧transform)
-        // として素の識別子に読み替える(以降はparsePostfixの通常の呼び出し解析に乗る)
-        if (this.peek(1).type === "(") {
+        // F-8: 'map' は文脈依存キーワード。型位置と同じ '<' が続けばmapリテラル/型構築として読む。
+        // それ以外('(' が続く式位置の組み込み関数呼び出し map(arr, f)(旧transform)も、
+        // 'map' を裸の値として書いた場合も)は素の識別子に読み替える(以降はparsePostfixの通常の
+        // 呼び出し解析に乗る)。'<' 以外を全部ここで拾うことで、裸の値の場合にここで
+        // "expected '<' after 'map'" という的外れなsyntax-errorを出さず、checker側の
+        // builtin-as-value診断(レビュー起点)に委ねられる
+        if (this.peek(1).type !== "<") {
           this.next();
           return { kind: "ident", name: "map", pos: t.pos };
         }

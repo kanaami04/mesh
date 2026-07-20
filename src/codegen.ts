@@ -662,6 +662,14 @@ class Codegen {
           return `${args[0]}.toLowerCase()`;
         case "toInt":
           return `__toInt(${args[0]})`;
+        case "toFloat":
+          return args[0]; // intもfloatも同じJS number — 型レベルの変換で実行時は素通り
+        case "round":
+          return `__toIntSafe(Math.round(${args[0]}), ${this.at(expr.pos)})`;
+        case "floor":
+          return `__toIntSafe(Math.floor(${args[0]}), ${this.at(expr.pos)})`;
+        case "ceil":
+          return `__toIntSafe(Math.ceil(${args[0]}), ${this.at(expr.pos)})`;
         case "filter":
           return `(await __filter(${args[0]}, ${args[1]}))`;
         case "map": // F-8: 旧transform

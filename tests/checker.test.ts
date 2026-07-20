@@ -1275,6 +1275,17 @@ fn main() {
     expect(inMain(`ages: map<string, int> = map<string, int>{}\nprint(len(ages))`)).toEqual([]);
   });
 
+  test("退行防止: 'map' を裸の値として使うと構文エラーではなくbuiltin-as-value診断になる", () => {
+    // レビューで見つかった穴: '<' が来なければ即 expect("<", "after 'map'") が発火し、
+    // "expected '<' after 'map'" という的外れなsyntax-errorになっていた(F-8のparser修正)
+    expect(inMain(`x := map\nprint(x)`)).toEqual([
+      expect.stringContaining("'map' is a builtin function — call it like map(...)"),
+    ]);
+    expect(inMain(`print(map)`)).toEqual([
+      expect.stringContaining("'map' is a builtin function — call it like map(...)"),
+    ]);
+  });
+
   test("メソッド: 正しい宣言・呼び出しはエラーなし", () => {
     const errors = errorsOf(`struct Todo {
 	title: string
@@ -1541,6 +1552,40 @@ fn main() {
 	print(u.name)
 }`);
       expect(errors).toEqual([]);
+    });
+
+    test("退行防止: Tがunionの中(T | error)にしか現れなくても推論できる(critique文書のretry例)", () => {
+      const errors = errorsOf(`fn retry<T>(f: fn() T | error, tries: int) T | error {
+	mut i := 1
+	for i <= tries {
+		v := f()
+		if v is error { i = i + 1; continue }
+		return v
+	}
+	return error("gave up")
+}
+fn main() {
+	n := retry(fn() int | error { return 42 }, 3)
+	if n is error { return }
+	print(n + 1)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("退行防止: Tがunion(T | none)の中にあり、素の値(非union)を渡しても推論できる", () => {
+      const errors = errorsOf(`fn firstNonNone<T>(a: T | none) T | none { return a }
+fn main() {
+	x := firstNonNone(5)
+	if x is none { return }
+	print(x + 1)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("T | none に none だけを渡すと、他に手がかりが無いので推論失敗のまま(正しい挙動)", () => {
+      const errors = errorsOf(`fn firstNonNone<T>(a: T | none) T | none { return a }
+fn main() { print(firstNonNone(none)) }`);
+      expect(errors).toEqual([expect.stringContaining("cannot infer type parameter(s) 'T'")]);
     });
 
     test("同じTが2引数に出てくる場合、食い違いを通常の代入不可エラーとして報告する", () => {

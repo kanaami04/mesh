@@ -42,6 +42,7 @@ export const BUILTINS = new Set([
   "print", "len", "push", "str", "error", "sleep", "delete",
   "contains", "indexOf", "get", "keys", "values", "sort",
   "split", "join", "trim", "upper", "lower", "toInt",
+  "toFloat", "round", "floor", "ceil", // int/floatの片道変換しか無かった穴を埋める(レビュー起点)
   "filter", "map", "reduce", // F-8: transform → map(文脈依存キーワード化により 'map' の予約と両立)
   "close",
 ]);
@@ -101,6 +102,24 @@ export function checkModules(modules: ParsedModule[], opts?: { testMode?: boolea
     list.push(m);
     packages.set(m.pkg, list);
   }
+
+  // 組み込みパッケージ(mesh/io, mesh/json)のエイリアス名と同じ名前のユーザーパッケージを検出する。
+  // registryはエイリアス名だけをキーにした単一のMapなので、検出しないと検査は素通りし、
+  // 生成JSが同名関数の二重宣言でロード時に壊れる(検査が通ったのにcrashするP4違反)
+  const builtinPathByAlias = new Map([...BUILTIN_PACKAGES.keys()].map((path) => [path.split("/").pop()!, path]));
+  for (const [pkgName, files] of packages) {
+    const builtinPath = builtinPathByAlias.get(pkgName);
+    if (builtinPath) {
+      diagnostics.push({
+        pos: { line: 1, col: 1 },
+        code: "package-name-reserved",
+        file: files[0]?.file,
+        message: `package name '${pkgName}' collides with the built-in package '${builtinPath}' — ` +
+          `rename the '${pkgName}/' directory (built-in package names are reserved)`,
+      });
+    }
+  }
+  if (diagnostics.length > 0) return { diagnostics, tests: [] };
 
   // import グラフの検証: 未知のパッケージ・不正なパッケージ名・循環
   const deps = new Map<string, Set<string>>();
@@ -316,6 +335,19 @@ class Checker {
     return undefined;
   }
 
+  // struct フィールド名の予約チェック。codegen は `{ name: value }` という素のJSオブジェクト
+  // リテラルへ直訳するため、'__proto__' だけは他のフィールドと違って特別扱いされ
+  // (代入ではなくprototypeの差し替えになる)、値が黙って消える(レビュー起点)
+  private checkFieldName(name: string, pos: Pos) {
+    if (name === "__proto__") {
+      this.error(
+        pos,
+        "reserved-field-name",
+        `'__proto__' can't be used as a field name — pick a different name`,
+      );
+    }
+  }
+
   // 型注釈(構文)を内部表現の型へ変換
   private resolveType(node: TypeNode): Type {
     switch (node.kind) {
@@ -331,6 +363,7 @@ class Checker {
         return { kind: "literal", value: node.value };
       case "structType": {
         // 名前なし文脈で来た場合(通常は resolveAlias 経由で来る)
+        for (const f of node.fields) this.checkFieldName(f.name, f.pos);
         return {
           kind: "struct",
           name: "(anonymous)",
@@ -406,6 +439,7 @@ class Checker {
       const struct: Type = { kind: "struct", name: displayName, fields: [] };
       this.resolvedAliases.set(name, struct);
       for (const f of node.fields) {
+        this.checkFieldName(f.name, f.pos);
         struct.fields.push({ name: f.name, type: this.resolveType(f.type) });
       }
       if (this.errorTypeNames.has(name)) this.tagErrorMembers(struct, displayName, name, pos);
@@ -1076,7 +1110,20 @@ class Checker {
 
   private inferExpr(expr: Expr): Type {
     switch (expr.kind) {
-      case "int": return INT;
+      case "int": {
+        // F-10フォローアップ: safe-integer検査は演算結果(__iarith)だけを見ており、
+        // リテラルそのものが既に範囲外なら無検査ですり抜けていた(9007199254740993 等)。
+        // 実行するまでもなく分かるバグなので、リテラル0除算と同じくコンパイル時に検出する
+        if (!Number.isSafeInteger(Number(expr.value))) {
+          this.error(
+            expr.pos,
+            "int-literal-overflow",
+            `integer literal ${expr.value} exceeds the safe integer range ` +
+              `(±${Number.MAX_SAFE_INTEGER}) and would silently lose precision`,
+          );
+        }
+        return INT;
+      }
       case "float": return FLOAT;
       case "string":
         // 文字列リテラルはリテラル型として推論する("active" は型 "active")。
@@ -1997,8 +2044,8 @@ class Checker {
   }
 
   // unifyTypeParam が実際に辿れる形とそろえた「Tがこの型の中に(推論可能な位置で)現れるか」。
-  // union/struct の中は辿らない(unifyもそこは辿らないので、そろえないと「宣言は通るのに
-  // 呼び出しは毎回推論失敗する」という罠になる)
+  // union の中(T | error 等)も辿る — unifyTypeParamも同じ形を辿れるようにしたので、
+  // ここだけ辿らないと「宣言は通るのに呼び出しは毎回推論失敗する」という罠になる
   private typeContainsParam(t: Type, name: string): boolean {
     switch (t.kind) {
       case "typeParam":
@@ -2010,6 +2057,28 @@ class Checker {
         return this.typeContainsParam(t.key, name) || this.typeContainsParam(t.value, name);
       case "fn":
         return t.params.some((p) => this.typeContainsParam(p, name)) || this.typeContainsParam(t.ret, name);
+      case "union":
+        return t.members.some((m) => this.typeContainsParam(m, name));
+      default:
+        return false;
+    }
+  }
+
+  // typeContainsParamの「特定の名前」版ではなく「何らかの型パラメータを含むか」だけを見る版。
+  // union内のどのメンバーが型パラメータを含む側かを仕分けるのに使う(unifyTypeParam参照)
+  private containsAnyTypeParam(t: Type): boolean {
+    switch (t.kind) {
+      case "typeParam":
+        return true;
+      case "array":
+      case "chan":
+        return this.containsAnyTypeParam(t.elem);
+      case "map":
+        return this.containsAnyTypeParam(t.key) || this.containsAnyTypeParam(t.value);
+      case "fn":
+        return t.params.some((p) => this.containsAnyTypeParam(p)) || this.containsAnyTypeParam(t.ret);
+      case "union":
+        return t.members.some((m) => this.containsAnyTypeParam(m));
       default:
         return false;
     }
@@ -2018,7 +2087,7 @@ class Checker {
   // 呼び出し引数から型パラメータを推論する。paramType(Tを含みうる)とargType(検査済みの
   // 具体型)を並行に辿り、typeParamに初めて出会った位置の実引数型をそのまま束縛する
   // (2回目以降の出現は上書きしない — 食い違いは後段のcheckArgsAgainstが通常の代入不可
-  // エラーとして報告する)。union型の中までは辿らない(typeContainsParamと同じ制限)
+  // エラーとして報告する)。
   private unifyTypeParam(paramType: Type, argType: Type, bindings: Map<string, Type>) {
     if (paramType.kind === "typeParam") {
       if (!bindings.has(paramType.name)) bindings.set(paramType.name, argType);
@@ -2035,6 +2104,30 @@ class Checker {
       const n = Math.min(paramType.params.length, argType.params.length);
       for (let i = 0; i < n; i++) this.unifyTypeParam(paramType.params[i], argType.params[i], bindings);
       this.unifyTypeParam(paramType.ret, argType.ret, bindings);
+    } else if (paramType.kind === "union") {
+      // T | error のようなunionを実引数の型と照合する。argTypeがunionでなければ
+      // (例: firstNonNone(5) の 5 は素の int)1メンバーのunionとして扱う — T | none に
+      // 素の値を渡すのは正当な呼び方であり、union同士のときだけ推論できるのでは足りない。
+      // paramType側の「型パラメータを含まないメンバー」はargType側の対応するメンバーを
+      // 消費するだけ(値自体の食い違いは後段のcheckArgsAgainstに任せる)。残ったargType側の
+      // メンバーを、型パラメータを含む側のメンバー(通常は裸のTひとつ)へ割り当てる
+      const argMembers = argType.kind === "union" ? argType.members : [argType];
+      const varMembers = paramType.members.filter((m) => this.containsAnyTypeParam(m));
+      const concreteMembers = paramType.members.filter((m) => !this.containsAnyTypeParam(m));
+      const usedArgMembers = new Set<Type>();
+      for (const cm of concreteMembers) {
+        const match = argMembers.find((am) => !usedArgMembers.has(am) && typeEquals(cm, am));
+        if (match) usedArgMembers.add(match);
+      }
+      const remaining = argMembers.filter((am) => !usedArgMembers.has(am));
+      if (varMembers.length === 1 && remaining.length > 0) {
+        this.unifyTypeParam(varMembers[0], remaining.length === 1 ? remaining[0] : unionOf(remaining), bindings);
+      } else if (varMembers.length > 1) {
+        // 型パラメータを含むメンバーが複数ある稀なケース: 順番に対応させるベストエフォート
+        varMembers.forEach((vm, i) => {
+          if (remaining[i]) this.unifyTypeParam(vm, remaining[i], bindings);
+        });
+      }
     }
   }
 
@@ -2308,6 +2401,28 @@ class Checker {
           this.error(expr.args[0].pos, "builtin-arg-type", `toInt() requires a string, got ${typeToString(args[0])}`);
         }
         return unionOf([INT, ERROR]);
+      }
+      // int/floatが片道(int→float)にしか変換できず、json.Value.n(float)を配列添字や
+      // ループ境界のintへ戻す手段が無かった穴を埋める(レビュー起点)。丸め方向を選ばせるため
+      // round/floor/ceilの3つに分け、「floatを持っている前提」を強制するためint入力は弾く
+      // (すでにintなら変換の必要が無い、というP1の一貫性)
+      case "toFloat": {
+        if (expectArity(1) && !typeEquals(args[0], INT) && args[0].kind !== "any") {
+          this.error(expr.args[0].pos, "builtin-arg-type", `toFloat() requires an int, got ${typeToString(args[0])}`);
+        }
+        return FLOAT;
+      }
+      case "round":
+      case "floor":
+      case "ceil": {
+        if (expectArity(1) && !typeEquals(args[0], FLOAT) && args[0].kind !== "any") {
+          this.error(
+            expr.args[0].pos,
+            "builtin-arg-type",
+            `${name}() requires a float, got ${typeToString(args[0])}`,
+          );
+        }
+        return INT;
       }
       case "close": {
         if (expectArity(1)) {

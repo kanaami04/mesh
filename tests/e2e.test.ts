@@ -989,6 +989,20 @@ export fn getUser(id: string) UserResult {
     expect(out).toBe("try # 3\n");
   });
 
+  test("F-9c: トップレベルの参照値(配列/map/struct)は再代入できないが中身は関数から変更できる", () => {
+    // card.tsが以前「グローバルな可変状態は無い」と自己矛盾していた挙動をそのまま固定するテスト
+    // (:= の不変性は束縛の不変性であってデータの不変性ではない、というのはローカル変数と同じ)
+    const out = runSource(`events: string[] = []
+fn logEvent(msg: string) { push(events, msg) }
+fn main() {
+	logEvent("a")
+	logEvent("b")
+	print(len(events))
+	print(events)
+}`);
+    expect(out).toBe("2\n[a b]\n");
+  });
+
   test("F-9c: exportしたトップレベル定数をパッケージ越しに参照できる", () => {
     // main が先、依存パッケージ config が後(cli.tsの発見順と同じ)。JSのconstはhoistされない
     // ので、codegen側が依存順(config → main)に並べ替えてから出さないとTDZエラーになる
@@ -1091,6 +1105,19 @@ fn main() {
     expect(result.code).toBeNull();
     expect(result.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'mesh/http'");
   });
+
+  test("退行防止: 組み込みパッケージと同名のユーザーパッケージ('io'/'json')は検査時にエラーになる", () => {
+    // レビューで見つかった穴: 以前はregistryが黙って上書きされ、検査は通るのに生成JSが
+    // 同名関数の二重宣言でロード時にクラッシュしていた(P4違反 — Meshのソースに一切結びつかない
+    // 素のJSパースエラーになる)
+    const result = compileModules([
+      { pkg: "main", file: "app.mesh", source: `import "io"\nfn main() { print(io.args()) }` },
+      { pkg: "io", file: "io/io.mesh", source: `export fn args() string[] { return [] }` },
+    ]);
+    expect(result.code).toBeNull();
+    const messages = result.diagnostics.map((d) => d.message).join("\n");
+    expect(messages).toContain("package name 'io' collides with the built-in package 'mesh/io'");
+  });
 });
 
 describe("F-15: mesh test --json(テストランナー)", () => {
@@ -1131,6 +1158,68 @@ fn testPanicIsIsolated() none | error {
     expect(proc.stdout).toContain("FAIL testPanicIsIsolated");
     expect(proc.stdout).toContain("index 10 out of range");
     expect(proc.stdout).toContain("1/3 passed");
+  });
+
+  test("退行防止: detach/spawnした背景タスクのpanicは『合格』に紛れず可視化される", () => {
+    // レビューで見つかった穴: __runTestsはawaitされたテスト本体しかtry/catchしておらず、
+    // detach/spawnの失敗は別の非同期経路(__panic)を通るので、以前は捕まらずにok:trueへ
+    // 紛れ込んでいた(detach)か、プロセスがレースで落ちて"internal error"になっていた(spawn)
+    const dir = newProjectDir();
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    writeFileSync(
+      join(dir, "main_test.mesh"),
+      `fn boom() none | error {
+	nums := [1, 2, 3]
+	print(nums[10])
+	return none
+}
+fn testDetachPanics() none | error {
+	detach boom()
+	return none
+}
+fn testOk() none | error {
+	return none
+}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh"), "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(1); // 背景タスクのpanicのせいで全体はfailのはず
+    const report = JSON.parse(proc.stdout);
+    expect(report.ok).toBe(false);
+    expect(report.tests.find((t: { name: string }) => t.name === "testDetachPanics").pass).toBe(true);
+    expect(report.tests.find((t: { name: string }) => t.name === "testOk").pass).toBe(true);
+    const bg = report.tests.find((t: { name: string }) => t.name === "(background task)");
+    expect(bg.pass).toBe(false);
+    expect(bg.message).toContain("index 10 out of range");
+  });
+
+  test("退行防止: spawnした背景タスクのpanicも同様に可視化される(以前はプロセスがレースで落ちていた)", () => {
+    const dir = newProjectDir();
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    writeFileSync(
+      join(dir, "main_test.mesh"),
+      `fn boom() none | error {
+	nums := [1, 2, 3]
+	print(nums[10])
+	return none
+}
+fn testSpawnPanics() none | error {
+	spawn boom()
+	wait { }
+	return none
+}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh"), "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(1);
+    const report = JSON.parse(proc.stdout);
+    expect(report.ok).toBe(false);
+    expect(report.tests.some((t: { name: string; message?: string }) => t.message?.includes("index 10 out of range")))
+      .toBe(true);
   });
 
   test("--json は構造化結果を返す", () => {
@@ -1220,6 +1309,81 @@ fn testPanicIsIsolated() none | error {
     const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "greet")], { encoding: "utf8", timeout: 15_000 });
     expect(proc.status).toBe(0);
     expect(proc.stdout).toContain("1/1 passed");
+  });
+});
+
+describe("退行防止: toFloat/round/floor/ceil(float→intの片道しか無かった穴)", () => {
+  // レビュー起点: int→floatは自動昇格するが逆方向が無く、json.Value.n(float)を
+  // 配列添字やループ境界のintへ戻す手段が無かった。round/floor/ceilで丸め方向を選ばせ、
+  // 結果がsafe integer範囲を超えたらpanicする(F-10と同じ無音の精度崩れを許さない方針)
+  test("json.Value.n(float)をroundでintに戻して配列添字に使える", () => {
+    const out = runSource(`import "mesh/json"
+fn main() {
+  items := ["a", "b", "c"]
+  v := json.parse("1") or _ => json.Value{kind: "null"}
+  if v is { kind: "num" } {
+    print(items[round(v.n)])
+  }
+}`);
+    expect(out).toBe("b\n");
+  });
+
+  test("toFloat: intをfloatにしてfloat除算を強制できる", () => {
+    expect(runSource(`fn main() { print(toFloat(7) / toFloat(2)) }`)).toBe("3.5\n");
+  });
+
+  test("floor/ceil: 切り捨て・切り上げの向きが正しい", () => {
+    expect(runSource(`fn main() { print(floor(3.7)) }`)).toBe("3\n");
+    expect(runSource(`fn main() { print(ceil(3.2)) }`)).toBe("4\n");
+    expect(runSource(`fn main() { print(round(3.5)) }`)).toBe("4\n");
+  });
+
+  test("panic: round/floor/ceilの結果がsafe integer範囲を超えたら停止する", () => {
+    // Meshの浮動小数点リテラルは指数表記非対応なので、乗算で範囲外を作る
+    const huge = "huge := 100000000000000.0\n\thuge = huge * huge";
+    expect(runSourceExpectPanic(`fn main() {\n\tmut ${huge}\n\tprint(round(huge))\n}`)).toContain(
+      "exceeds the safe integer range",
+    );
+    expect(runSourceExpectPanic(`fn main() {\n\tmut ${huge}\n\tprint(floor(huge))\n}`)).toContain(
+      "exceeds the safe integer range",
+    );
+    expect(runSourceExpectPanic(`fn main() {\n\tmut ${huge}\n\tprint(ceil(huge))\n}`)).toContain(
+      "exceeds the safe integer range",
+    );
+  });
+
+  test("型検査: toFloatはint以外、round/floor/ceilはfloat以外を弾く", () => {
+    const badToFloat = compile(`fn main() { print(toFloat(1.5)) }`);
+    expect(badToFloat.code).toBeNull();
+    expect(badToFloat.diagnostics.map((d) => d.message).join("\n")).toContain(
+      "toFloat() requires an int",
+    );
+    const badRound = compile(`fn main() { print(round(5)) }`);
+    expect(badRound.code).toBeNull();
+    expect(badRound.diagnostics.map((d) => d.message).join("\n")).toContain("round() requires a float");
+  });
+});
+
+describe("退行防止: __proto__をstructフィールド名に使うと拒否される", () => {
+  // レビュー起点: codegenはstruct literalを素のJSオブジェクトリテラル({ name: value })へ
+  // 直訳するため、フィールド名が'__proto__'だと代入ではなくprototypeの差し替えになり、
+  // 値が検査エラーも実行時エラーも無く黙って消えていた
+  test("通常のstruct宣言で__proto__をフィールド名にするとコンパイルエラー", () => {
+    const result = compile(`struct Sneaky {\n\t__proto__: string\n}\nfn main() {\n\ts := Sneaky{__proto__: "x"}\n\tprint(s.__proto__)\n}`);
+    expect(result.code).toBeNull();
+    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain(
+      "'__proto__' can't be used as a field name",
+    );
+  });
+
+  test("判別可能unionの無名struct(F-7)でも__proto__は拒否される", () => {
+    const result = compile(
+      `type Shape = { kind: "circle", __proto__: float } | { kind: "square", side: float }\nfn main() { print(1) }`,
+    );
+    expect(result.code).toBeNull();
+    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain(
+      "'__proto__' can't be used as a field name",
+    );
   });
 });
 
@@ -1852,6 +2016,18 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     expect(
       runSourceExpectPanic(`fn main() {\n\tbig := 9007199254740991\n\tprint(big * 2)\n}`),
     ).toContain("integer overflow");
+  });
+
+  test("退行防止: 整数リテラル自体がsafe-integer範囲を超えていればコンパイル時に検出する", () => {
+    // レビューで見つかった穴: F-10の__iarithは演算結果しか検査しておらず、
+    // リテラルそのものが既に範囲外(9007199254740992以上)だと無検査で通っていた
+    const result = compile(`fn main() {\n\tx := 9007199254740993\n\tprint(x)\n}`);
+    expect(result.code).toBeNull();
+    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain(
+      "integer literal 9007199254740993 exceeds the safe integer range",
+    );
+    // 境界値(MAX_SAFE_INTEGERちょうど)はエラーにならない
+    expect(compile(`fn main() {\n\tx := 9007199254740991\n\tprint(x)\n}`).code).not.toBeNull();
   });
 
   test("F-9b: 複合代入 += -= *= /= %= が実行時にも正しく動く", () => {

@@ -34,6 +34,7 @@ export type DiagnosticCode =
   | "incomparable-types"
   | "use-is-none"
   | "division-by-zero"
+  | "int-literal-overflow"
   // 可変性
   | "immutable-assignment"
   | "compound-assign-on-map"
@@ -51,6 +52,7 @@ export type DiagnosticCode =
   | "unknown-field"
   | "method-not-called"
   | "duplicate-field"
+  | "reserved-field-name"
   | "missing-fields"
   | "discriminated-union-no-match"
   | "discriminated-union-ambiguous"
@@ -91,6 +93,7 @@ export type DiagnosticCode =
   | "range-arity"
   // パッケージ・import(モジュールレベル)
   | "invalid-package-name"
+  | "package-name-reserved"
   | "self-import"
   | "import-cycle"
   // 構文(パーサ)
@@ -211,6 +214,10 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
   "division-by-zero":
     "Integer division or modulo by the literal 0 is caught at compile time — it would always panic at " +
     "runtime, so there's no reason to wait until then to report it.",
+  "int-literal-overflow":
+    "The literal is outside JavaScript's safe integer range, so it would silently lose precision the " +
+    "moment the program ran (the same class of bug F-10's runtime overflow panic exists to catch for " +
+    "arithmetic results) — caught at compile time instead, since a literal's value never changes.",
   "immutable-assignment":
     "This binding was declared without 'mut', so it can't be reassigned or have '++'/'--' applied to " +
     "it. Add 'mut' to the declaration if it should be mutable.",
@@ -252,6 +259,10 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "not passed around as bare values.",
   "duplicate-field":
     "The same field name appears twice in one struct literal.",
+  "reserved-field-name":
+    "'__proto__' can't be used as a struct field name. Mesh compiles struct literals to plain JS " +
+    "object literals, where '__proto__: value' sets the object's prototype instead of a normal " +
+    "property — silently discarding the value instead of storing it.",
   "missing-fields":
     "A struct literal must set every field of the struct (Mesh has no zero values / default field " +
     "values) — the message lists which ones are missing.",
@@ -370,6 +381,12 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
   "invalid-package-name":
     "The last segment of an import path must be a valid identifier, since it becomes the qualifier " +
     "used for pkg.symbol access — rename the package directory if it isn't.",
+  "package-name-reserved":
+    "This package's directory name is the same as a built-in package's alias (e.g. 'io' for " +
+    "'mesh/io', 'json' for 'mesh/json') — F-14's built-in packages are registered by that short " +
+    "name, so a same-named user package would silently replace it, and the two would collide " +
+    "in the generated JavaScript at load time instead of failing here with a clear message. " +
+    "Rename the directory.",
   "self-import":
     "A package can't import itself.",
   "import-cycle":

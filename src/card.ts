@@ -36,11 +36,14 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 - \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
   (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)
 
-Top-level bindings are always immutable — \`mut\` is not allowed at the top level, so there is
-no mutable global state (F-9c). \`export\` makes a top-level constant visible as \`pkg.name\`
-from other packages, same as \`fn\`/\`struct\`/\`type\`. To share MUTABLE state, pass it as a
-parameter — arrays, maps, structs, and channels are reference values, so a function mutating
-one (e.g. \`push(items, x)\`) is visible to the caller.
+Top-level bindings are always immutable — \`mut\` is not allowed at the top level, so a
+top-level name can never be REASSIGNED (F-9c). \`export\` makes it visible as \`pkg.name\` from
+other packages, same as \`fn\`/\`struct\`/\`type\`. Like any \`:=\`, this is binding-immutability,
+not data-immutability: a top-level array/map/struct/channel can still be mutated through its
+contents by ANY function in the package, with no \`mut\` or parameter in sight (\`push(topLevelArr,
+x)\` works from anywhere). That reach is wider than the same mutation via a parameter, which at
+least shows up at the call site — prefer parameters for shared mutable state; reserve a
+top-level reference value for things meant to be genuinely package-wide (a cache, a counter).
 
     maxRetries := 3                  // top-level constant — visible to every fn in the package
     export basePath: string = "/api" // exported — other packages use it as pkg.basePath
@@ -90,6 +93,10 @@ one (e.g. \`push(items, x)\`) is visible to the caller.
   not just the return type) — the compiler infers \`T\` from the call's arguments, there is no
   \`first<int>(...)\` explicit-instantiation syntax. \`fn zero<T>() T\` is a compile error for
   exactly this reason (nothing in the call \`zero()\` tells the compiler what \`T\` is).
+  \`T\` inside a union parameter (\`fn retry<T>(f: fn() T | error, tries: int) T | error { ... }\`)
+  is inferred too — the concrete member(s) of the union (\`error\`) are matched off and whatever's
+  left becomes \`T\`. A union argument with nothing left after that (e.g. passing bare \`none\` to
+  a \`T | none\` parameter) has no evidence for \`T\` and fails to infer, same as \`zero()\` above.
 - Call it by name directly — \`first(nums, pred)\`. Assigning a generic function to a variable
   first (\`f := first\`) and calling that isn't supported; \`T\` stays unresolved and the call fails.
 
@@ -350,6 +357,10 @@ Methods use Go's syntax — a receiver clause right after \`fn\`, before the met
 Note: postfix \`x?\` is error/none propagation (like Rust's \`?\`); prefix \`!x\` is boolean NOT.
 There is no ternary \`?:\` and no optional chaining \`?.\` — use \`if\` or \`match\`.
 
+\`int\` is a JS \`number\` (53-bit safe range), so overflow is caught, not silently wrong (F-10): a
+literal outside ±9007199254740991 is a compile-time error; \`+ - *\` whose RESULT overflows panics
+at runtime. \`int\`/\`float\` mix freely in arithmetic (result widens to \`float\`).
+
 ## Strings
 
     s := "hello \${name}"    // interpolation is always on in "..."; escape \\$ for a literal $
@@ -434,6 +445,7 @@ form of \`match\`.
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
     contains(arr, v)  indexOf(arr, v)  get(arr, i)  keys(m)  values(m)  sort(arr)
     split(s, sep)  join(arr, sep)  trim(s)  upper(s)  lower(s)  toInt(s)
+    toFloat(i)  round(f)  floor(f)  ceil(f)
     filter(arr, pred)  map(arr, f)  reduce(arr, f, init)  close(ch)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
@@ -455,6 +467,11 @@ form of \`match\`.
   one-element array). \`join(arr, sep)\` takes \`string[]\`. \`trim\`/\`upper\`/\`lower\` are
   string → string. \`toInt(s)\` DOES fail on non-numeric input, so it returns \`int | error\`
   — narrow it like any other failable call: \`n := toInt(s)?\` or \`n := toInt(s) or _ => 0\`.
+- \`int\`→\`float\` already happens for free wherever a \`float\` is expected — \`toFloat(i)\` only
+  matters inline, to force float division without an intermediate \`float\` variable:
+  \`toFloat(sum) / toFloat(count)\`. The reverse never happens for free: \`round\`/\`floor\`/\`ceil\`
+  turn a computed \`float\` (e.g. \`json.Value\`'s \`n\`) back into \`int\` — pick the rounding
+  direction explicitly; all three panic if the result exceeds the safe integer range.
 - Higher-order functions take a function VALUE as an argument — either a named \`fn\`, or an
   inline \`fn(...) ... { ... }\` closure (closures can capture outer variables, including
   \`mut\` ones):
@@ -516,6 +533,8 @@ in a package directory and import it:
 - v1 limits: package paths are single directory names (no \`"a/b"\` nesting). \`"mesh/..."\` is
   reserved for the standard library — \`mesh/io\` and \`mesh/json\` exist (see next section);
   any other \`mesh/...\` path is not implemented yet and is an \`unknown package\` error.
+- Your own package directories can't be named \`io\` or \`json\` — those short names are reserved
+  by the built-in packages above, and a same-named directory is a compile error.
 
 ## Standard library: mesh/io, mesh/json (F-14)
 
@@ -601,6 +620,10 @@ instead of by code — use whichever is more convenient.
     send on closed channel / close of closed channel → panic: don't send/close after close(ch) already ran
     test function 'x' must ... return 'none | error' → fn test...() in a _test.mesh file must take
                                                         no params and return 'none | error' (F-15)
+    integer literal ... exceeds the safe integer range → the literal itself is unrepresentable;
+                                                        split the computation or use float
+    panic: ...: integer overflow — result ... exceeds → an int + - * result overflowed at runtime;
+                                                        this is a real bug, not a type error
     range over an array needs two names             → for i, v := range arr (use _ to drop one)
     cannot use any[] as Todo[] / cannot return any[] → the [] has no type context here; add one
                                                         (xs: Todo[] = [] or a declared return type)
@@ -614,6 +637,7 @@ instead of by code — use whichever is more convenient.
     discriminated union 'X' needs a tag field       → give every anonymous member a shared field
                                                         with a distinct string-literal value (F-7),
                                                         e.g. add kind: "ok" / kind: "notFound"
+    '__proto__' can't be used as a field name     → pick a different field name
     'X{...}' needs its tag field 'kind' set         → you left out the tag (or gave a non-literal
                                                         value); write kind: "..." to select a member
     no member of 'X' has kind: "..."                → check the tag value for a typo (F-7)
