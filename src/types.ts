@@ -12,7 +12,9 @@ export type Type =
   | { kind: "chan"; elem: Type }
   | { kind: "map"; key: Type; value: Type } // map<string, int>。読みは V | none を返す
   | { kind: "fn"; params: Type[]; ret: Type }
-  | { kind: "union"; members: Type[] }
+  // F-7: discriminantTagは2個以上のstruct memberを持つ判別可能unionだけが持つ
+  // (「全メンバーに存在しリテラル型で値が互いに異なる」フィールド名。型宣言の解決時に検証・確定する)
+  | { kind: "union"; members: Type[]; discriminantTag?: string }
   // ジェネリック関数(F-1後半)の宣言側でだけ現れる抽象型パラメータ。呼び出し側の
   // 引数からunifyTypeParamで具体型を推論し、substituteTypeParamsで置き換える。
   // 同名同士以外には代入できない(assignableはtypeEqualsへフォールバックする)
@@ -39,7 +41,13 @@ export const ANY: Type = { kind: "any" };
 export const NONE: Type = { kind: "none" };
 export const CLOSED: Type = { kind: "closed" };
 
-export function typeToString(t: Type): string {
+// seen: 表示中の union/無名struct(名前を持たず展開するしかない種類)を覚えておく「知恵の輪」ガード。
+// 名前付きstructは名前だけ返して再帰しないので元々安全だが、無名structが配列やmap越しに
+// 自分自身(を含むunion)を参照する自己参照判別可能union(json.Value等)は、名前で止められず
+// 無限に展開し続けてスタックオーバーフローする。既にスタック上にある型へ戻ってきたら
+// それ以上展開せず "..." で打ち切る(typeEqualsの再帰struct比較ガードと同じ発想)
+export function typeToString(t: Type, seen: Set<Type> = new Set()): string {
+  if (seen.has(t)) return "...";
   switch (t.kind) {
     case "prim":
       return t.name;
@@ -52,21 +60,28 @@ export function typeToString(t: Type): string {
     case "literal":
       return JSON.stringify(t.value);
     case "array":
-      return `${typeToString(t.elem)}[]`;
+      return `${typeToString(t.elem, seen)}[]`;
     case "chan":
-      return `chan<${typeToString(t.elem)}>`;
+      return `chan<${typeToString(t.elem, seen)}>`;
     case "map":
-      return `map<${typeToString(t.key)}, ${typeToString(t.value)}>`;
+      return `map<${typeToString(t.key, seen)}, ${typeToString(t.value, seen)}>`;
     case "fn":
-      return `fn(${t.params.map(typeToString).join(", ")}) ${typeToString(t.ret)}`;
-    case "union":
-      return t.members.map(typeToString).join(" | ");
-    case "struct":
+      return `fn(${t.params.map((p) => typeToString(p, seen)).join(", ")}) ${typeToString(t.ret, seen)}`;
+    case "union": {
+      seen.add(t);
+      const s = t.members.map((m) => typeToString(m, seen)).join(" | ");
+      seen.delete(t);
+      return s;
+    }
+    case "struct": {
       // 無名struct(判別可能unionのメンバー)は名前ではなく形を表示する。エラーメッセージで
       // 「missing: (anonymous)」のような読めない表示にならないようにするため
-      return t.name === "(anonymous)"
-        ? `{ ${t.fields.map((f) => `${f.name}: ${typeToString(f.type)}`).join(", ")} }`
-        : t.name;
+      if (t.name !== "(anonymous)") return t.name;
+      seen.add(t);
+      const s = `{ ${t.fields.map((f) => `${f.name}: ${typeToString(f.type, seen)}`).join(", ")} }`;
+      seen.delete(t);
+      return s;
+    }
     case "typeParam":
       return t.name;
   }

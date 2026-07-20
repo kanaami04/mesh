@@ -31,6 +31,16 @@ export interface Program {
   imports: ImportDecl[];
   types: TypeDecl[];
   fns: FnDecl[];
+  consts: ConstDecl[];
+}
+
+export interface ConstDecl {
+  kind: "constDecl"; // x := 10  /  x: int = 10  /  export x := 10(F-9c: トップレベル定数。常に不変)
+  name: string;
+  typeNode: TypeNode | null; // 型注釈があれば(x: int = 10)。無ければ値から推論(x := 10)
+  value: Expr;
+  exported: boolean;
+  pos: Pos;
 }
 
 export interface ImportDecl {
@@ -112,9 +122,13 @@ export interface TypedVarDecl {
 }
 
 export interface Assign {
-  kind: "assign"; // x = 1  /  v, err = f()
+  kind: "assign"; // x = 1  /  v, err = f()  /  x += 1(F-9b: 複合代入。常に単一target/value)
   targets: Expr[]; // ident / index / member
   values: Expr[];
+  compoundOp?: "+" | "-" | "*" | "/" | "%"; // += -= *= /= %= のとき Parser が立てる
+  intDiv?: boolean; // compoundOpが int同士の /= のとき Checker が立てる(切り捨て+ゼロ検査)
+  intMod?: boolean; // compoundOpが int同士の %= のとき Checker が立てる(ゼロ剰余検査)
+  intArith?: boolean; // compoundOpが int同士の += -= *= のとき Checker が立てる(F-10: safe-integer検査)
   pos: Pos;
 }
 
@@ -258,6 +272,7 @@ export interface BinaryExpr extends ExprBase {
   right: Expr;
   intDiv?: boolean; // int / int のとき Checker が立てる(切り捨て+ゼロ除算検査)
   intMod?: boolean; // int % int のとき Checker が立てる(ゼロ剰余検査)
+  intArith?: boolean; // int同士の + - * のとき Checker が立てる(F-10: safe-integer検査)
 }
 export interface UnaryExpr extends ExprBase {
   kind: "unary"; // !x / -x
@@ -291,9 +306,10 @@ export interface FnExpr extends ExprBase {
   body: Block;
 }
 export interface ChanExpr extends ExprBase {
-  kind: "chanExpr"; // chan<int>() 無制限バッファ(既定) / chan<int>(n) 容量n(nがブロッキング送信)
+  // chan<int>(none) 無制限バッファ(F-11: 明示必須。既定では選べない) / chan<int>(n) 容量n(nがブロッキング送信)
+  kind: "chanExpr";
   elem: TypeNode;
-  capacity: Expr | null;
+  capacity: Expr; // 常に必須(F-11)。'none' なら無制限、それ以外はint式で容量nを表す
 }
 export interface IsExpr extends ExprBase {
   kind: "is"; // x is none / x is error — narrowing の起点

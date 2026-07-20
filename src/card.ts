@@ -10,7 +10,9 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 
 ## Program structure
 
-- Top level allows only \`import\`, \`fn\`, \`struct\`, \`type\` declarations (imports first). Entry point: \`fn main()\` (required, no params, no return type).
+- Top level allows only \`import\`, \`fn\`, \`struct\`, \`type\` declarations, and top-level constants
+  (\`name := value\` / \`name: T = value\`, F-9c — imports first). Entry point: \`fn main()\`
+  (required, no params, no return type).
 - No semicolons (statements end at newline). Blocks always use braces. Comments: \`//\`.
 
 ## Bindings (immutable by default)
@@ -18,6 +20,8 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
     x := 10           // immutable binding (default). Type is inferred.
     mut n := 0        // mutable — only mut bindings can be reassigned or ++/--
     n = n + 1
+    n += 1            // compound assignment: += -= *= /= %= (F-9b). Not on a map entry — the
+                       // key may not exist, so read with a fallback first: m[k] = (m[k] or 0) + 1
     xs: int[] = []    // typed declaration: annotate the type explicitly (name: T = value)
     mut best: string | none = none   // start "absent", assign a real value later (needs mut)
 
@@ -32,16 +36,21 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
 - \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
   (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)
 
-There are NO global/module-level variables (top level is only fn/struct/type). To share
-mutable state, pass it as a parameter — arrays, maps, structs, and channels are reference
-values, so a function mutating one (e.g. \`push(items, x)\`) is visible to the caller.
+Top-level bindings are always immutable — \`mut\` is not allowed at the top level, so there is
+no mutable global state (F-9c). \`export\` makes a top-level constant visible as \`pkg.name\`
+from other packages, same as \`fn\`/\`struct\`/\`type\`. To share MUTABLE state, pass it as a
+parameter — arrays, maps, structs, and channels are reference values, so a function mutating
+one (e.g. \`push(items, x)\`) is visible to the caller.
+
+    maxRetries := 3                  // top-level constant — visible to every fn in the package
+    export basePath: string = "/api" // exported — other packages use it as pkg.basePath
 
 ## Types
 
     int  float  string  bool  error  none  any
-    T[]                // array:   nums := [1, 2, 3]  /  empty: items := Todo[]{}
+    T[]                // array:   nums := [1, 2, 3]  /  empty: items: Todo[] = []
     map<K, V>          // map:     ages := map<string, int>{"a": 1}  /  empty: map<string, int>{}
-    chan<T>            // channel: ch := chan<string>()
+    chan<T>            // channel: ch := chan<string>(none)
     A | B              // union
     "active"           // string literal type (subtype of string)
     fn(int, string) bool   // function type — types only, no parameter names.
@@ -175,8 +184,14 @@ Long union declarations can be split across lines — continuation lines start w
 - \`{ field: Type, ... }\` (an anonymous struct shape) is ONLY valid inside a \`type X = A | B\`
   union. Writing it alone (\`type X = { ... }\`) is a compile error — use \`struct X { ... }\`
   for a standalone shape.
-- Build a value using the UNION's own name as the struct-literal name; the given field set
-  picks which member you meant (no separate name needed per member).
+- Build a value using the UNION's own name as the struct-literal name. A REQUIRED tag field
+  (F-7) — one field name present in every member, with a distinct string-literal value in
+  each (\`kind\` by convention, but any name works) — picks which member you meant, by its
+  VALUE alone. This is declared once and enforced at the \`type\` declaration: a union with 2+
+  anonymous members that has no such field is a compile error right there (\`discriminated
+  union 'X' needs a tag field\`), before anyone tries to construct one. This also means adding
+  a member elsewhere can never silently break an existing literal — resolution never compares
+  against the OTHER members' field sets, only the tag value written right there.
 - Narrow with \`match\` using a partial-shape pattern — name only the field(s) you need to pick
   the member (usually just the tag, e.g. \`kind\`). After narrowing, access the rest of that
   member's fields normally (\`res.user\`); accessing a field from a different member is a
@@ -303,8 +318,11 @@ Methods use Go's syntax — a receiver clause right after \`fn\`, before the met
 ## Arrays
 
     xs := [1, 2, 3]        // non-empty literal — element type inferred
-    ys := Todo[]{}         // empty typed array (literal form)
-    zs: Todo[] = []        // empty typed array (typed declaration) — same result, more familiar
+    zs: Todo[] = []        // empty typed array — always use a typed declaration (there is no
+                           // 'Todo[]{}' literal form; a plain '[]' becomes the right type
+                           // wherever one is expected, so a literal form would just duplicate this)
+    ws := Todo[]{a, b}     // non-empty typed array literal — still useful to force an explicit
+                           // element type instead of inferring one from the first element
     push(xs, 4)            // append in place — mutates xs, returns none (not usable as a value)
     n := len(xs)
     for i, v := range xs { }
@@ -341,7 +359,7 @@ There is no ternary \`?:\` and no optional chaining \`?.\` — use \`if\` or \`m
 
     task := spawn f(x)       // run concurrently; returns a receive port (chan<T>)
     v := <-task              // receive = wait for the result — type is T | closed (see below)
-    ch := chan<string>()     // channel, unbounded buffer: ch <- v sends, <-ch receives
+    ch := chan<string>(none) // channel, unbounded buffer: ch <- v sends, <-ch receives
     wait {                   // wait EARLIER than the function exit: block until every
         spawn a()            // task spawned inside this block has finished
         spawn b()
@@ -360,9 +378,14 @@ Two ownership tiers — pick by how long the task should live:
 - A long-lived worker that loops forever receiving from a channel must be \`detach\`ed —
   \`spawn\` would make the enclosing function wait for it forever at its exit.
 
-### Channel capacity — chan<T>() vs chan<T>(n)
+### Channel capacity — always explicit (F-11): chan<T>(none) vs chan<T>(n)
 
-    ch := chan<T>()     // no argument: UNBOUNDED buffer, send never blocks (the common case)
+Capacity is a REQUIRED argument — \`chan<T>()\` is a compile error. An unbounded channel lets a
+long-lived \`detach\`ed worker's inbox grow forever if nothing drains it (a resource leak with
+no syntactic warning sign), so choosing "unbounded" must be written out, not left as a default:
+
+    ch := chan<T>(none) // explicitly UNBOUNDED: send never blocks (only when you've reasoned
+                         // about why unbounded growth here is fine)
     ch := chan<T>(0)    // capacity 0: UNBUFFERED — send blocks until a receiver is ready right now
     ch := chan<T>(3)    // capacity 3: send blocks only once 3 unreceived values are already buffered
 
@@ -379,7 +402,7 @@ type always includes \`closed\` — you must narrow before using the value, same
         close(ch)             // declares "no more sends" — required to end a receive loop cleanly
     }
     fn main() {
-        ch := chan<int>()
+        ch := chan<int>(none)
         spawn produce(ch)
         for {
             v := <-ch          // type: int | closed
@@ -409,15 +432,25 @@ form of \`match\`.
 ## Builtins (complete list)
 
     print(...)  len(x)  push(arr, v)  str(x)  error(msg)  sleep(ms)  delete(m, k)
-    contains(arr, v)  indexOf(arr, v)  keys(m)  values(m)  sort(arr)
+    contains(arr, v)  indexOf(arr, v)  get(arr, i)  keys(m)  values(m)  sort(arr)
     split(s, sep)  join(arr, sep)  trim(s)  upper(s)  lower(s)  toInt(s)
-    filter(arr, pred)  transform(arr, f)  reduce(arr, f, init)  close(ch)
+    filter(arr, pred)  map(arr, f)  reduce(arr, f, init)  close(ch)
 
 - \`print\` writes its args separated by spaces and appends a newline (one call = one line).
 - push, not append. \`contains\`/\`indexOf\` work on arrays; \`indexOf\` returns \`int | none\`
-  (narrow it, same as any other union). \`keys\`/\`values\` return arrays from a map (insertion
-  order). \`sort(arr)\` is NON-mutating — it returns a NEW sorted array (\`int[]\`, \`float[]\` or
-  \`string[]\` only, ascending); the argument is unchanged.
+  (narrow it, same as any other union). \`get(arr, i)\` is a type-safe read — returns
+  \`T | none\` instead of panicking on an out-of-range index (F-9d). Use \`arr[i]\` when an
+  out-of-range index is a bug you want to panic on (e.g. a loop bound you control yourself);
+  use \`get(arr, i)\` when the index comes from outside (user input, another data source) and
+  out-of-range is an expected case to handle, not a bug:
+
+      first := get(xs, 0) or 0            // safe read with a fallback
+      v := get(xs, i)
+      if v is none { return error("no element at \${i}") }
+
+  \`keys\`/\`values\` return arrays from a map (insertion order). \`sort(arr)\` is NON-mutating —
+  it returns a NEW sorted array (\`int[]\`, \`float[]\` or \`string[]\` only, ascending); the
+  argument is unchanged.
 - \`split(s, sep)\` always returns \`string[]\` (never fails — no separator found means a
   one-element array). \`join(arr, sep)\` takes \`string[]\`. \`trim\`/\`upper\`/\`lower\` are
   string → string. \`toInt(s)\` DOES fail on non-numeric input, so it returns \`int | error\`
@@ -428,11 +461,12 @@ form of \`match\`.
 
       isEven := fn(n: int) bool { return n % 2 == 0 }
       evens := filter(nums, isEven)                        // T[]  (same element type)
-      labels := transform(nums, fn(n: int) string { return "n\${n}" })  // can change element type
+      labels := map(nums, fn(n: int) string { return "n\${n}" })  // can change element type
       total := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)  // fold to Acc
 
-  \`transform(arr, f)\` is Mesh's map-over-array (named \`transform\`, NOT \`map\` — \`map\` is
-  already the \`map<K, V>\` type keyword, so \`map(arr, f)\` is a parse error; see below).
+  \`map(arr, f)\` is Mesh's map-over-array (F-8: \`map\` is a context-dependent keyword — \`map<K, V>\`
+  in a type position is still the map TYPE, \`map(arr, f)\` in an expression position is this
+  function; the two never collide because one needs \`<\` next and the other needs \`(\`).
   \`reduce(arr, f, init)\` takes the callback before the initial value, matching JS's
   \`.reduce(callback, initialValue)\` order (with the array moved to the first argument).
 - You can write your OWN higher-order functions with function types (\`fn(T) U\` — see Types):
@@ -475,12 +509,51 @@ in a package directory and import it:
         q: mathutil.Point = mathutil.origin()   // qualify in type positions too
     }
 
-- \`export\` goes on top-level \`fn\` / \`struct\` / \`type\`. Methods are NOT exported
-  individually — they work wherever their struct is usable (export the struct).
+- \`export\` goes on top-level \`fn\` / \`struct\` / \`type\` / constant (F-9c). Methods are NOT
+  exported individually — they work wherever their struct is usable (export the struct).
 - Accessing an unexported symbol, importing an unknown package, and import cycles are all
   compile errors. A package cannot import itself.
-- v1 limits: package paths are single directory names (no \`"a/b"\` nesting), and there are
-  no standard-library packages yet (\`"mesh/..."\` is reserved for the future stdlib).
+- v1 limits: package paths are single directory names (no \`"a/b"\` nesting). \`"mesh/..."\` is
+  reserved for the standard library — \`mesh/io\` and \`mesh/json\` exist (see next section);
+  any other \`mesh/...\` path is not implemented yet and is an \`unknown package\` error.
+
+## Standard library: mesh/io, mesh/json (F-14)
+
+Only builtin package with NO .mesh source — it needs native file/JSON access, so it's wired
+directly into the compiler instead of being a directory of Mesh files.
+
+    import "mesh/io"
+    import "mesh/json"
+
+    fn main() {
+        text := io.readFile(io.args()[0])     // string | error
+        if text is error { print("read failed: \${text}"); return }
+
+        v := json.parse(text)                 // json.Value | error
+        if v is error { print("bad json: \${v}"); return }
+        if v is { kind: "obj" } {
+            print(len(v.entries))             // v.entries is map<string, json.Value>
+        }
+        print(json.stringify(v))
+    }
+
+- \`io.args() string[]\` — the program's own CLI arguments (\`mesh run file.mesh a b\` → \`["a","b"]\`,
+  not including the file path itself). Empty outside a CLI context (e.g. the browser playground).
+- \`io.readFile(path: string) string | error\` — reads a whole file as UTF-8 text. A missing
+  file or any other read failure is \`error\`, never a panic (this is an EXPECTED failure —
+  the caller doesn't control whether the file exists).
+- \`json.Value\` is a discriminated union (F-7: has a required \`kind\` tag, like any other) —
+  the self-referential-type showcase:
+
+      type Value = { kind: "str", s: string } | { kind: "num", n: float }
+                 | { kind: "bool", b: bool } | { kind: "null" }
+                 | { kind: "arr", items: Value[] } | { kind: "obj", entries: map<string, Value> }
+
+  Build one directly with \`json.Value{kind: "str", s: "hi"}\`, same as any discriminated union
+  construction. Narrow with \`match\`/\`is\` partial-shape patterns exactly like a user-declared one.
+- \`json.parse(text: string) json.Value | error\` — malformed JSON is \`error\`, not a panic.
+  \`json.stringify(v: json.Value) string\` — the inverse; never fails (a well-formed \`Value\`
+  tree always serializes).
 
 ## Does NOT exist in Mesh — never write these
 
@@ -508,6 +581,8 @@ instead of by code — use whichever is more convenient.
 ## Common compile errors → how to fix
 
     'x' is immutable — declare it with 'mut'        → change x := ... to mut x := ...
+    top-level bindings are always immutable         → 'mut' isn't allowed at the top level (F-9c);
+                                                        pass mutable state as a parameter instead
     'x' shadows an outer binding                    → rename it, or assign with = to a mut binding
     cannot access field or method on User | none    → add: if u is none { return }, then narrow it first
     undefined: 'render' (when render is a method)   → methods have no bare-name form; write t.render(), not render(t)
@@ -521,18 +596,29 @@ instead of by code — use whichever is more convenient.
                                                         explicitly ('or _ => expr'); plain 'or expr'
                                                         is only for none-typed fallbacks
     invalid operation: T + T | closed                → you used <-ch directly; narrow with 'is closed' first
+    chan<T>() no longer defaults to an unbounded buffer → write chan<T>(none) for unbounded,
+                                                        or chan<T>(n) for a bounded buffer
     send on closed channel / close of closed channel → panic: don't send/close after close(ch) already ran
     range over an array needs two names             → for i, v := range arr (use _ to drop one)
-    cannot use any[] as Todo[] / cannot return any[] → you wrote []; use Todo[]{} for an empty typed array
+    cannot use any[] as Todo[] / cannot return any[] → the [] has no type context here; add one
+                                                        (xs: Todo[] = [] or a declared return type)
+    empty typed array literal 'T[]{}' was removed    → write 'xs: T[] = []' instead
+    cannot use '+=' on a map entry                   → read with a fallback first:
+                                                        m[k] = (m[k] or 0) + 1
     this function has no return value (from push)   → push returns none; don't use it as a value
     panic: file:line:col: index N out of range      → check len() before indexing
-    expected '<' after 'map', but got '('           → you wrote map(arr, f); use transform(arr, f)
-                                                        ('map' is the map<K, V> type keyword)
     use 'struct X { ... }' to define a data shape   → you wrote type X = { ... } alone; either use
                                                         struct, or add a union: type X = {...} | {...}
-    no member of 'X' matches the field(s) {...}     → the fields you wrote don't match any member of X;
-                                                        check spelling and which fields that member needs
-    ambiguous — multiple members of 'X' match       → add/change a field so only one member's shape fits
+    discriminated union 'X' needs a tag field       → give every anonymous member a shared field
+                                                        with a distinct string-literal value (F-7),
+                                                        e.g. add kind: "ok" / kind: "notFound"
+    'X{...}' needs its tag field 'kind' set         → you left out the tag (or gave a non-literal
+                                                        value); write kind: "..." to select a member
+    no member of 'X' has kind: "..."                → check the tag value for a typo (F-7)
+    no member of 'X' matches the field(s) {...}     → (union of named structs only) the fields you
+                                                        wrote don't match any member; check spelling
+    ambiguous — multiple members of 'X' match       → (union of named structs only) add/change a
+                                                        field so only one member's shape fits
     type alias cycle involving 'X'                  → two unions reference each other as bare members
                                                         with nothing wrapping the reference; wrap it in
                                                         a struct field instead (self-reference through

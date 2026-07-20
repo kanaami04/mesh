@@ -18,6 +18,7 @@ import {
 } from "./compiler";
 import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "./diagnostic-codes";
 import { parse } from "./parser";
+import { BUILTIN_PACKAGES } from "./stdlib";
 
 const USAGE = `Mesh compiler v0.1.0
 
@@ -62,8 +63,11 @@ function loadModules(entryFile: string): ModuleSource[] {
     const path = queue.shift()!;
     if (loaded.has(path)) continue;
     loaded.add(path);
+    // F-14: 組み込みパッケージ(mesh/io, mesh/json)は .mesh ソースを持たない —
+    // ディスクから読まず、checker側がsrc/stdlib.tsから直接シグネチャを登録する
+    if (BUILTIN_PACKAGES.has(path)) continue;
     if (path === "mesh" || path.startsWith("mesh/")) {
-      console.error(`error: standard-library modules ('${path}') are not available yet`);
+      console.error(`error: standard-library module '${path}' is not available yet`);
       process.exit(1);
     }
     if (path.includes("/")) {
@@ -159,7 +163,8 @@ function main() {
       const dir = mkdtempSync(join(tmpdir(), "mesh-"));
       const outPath = join(dir, basename(file).replace(/\.mesh$/, "") + ".mjs");
       writeFileSync(outPath, code);
-      const proc = spawnSync(process.execPath, [outPath], { stdio: "inherit" });
+      // file の後に続く追加引数はプログラム自身の引数として渡す(io.args()で読める。F-14)
+      const proc = spawnSync(process.execPath, [outPath, ...rest], { stdio: "inherit" });
       process.exit(proc.status ?? 0);
     }
     case "build": {

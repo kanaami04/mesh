@@ -98,6 +98,79 @@ describe("checker", () => {
     expect(errors).toEqual([expect.stringContaining("'a' is immutable")]);
   });
 
+  test("F-9b: 複合代入 += -= *= /= %= が使える", () => {
+    expect(inMain(`mut x := 1\nx += 2\nprint(x)`)).toEqual([]);
+    expect(inMain(`mut x := 10\nx -= 3\nprint(x)`)).toEqual([]);
+    expect(inMain(`mut x := 2\nx *= 3\nprint(x)`)).toEqual([]);
+    expect(inMain(`mut x := 10\nx /= 3\nprint(x)`)).toEqual([]);
+    expect(inMain(`mut x := 10\nx %= 3\nprint(x)`)).toEqual([]);
+    expect(inMain(`mut s := "a"\ns += "b"\nprint(s)`)).toEqual([]);
+  });
+
+  test("F-9b: 複合代入も不変の変数へは使えない", () => {
+    expect(inMain(`x := 1\nx += 2`)).toEqual([expect.stringContaining("'x' is immutable")]);
+  });
+
+  test("F-9b: 複合代入は左右の型が合わないと検出する", () => {
+    expect(inMain(`mut x := 1\nx += "a"`)).toEqual([
+      expect.stringContaining(`invalid operation: int + "a"`),
+    ]);
+  });
+
+  test("F-9b: 複合代入は配列の添字にも使える", () => {
+    expect(inMain(`mut nums := [1, 2, 3]\nnums[0] += 10\nprint(nums[0])`)).toEqual([]);
+  });
+
+  test("F-9b: 複合代入はmapの要素には使えない(欠損キーで壊れるため)", () => {
+    expect(inMain(`mut m := map<string, int>{"a": 1}\nm["a"] += 1`)).toEqual([
+      expect.stringContaining("cannot use '+=' on a map entry"),
+    ]);
+  });
+
+  test("F-9b: 複合代入のリテラルゼロ除算はコンパイル時に検出する", () => {
+    expect(inMain(`mut x := 10\nx /= 0`)).toEqual([
+      expect.stringContaining("integer division by zero"),
+    ]);
+  });
+
+  test("F-9c: トップレベル定数が使える(:= と型注釈つき)", () => {
+    expect(errorsOf(`maxRetries := 3\nfn main() { print(maxRetries) }`)).toEqual([]);
+    expect(errorsOf(`greeting: string = "hi"\nfn main() { print(greeting) }`)).toEqual([]);
+  });
+
+  test("F-9c: トップレベル定数は宣言順に関係なく関数から参照できる(関数同士と同じ)", () => {
+    expect(errorsOf(`fn main() { print(limit) }\nlimit := 10`)).toEqual([]);
+  });
+
+  test("F-9c: トップレベル定数は他の定数を参照できる(先に書かれていれば)", () => {
+    expect(errorsOf(`base := 10\ndoubled := base * 2\nfn main() { print(doubled) }`)).toEqual([]);
+    expect(errorsOf(`doubled := base * 2\nbase := 10\nfn main() { print(doubled) }`)).toEqual([
+      expect.stringContaining("undefined: 'base'"),
+    ]);
+  });
+
+  test("F-9c: トップレベル定数は不変(再代入・++ 不可)", () => {
+    expect(errorsOf(`limit := 10\nfn main() { limit = 20\nprint(limit) }`)).toEqual([
+      expect.stringContaining("'limit' is immutable"),
+    ]);
+  });
+
+  test("F-9c: トップレベル定数は関数名などと名前がぶつかると検出する", () => {
+    expect(errorsOf(`fn limit() int { return 1 }\nlimit := 10\nfn main() {}`)).toEqual([
+      expect.stringContaining("'limit' is already declared"),
+    ]);
+  });
+
+  test("F-9c: トップレベル定数の型注釈と値が合わないと検出する", () => {
+    expect(errorsOf(`limit: string = 10\nfn main() { print(limit) }`)).toEqual([
+      expect.stringContaining(`cannot use int as string`),
+    ]);
+  });
+
+  test("F-9c: トップレベルの 'mut' は使えない", () => {
+    expect(() => parse(`mut limit := 10\nfn main() {}`)).toThrow("top-level bindings are always immutable");
+  });
+
   test("C風forのヘッダ変数は暗黙に可変(i++が通る)", () => {
     expect(inMain(`for i := 0; i < 3; i++ {\nprint(i)\n}`)).toEqual([]);
   });
@@ -249,6 +322,20 @@ fn main() {
       `type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }\nfn main() {}`,
     );
     expect(errors).toEqual([]);
+  });
+
+  test("typeToString: 自己参照する判別可能unionを型エラーに出しても無限再帰しない(退行防止)", () => {
+    // 循環部分は "..." で打ち切って表示する。以前はスタックオーバーフローしていた
+    const errors = errorsOf(`type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+fn main() {
+	t: Tree = "not a tree"
+	print(t)
+}`);
+    expect(errors).toEqual([
+      expect.stringContaining(
+        `cannot use "not a tree" as { kind: "leaf", value: int } | { kind: "node", left: ..., right: ... }`,
+      ),
+    ]);
   });
 
   test("match: リテラルunion の網羅性検査(不足リテラルを名指し)", () => {
@@ -419,25 +506,136 @@ fn main() { print(describe(Resp{kind: "notFound"})) }`);
     ]);
   });
 
-  test("判別可能union: フィールド集合がどのメンバーにも一致しないと構築エラー", () => {
+  test("判別可能union: タグで解決した後もフィールド不明は通常どおり検出する(F-7)", () => {
     const errors = errorsOf(`type Resp = { kind: "ok" } | { kind: "notFound" }
 fn main() {
 	r := Resp{kind: "ok", extra: 1}
 	print(r)
 }`);
     expect(errors).toEqual([
-      expect.stringContaining("no member of 'Resp' matches the field(s) {kind, extra}"),
+      expect.stringContaining("Resp has no field 'extra' (fields: kind)"),
     ]);
   });
 
-  test("判別可能union: 複数メンバーに一致すると曖昧エラー(int/floatの拡大が重なるケース)", () => {
-    const errors = errorsOf(`type Resp = { x: int } | { x: float }
+  test("判別可能union: タグの値がどのメンバーにも無いと構築エラー(F-7)", () => {
+    const errors = errorsOf(`type Resp = { kind: "ok" } | { kind: "notFound" }
 fn main() {
-	r := Resp{x: 1}
+	r := Resp{kind: "nope"}
 	print(r)
 }`);
     expect(errors).toEqual([
-      expect.stringContaining("ambiguous — multiple members of 'Resp' match the field(s) {x}"),
+      expect.stringContaining(`no member of 'Resp' has kind: "nope"`),
+    ]);
+  });
+
+  test("F-7: タグ(共通のリテラル型フィールド)が無いunionはstruct memberが2個以上だと宣言時エラー", () => {
+    const errors = errorsOf(`type Resp = { x: int } | { x: float }
+fn main() { print(1) }`);
+    expect(errors).toEqual([
+      expect.stringContaining("discriminated union 'Resp' needs a tag field"),
+    ]);
+  });
+
+  test("F-7: タグを書き忘れる(または非リテラル値)と構築エラー", () => {
+    const errors = errorsOf(`type Resp = { kind: "ok" } | { kind: "notFound" }
+fn main() {
+	r := Resp{}
+	print(r)
+}`);
+    expect(errors[0]).toContain("needs its tag field 'kind' set to select a member");
+  });
+
+  test("F-7: タグ候補のフィールドがあっても値が重複していれば宣言時エラー", () => {
+    const errors = errorsOf(
+      `type Resp = { kind: "ok", a: int } | { kind: "ok", b: int }\nfn main() { print(1) }`,
+    );
+    expect(errors).toEqual([
+      expect.stringContaining("discriminated union 'Resp' needs a tag field"),
+    ]);
+  });
+
+  test("F-7: 名前付きstruct同士のunion(Circle | Square)はタグ不要 — 自分の名前で構築する", () => {
+    const errors = errorsOf(`struct Circle { kind: string  r: float }
+struct Square { kind: string  s: float }
+type Shape = Circle | Square
+fn main() {
+	c: Shape = Circle{kind: "circle", r: 2.0}
+	if c is Circle { print(c.r) }
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("F-7: メンバー追加という『遠隔』変更が既存の正しくタグ付けされたリテラルを壊さない", () => {
+    // 判別可能unionにメンバーを追加しても、離れた場所の既存リテラル(タグで解決)は無傷のまま
+    const before = errorsOf(`type Resp = { kind: "ok", value: int } | { kind: "notFound" }
+fn make() Resp { return Resp{kind: "ok", value: 1} }
+fn main() { print(make()) }`);
+    const after = errorsOf(`type Resp = { kind: "ok", value: int } | { kind: "notFound" } | { kind: "forbidden" }
+fn make() Resp { return Resp{kind: "ok", value: 1} }
+fn main() { print(make()) }`);
+    expect(before).toEqual([]);
+    expect(after).toEqual([]);
+  });
+
+  test("F-14: mesh/io — io.args() / io.readFile(path) が型検査を通る", () => {
+    expect(errorsOf(`import "mesh/io"
+fn main() {
+	args := io.args()
+	print(len(args))
+	content := io.readFile("x.txt")
+	if content is error {
+		return
+	}
+	print(content)
+}`)).toEqual([]);
+  });
+
+  test("F-14: io.readFile は引数の型を検査する", () => {
+    expect(errorsOf(`import "mesh/io"\nfn main() { print(io.readFile(1)) }`)).toEqual([
+      expect.stringContaining(`cannot use int as string`),
+    ]);
+  });
+
+  test("F-14: mesh/json — json.parse/json.stringify とjson.Value型が使える", () => {
+    const errors = errorsOf(`import "mesh/json"
+fn main() {
+	v := json.parse("{}")
+	if v is error {
+		return
+	}
+	print(json.stringify(v))
+}`);
+    expect(errors).toEqual([]);
+  });
+
+  test("F-14: json.Value は判別可能unionとしてmatch/narrowingできる(タグは'kind')", () => {
+    const errors = errorsOf(`import "mesh/json"
+fn describe(v: json.Value) string {
+	return match v {
+		{ kind: "str" } => v.s
+		{ kind: "num" } => str(v.n)
+		{ kind: "bool" } => str(v.b)
+		{ kind: "null" } => "null"
+		{ kind: "arr" } => str(len(v.items))
+		{ kind: "obj" } => str(len(v.entries))
+	}
+}
+fn main() { print(describe(json.Value{kind: "str", s: "hi"})) }`);
+    expect(errors).toEqual([]);
+  });
+
+  test("F-14: json.Value{...} は他の判別可能unionと同じくタグ値で構築できる", () => {
+    expect(errorsOf(`import "mesh/json"\nfn main() { print(json.Value{kind: "num", n: 1.5}) }`)).toEqual(
+      [],
+    );
+    expect(errorsOf(`import "mesh/json"\nfn main() { print(json.Value{kind: "nope"}) }`)).toEqual([
+      expect.stringContaining("no member of 'Value' has kind: \"nope\""),
+    ]);
+  });
+
+  test("F-14: mesh/io, mesh/json 以外の mesh/* は未実装のまま(回帰確認)", () => {
+    expect(errorsOf(`import "mesh/http"\nfn main() { print(1) }`)).toEqual([
+      expect.stringContaining("unknown package 'mesh/http'"),
     ]);
   });
 
@@ -545,20 +743,16 @@ for i := range 3 {
     ]);
   });
 
-  test("型付き配列リテラル: 空配列に型が付く", () => {
-    // 空の [] は any[] だが、Todo[]{} は Todo[] になる
-    const errors = errorsOf(`struct Todo {
+  test("型付き配列リテラル: 空の Todo[]{} はF-9aで廃止 — xs: T[] = [] を使えという案内が出る", () => {
+    expect(() =>
+      errorsOf(`struct Todo {
 	id: int
-}
-fn make() Todo[] {
-	return Todo[]{}
 }
 fn main() {
 	todos := Todo[]{}
-	push(todos, Todo{id: 1})
-	print(len(todos) + len(make()))
-}`);
-    expect(errors).toEqual([]);
+	print(len(todos))
+}`),
+    ).toThrow("empty typed array literal 'T[]{}' was removed");
   });
 
   test("型付き配列リテラル: 要素の型を検査する", () => {
@@ -891,7 +1085,7 @@ fn main() { print(useIt("41")) }`);
   });
 
   test("チャネルの要素型の不一致を検出", () => {
-    expect(inMain(`ch := chan<int>()\nch <- "hi"`)).toEqual([
+    expect(inMain(`ch := chan<int>(none)\nch <- "hi"`)).toEqual([
       expect.stringContaining(`cannot send "hi" to chan<int>`),
     ]);
   });
@@ -927,6 +1121,26 @@ fn main() { print(useIt("41")) }`);
     expect(inMain(`nums := [1, 2, 3]\ni := indexOf(nums, 2)\nif i is none {\nreturn\n}\nprint(i + 1)`)).toEqual(
       [],
     );
+  });
+
+  test("F-9d: get(arr, i) は T | none なので絞り込みが必要", () => {
+    expect(inMain(`nums := [1, 2, 3]\nv := get(nums, 0)\nprint(v + 1)`)).toEqual([
+      expect.stringContaining("invalid operation"),
+    ]);
+    expect(inMain(`nums := [1, 2, 3]\nv := get(nums, 0)\nif v is none {\nreturn\n}\nprint(v + 1)`)).toEqual([]);
+    expect(inMain(`nums := [1, 2, 3]\nprint(get(nums, 0) or 0)`)).toEqual([]);
+  });
+
+  test("F-9d: get() は添字がintでないと検出する", () => {
+    expect(inMain(`nums := [1, 2, 3]\nprint(get(nums, "0"))`)).toEqual([
+      expect.stringContaining(`index must be int, got "0"`),
+    ]);
+  });
+
+  test("F-9d: get() は配列以外だと検出する", () => {
+    expect(inMain(`print(get("not an array", 0))`)).toEqual([
+      expect.stringContaining("get() requires an array"),
+    ]);
   });
 
   test("keys/values: mapから配列の型を正しく推論", () => {
@@ -985,12 +1199,12 @@ fn main() {
     ]);
   });
 
-  test("transform: 戻り値の型が変わってよい(int[] → string[])", () => {
+  test("F-8: map(): 戻り値の型が変わってよい(int[] → string[])", () => {
     expect(
-      inMain(`nums := [1, 2, 3]\nlabels := transform(nums, fn(n: int) string { return str(n) })\nprint(labels[0])`),
+      inMain(`nums := [1, 2, 3]\nlabels := map(nums, fn(n: int) string { return str(n) })\nprint(labels[0])`),
     ).toEqual([]);
-    expect(inMain(`nums := [1, 2, 3]\nprint(transform(nums, fn(s: string) int { return 1 }))`)).toEqual([
-      expect.stringContaining("transform() callback must take a single int parameter"),
+    expect(inMain(`nums := [1, 2, 3]\nprint(map(nums, fn(s: string) int { return 1 }))`)).toEqual([
+      expect.stringContaining("map() callback must take a single int parameter"),
     ]);
   });
 
@@ -1010,10 +1224,12 @@ fn main() {
     ).toEqual([expect.stringContaining("reduce() initial value must be string, got int")]);
   });
 
-  test("map(...) は 'map' 型キーワードと衝突して構文エラーになる(transformを使う)", () => {
-    expect(() => errorsOf(`nums := [1, 2, 3]\nprint(map(nums, fn(n: int) int { return n }))`)).toThrow(
-      CompileError,
-    );
+  test("F-8: 'map' は文脈依存キーワード — map<K,V>型/リテラルとmap(arr,f)呼び出しが共存する", () => {
+    expect(
+      inMain(`nums := [1, 2, 3]\ndoubled := map(nums, fn(n: int) int { return n * 2 })\nprint(doubled[0])`),
+    ).toEqual([]);
+    expect(inMain(`ages := map<string, int>{"a": 1}\nprint(ages["a"])`)).toEqual([]);
+    expect(inMain(`ages: map<string, int> = map<string, int>{}\nprint(len(ages))`)).toEqual([]);
   });
 
   test("メソッド: 正しい宣言・呼び出しはエラーなし", () => {
@@ -1139,16 +1355,16 @@ fn main() {
   });
 
   test("受信は常に T | closed — 絞り込む前に演算に使うとエラー", () => {
-    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v + 1)`)).toEqual([
+    expect(inMain(`ch := chan<int>(none)\nv := <-ch\nprint(v + 1)`)).toEqual([
       expect.stringContaining("invalid operation"),
     ]);
     expect(
-      inMain(`ch := chan<int>()\nv := <-ch\nif v is closed {\nreturn\n}\nprint(v + 1)`),
+      inMain(`ch := chan<int>(none)\nv := <-ch\nif v is closed {\nreturn\n}\nprint(v + 1)`),
     ).toEqual([]);
   });
 
   test("is: 型名パターンで絞り込める(matchと同じパターン)", () => {
-    expect(inMain(`ch := chan<int>()\nv := <-ch\nif v is int {\nprint(v + 1)\n}`)).toEqual([]);
+    expect(inMain(`ch := chan<int>(none)\nv := <-ch\nif v is int {\nprint(v + 1)\n}`)).toEqual([]);
     const errors = errorsOf(`struct User { name: string }
 fn find(id: int) User | none | error {
 	if id == 1 { return User{name: "a"} }
@@ -1192,7 +1408,7 @@ fn main() { print(describe(Resp{kind: "notFound"})) }`);
   });
 
   test("is: unionに無い型は can never be エラー", () => {
-    expect(inMain(`ch := chan<int>()\nv := <-ch\nprint(v is string)`)).toEqual([
+    expect(inMain(`ch := chan<int>(none)\nv := <-ch\nprint(v is string)`)).toEqual([
       expect.stringContaining("can never be string"),
     ]);
   });
@@ -1210,8 +1426,8 @@ fn main() { print(describe(Resp{kind: "notFound"})) }`);
 
   test("select: 型は各アームの union、チャネル以外を渡すとエラー", () => {
     const errors = errorsOf(`fn main() {
-	a := chan<int>()
-	b := chan<string>()
+	a := chan<int>(none)
+	b := chan<string>(none)
 	x := select {
 		v := <-a => str(v)
 		v := <-b => v
@@ -1227,7 +1443,7 @@ fn main() { print(describe(Resp{kind: "notFound"})) }`);
 
   test("select: アーム内で束縛した変数は T | closed として絞り込める", () => {
     const errors = errorsOf(`fn main() {
-	a := chan<int>()
+	a := chan<int>(none)
 	total := select {
 		v := <-a => match v {
 			closed => 0

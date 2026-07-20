@@ -28,14 +28,14 @@ describe("サブセットカード(F-13後半): detectFeatures", () => {
     expect(features.has("structs")).toBe(true);
   });
 
-  test("配列型を検出する(空配列リテラル・型サフィックスどちらも)", () => {
-    expect(detectFeatures(`xs := Todo[]{}`).has("arrays")).toBe(true);
+  test("配列型を検出する(型付き配列リテラル・型サフィックスどちらも)", () => {
+    expect(detectFeatures(`xs := Todo[]{a, b}`).has("arrays")).toBe(true);
     expect(detectFeatures(`fn f(xs: int[]) {}`).has("arrays")).toBe(true);
   });
 
   test("並行処理: spawn/detach/chan/select/wait のいずれかを検出する", () => {
     expect(detectFeatures(`t := spawn f()`).has("concurrency")).toBe(true);
-    expect(detectFeatures(`ch := chan<int>()`).has("concurrency")).toBe(true);
+    expect(detectFeatures(`ch := chan<int>(none)`).has("concurrency")).toBe(true);
     expect(detectFeatures(`x := select { }`).has("concurrency")).toBe(true);
   });
 

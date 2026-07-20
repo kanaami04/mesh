@@ -261,7 +261,7 @@ fn main() {}`);
   });
 
   test("spawn はチャネル送受信・呼び出しと組み合わせられる", () => {
-    const stmts = parseBody(`ch := chan<int>()\nspawn f(1, ch)\nx := <-ch\nch <- 2`);
+    const stmts = parseBody(`ch := chan<int>(none)\nspawn f(1, ch)\nx := <-ch\nch <- 2`);
     expect(stmts.map((s) => s.kind)).toEqual(["shortVarDecl", "exprStmt", "shortVarDecl", "send"]);
   });
 
@@ -297,12 +297,18 @@ fn main() {}`);
     expect(expr.capacity?.kind).toBe("int");
   });
 
-  test("chan<T>() は容量なし(null)", () => {
-    const [stmt] = parseBody(`ch := chan<int>()`);
+  test("F-11: chan<T>(none) は明示的な無制限バッファ", () => {
+    const [stmt] = parseBody(`ch := chan<int>(none)`);
     if (stmt.kind !== "shortVarDecl") throw new Error("unexpected");
     const expr = stmt.values[0];
     if (expr.kind !== "chanExpr") throw new Error("expected chanExpr, got " + expr.kind);
-    expect(expr.capacity).toBeNull();
+    expect(expr.capacity.kind).toBe("none");
+  });
+
+  test("F-11: chan<T>() は容量の省略を許さない", () => {
+    expect(() => parseBody(`ch := chan<int>()`)).toThrow(
+      "chan<T>() no longer defaults to an unbounded buffer",
+    );
   });
 
   test("select式: アームとdefault(_)をパースできる", () => {
@@ -319,8 +325,22 @@ fn main() {}`);
     expect(() => parseBody(`msg := select {\n_ => "a"\n_ => "b"\n}`)).toThrow(CompileError);
   });
 
-  test("トップレベルは fn のみ", () => {
-    expect(() => parse(`x := 1`)).toThrow(CompileError);
+  test("トップレベルは fn/struct/type/定数(F-9c)のみ", () => {
+    expect(() => parse(`print(1)`)).toThrow(CompileError);
+    expect(() => parse(`if true {}`)).toThrow(CompileError);
+  });
+
+  test("F-9c: トップレベル定数 x := 1 / x: int = 1 をパースできる", () => {
+    const program = parse(`x := 1\ny: string = "a"\nexport z := true\nfn main() {}`);
+    expect(program.consts).toEqual([
+      expect.objectContaining({ kind: "constDecl", name: "x", typeNode: null, exported: false }),
+      expect.objectContaining({ kind: "constDecl", name: "y", exported: false }),
+      expect.objectContaining({ kind: "constDecl", name: "z", exported: true }),
+    ]);
+  });
+
+  test("F-9c: トップレベルの 'mut' は使えない", () => {
+    expect(() => parse(`mut x := 1`)).toThrow(CompileError);
   });
 
   test("モジュール: import宣言とexport修飾をパースできる", () => {

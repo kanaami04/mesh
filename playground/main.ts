@@ -28,7 +28,7 @@ fn main() {
 	print(<-task)
 
 	// channel で複数タスクの結果を集める
-	ch := chan<string>()
+	ch := chan<string>(none)
 	for i := 1; i <= 3; i++ {
 		spawn worker(i, ch)
 	}

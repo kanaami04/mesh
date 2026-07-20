@@ -135,6 +135,15 @@ const __imod = (a, b, at) => {
   if (b === 0) throw new __Panic(at + ": integer modulo by zero");
   return a % b;
 };
+// F-10: intはJSのnumberなので53bitを超えると静かに丸まる。演算結果がsafe integerの
+// 範囲を超えたら(範囲外アクセス・ゼロ除算と同じ)即panicする
+const __iarith = (a, op, b, at) => {
+  const r = op === "+" ? a + b : op === "-" ? a - b : a * b;
+  if (!Number.isSafeInteger(r)) {
+    throw new __Panic(at + ": integer overflow — result " + r + " exceeds the safe integer range");
+  }
+  return r;
+};
 // union路線の道具:
 // __prop:    f()? — none/error/構造化error型 なら __Propagate を投げて呼び出し元へ即 return させる
 // __propCtx: f() ? "ctx" — 失敗を error("ctx[: 元メッセージ]") に包んで伝播(noneも昇格。
@@ -197,6 +206,8 @@ const __indexOf = (arr, v) => {
   const i = arr.indexOf(v);
   return i === -1 ? null : i;
 };
+// F-9d: 配列の型安全な読み。範囲外は arr[i] のようにpanicせず none(null)を返す
+const __get = (arr, i) => (Number.isInteger(i) && i >= 0 && i < arr.length ? arr[i] : null);
 // sort() は非破壊: 元の配列は変えず、並び替えたコピーを返す。
 // < / > は int・float・string のどれでも正しく比較できるので単一の比較関数で足りる
 const __sorted = (arr) => [...arr].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -228,6 +239,45 @@ const __reduce = async (arr, f, init) => {
   for (const x of arr) acc = await f(acc, x);
   return acc;
 };
+// F-14: mesh/io — .messソースを持たない組み込みパッケージ(シグネチャはsrc/stdlib.tsに登録)。
+// io$readFile はNode専用のfsに依存するので動的importで読む — ブラウザ実行(プレイグラウンドの
+// Web Worker)ではモジュール解決自体が失敗し、素直にerror値へ落ちる(T | errorの通常経路)
+const io$args = () => globalThis.process?.argv?.slice(2) ?? [];
+const io$readFile = async (path) => {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    return await readFile(path, "utf8");
+  } catch (e) {
+    return new Error(e instanceof Error ? e.message : String(e));
+  }
+};
+// F-14: mesh/json — json.Value(自己参照判別可能union)とJSの素の値とを変換する
+const __jsonToValue = (v) => {
+  if (v === null) return { kind: "null" };
+  if (typeof v === "string") return { kind: "str", s: v };
+  if (typeof v === "number") return { kind: "num", n: v };
+  if (typeof v === "boolean") return { kind: "bool", b: v };
+  if (Array.isArray(v)) return { kind: "arr", items: v.map(__jsonToValue) };
+  return { kind: "obj", entries: new Map(Object.entries(v).map(([k, x]) => [k, __jsonToValue(x)])) };
+};
+const __valueToJson = (v) => {
+  switch (v.kind) {
+    case "null": return null;
+    case "str": return v.s;
+    case "num": return v.n;
+    case "bool": return v.b;
+    case "arr": return v.items.map(__valueToJson);
+    case "obj": return Object.fromEntries([...v.entries].map(([k, x]) => [k, __valueToJson(x)]));
+  }
+};
+const json$parse = (text) => {
+  try {
+    return __jsonToValue(JSON.parse(text));
+  } catch (e) {
+    return new Error(e instanceof Error ? e.message : String(e));
+  }
+};
+const json$stringify = (v) => JSON.stringify(__valueToJson(v));
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v === __CLOSED ? "closed"

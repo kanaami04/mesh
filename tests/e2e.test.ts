@@ -290,7 +290,7 @@ fn main() {
     expect(runSource(`fn main() {\n\tprint("a")\n\tprint("b", "c")\n}`)).toBe("a\nb c\n");
   });
 
-  test("カードの新項目: 空配列 Todo[]{} / pushはnone / errメッセージ補間", () => {
+  test("カードの新項目: 空配列 xs: T[] = [] / pushはnone / errメッセージ補間", () => {
     const out = runSource(`struct Item {
       name: string
     }
@@ -298,7 +298,7 @@ fn main() {
       return error("bad: \${s}")
     }
     fn main() {
-      items := Item[]{}          // 空の型付き配列
+      items: Item[] = []          // 空の型付き配列
       push(items, Item{name: "x"})
       print(len(items))
 
@@ -354,22 +354,18 @@ fn main() {
     expect(out).toBe("ALICE | BOB | CAROL\n30\n");
   });
 
-  test("カードの新項目: 標準ライブラリ第三弾(filter/transform/reduce)", () => {
+  test("カードの新項目: 標準ライブラリ第三弾(filter/map/reduce)", () => {
     const out = runSource(`fn isEven(n: int) bool {
       return n % 2 == 0
     }
     fn main() {
       nums := [1, 2, 3, 4, 5, 6]
       evens := filter(nums, isEven)              // 名前付き関数を値として渡す
-      doubled := transform(evens, fn(n: int) int { return n * 2 })  // インラインクロージャ
+      doubled := map(evens, fn(n: int) int { return n * 2 })  // インラインクロージャ
       total := reduce(doubled, fn(acc: int, n: int) int { return acc + n }, 0)
       print(total)
     }`);
     expect(out).toBe("24\n");
-    // カードどおり map(...) は型キーワードと衝突して構文エラーになる
-    expect(compile(`fn main() { nums := [1]\nprint(map(nums, fn(n: int) int { return n })) }`).code).toBe(
-      null,
-    );
   });
 
   test("カードの新項目: メソッド(Goスタイルのレシーバ構文)", () => {
@@ -428,7 +424,7 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
       close(ch)
     }
     fn main() {
-      ch := chan<int>()
+      ch := chan<int>(none)
       spawn produce(ch)
       mut total := 0
       for {
@@ -440,7 +436,7 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
       }
       print(total)
 
-      a := chan<string>()
+      a := chan<string>(none)
       spawn slowSend(a, "hi")
       r := select {
         v := <-a => v
@@ -455,7 +451,7 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     expect(out).toBe("3\nnothing\n");
     // カードどおり、<-ch は絞り込まずに算術に使うとコンパイルエラーになる
     expect(
-      compile(`fn main() { ch := chan<int>()\nv := <-ch\nprint(v + 1) }`).code,
+      compile(`fn main() { ch := chan<int>(none)\nv := <-ch\nprint(v + 1) }`).code,
     ).toBe(null);
   });
 
@@ -737,7 +733,7 @@ fn main() { t := Todo{title: "a"}\nprint(render(t)) }`).code,
     }
 
     fn myFilter<T>(arr: T[], pred: fn(T) bool) T[] {
-        out := T[]{}
+        out: T[] = []
         for _, v := range arr {
             if pred(v) { push(out, v) }
         }
@@ -948,7 +944,7 @@ export fn getUser(id: string) UserResult {
       "'Hidden' is not exported by package 'util'",
     );
     expect(err(`import "util"\nfn main() { print(util.nope()) }`)).toContain(
-      "package 'util' has no exported function 'nope'",
+      "package 'util' has no exported function or constant 'nope'",
     );
   });
 
@@ -986,6 +982,114 @@ export fn getUser(id: string) UserResult {
     const proc = spawnSync(process.execPath, [CLI, "run", example], { encoding: "utf8", timeout: 15_000 });
     expect(proc.status).toBe(0);
     expect(proc.stdout).toBe("3\n12\n25\n0 0\n");
+  });
+
+  test("F-9c: トップレベル定数を実行できる(単一パッケージ)", () => {
+    const out = runSource(`maxRetries := 3\nlabel: string = "try #"\nfn main() {\n\tprint(label, maxRetries)\n}`);
+    expect(out).toBe("try # 3\n");
+  });
+
+  test("F-9c: exportしたトップレベル定数をパッケージ越しに参照できる", () => {
+    // main が先、依存パッケージ config が後(cli.tsの発見順と同じ)。JSのconstはhoistされない
+    // ので、codegen側が依存順(config → main)に並べ替えてから出さないとTDZエラーになる
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "config"\nfn main() { print(config.MaxRetries + 1) }`,
+      },
+      { pkg: "config", file: "config/c.mesh", source: `export MaxRetries := 3` },
+    ]);
+    expect(out).toBe("4\n");
+  });
+});
+
+describe("F-14: mesh/io + mesh/json(組み込みパッケージ)", () => {
+  test("json.parse → 判別可能unionとして絞り込み → json.stringifyで往復できる", () => {
+    const out = runSource(`import "mesh/json"
+fn main() {
+	r := json.parse("{\\"a\\": 1, \\"b\\": [true, null, \\"x\\"]}")
+	if r is error {
+		print("parse failed")
+		return
+	}
+	v := r
+	if v is { kind: "obj" } {
+		print(len(v.entries))
+	}
+	print(json.stringify(v))
+}`);
+    expect(out).toBe(`2\n{"a":1,"b":[true,null,"x"]}\n`);
+  });
+
+  test("json.parse: 壊れたJSONは 'error' になる(panicしない)", () => {
+    const out = runSource(`import "mesh/json"
+fn main() {
+	r := json.parse("{not valid json")
+	if r is error {
+		print("got error")
+		return
+	}
+	print("should not reach here")
+}`);
+    expect(out).toBe("got error\n");
+  });
+
+  test("json.Value{...} で構築してstringifyできる(利用者側からの構築)", () => {
+    const out = runSource(`import "mesh/json"
+fn main() {
+	v := json.Value{kind: "arr", items: [
+		json.Value{kind: "num", n: 1.0},
+		json.Value{kind: "str", s: "two"},
+		json.Value{kind: "bool", b: true},
+		json.Value{kind: "null"},
+	]}
+	print(json.stringify(v))
+}`);
+    expect(out).toBe(`[1,"two",true,null]\n`);
+  });
+
+  test("io.readFile: 実在するファイルを読める / 無いファイルは 'error'(panicしない)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-io-test-"));
+    const filePath = join(dir, "data.txt");
+    writeFileSync(filePath, "hello from disk");
+    const out = runSource(`import "mesh/io"
+fn main() {
+	ok := io.readFile("${filePath}")
+	if ok is error {
+		print("unexpected error")
+		return
+	}
+	print(ok)
+
+	missing := io.readFile("${filePath}.does-not-exist")
+	if missing is error {
+		print("missing handled")
+	}
+}`);
+    expect(out).toBe("hello from disk\nmissing handled\n");
+  });
+
+  test("io.args(): CLI経由で渡した引数がプログラムから見える", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-io-args-"));
+    const meshPath = join(dir, "main.mesh");
+    writeFileSync(
+      meshPath,
+      `import "mesh/io"\nfn main() {\n\tfor _, a := range io.args() {\n\t\tprint(a)\n\t}\n}`,
+    );
+    const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+    const proc = spawnSync(process.execPath, [CLI, "run", meshPath, "foo", "bar"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toBe("foo\nbar\n");
+  });
+
+  test("mesh/io, mesh/json 以外の mesh/* は未実装のまま(回帰確認)", () => {
+    const result = compile(`import "mesh/http"\nfn main() { print(1) }`);
+    expect(result.code).toBeNull();
+    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'mesh/http'");
   });
 });
 
@@ -1202,7 +1306,7 @@ describe("e2e", () => {
       name: string
     }
     fn main() {
-      items := Item[]{}
+      items: Item[] = []
       push(items, Item{name: "a"})
       push(items, Item{name: "b"})
       for _, it := range items {
@@ -1392,7 +1496,7 @@ describe("e2e", () => {
       ]
       isPaid := fn(o: Order) bool { return o.status == "paid" }
       paid := filter(orders, isPaid)
-      discounted := transform(paid, fn(o: Order) float { return o.amount * 0.9 })
+      discounted := map(paid, fn(o: Order) float { return o.amount * 0.9 })
       total := reduce(discounted, fn(acc: float, x: float) float { return acc + x }, 0.0)
       for _, o := range paid {
         print(o.summary())
@@ -1608,6 +1712,42 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     );
   });
 
+  test("panic: F-10 int演算がsafe integerの範囲を超えたら即停止", () => {
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tbig := 9007199254740991\n\tprint(big + 1)\n}`),
+    ).toContain("integer overflow");
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tbig := -9007199254740991\n\tprint(big - 1)\n}`),
+    ).toContain("integer overflow");
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tbig := 9007199254740991\n\tprint(big * 2)\n}`),
+    ).toContain("integer overflow");
+  });
+
+  test("F-9b: 複合代入 += -= *= /= %= が実行時にも正しく動く", () => {
+    expect(runSource(`fn main() {\n\tmut x := 10\n\tx += 5\n\tprint(x)\n}`)).toBe("15\n");
+    expect(runSource(`fn main() {\n\tmut x := 10\n\tx -= 3\n\tprint(x)\n}`)).toBe("7\n");
+    expect(runSource(`fn main() {\n\tmut x := 4\n\tx *= 3\n\tprint(x)\n}`)).toBe("12\n");
+    expect(runSource(`fn main() {\n\tmut x := 10\n\tx /= 3\n\tprint(x)\n}`)).toBe("3\n");
+    expect(runSource(`fn main() {\n\tmut x := 10\n\tx %= 3\n\tprint(x)\n}`)).toBe("1\n");
+    expect(runSource(`fn main() {\n\tmut s := "a"\n\ts += "b"\n\tprint(s)\n}`)).toBe("ab\n");
+  });
+
+  test("F-9b: 複合代入は配列の添字にも実行時に効く", () => {
+    expect(
+      runSource(`fn main() {\n\tmut nums := [1, 2, 3]\n\tnums[1] += 10\n\tprint(nums[1])\n}`),
+    ).toBe("12\n");
+  });
+
+  test("panic: 複合代入もsafe-integer検査・ゼロ除算検査を通る", () => {
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tmut big := 9007199254740991\n\tbig += 1\n\tprint(big)\n}`),
+    ).toContain("integer overflow");
+    expect(
+      runSourceExpectPanic(`fn main() {\n\tmut x := 10\n\tmut zero := 0\n\tx /= zero\n\tprint(x)\n}`),
+    ).toContain("integer division by zero");
+  });
+
   test("panic: 範囲外への書き込みも配列を黙って伸ばさない", () => {
     const stderr = runSourceExpectPanic(`fn main() {
       nums := [1]
@@ -1647,6 +1787,26 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
       }
     }`);
     expect(out).toBe("true\nfalse\n1\nnot found\n");
+  });
+
+  test("F-9d: get(arr, i) は範囲外でもpanicせず none を返す", () => {
+    const out = runSource(`fn main() {
+      nums := [10, 20, 30]
+      v := get(nums, 1)
+      if v is none {
+        print("none")
+      } else {
+        print(v)
+      }
+      w := get(nums, 99)
+      if w is none {
+        print("none")
+      } else {
+        print(w)
+      }
+      print(get(nums, -1) or -999)
+    }`);
+    expect(out).toBe("20\nnone\n-999\n");
   });
 
   test("標準ライブラリ第一弾: keys / values(mapの挿入順)", () => {
@@ -1746,10 +1906,10 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     expect(out).toBe("[4 5]\n[2 3 4 5]\n");
   });
 
-  test("標準ライブラリ第三弾: transformは要素の型を変えられる(int[] → string[])", () => {
+  test("標準ライブラリ第三弾: mapは要素の型を変えられる(int[] → string[])(F-8)", () => {
     const out = runSource(`fn main() {
       nums := [1, 2, 3]
-      labels := transform(nums, fn(n: int) string { return "n\${n}" })
+      labels := map(nums, fn(n: int) string { return "n\${n}" })
       print(labels)
     }`);
     expect(out).toBe("[n1 n2 n3]\n");
@@ -1767,7 +1927,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     expect(out).toBe("10\n1234\n");
   });
 
-  test("標準ライブラリ第三弾: filter→transform→reduceのパイプライン", () => {
+  test("標準ライブラリ第三弾: filter→map→reduceのパイプライン(F-8)", () => {
     const out = runSource(`fn isEven(n: int) bool {
       return n % 2 == 0
     }
@@ -1779,7 +1939,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     }
     fn main() {
       nums := [1, 2, 3, 4, 5, 6]
-      result := reduce(transform(filter(nums, isEven), double), sum, 0)
+      result := reduce(map(filter(nums, isEven), double), sum, 0)
       print(result)   // (2+4+6)*2 = 24
     }`);
     expect(out).toBe("24\n");
@@ -1869,7 +2029,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
       close(ch)
     }
     fn main() {
-      ch := chan<int>()
+      ch := chan<int>(none)
       spawn produce(ch)
       mut total := 0
       for {
@@ -1886,10 +2046,10 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
 
   test("channel仕様: close済みへの送信・二重closeはpanic", () => {
     expect(
-      runSourceExpectPanic(`fn main() {\n\tch := chan<int>()\n\tclose(ch)\n\tclose(ch)\n}`),
+      runSourceExpectPanic(`fn main() {\n\tch := chan<int>(none)\n\tclose(ch)\n\tclose(ch)\n}`),
     ).toContain("close of closed channel");
     expect(
-      runSourceExpectPanic(`fn main() {\n\tch := chan<int>()\n\tclose(ch)\n\tch <- 1\n}`),
+      runSourceExpectPanic(`fn main() {\n\tch := chan<int>(none)\n\tclose(ch)\n\tch <- 1\n}`),
     ).toContain("send on closed channel");
   });
 
@@ -1902,7 +2062,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     }
     fn main() {
       ch := chan<int>(1)
-      log := string[]{}
+      log: string[] = []
       spawn producer(ch, log)
       sleep(30)
       print(log)          // まだ "sent 1" だけのはず(2個目はブロック中)
@@ -1923,8 +2083,8 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
       ch <- msg
     }
     fn main() {
-      a := chan<string>()
-      b := chan<string>()
+      a := chan<string>(none)
+      b := chan<string>(none)
       spawn slowSend(a, "from a", 15)
       spawn slowSend(b, "from b", 60)
       msg := select {
@@ -1938,7 +2098,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
 
   test("channel仕様: select の _ (default) は非ブロッキングにする", () => {
     const out = runSource(`fn main() {
-      empty := chan<int>()
+      empty := chan<int>(none)
       r := select {
         v := <-empty => "unexpected"
         _ => "nothing ready"
@@ -1950,7 +2110,7 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
 
   test("channel仕様: selectでもclosedをmatchで扱える", () => {
     const out = runSource(`fn main() {
-      ch := chan<int>()
+      ch := chan<int>(none)
       close(ch)
       r := select {
         v := <-ch => match v {

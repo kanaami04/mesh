@@ -36,6 +36,7 @@ export type DiagnosticCode =
   | "division-by-zero"
   // 可変性
   | "immutable-assignment"
+  | "compound-assign-on-map"
   // 関数・呼び出し
   | "argument-count"
   | "not-callable"
@@ -53,6 +54,8 @@ export type DiagnosticCode =
   | "missing-fields"
   | "discriminated-union-no-match"
   | "discriminated-union-ambiguous"
+  | "discriminated-union-tag-required"
+  | "discriminated-union-tag-missing"
   | "method-field-conflict"
   | "duplicate-method"
   | "invalid-receiver-type"
@@ -94,6 +97,8 @@ export type DiagnosticCode =
   | "syntax-error"
   | "import-order"
   | "invalid-top-level-declaration"
+  | "top-level-mut-not-allowed"
+  | "chan-capacity-required"
   | "invalid-import-path"
   | "bare-struct-shape"
   | "method-export-redundant"
@@ -105,6 +110,7 @@ export type DiagnosticCode =
   | "invalid-spawn-target"
   | "multiple-select-defaults"
   | "postfix-bang-renamed"
+  | "empty-typed-array-literal-removed"
   // 字句(レキサ)
   | "unterminated-string"
   | "unknown-escape"
@@ -207,6 +213,11 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
   "immutable-assignment":
     "This binding was declared without 'mut', so it can't be reassigned or have '++'/'--' applied to " +
     "it. Add 'mut' to the declaration if it should be mutable.",
+  "compound-assign-on-map":
+    "Compound assignment (+=, -=, *=, /=, %=) isn't allowed on a map entry because reading it can " +
+    "return 'none' for a missing key — computing 'current op value' would silently produce garbage " +
+    "for a key that doesn't exist yet. Read with an explicit fallback first: " +
+    "'m[k] = (m[k] or fallback) op value'.",
   "argument-count":
     "The call passes a different number of arguments than the function/method/builtin expects.",
   "not-callable":
@@ -244,12 +255,29 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "A struct literal must set every field of the struct (Mesh has no zero values / default field " +
     "values) — the message lists which ones are missing.",
   "discriminated-union-no-match":
-    "The set of field names written in this struct literal doesn't exactly match any member of the " +
-    "discriminated union named. Check for typos or a missing/extra field.",
+    "For a union with 2+ anonymous '{...}' members (F-7): no member's tag value matches the one " +
+    "written in this struct literal — check the tag value for a typo. For a union of independently " +
+    "named structs (each constructed by its own name, e.g. 'Circle | Square'): the written field " +
+    "set doesn't exactly match any member's fields — check for typos or a missing/extra field.",
   "discriminated-union-ambiguous":
-    "The set of field names matches more than one member of the discriminated union, and the field " +
-    "values' types don't disambiguate further. Add a more specific field value, or rename fields so " +
-    "each member's shape is unique.",
+    "Only possible for a union of independently named structs (each normally constructed by its own " +
+    "name, e.g. 'Circle | Square') — a union with 2+ anonymous '{...}' members always resolves by a " +
+    "required tag value instead (F-7), which can't be ambiguous. Here, the written field set matches " +
+    "more than one member and the field values' types don't disambiguate further — add a more " +
+    "specific field value, or rename fields so each member's shape is unique.",
+  "discriminated-union-tag-required":
+    "A union with 2+ anonymous '{...}' struct members (constructed via the union's own name, e.g. " +
+    "'MyUnion{...}') must have a tag field: one field name present in every member, with a distinct " +
+    "string-literal type in each (e.g. kind: \"ok\" / kind: \"notFound\") — F-7. Without one, " +
+    "constructing a member by field set alone is fragile: adding a member elsewhere with an " +
+    "overlapping field set could silently make an existing literal ambiguous or resolve to the wrong " +
+    "member. Add a tag field, like the well-known 'kind' convention, with a unique literal value per " +
+    "member. (This doesn't apply to a union of independently named structs, like 'Circle | Square' " +
+    "— each already has its own unambiguous name to construct by.)",
+  "discriminated-union-tag-missing":
+    "This discriminated union's struct literal must set its tag field to a string-literal value so " +
+    "the member can be identified (F-7) — e.g. write 'kind: \"ok\"', not a computed or non-literal " +
+    "expression for that field.",
   "method-field-conflict":
     "A method declaration's name is already used by a field on the same struct — methods and fields " +
     "share one namespace on a given struct.",
@@ -352,8 +380,17 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
   "import-order":
     "All 'import' declarations must appear before any other top-level declaration in the file.",
   "invalid-top-level-declaration":
-    "Only 'import', 'fn', 'struct', and 'type' (optionally preceded by 'export' and/or 'error') are " +
-    "allowed at the top level of a file.",
+    "Only 'import', 'fn', 'struct', 'type' (optionally preceded by 'export' and/or 'error'), and " +
+    "top-level constants ('name := value', F-9c) are allowed at the top level of a file.",
+  "top-level-mut-not-allowed":
+    "Top-level bindings are always immutable, so 'mut' can't be used on one (F-9c). Mesh has no " +
+    "mutable globals — if you need shared mutable state, pass it as a parameter instead.",
+  "chan-capacity-required":
+    "'chan<T>()' no longer defaults to an unbounded buffer (F-11) — an unbounded channel let a " +
+    "detached background task leak memory forever with no syntactic warning sign, unlike a leaked " +
+    "goroutine (which the 2-tier ownership design already makes impossible). Write 'chan<T>(none)' " +
+    "to still choose an unbounded channel explicitly, or 'chan<T>(n)' for one that blocks sends " +
+    "once n values are buffered.",
   "invalid-import-path":
     "The import path string is invalid — it can't be empty, and it can't use string interpolation " +
     "(it must be a plain string literal).",
@@ -387,6 +424,11 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "Postfix '!' for none/error propagation was renamed to '?' (to match Rust's identical operator, " +
     "and to stop colliding with force-unwrap/non-null-assertion meanings from other languages). Replace " +
     "'!' with '?' at the end of the expression.",
+  "empty-typed-array-literal-removed":
+    "Empty typed array literals ('Todo[]{}') were removed — they duplicated the plain empty array " +
+    "'[]', which already becomes the right type wherever one is expected (a ':'-annotated declaration " +
+    "or a function's declared return type). Write 'xs: Todo[] = []' instead (non-empty typed array " +
+    "literals like 'Todo[]{a, b}' are unaffected).",
   "unterminated-string":
     "A string literal was opened with '\"' but the line ended (or the file ended) before a matching " +
     "closing '\"' was found.",

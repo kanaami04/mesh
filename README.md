@@ -21,7 +21,7 @@ fn worker(id: int, ch: chan<string>) {
 }
 
 fn main() {
-	ch := chan<string>()
+	ch := chan<string>(none)
 
 	for i := 1; i <= 3; i++ {
 		spawn worker(i, ch)   // goroutine 風の並行実行
@@ -237,7 +237,7 @@ wait {                 // 関数の出口より早い時点でまとめて待ち
 	spawn g(2)
 }
 
-ch := chan<string>()   // チャネル: 複数タスクの結果を集めるなど
+ch := chan<string>(none)   // チャネル: 複数タスクの結果を集めるなど(容量は常に明示。F-11)
 ch <- "hello"          // 送信
 msg := <-ch            // 受信(値が来るまで待つ)
 ```
@@ -250,7 +250,7 @@ Goで有名な「発射しっぱなしのgoroutineリーク」は構文的に書
 ### channel仕様: 容量・close・select
 
 ```go
-ch := chan<int>()      // 引数無し = 無制限バッファ(送信は常に即完了)
+ch := chan<int>(none)  // 明示的に無制限バッファを選ぶ(送信は常に即完了。容量省略はコンパイルエラー)
 ch := chan<int>(0)     // 容量0 = 真の同期(受信者が現れるまで送信ブロック)
 ch := chan<int>(3)     // 容量3 = バッファが3個埋まったら送信ブロック(Go互換の本物のブロッキング)
 
@@ -298,7 +298,8 @@ for { ... }                       // 無限ループ(break で脱出)
 | `trim(s)` / `upper(s)` / `lower(s)` | 前後空白除去 / 大文字化 / 小文字化 |
 | `toInt(s)` | 文字列→整数(`int \| error`。パース失敗時は`error`) |
 | `filter(arr, pred)` | 条件に合う要素だけの新しい配列 |
-| `transform(arr, f)` | 各要素を変換した新しい配列(要素の型が変わってもよい。`map`の代わり) |
+| `map(arr, f)` | 各要素を変換した新しい配列(要素の型が変わってもよい) |
+| `get(arr, i)` | 範囲外でもpanicしない安全な読み(`T \| none`) |
 | `reduce(arr, f, init)` | 畳み込み(`f: fn(Acc, T) Acc`) |
 | `close(ch)` | チャネルをclose(以後の受信は`closed`) |
 
@@ -344,9 +345,10 @@ Mesh の関数はすべて `async function` として出力され、呼び出し
 ### Go との意味論の違い(割り切り)
 
 - 並行処理は**シングルスレッド**(JS のイベントループ上)。並列(マルチコア)ではない
-- `int` は JS の number(53bit 整数)。`int` 同士の除算は切り捨て
-- チャネルの既定は容量**無制限**バッファ(`chan<T>()`)。Go の既定(容量0の同期)が欲しいときは
-  `chan<T>(0)` と明示する
+- `int` は JS の number(53bit 整数)。`int` 同士の除算は切り捨て。演算結果が safe integer の
+  範囲(`Number.isSafeInteger`)を超えたら panic で即停止する(無音の桁あふれを許さない)
+- チャネルの容量は常に明示必須(`chan<T>()` はコンパイルエラー)。無制限バッファが欲しいときは
+  `chan<T>(none)`、Go の既定(容量0の同期)が欲しいときは `chan<T>(0)` と書く
 
 ## ロードマップ
 

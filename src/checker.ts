@@ -5,6 +5,7 @@
 
 import type { Block, Expr, FnDecl, FnExpr, MemberExpr, Program, Stmt, TypeNode } from "./ast";
 import type { Diagnostic, DiagnosticCode, Fix } from "./diagnostic-codes";
+import { BUILTIN_PACKAGES } from "./stdlib";
 import type { Pos } from "./token";
 import {
   ANY,
@@ -25,6 +26,7 @@ import {
   unionOf,
   unionWithout,
   widenLiteral,
+  type StructField,
   type Type,
 } from "./types";
 
@@ -38,9 +40,9 @@ export type { Diagnostic, DiagnosticCode, Fix } from "./diagnostic-codes";
 // 組み込み関数。特殊な検査(可変長引数など)は checkCall 内で行う。
 export const BUILTINS = new Set([
   "print", "len", "push", "str", "error", "sleep", "delete",
-  "contains", "indexOf", "keys", "values", "sort",
+  "contains", "indexOf", "get", "keys", "values", "sort",
   "split", "join", "trim", "upper", "lower", "toInt",
-  "filter", "transform", "reduce",
+  "filter", "map", "reduce", // F-8: transform → map(文脈依存キーワード化により 'map' の予約と両立)
   "close",
 ]);
 
@@ -63,9 +65,10 @@ export interface ParsedModule {
 
 // パッケージが外へ見せる(または隠している)シンボル。exported フラグごと持つことで
 // 「存在しない」と「exportされていない」を別のエラーメッセージにできる(P4)
-interface PackageSymbols {
+export interface PackageSymbols {
   types: Map<string, { type: Type; exported: boolean }>;
   fns: Map<string, { type: Type; exported: boolean }>;
+  consts: Map<string, { type: Type; exported: boolean }>; // F-9c: トップレベル定数
 }
 
 // 単一ファイル(従来のAPI)。"main" パッケージ1ファイルとして検査する
@@ -108,7 +111,7 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
           });
           continue;
         }
-        if (!packages.has(imp.alias)) {
+        if (!packages.has(imp.alias) && !BUILTIN_PACKAGES.has(imp.path)) {
           diagnostics.push({
             pos: imp.pos,
             code: "unknown-package",
@@ -117,7 +120,10 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
           });
           continue;
         }
-        set.add(imp.alias);
+        // F-14: 組み込みパッケージ(mesh/io, mesh/json)は.messソースを持たないので
+        // ユーザーパッケージの依存グラフ(循環検出・検査順)には含めない — registryへは
+        // このループの外で事前に登録済み
+        if (packages.has(imp.alias)) set.add(imp.alias);
       }
     }
     deps.set(pkg, set);
@@ -151,8 +157,13 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
     if (!visit(pkg, [])) return diagnostics;
   }
 
-  // 依存順に検査。メソッド表は全パッケージ共有(struct名はパッケージ修飾済みで衝突しない)
+  // 依存順に検査。メソッド表は全パッケージ共有(struct名はパッケージ修飾済みで衝突しない)。
+  // F-14: 組み込みパッケージ(.messソースを持たない)は事前にエイリアス名でregistryへ登録しておく
+  // (path "mesh/io" → alias "io"。checkPackageは通さない — 検査すべきMeshソースが無いため)
   const registry = new Map<string, PackageSymbols>();
+  for (const [path, symbols] of BUILTIN_PACKAGES) {
+    registry.set(path.split("/").pop()!, symbols);
+  }
   const sharedMethods = new Map<string, Map<string, Type>>();
   for (const pkg of order) {
     const files = packages.get(pkg)!;
@@ -198,6 +209,7 @@ class Checker {
   // このパッケージのトップレベル宣言(exports収集用): 名前 → exportedフラグ
   private typeExported = new Map<string, boolean>();
   private fnDecls = new Map<string, { type: Type; exported: boolean }>();
+  private constDecls = new Map<string, { type: Type; exported: boolean }>(); // F-9c
   // error type X = ... / error struct X { ... }(F-2後半)で宣言された名前の集合。
   // resolveAliasがこれを見て、そのエイリアスの構造体メンバーに isErrorType を立てる
   private errorTypeNames = new Set<string>();
@@ -404,6 +416,28 @@ class Checker {
       }
       union.members = flattened.kind === "union" ? flattened.members : [flattened];
       if (this.errorTypeNames.has(name)) this.tagErrorMembers(union, null, name, pos);
+      // F-7: 判別可能union(C-1の無名{...}メンバーが2個以上)は必ずタグフィールドを持つ。
+      // 構築時(structLit)はこのタグの値だけを見てメンバーを特定する(フィールド集合は見ない)。
+      // 名前付きstruct同士のunion(type Shape = Circle | Square)はそれぞれ自分の名前で構築される
+      // ので対象外 — フィールド集合の遠隔作用が起きるのは「union自身の名前で構築する無名メンバー」
+      // だけであり、名前付きメンバーには元々この曖昧さが無い
+      const anonymousMembers = union.members.filter(
+        (m): m is Type & { kind: "struct" } => m.kind === "struct" && m.name === "(anonymous)",
+      );
+      if (anonymousMembers.length >= 2) {
+        const tag = this.findDiscriminantTag(anonymousMembers);
+        if (tag === null) {
+          this.error(
+            pos,
+            "discriminated-union-tag-required",
+            `discriminated union '${name}' needs a tag field — every struct member must share one ` +
+              `field with a distinct string-literal value (e.g. kind: "...") so a member can be ` +
+              `identified from its tag alone, without comparing against the other members (F-7)`,
+          );
+        } else {
+          union.discriminantTag = tag;
+        }
+      }
       return union;
     }
     if (this.resolvingAliases.has(name)) {
@@ -416,6 +450,20 @@ class Checker {
     this.resolvedAliases.set(name, resolved);
     if (this.errorTypeNames.has(name)) this.tagErrorMembers(resolved, null, name, pos);
     return resolved;
+  }
+
+  // F-7: 判別可能unionのタグフィールド名を求める。「全メンバーに存在し、リテラル型(文字列
+  // リテラルのみが存在)で、値が互いに異なる」フィールドが1つでもあればそれを使う(複数の
+  // 候補があっても最初に見つかったものでよい — どれを選んでも局所解決という性質は変わらない)。
+  // 無ければ null(判別可能unionとして構築できない)
+  private findDiscriminantTag(members: (Type & { kind: "struct" })[]): string | null {
+    for (const name of members[0].fields.map((f) => f.name)) {
+      const fields = members.map((m) => m.fields.find((f) => f.name === name));
+      if (fields.some((f) => f === undefined || f.type.kind !== "literal")) continue;
+      const values = fields.map((f) => (f!.type as Type & { kind: "literal" }).value);
+      if (new Set(values).size === members.length) return name;
+    }
+    return null;
   }
 
   // error type/struct 宣言(F-2後半)で名付けられたエイリアスの各メンバーに isErrorType を立てる。
@@ -517,6 +565,28 @@ class Checker {
       }
     }
 
+    // F-9c: トップレベル定数。関数シグネチャの後・関数本体の検査より前に登録するので、
+    // 関数本体からは宣言順に関係なく参照できる(関数同士の相互参照と同じ扱い)。
+    // 定数が他の定数を参照する場合はJSのconst文になる都合上、先に書かれている必要がある
+    // (このfor自体がファイル順・宣言順に処理するので、その順序がそのまま要求になる)
+    for (const { file, program } of files) {
+      this.currentFile = file;
+      for (const c of program.consts) {
+        const declared = c.typeNode ? this.resolveType(c.typeNode) : null;
+        const valueType = this.checkExprSingle(c.value);
+        if (declared && !assignable(valueType, declared)) {
+          this.error(
+            c.value.pos,
+            "type-mismatch",
+            `cannot use ${typeToString(valueType)} as ${typeToString(declared)}`,
+          );
+        }
+        const finalType = declared ?? valueType;
+        this.declare(c.name, finalType, c.pos, false);
+        this.constDecls.set(c.name, { type: finalType, exported: c.exported });
+      }
+    }
+
     if (opts.requireMain) {
       const withMain = files.find(({ program }) =>
         program.fns.some((f) => f.name === "main" && !f.receiver),
@@ -548,7 +618,7 @@ class Checker {
       const type = this.resolvedAliases.get(name);
       if (type) types.set(name, { type, exported });
     }
-    this.registry.set(this.pkg, { types, fns: this.fnDecls });
+    this.registry.set(this.pkg, { types, fns: this.fnDecls, consts: this.constDecls });
     return this.diagnostics;
   }
 
@@ -678,7 +748,30 @@ class Checker {
             if (container?.kind === "map") expected = container.value;
           }
           const valueType = types[i] ?? ANY;
-          if (!assignable(valueType, expected)) {
+          // F-9b: 複合代入(x += 1 等)は「現在値 op 右辺」を計算し、結果を代入先へ戻せるか検査する。
+          // binary式の算術検査(checkArithOp)を共有し、safe-integer等のフラグはこの文自体へ立てる
+          if (stmt.compoundOp && target.kind === "index" && target.target.resolvedType?.kind === "map") {
+            // mapのキーは存在しないかもしれない(読みは常に V | none)。「現在値 + 右辺」を
+            // 無条件に計算すると欠損キーが黙って壊れた値になるので、複合代入自体を禁止する
+            this.error(
+              stmt.pos,
+              "compound-assign-on-map",
+              `cannot use '${stmt.compoundOp}=' on a map entry — the key may not exist yet; ` +
+                `write 'm[k] = (m[k] or fallback) ${stmt.compoundOp} value' instead`,
+            );
+          } else if (stmt.compoundOp) {
+            const arith = this.checkArithOp(stmt.compoundOp, expected, stmt.values[i], valueType, stmt.pos);
+            if (arith.intDiv) stmt.intDiv = true;
+            if (arith.intMod) stmt.intMod = true;
+            if (arith.intArith) stmt.intArith = true;
+            if (!assignable(arith.type, expected)) {
+              this.error(
+                stmt.pos,
+                "type-mismatch",
+                `cannot assign ${typeToString(arith.type)} to ${typeToString(expected)}`,
+              );
+            }
+          } else if (!assignable(valueType, expected)) {
             this.error(
               stmt.pos,
               "type-mismatch",
@@ -1007,7 +1100,7 @@ class Checker {
           this.error(
             expr.pos,
             "prop-context-structured-error",
-            `'?' with context can't convert ${structured.map(typeToString).join(" | ")} to a message` +
+            `'?' with context can't convert ${structured.map((t) => typeToString(t)).join(" | ")} to a message` +
               ` — use plain '?' (no context) to propagate it as-is, or handle it with 'is'/'match' first`,
           );
         } else {
@@ -1253,43 +1346,84 @@ class Checker {
         const fieldTypes = expr.fields.map((f) => this.checkExprSingle(f.value));
 
         let t = resolved;
-        // 判別可能union(C-1): GetUserResponse{kind: "ok", user: u} のように、union型の
-        // 名前をそのまま struct リテラルの名前として使う。書かれたフィールド集合が
-        // ちょうど一致するメンバーへ絞り込み、複数残るならフィールド値の型(判別フィールドの
-        // 文字列リテラル値など)でさらに絞り込んで1つに特定する
+        // 判別可能union(C-1、F-7でタグ必須化): GetUserResponse{kind: "ok", user: u} のように、
+        // union型の名前をそのまま struct リテラルの名前として使う。
+        // 無名{...}メンバー(union自身の名前でしか構築できない — フィールド集合の遠隔作用が
+        // 起きるのはここだけ)が2個以上あれば、書かれたタグフィールドの値だけを見てメンバーを
+        // 特定する(フィールド集合は一切見ない)。名前付きstruct同士のunion(type Shape = Circle
+        // | Square)はそれぞれ自分の名前で構築されるので対象外 — 従来どおりフィールド集合で解決する
         if (resolved.kind === "union") {
-          const fieldNameSet = new Set(expr.fields.map((f) => f.name));
-          const structMembers = resolved.members.filter((m) => m.kind === "struct");
-          let candidates = structMembers.filter((m) => {
-            if (m.kind !== "struct") return false;
-            const memberNames = new Set(m.fields.map((f) => f.name));
-            return memberNames.size === fieldNameSet.size && [...fieldNameSet].every((n) => memberNames.has(n));
-          });
-          if (candidates.length > 1) {
-            candidates = candidates.filter(
-              (m) =>
-                m.kind === "struct" &&
+          const structMembers = resolved.members.filter((m): m is Type & { kind: "struct" } => m.kind === "struct");
+          const anonymousMembers = structMembers.filter((m) => m.name === "(anonymous)");
+          if (anonymousMembers.length >= 2) {
+            if (!resolved.discriminantTag) {
+              // 型宣言自体がタグ不足で既にエラー報告済み(discriminated-union-tag-required)。
+              // ここで二重にエラーを出さず黙って諦める
+              return ANY;
+            }
+            const tagName = resolved.discriminantTag;
+            const tagIndex = expr.fields.findIndex((f) => f.name === tagName);
+            const tagType = tagIndex === -1 ? null : fieldTypes[tagIndex];
+            if (tagType === null || tagType.kind !== "literal") {
+              this.error(
+                expr.pos,
+                "discriminated-union-tag-missing",
+                `'${expr.name}{...}' needs its tag field '${tagName}' set to select a member ` +
+                  `(e.g. ${expr.name}{ ${tagName}: "...", ... })`,
+              );
+              return ANY;
+            }
+            const match = anonymousMembers.find((m) => {
+              const f = m.fields.find((f) => f.name === tagName);
+              return f?.type.kind === "literal" && f.type.value === tagType.value;
+            });
+            if (!match) {
+              const validValues = anonymousMembers
+                .map((m) => m.fields.find((f) => f.name === tagName))
+                .filter((f): f is StructField & { type: Type & { kind: "literal" } } =>
+                  f !== undefined && f.type.kind === "literal",
+                )
+                .map((f) => `"${f.type.value}"`)
+                .join(" | ");
+              this.error(
+                expr.pos,
+                "discriminated-union-no-match",
+                `no member of '${expr.name}' has ${tagName}: "${tagType.value}" (valid ${tagName} values: ${validValues})`,
+              );
+              return ANY;
+            }
+            t = match;
+          } else if (structMembers.length <= 1) {
+            t = structMembers[0] ?? ANY;
+          } else {
+            // 名前付きstruct同士のunion(無名メンバーは1個以下): 従来どおりフィールド集合で解決
+            const fieldNameSet = new Set(expr.fields.map((f) => f.name));
+            let candidates = structMembers.filter((m) => {
+              const memberNames = new Set(m.fields.map((f) => f.name));
+              return memberNames.size === fieldNameSet.size && [...fieldNameSet].every((n) => memberNames.has(n));
+            });
+            if (candidates.length > 1) {
+              candidates = candidates.filter((m) =>
                 expr.fields.every((f, i) => {
                   const decl = m.fields.find((d) => d.name === f.name);
                   return decl !== undefined && assignable(fieldTypes[i], decl.type);
                 }),
-            );
+              );
+            }
+            if (candidates.length !== 1) {
+              const shapes = structMembers.map((m) => `{ ${m.fields.map((f) => f.name).join(", ")} }`).join(" | ");
+              this.error(
+                expr.pos,
+                candidates.length === 0 ? "discriminated-union-no-match" : "discriminated-union-ambiguous",
+                candidates.length === 0
+                  ? `no member of '${expr.name}' matches the field(s) {${[...fieldNameSet].join(", ")}}` +
+                      (shapes ? ` (union members: ${shapes})` : "")
+                  : `ambiguous — multiple members of '${expr.name}' match the field(s) {${[...fieldNameSet].join(", ")}}`,
+              );
+              return ANY;
+            }
+            t = candidates[0];
           }
-          if (candidates.length !== 1) {
-            const shapes = structMembers
-              .map((m) => (m.kind === "struct" ? `{ ${m.fields.map((f) => f.name).join(", ")} }` : ""))
-              .join(" | ");
-            this.error(
-              expr.pos,
-              candidates.length === 0 ? "discriminated-union-no-match" : "discriminated-union-ambiguous",
-              candidates.length === 0
-                ? `no member of '${expr.name}' matches the field(s) {${[...fieldNameSet].join(", ")}}` +
-                    (shapes ? ` (union members: ${shapes})` : "")
-                : `ambiguous — multiple members of '${expr.name}' match the field(s) {${[...fieldNameSet].join(", ")}}`,
-            );
-            return ANY;
-          }
-          t = candidates[0];
         }
         if (t.kind === "any") return ANY; // 解決自体が失敗(未知/未export)— エラーは報告済み
         if (t.kind !== "struct") {
@@ -1348,10 +1482,15 @@ class Checker {
       }
 
       case "chanExpr": {
-        if (expr.capacity) {
+        // F-11: capacityは常に必須。'none'なら無制限、それ以外はintでなければならない
+        if (expr.capacity.kind !== "none") {
           const cap = this.checkExprSingle(expr.capacity);
           if (!typeEquals(cap, INT) && cap.kind !== "any") {
-            this.error(expr.capacity.pos, "type-mismatch", `channel capacity must be int, got ${typeToString(cap)}`);
+            this.error(
+              expr.capacity.pos,
+              "type-mismatch",
+              `channel capacity must be int or none, got ${typeToString(cap)}`,
+            );
           }
         }
         return { kind: "chan", elem: this.resolveType(expr.elem) };
@@ -1419,35 +1558,51 @@ class Checker {
       return BOOL;
     }
 
-    // 算術演算: + - * / %
+    // 算術演算: + - * / %(binary式とF-9bの複合代入 += 等で共有 — checkArithOp参照)
+    const arith = this.checkArithOp(op as "+" | "-" | "*" | "/" | "%", left, expr.right, right, expr.pos);
+    if (arith.intDiv) expr.intDiv = true;
+    if (arith.intMod) expr.intMod = true;
+    if (arith.intArith) expr.intArith = true;
+    return arith.type;
+  }
+
+  // 算術演算(+ - * / %)の型検査。binary式の算術分岐とF-9bの複合代入(+=など)が共有する。
+  // rightExpr は0除算リテラル検査に使う実際のAST(型だけでは "0" という値まで分からない)。
+  // フラグ(intDiv/intMod/intArith)は呼び出し側のASTノード(binary式 or Assign文)へ立てる
+  private checkArithOp(
+    op: "+" | "-" | "*" | "/" | "%",
+    left: Type,
+    rightExpr: Expr,
+    right: Type,
+    pos: Pos,
+  ): { type: Type; intDiv?: boolean; intMod?: boolean; intArith?: boolean } {
     if (op === "+" && isStringy(left) && isStringy(right)) {
-      return STRING;
+      return { type: STRING };
     }
     if (isNumeric(left) && isNumeric(right)) {
       const isInt = typeEquals(left, INT) && typeEquals(right, INT);
-      if (op === "/" && isInt) expr.intDiv = true; // int同士の除算は切り捨て+ゼロ検査
-      if (op === "%" && isInt) expr.intMod = true;
       // リテラルの 0 で割るのは実行するまでもなくバグ。コンパイル時に弾く
-      if (isInt && (op === "/" || op === "%") && expr.right.kind === "int" && expr.right.value === "0") {
-        this.error(
-          expr.right.pos,
-          "division-by-zero",
-          `integer ${op === "/" ? "division" : "modulo"} by zero`,
-        );
+      if (isInt && (op === "/" || op === "%") && rightExpr.kind === "int" && rightExpr.value === "0") {
+        this.error(rightExpr.pos, "division-by-zero", `integer ${op === "/" ? "division" : "modulo"} by zero`);
       }
-      if (left.kind === "any" || right.kind === "any") return ANY;
-      return isInt ? INT : FLOAT;
+      if (left.kind === "any" || right.kind === "any") return { type: ANY };
+      return {
+        type: isInt ? INT : FLOAT,
+        intDiv: op === "/" && isInt, // int同士の除算は切り捨て+ゼロ検査
+        intMod: op === "%" && isInt, // int同士の剰余はゼロ検査
+        intArith: isInt && (op === "+" || op === "-" || op === "*"), // F-10: safe-integer検査
+      };
     }
-    if (left.kind === "any" || right.kind === "any") return ANY;
+    if (left.kind === "any" || right.kind === "any") return { type: ANY };
     this.error(
-      expr.pos,
+      pos,
       "invalid-operation",
       `invalid operation: ${typeToString(left)} ${op} ${typeToString(right)}` +
         (op === "+" && (typeEquals(left, STRING) || typeEquals(right, STRING))
           ? " (hint: use str() to convert values to string)"
           : ""),
     );
-    return ANY;
+    return { type: ANY };
   }
 
   // 判別可能union用: パターンが構造体型メンバーの「部分形」として一致するか。
@@ -1543,7 +1698,7 @@ class Checker {
         this.error(
           expr.pos,
           "match-not-exhaustive",
-          `match is not exhaustive — missing: ${missing.map(typeToString).join(", ")}` +
+          `match is not exhaustive — missing: ${missing.map((t) => typeToString(t)).join(", ")}` +
             ` (add arms for them, or a '_' arm)`,
         );
       }
@@ -1602,7 +1757,8 @@ class Checker {
     if (this.lookup(alias) !== undefined) return null; // ローカル束縛が優先(declareが衝突を防いでいる)
     if (!this.importAliases.has(alias)) return null;
     const symbols = this.registry.get(alias);
-    const fn = symbols?.fns.get(member.name);
+    // F-9c: 関数だけでなくトップレベル定数(pkg.constName)も同じ経路で解決する
+    const fn = symbols?.fns.get(member.name) ?? symbols?.consts.get(member.name);
     if (!fn) {
       if (symbols?.types.get(member.name)?.exported) {
         this.error(
@@ -1614,7 +1770,7 @@ class Checker {
         this.error(
           member.pos,
           "unknown-package-function",
-          `package '${alias}' has no exported function '${member.name}'`,
+          `package '${alias}' has no exported function or constant '${member.name}'`,
         );
       }
       member.resolvedPkg = alias;
@@ -2010,6 +2166,23 @@ class Checker {
         }
         return unionOf([INT, NONE]);
       }
+      case "get": {
+        // F-9d: 配列の範囲外アクセスはpanicが正しいことも多いが(ユーザー入力由来のindex等)、
+        // mapの欠損キーと同じく型で強制される安全な読みも用意する(arr[i]はpanic用途のまま残す)
+        if (expectArity(2)) {
+          const arr = args[0];
+          if (arr.kind === "array") {
+            if (!typeEquals(args[1], INT) && args[1].kind !== "any") {
+              this.error(expr.args[1].pos, "invalid-index-type", `index must be int, got ${typeToString(args[1])}`);
+            }
+            return unionOf([arr.elem, NONE]);
+          }
+          if (arr.kind !== "any") {
+            this.error(expr.args[0].pos, "builtin-arg-type", `get() requires an array, got ${typeToString(arr)}`);
+          }
+        }
+        return ANY;
+      }
       case "keys": {
         if (!expectArity(1)) return { kind: "array", elem: ANY };
         const m = args[0];
@@ -2137,7 +2310,7 @@ class Checker {
         }
         return args[0]?.kind === "array" ? args[0] : ANY;
       }
-      case "transform": {
+      case "map": { // F-8: 旧transform。高階関数のmap-over-array
         if (expectArity(2)) {
           const arr = args[0];
           const f = args[1];
@@ -2147,18 +2320,18 @@ class Checker {
                 this.error(
                   expr.args[1].pos,
                   "callback-signature-mismatch",
-                  `transform() callback must take a single ${typeToString(arr.elem)} parameter`,
+                  `map() callback must take a single ${typeToString(arr.elem)} parameter`,
                 );
               }
             } else if (f.kind !== "any") {
               this.error(
                 expr.args[1].pos,
                 "builtin-arg-type",
-                `transform() second argument must be a function, got ${typeToString(f)}`,
+                `map() second argument must be a function, got ${typeToString(f)}`,
               );
             }
           } else if (arr.kind !== "any") {
-            this.error(expr.args[0].pos, "builtin-arg-type", `transform() requires an array, got ${typeToString(arr)}`);
+            this.error(expr.args[0].pos, "builtin-arg-type", `map() requires an array, got ${typeToString(arr)}`);
           }
         }
         const f = args[1];

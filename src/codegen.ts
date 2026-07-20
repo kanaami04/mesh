@@ -7,7 +7,7 @@
 // - go f(x) は await しない = 裏で走り続ける Promise になる。これが goroutine。
 // - 多値戻り `return a, err` は配列 [a, err]、受け側 `v, err := f()` は分割代入。
 
-import type { Block, Expr, FnDecl, MatchPattern, Program, Stmt, TypeNode } from "./ast";
+import type { Assign, Block, ConstDecl, Expr, FnDecl, MatchPattern, Program, Stmt, TypeNode } from "./ast";
 import { BUILTINS } from "./checker";
 import { PRELUDE } from "./runtime";
 import type { Pos } from "./token";
@@ -48,9 +48,14 @@ class Codegen {
   }
 
   generateAll(modules: { pkg: string; file: string; program: Program }[]): string {
+    // F-9c: トップレベル定数はJSの const として出す — 関数宣言と違いhoistされないので、
+    // パッケージを依存順(importされる側が先)に並べ直してから出力する必要がある
+    // (checkerが循環は無いことを既に保証しているので、ここでは単純なDFSでよい)
+    const orderedModules = this.sortModulesByDependency(modules);
+
     // パッケージごとのトップレベル関数名を先に集める(ファイル横断)
     const fnsByPkg = new Map<string, Set<string>>();
-    for (const m of modules) {
+    for (const m of orderedModules) {
       const set = fnsByPkg.get(m.pkg) ?? new Set();
       for (const fn of m.program.fns) {
         if (!fn.receiver) set.add(fn.name);
@@ -60,10 +65,11 @@ class Codegen {
 
     this.out.push(PRELUDE.trimEnd());
     this.out.push("");
-    for (const m of modules) {
+    for (const m of orderedModules) {
       this.file = m.file;
       this.pkg = m.pkg;
       this.localFns = fnsByPkg.get(m.pkg) ?? new Set();
+      for (const c of m.program.consts) this.genConstDecl(c);
       for (const fn of m.program.fns) {
         this.genFnDecl(fn);
         this.out.push("");
@@ -71,6 +77,37 @@ class Codegen {
     }
     this.out.push("main().catch(__panic);");
     return this.out.join("\n") + "\n";
+  }
+
+  // パッケージを依存順に並べ替える(importされる側が先)。同一パッケージ内のファイル順は保つ
+  private sortModulesByDependency<M extends { pkg: string; program: Program }>(modules: M[]): M[] {
+    const byPkg = new Map<string, M[]>();
+    for (const m of modules) {
+      const list = byPkg.get(m.pkg) ?? [];
+      list.push(m);
+      byPkg.set(m.pkg, list);
+    }
+    const importsOf = new Map<string, Set<string>>();
+    for (const [pkg, files] of byPkg) {
+      const set = new Set<string>();
+      for (const m of files) for (const imp of m.program.imports) set.add(imp.alias);
+      importsOf.set(pkg, set);
+    }
+    const order: string[] = [];
+    const done = new Set<string>();
+    const visit = (pkg: string) => {
+      if (done.has(pkg)) return;
+      done.add(pkg);
+      for (const dep of importsOf.get(pkg) ?? []) visit(dep);
+      order.push(pkg);
+    };
+    for (const pkg of byPkg.keys()) visit(pkg);
+    return order.flatMap((pkg) => byPkg.get(pkg) ?? []);
+  }
+
+  // F-9c: トップレベル定数を素の const として出す(関数と同じ pkg$name マングルを共有)
+  private genConstDecl(c: ConstDecl) {
+    this.emit(`const ${this.fnJsName(this.pkg, c.name)} = ${this.genExpr(c.value)};`);
   }
 
   // トップレベル関数の生成JS名: mainパッケージは素の名前、それ以外は pkg$name
@@ -175,17 +212,24 @@ class Codegen {
       case "assign": {
         if (stmt.targets.length === 1) {
           const target = stmt.targets[0];
-          const value = this.genExpr(stmt.values[0]);
+          const rhs = this.genExpr(stmt.values[0]);
           if (target.kind === "index" && target.target.resolvedType?.kind === "map") {
-            // map への書き込みは新キーの追加も正当なので検査なしの set
-            this.emit(`${this.genExpr(target.target)}.set(${this.genExpr(target.index)}, ${value});`);
+            // map への書き込みは新キーの追加も正当なので検査なしの set(複合代入は
+            // checkerがmapの欠損キー問題を理由に弾いているので、ここは常に通常代入)
+            this.emit(`${this.genExpr(target.target)}.set(${this.genExpr(target.index)}, ${rhs});`);
           } else if (target.kind === "index") {
-            // 添字への書き込みも範囲検査する(範囲外は黙って配列を伸ばさず panic)
-            this.emit(
-              `__idxset(${this.genExpr(target.target)}, ${this.genExpr(target.index)}, ${value}, ${this.at(target.pos)});`,
-            );
+            // 添字への書き込みも範囲検査する(範囲外は黙って配列を伸ばさず panic)。
+            // 複合代入(arr[i] += 1)は現在値の読み(__idx)を挟む — 添字式の二重評価は
+            // i++/i--と同じくv1の割り切り
+            const arr = this.genExpr(target.target);
+            const idx = this.genExpr(target.index);
+            const at = this.at(target.pos);
+            const value = stmt.compoundOp ? this.genCompoundValue(stmt, `__idx(${arr}, ${idx}, ${at})`, rhs) : rhs;
+            this.emit(`__idxset(${arr}, ${idx}, ${value}, ${at});`);
           } else {
-            this.emit(`${this.genLValue(target)} = ${value};`);
+            const lvalue = this.genLValue(target);
+            const value = stmt.compoundOp ? this.genCompoundValue(stmt, lvalue, rhs) : rhs;
+            this.emit(`${lvalue} = ${value};`);
           }
           break;
         }
@@ -364,6 +408,16 @@ class Codegen {
     return this.genExpr(expr);
   }
 
+  // F-9b: 複合代入(x += 1 等)の右辺値を組み立てる。currentCode は代入先の「今の値」を
+  // 読むコード片(binary式と同じくintDiv/intMod/intArithのフラグでpanic層のヘルパを挟む)
+  private genCompoundValue(stmt: Assign, currentCode: string, rhs: string): string {
+    const at = this.at(stmt.pos);
+    if (stmt.intDiv) return `__idiv(${currentCode}, ${rhs}, ${at})`;
+    if (stmt.intMod) return `__imod(${currentCode}, ${rhs}, ${at})`;
+    if (stmt.intArith) return `__iarith(${currentCode}, "${stmt.compoundOp}", ${rhs}, ${at})`;
+    return `(${currentCode} ${stmt.compoundOp} ${rhs})`;
+  }
+
   // ---- 式 ----
 
   private genExpr(expr: Expr): string {
@@ -444,6 +498,7 @@ class Codegen {
         const right = this.genExpr(expr.right);
         if (expr.intDiv) return `__idiv(${left}, ${right}, ${this.at(expr.pos)})`; // 切り捨て+ゼロ検査
         if (expr.intMod) return `__imod(${left}, ${right}, ${this.at(expr.pos)})`;
+        if (expr.intArith) return `__iarith(${left}, "${expr.op}", ${right}, ${this.at(expr.pos)})`;
         const op = expr.op === "==" ? "===" : expr.op === "!=" ? "!==" : expr.op;
         return `(${left} ${op} ${right})`;
       }
@@ -502,7 +557,9 @@ class Codegen {
       }
 
       case "chanExpr":
-        return expr.capacity ? `new __Channel(${this.genExpr(expr.capacity)})` : "new __Channel()";
+        // F-11: 'none'(明示的な無制限選択)は容量なしのコンストラクタ呼び出しに落とす
+        // (__Channelは引数省略でInfinity扱い。runtime.ts参照)
+        return expr.capacity.kind === "none" ? "new __Channel()" : `new __Channel(${this.genExpr(expr.capacity)})`;
 
       case "spawn": {
         // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す。
@@ -572,6 +629,8 @@ class Codegen {
           return `${args[0]}.includes(${args[1]})`;
         case "indexOf":
           return `__indexOf(${args[0]}, ${args[1]})`;
+        case "get":
+          return `__get(${args[0]}, ${args[1]})`;
         case "keys":
           return `Array.from(${args[0]}.keys())`;
         case "values":
@@ -592,7 +651,7 @@ class Codegen {
           return `__toInt(${args[0]})`;
         case "filter":
           return `(await __filter(${args[0]}, ${args[1]}))`;
-        case "transform":
+        case "map": // F-8: 旧transform
           return `(await __map(${args[0]}, ${args[1]}))`;
         case "reduce":
           return `(await __reduce(${args[0]}, ${args[1]}, ${args[2]}))`;

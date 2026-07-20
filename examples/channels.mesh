@@ -7,7 +7,7 @@ fn worker(id: int, ch: chan<string>) {
 }
 
 fn main() {
-	ch := chan<string>()
+	ch := chan<string>(none)
 
 	for i := 1; i <= 3; i++ {
 		spawn worker(i, ch)

@@ -5,6 +5,7 @@
 import type {
   Block,
   CallExpr,
+  ConstDecl,
   Expr,
   FnDecl,
   IfStmt,
@@ -105,6 +106,7 @@ class Parser {
     const imports: ImportDecl[] = [];
     const fns: FnDecl[] = [];
     const types: TypeDecl[] = [];
+    const consts: ConstDecl[] = [];
     this.skipSemis();
     // import はファイル先頭にまとめる(宣言が始まったら以後の import はエラー)
     while (this.check("import")) {
@@ -116,6 +118,15 @@ class Parser {
         throw new CompileError("imports must come before all declarations", this.peek().pos, "import-order");
       }
       const exported = this.match("export");
+      // F-9c: トップレベル定数は常に不変(共有可変状態を作らないため)。'mut' はここでは使えない
+      if (this.check("mut")) {
+        throw new CompileError(
+          "top-level bindings are always immutable — 'mut' is not allowed here " +
+            "(there are no mutable globals; pass mutable state as a parameter instead)",
+          this.peek().pos,
+          "top-level-mut-not-allowed",
+        );
+      }
       // error type X = ... / error struct X { ... }(F-2後半): "error" は予約語ではなく
       // ("error"は組み込み型名としてチェッカー側で守られている)、直後が type/struct のときだけ
       // マーカーとして読む文脈依存キーワード。1トークン先読みで曖昧さなく判定できる
@@ -129,18 +140,35 @@ class Parser {
         types.push(this.parseStructDecl(exported, isError));
       } else if (this.check("fn")) {
         fns.push(this.parseFnDecl(exported));
+      } else if (this.check("ident") && (this.peek(1).type === ":=" || this.peek(1).type === ":")) {
+        consts.push(this.parseConstDecl(exported));
       } else {
         throw new CompileError(
           exported
-            ? "'export' must be followed by a 'fn', 'struct' or 'type' declaration"
-            : "only 'fn', 'struct' and 'type' declarations are allowed at the top level",
+            ? "'export' must be followed by a 'fn', 'struct', 'type' or constant (name := value) declaration"
+            : "only 'fn', 'struct', 'type' declarations and top-level constants (name := value) are allowed at the top level",
           this.peek().pos,
           "invalid-top-level-declaration",
         );
       }
       this.skipSemis();
     }
-    return { kind: "program", imports, types, fns };
+    return { kind: "program", imports, types, fns, consts };
+  }
+
+  // F-9c: トップレベル定数。x := 10 / x: int = 10(常に不変。'mut'は上のparseProgramで先に弾く)
+  private parseConstDecl(exported: boolean): ConstDecl {
+    const nameTok = this.expect("ident", "as constant name");
+    if (this.check(":")) {
+      this.next();
+      const typeNode = this.parseType();
+      this.expect("=", "in typed top-level constant ('name: T = value')");
+      const value = this.parseExpr();
+      return { kind: "constDecl", name: nameTok.value, typeNode, value, exported, pos: nameTok.pos };
+    }
+    this.expect(":=", "after top-level constant name");
+    const value = this.parseExpr();
+    return { kind: "constDecl", name: nameTok.value, typeNode: null, value, exported, pos: nameTok.pos };
   }
 
   // import "math" — パッケージ(プロジェクトルート直下のディレクトリ)の取り込み
@@ -575,6 +603,20 @@ class Parser {
       return { kind: "assign", targets, values, pos: start.pos };
     }
 
+    // F-9b: 複合代入 x += 1(常に単一target/value。多重代入とは組み合わせない — Goと同じ)
+    if (this.check("+=") || this.check("-=") || this.check("*=") || this.check("/=") || this.check("%=")) {
+      if (mutable) {
+        throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos, "misplaced-mut");
+      }
+      if (first.kind !== "ident" && first.kind !== "index" && first.kind !== "member") {
+        throw new CompileError("invalid assignment target", first.pos, "invalid-assignment-target");
+      }
+      const opTok = this.next();
+      const compoundOp = opTok.type.slice(0, -1) as "+" | "-" | "*" | "/" | "%";
+      const value = this.parseExpr();
+      return { kind: "assign", targets: [first], values: [value], compoundOp, pos: start.pos };
+    }
+
     if (mutable) {
       throw new CompileError("'mut' can only be used with a ':=' declaration", start.pos, "misplaced-mut");
     }
@@ -763,6 +805,15 @@ class Parser {
             this.skipSemis();
           }
           this.expect("}", "at end of array literal");
+          if (elems.length === 0) {
+            // F-9a: 空の型付き配列は `xs: T[] = []` に一本化(素の [] が文脈から型を得られるため重複だった)
+            throw new CompileError(
+              "empty typed array literal 'T[]{}' was removed — write 'xs: T[] = []' instead " +
+                "(a plain '[]' becomes the right type wherever one is expected)",
+              expr.pos,
+              "empty-typed-array-literal-removed",
+            );
+          }
           expr = { kind: "arrayLit", elems, elemType, pos: expr.pos };
           continue;
         }
@@ -943,17 +994,33 @@ class Parser {
         return { kind: "select", arms, defaultArm, pos: t.pos };
       }
       case "chan": {
-        // チャネル生成: chan<int>()(無制限バッファ) / chan<int>(n)(容量n、送信がブロックしうる)
+        // チャネル生成: chan<int>(none)(無制限バッファ) / chan<int>(n)(容量n、送信がブロックしうる)。
+        // F-11: 容量は常に明示必須(省略はできない — 無制限を選ぶこと自体はnoneで引き続き可能)
         this.next();
         this.expect("<", "after 'chan'");
         const elem = this.parseType();
         this.expect(">", "after channel element type");
-        this.expect("(", "to create a channel: chan<T>() or chan<T>(capacity)");
-        const capacity = this.check(")") ? null : this.parseExpr();
-        this.expect(")", "to create a channel: chan<T>() or chan<T>(capacity)");
+        this.expect("(", "to create a channel: chan<T>(capacity) or chan<T>(none)");
+        if (this.check(")")) {
+          throw new CompileError(
+            "chan<T>() no longer defaults to an unbounded buffer (F-11) — write chan<T>(none) for an " +
+              "unbounded channel, or chan<T>(n) for one that blocks sends once n values are buffered",
+            this.peek().pos,
+            "chan-capacity-required",
+          );
+        }
+        const capacity = this.parseExpr();
+        this.expect(")", "to create a channel: chan<T>(capacity) or chan<T>(none)");
         return { kind: "chanExpr", elem, capacity, pos: t.pos };
       }
       case "map": {
+        // F-8: 'map' は文脈依存キーワード。型位置と同じ '<' が続けばmapリテラル/型構築、
+        // '(' が続けば式位置の組み込み関数 map(arr, f)(高階関数のmap-over-array。旧transform)
+        // として素の識別子に読み替える(以降はparsePostfixの通常の呼び出し解析に乗る)
+        if (this.peek(1).type === "(") {
+          this.next();
+          return { kind: "ident", name: "map", pos: t.pos };
+        }
         // mapリテラル: map<string, int>{"a": 1, "b": 2}(空は {} )
         this.next();
         this.expect("<", "after 'map'");

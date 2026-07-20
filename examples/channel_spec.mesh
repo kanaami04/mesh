@@ -15,7 +15,7 @@ fn slowSend(ch: chan<string>, msg: string, ms: int) {
 
 fn main() {
 	// close: 終端を型で検出する
-	ch := chan<int>()
+	ch := chan<int>(none)
 	spawn produce(ch)
 	mut total := 0
 	for {
@@ -28,8 +28,8 @@ fn main() {
 	print("total: ${total}")
 
 	// select: 複数チャネルのうち先に準備できた方を選ぶ(Goと同じく擬似ランダムに公平選択)
-	a := chan<string>()
-	b := chan<string>()
+	a := chan<string>(none)
+	b := chan<string>(none)
 	spawn slowSend(a, "from a", 15)
 	spawn slowSend(b, "from b", 60)
 	msg := select {
@@ -39,7 +39,7 @@ fn main() {
 	print(msg)
 
 	// select の "_" は非ブロッキング用のdefault
-	empty := chan<int>()
+	empty := chan<int>(none)
 	r := select {
 		v := <-empty => "unexpected: ${v}"
 		_ => "nothing ready"

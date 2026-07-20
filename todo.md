@@ -21,6 +21,18 @@
         後半: `mesh card --for <file>...`(使っている機能のセクションだけの縮小版カード)+
         カード完全性の逆方向検査(`BUILTINS`/`RESERVED`とカード記載の機械照合CI。
         `s[0]`のような未知の見落としまでは拾えない退行防止止まり、と設計時点で合意済み)
+  - [x] ~~F-7〜F-11(討議項目の残り)~~ ✅ 2026-07-20実装(kanayama承認: 各項目の推奨案どおり)。
+        F-7判別可能unionのタグ必須化(宣言時に検証、構築はタグ値のみで解決。名前付きstruct同士の
+        unionは対象外で従来どおり)/ F-8 transform→map改名(文脈依存キーワード)/
+        F-9小さな一貫性の穴4件(空配列記法統一・複合代入`+=`等・トップレベル定数・`get(arr,i)`)/
+        F-10 int safe-integer検査(panic層)/ F-11 chan capacity常時明示必須(`chan<T>(none)`で
+        無制限は引き続き選べる)。討議項目(F節)は全て決着 — 詳細は design-agenda.md 参照
+  - [x] ~~F-14(mesh/io + mesh/json)~~ ✅ 2026-07-20実装(kanayama承認: v1は
+        `io.args()`/`io.readFile(path)` + `json.parse`/`json.stringify`+`json.Value`のみ)。
+        `.mesh`ソースを持たない「組み込みパッケージ」という新しい種別を追加(`src/stdlib.ts`で
+        型シグネチャを直接構築しcheckerのregistryへ事前登録)。json.Valueは自己参照判別可能union
+        のショーケースとして無事構築できた。副産物: `typeToString`の自己参照型無限再帰バグを発見・修正。
+        残りはF-15(`mesh test --json`)と、C-6の続き(環境別モジュール・`mesh/http`)
 
 - [ ] **言語カード実証実験の継続** — 全記録は [docs/card-experiments.md](docs/card-experiments.md)
   - [x] 第1〜3回実施(TODO×2・単語頻度)。6→1→1往復。手法はメモリに記録
@@ -61,7 +73,7 @@
   - ~~map型(`m[k]` は `V | none`)/ for range(完全形のみ)~~ ✅ 実装済み(2026-07-18)
   - 決定記録は [docs/syntax-proposals.md](docs/syntax-proposals.md) と [docs/design-agenda.md](docs/design-agenda.md)
 - [ ] **Rust移植の開始**
-  - 現行テストスイート(233件、2026-07-19時点)を「合格基準」にする
+  - 現行テストスイート(350件、2026-07-20時点)を「合格基準」にする
   - lexer → parser → checker → codegen の順に移植
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
