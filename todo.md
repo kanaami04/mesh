@@ -5,8 +5,9 @@
 
 ## 次の一手(おすすめ順)
 
-- [ ] **批評ターン(2026-07-19)起点の再討議・実装** — 全記録は [docs/critique-2026-07.md](docs/critique-2026-07.md)、
-      討議項目は [docs/design-agenda.md](docs/design-agenda.md) の **F節**(F-1〜F-15)
+- [x] **批評ターン(2026-07-19)起点の再討議・実装** — 全記録は [docs/critique-2026-07.md](docs/critique-2026-07.md)、
+      討議項目は [docs/design-agenda.md](docs/design-agenda.md) の **F節**(F-1〜F-15)。**F節は全項目決着**
+      (2026-07-20)。残る宿題はC-6の続き(環境別モジュール・`mesh/http`)
   - 推奨順: ~~F-1(前半・後半)~~・~~F-2(前半・後半)~~・~~F-3~~・~~F-4~~・~~F-5~~・~~F-6~~(すべて✅ 2026-07-19)・
     ~~F-12第1・第2ラウンド~~(✅ 2026-07-20。結果は [docs/benchmark-2026-07.md](docs/benchmark-2026-07.md)。
     第2R: Haiku被験体で一発成功率 Mesh 2/4・TS 3/4・Go 4/4、全セル最大1往復で成功。
@@ -31,8 +32,13 @@
         `io.args()`/`io.readFile(path)` + `json.parse`/`json.stringify`+`json.Value`のみ)。
         `.mesh`ソースを持たない「組み込みパッケージ」という新しい種別を追加(`src/stdlib.ts`で
         型シグネチャを直接構築しcheckerのregistryへ事前登録)。json.Valueは自己参照判別可能union
-        のショーケースとして無事構築できた。副産物: `typeToString`の自己参照型無限再帰バグを発見・修正。
-        残りはF-15(`mesh test --json`)と、C-6の続き(環境別モジュール・`mesh/http`)
+        のショーケースとして無事構築できた。副産物: `typeToString`の自己参照型無限再帰バグを発見・修正
+  - [x] ~~F-15(mesh test --json)~~ ✅ 2026-07-20実装(kanayama承認: 各設計判断は推奨案どおり)。
+        テストは`_test.mesh`ファイル限定・`fn test...() none | error`(none=合格・error=失敗、
+        新しい合否概念を作らず既存union語彙を流用)。`mesh test file.mesh`(mainパッケージ)/
+        `mesh test <dir>`(そのパッケージ自身)のどちらもmain()不要でTDD向け。依存先パッケージの
+        テストは実行しない。**テスト実行中のpanicは1件の失敗として隔離**し他は続行 —
+        F-14実装メモの障害分離方針を初めて実地適用した。討議項目(F節)はこれで全て決着
 
 - [ ] **言語カード実証実験の継続** — 全記録は [docs/card-experiments.md](docs/card-experiments.md)
   - [x] 第1〜3回実施(TODO×2・単語頻度)。6→1→1往復。手法はメモリに記録

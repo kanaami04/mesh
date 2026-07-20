@@ -1,7 +1,7 @@
 // E2E テスト: .mesh をコンパイル → 生成された JS を実行 → 標準出力を照合
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compile, compileModules, type ModuleSource } from "../src/compiler";
@@ -1090,6 +1090,136 @@ fn main() {
     const result = compile(`import "mesh/http"\nfn main() { print(1) }`);
     expect(result.code).toBeNull();
     expect(result.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'mesh/http'");
+  });
+});
+
+describe("F-15: mesh test --json(テストランナー)", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+  const newProjectDir = () => mkdtempSync(join(tmpdir(), "mesh-test-cmd-"));
+
+  test("fn testXxx() none | error の合否・panic隔離が正しく動く", () => {
+    const dir = newProjectDir();
+    writeFileSync(
+      join(dir, "main.mesh"),
+      `fn add(a: int, b: int) int { return a + b }\nfn main() { print(add(1, 2)) }`,
+    );
+    writeFileSync(
+      join(dir, "main_test.mesh"),
+      `fn testAdditionPasses() none | error {
+	if add(2, 3) != 5 { return error("bad") }
+	return none
+}
+fn testAdditionFails() none | error {
+	if add(2, 2) != 5 { return error("expected 5, got \${add(2, 2)}") }
+	return none
+}
+fn testPanicIsIsolated() none | error {
+	nums := [1, 2, 3]
+	print(nums[10])
+	return none
+}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh")], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(1); // 一部失敗しているので非0
+    expect(proc.stdout).toContain("ok   testAdditionPasses");
+    expect(proc.stdout).toContain("FAIL testAdditionFails");
+    expect(proc.stdout).toContain("expected 5, got 4");
+    // panicも1件の失敗として報告され、テストラン自体はクラッシュせず最後まで終わる
+    expect(proc.stdout).toContain("FAIL testPanicIsIsolated");
+    expect(proc.stdout).toContain("index 10 out of range");
+    expect(proc.stdout).toContain("1/3 passed");
+  });
+
+  test("--json は構造化結果を返す", () => {
+    const dir = newProjectDir();
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    writeFileSync(join(dir, "main_test.mesh"), `fn testOk() none | error { return none }`);
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh"), "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(0);
+    const report = JSON.parse(proc.stdout);
+    expect(report).toEqual({ ok: true, tests: [{ name: "testOk", file: join(dir, "main_test.mesh"), pass: true }] });
+  });
+
+  test("テストが1つも無ければその旨を表示し、exit 0", () => {
+    const dir = newProjectDir();
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh")], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("no tests found");
+  });
+
+  test("シグネチャが不正なテスト関数はコンパイルエラーになる", () => {
+    const dir = newProjectDir();
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    writeFileSync(join(dir, "main_test.mesh"), `fn testBad(x: int) int { return x }`);
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh")], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(proc.status).toBe(1);
+    expect(proc.stderr).toContain("invalid-test-signature");
+  });
+
+  test("ディレクトリを渡すとそのパッケージ自身をテストする(依存元のテストは実行しない)", () => {
+    const dir = newProjectDir();
+    mkdirSync(join(dir, "mathutil"));
+    writeFileSync(join(dir, "mathutil", "ops.mesh"), `export fn square(n: int) int { return n * n }`);
+    writeFileSync(
+      join(dir, "mathutil", "ops_test.mesh"),
+      `fn testSquare() none | error {
+	if square(4) != 16 { return error("bad") }
+	return none
+}`,
+    );
+    writeFileSync(join(dir, "app.mesh"), `import "mathutil"\nfn main() { print(mathutil.square(3)) }`);
+    writeFileSync(
+      join(dir, "app_test.mesh"),
+      `fn testAppUsesSquare() none | error {
+	if mathutil.square(5) != 25 { return error("bad") }
+	return none
+}`,
+    );
+
+    // mathutil単体のテストだけが走る
+    const pkgProc = spawnSync(process.execPath, [CLI, "test", join(dir, "mathutil"), "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(pkgProc.status).toBe(0);
+    expect(JSON.parse(pkgProc.stdout).tests.map((t: { name: string }) => t.name)).toEqual(["testSquare"]);
+
+    // mainのテストだけが走る(mathutilのテストは含まれない)
+    const appProc = spawnSync(process.execPath, [CLI, "test", join(dir, "app.mesh"), "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(appProc.status).toBe(0);
+    expect(JSON.parse(appProc.stdout).tests.map((t: { name: string }) => t.name)).toEqual(["testAppUsesSquare"]);
+  });
+
+  test("mesh testはmain()が無いパッケージも検査・実行できる(TDD向け)", () => {
+    const dir = newProjectDir();
+    mkdirSync(join(dir, "greet"));
+    writeFileSync(join(dir, "greet", "greet.mesh"), `export fn hello(name: string) string { return "hi \${name}" }`);
+    writeFileSync(
+      join(dir, "greet", "greet_test.mesh"),
+      `fn testHello() none | error {
+	if hello("bob") != "hi bob" { return error("bad") }
+	return none
+}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "greet")], { encoding: "utf8", timeout: 15_000 });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("1/1 passed");
   });
 });
 

@@ -8,7 +8,7 @@
 // - 多値戻り `return a, err` は配列 [a, err]、受け側 `v, err := f()` は分割代入。
 
 import type { Assign, Block, ConstDecl, Expr, FnDecl, MatchPattern, Program, Stmt, TypeNode } from "./ast";
-import { BUILTINS } from "./checker";
+import { BUILTINS, type TestInfo } from "./checker";
 import { PRELUDE } from "./runtime";
 import type { Pos } from "./token";
 
@@ -18,9 +18,13 @@ export function generate(program: Program, file = "main.mesh"): string {
 
 // 全パッケージを1つの.mjsへまとめて出力する(バンドル)。
 // 非mainパッケージのトップレベル関数は `pkg$name` に改名して衝突を防ぐ
-// (Meshの識別子に $ は使えないので、ユーザーコードと衝突しない)
-export function generateModules(modules: { pkg: string; file: string; program: Program }[]): string {
-  return new Codegen().generateAll(modules);
+// (Meshの識別子に $ は使えないので、ユーザーコードと衝突しない)。
+// opts.tests があれば(F-15: mesh test)、末尾は main() 呼び出しの代わりにテストハーネスになる
+export function generateModules(
+  modules: { pkg: string; file: string; program: Program }[],
+  opts?: { tests?: TestInfo[] },
+): string {
+  return new Codegen().generateAll(modules, opts);
 }
 
 class Codegen {
@@ -47,7 +51,7 @@ class Codegen {
     return JSON.stringify(`${this.file}:${pos.line}:${pos.col}`);
   }
 
-  generateAll(modules: { pkg: string; file: string; program: Program }[]): string {
+  generateAll(modules: { pkg: string; file: string; program: Program }[], opts?: { tests?: TestInfo[] }): string {
     // F-9c: トップレベル定数はJSの const として出す — 関数宣言と違いhoistされないので、
     // パッケージを依存順(importされる側が先)に並べ直してから出力する必要がある
     // (checkerが循環は無いことを既に保証しているので、ここでは単純なDFSでよい)
@@ -75,7 +79,16 @@ class Codegen {
         this.out.push("");
       }
     }
-    this.out.push("main().catch(__panic);");
+    if (opts?.tests) {
+      // F-15: mesh test — main()を呼ぶ代わりにテストハーネスを起動する。
+      // panicも1件の失敗として隔離する(__runTests参照。他のテストは続行する)
+      const entries = opts.tests
+        .map((t) => `  { name: ${JSON.stringify(t.name)}, file: ${JSON.stringify(t.file)}, fn: ${t.jsName} }`)
+        .join(",\n");
+      this.out.push(`await __runTests([\n${entries}\n]);`);
+    } else {
+      this.out.push("main().catch(__panic);");
+    }
     return this.out.join("\n") + "\n";
   }
 

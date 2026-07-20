@@ -290,6 +290,33 @@ const __fmt = (v) =>
       : String(v);
 const __print = (...args) => console.log(args.map(__fmt).join(" "));
 const __error = (msg) => new Error(msg);
+// F-15: mesh test — 各テスト関数を順に呼ぶ。戻り値がnone(合格)かerror(失敗)かを見る。
+// panicも1件の失敗として隔離する(他のテストは続行する — 1つのバグでテストラン全体が
+// 落ちないように。requirements.md 5.5「障害分離」方針をここで初めて実地適用した)。
+// 結果は常に構造化JSONで標準出力へ1行書く(素の表示にするか--jsonのまま出すかはCLI側の仕事)
+const __runTests = async (tests) => {
+  const results = [];
+  for (const t of tests) {
+    try {
+      const r = await t.fn();
+      results.push(
+        r === null || r === undefined
+          ? { name: t.name, file: t.file, pass: true }
+          : { name: t.name, file: t.file, pass: false, message: __fmt(r) },
+      );
+    } catch (e) {
+      results.push({
+        name: t.name,
+        file: t.file,
+        pass: false,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  const ok = results.every((r) => r.pass);
+  console.log(JSON.stringify({ ok, tests: results }));
+  if (!ok && globalThis.process) globalThis.process.exitCode = 1;
+};
 // ===== end runtime =====
 
 `;

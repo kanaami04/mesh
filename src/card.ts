@@ -599,6 +599,8 @@ instead of by code — use whichever is more convenient.
     chan<T>() no longer defaults to an unbounded buffer → write chan<T>(none) for unbounded,
                                                         or chan<T>(n) for a bounded buffer
     send on closed channel / close of closed channel → panic: don't send/close after close(ch) already ran
+    test function 'x' must ... return 'none | error' → fn test...() in a _test.mesh file must take
+                                                        no params and return 'none | error' (F-15)
     range over an array needs two names             → for i, v := range arr (use _ to drop one)
     cannot use any[] as Todo[] / cannot return any[] → the [] has no type context here; add one
                                                         (xs: Todo[] = [] or a declared return type)
@@ -629,9 +631,43 @@ instead of by code — use whichever is more convenient.
     imports must come before all declarations       → move every import to the very top of the file
     'x' is a package — use it as a qualifier        → write x.something; a package name alone isn't a value
 
+## Testing: mesh test (F-15)
+
+Tests live in \`*_test.mesh\` files (same convention as Go's \`_test.go\`) — never in a regular
+\`.mesh\` file. A test is any top-level fn there whose name starts with \`test\`, taking no
+parameters and returning exactly \`none | error\` — \`none\` means it passed, \`error\` means it
+failed (no new pass/fail concept; this reuses the existing absence/failure vocabulary):
+
+    // ops.mesh
+    export fn square(n: int) int { return n * n }
+
+    // ops_test.mesh (same package — sees square() with no import, like any sibling file)
+    fn testSquare() none | error {
+        got := square(4)
+        if got != 16 { return error("expected 16, got \${got}") }
+        return none
+    }
+
+    mesh test ops.mesh              # or: mesh test <package-dir> to test a library package
+    mesh test ops.mesh --json       # {ok, tests: [{name, file, pass, message?}]}
+
+- A helper function in a \`_test.mesh\` file that ISN'T named \`test...\` is just a normal
+  function (available to tests, not run itself). A \`test...\`-named function with the wrong
+  signature (parameters, or a different return type) is a compile error, not a silently
+  skipped test.
+- \`mesh test <file.mesh>\` tests the \`main\` package: the given file plus any \`*_test.mesh\`
+  files alongside it. \`mesh test <dir>\` tests THAT package directly (its own \`.mesh\` and
+  \`_test.mesh\` files) — no \`main()\` required either way (write tests before the program exists).
+- Testing a package never pulls in a package that imports it, or that package's own tests —
+  only the target's own test files run; dependencies are compiled as plain production code.
+- A panic inside a test (e.g. an out-of-range index) is caught and reported as that ONE
+  test's failure (with the same \`file:line:col\` message a real panic would show) — the rest
+  of the run continues. This is the only place a Mesh program's own bug doesn't stop everything.
+
 ## Verify your code (agents: do this after every edit)
 
     mesh check file.mesh --json    # {ok, diagnostics: [{file, line, col, severity, code, message, fix?}]}
     mesh explain <code>            # longer explanation of a diagnostic code (no code = list them all)
     mesh run file.mesh             # compile and execute
+    mesh test file.mesh            # run *_test.mesh files next to it (--json for structured output)
 `;

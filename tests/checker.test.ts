@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { check } from "../src/checker";
+import { check, checkModules } from "../src/checker";
 import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "../src/diagnostic-codes";
 import { parse } from "../src/parser";
 import { CompileError } from "../src/token";
@@ -7,6 +7,14 @@ import { CompileError } from "../src/token";
 const diagnosticsOf = (src: string) => check(parse(src));
 const errorsOf = (src: string) => check(parse(src)).map((d) => d.message);
 const inMain = (body: string) => errorsOf(`fn main() {\n${body}\n}`);
+// F-15: テスト関数の発見・シグネチャ検証は "_test.mesh" ファイル限定なので、
+// 単一ファイルの check() ではなく checkModules() にファイル名を明示して渡す
+const errorsOfTestFile = (src: string) =>
+  checkModules([{ pkg: "main", file: "main_test.mesh", program: parse(src) }], { testMode: true }).diagnostics.map(
+    (d) => d.message,
+  );
+const testsOf = (src: string) =>
+  checkModules([{ pkg: "main", file: "main_test.mesh", program: parse(src) }], { testMode: true }).tests;
 
 describe("checker", () => {
   test("正しいプログラムはエラーなし", () => {
@@ -637,6 +645,41 @@ fn main() { print(describe(json.Value{kind: "str", s: "hi"})) }`);
     expect(errorsOf(`import "mesh/http"\nfn main() { print(1) }`)).toEqual([
       expect.stringContaining("unknown package 'mesh/http'"),
     ]);
+  });
+
+  test("F-15: '_test.mesh' 内の 'test'+接頭辞のfn(() none | error)がテストとして発見される", () => {
+    const tests = testsOf(`fn testAddition() none | error {
+	if 2 + 2 != 4 {
+		return error("bad math")
+	}
+	return none
+}
+fn helper() int { return 1 }`);
+    expect(tests.map((t) => t.name)).toEqual(["testAddition"]);
+    expect(tests[0].jsName).toBe("testAddition");
+    expect(errorsOfTestFile(`fn testAddition() none | error { return none }\nfn helper() int { return 1 }`)).toEqual(
+      [],
+    );
+  });
+
+  test("F-15: 'test'名の関数でも通常の.meshファイル(非_test.mesh)なら発見されない", () => {
+    // _test.mesh 以外はテストとして扱わない(命名規約はテストファイル内でだけ効く)
+    expect(check(parse(`fn testAddition() none | error { return none }\nfn main() {}`))).toEqual([]);
+  });
+
+  test("F-15: テスト関数のシグネチャが不正だと検出する(引数あり・戻り値が違う)", () => {
+    expect(errorsOfTestFile(`fn testBad(x: int) int { return x }`)).toEqual([
+      expect.stringContaining(
+        "test function 'testBad' must take no parameters and return 'none | error', got (int) int",
+      ),
+    ]);
+    expect(errorsOfTestFile(`fn testBad() error { return error("x") }`)).toEqual([
+      expect.stringContaining("must take no parameters and return 'none | error'"),
+    ]);
+  });
+
+  test("F-15: mesh testはmain()が無くても検査できる(TDD的に先にテストだけ書ける)", () => {
+    expect(errorsOfTestFile(`fn testX() none | error { return none }`)).toEqual([]);
   });
 
   test("struct: 名前的型付け(F-3) — 形が同じでも名前が違えば別の型(単位型の事故を防ぐ)", () => {

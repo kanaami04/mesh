@@ -3,7 +3,7 @@
 // ファイルシステムには依存しない(ブラウザのプレイグラウンドでも動く)。
 // 複数ファイルの読み込みは CLI 側の仕事で、ここはソース文字列の列を受け取るだけ
 
-import { checkModules, type Diagnostic, type ParsedModule } from "./checker";
+import { checkModules, type Diagnostic, type ParsedModule, type TestInfo } from "./checker";
 import { generateModules } from "./codegen";
 import { parse } from "./parser";
 import { CompileError } from "./token";
@@ -11,6 +11,7 @@ import { CompileError } from "./token";
 export interface CompileResult {
   code: string | null; // エラーがあれば null
   diagnostics: Diagnostic[];
+  tests: TestInfo[]; // F-15: 発見したテスト関数(mesh testが使う。通常のcompileでは常に空配列)
 }
 
 export interface ModuleSource {
@@ -24,7 +25,7 @@ export function compile(source: string, file = "main.mesh"): CompileResult {
   return compileModules([{ pkg: "main", file, source }]);
 }
 
-export function compileModules(modules: ModuleSource[]): CompileResult {
+export function compileModules(modules: ModuleSource[], opts?: { testMode?: boolean }): CompileResult {
   const parsed: ParsedModule[] = [];
   const parseErrors: Diagnostic[] = [];
   for (const m of modules) {
@@ -38,11 +39,12 @@ export function compileModules(modules: ModuleSource[]): CompileResult {
       }
     }
   }
-  if (parseErrors.length > 0) return { code: null, diagnostics: parseErrors };
+  if (parseErrors.length > 0) return { code: null, diagnostics: parseErrors, tests: [] };
 
-  const diagnostics = checkModules(parsed);
-  if (diagnostics.length > 0) return { code: null, diagnostics };
-  return { code: generateModules(parsed), diagnostics: [] };
+  const { diagnostics, tests } = checkModules(parsed, opts);
+  if (diagnostics.length > 0) return { code: null, diagnostics, tests: [] };
+  const code = generateModules(parsed, { tests: opts?.testMode ? tests : undefined });
+  return { code, diagnostics: [], tests };
 }
 
 export function formatDiagnostics(file: string, diagnostics: Diagnostic[]): string {

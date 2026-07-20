@@ -99,6 +99,7 @@ export type DiagnosticCode =
   | "invalid-top-level-declaration"
   | "top-level-mut-not-allowed"
   | "chan-capacity-required"
+  | "invalid-test-signature"
   | "invalid-import-path"
   | "bare-struct-shape"
   | "method-export-redundant"
@@ -391,6 +392,11 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "goroutine (which the 2-tier ownership design already makes impossible). Write 'chan<T>(none)' " +
     "to still choose an unbounded channel explicitly, or 'chan<T>(n)' for one that blocks sends " +
     "once n values are buffered.",
+  "invalid-test-signature":
+    "F-15: a function named 'test...' inside a '_test.mesh' file is treated as a test by 'mesh " +
+    "test', and must take no parameters and return exactly 'none | error' — 'none' means it " +
+    "passed, 'error' means it failed (reusing the existing absence/failure vocabulary instead of " +
+    "adding a new pass/fail concept). Rename it if it's a helper function, not a test itself.",
   "invalid-import-path":
     "The import path string is invalid — it can't be empty, and it can't use string interpolation " +
     "(it must be a plain string literal).",

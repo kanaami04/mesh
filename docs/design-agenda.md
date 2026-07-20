@@ -282,7 +282,20 @@ Kotlin(GlobalScope非推奨)・Swift(Task.detached)・Python(TaskGroup)と同方
       現行の`spawn`/`detach`(Mesh構文経由)は`__panic`固定で`process.exit`するが、stdlib内部が
       ハンドラ関数を素のJS `async`呼び出しとして直接呼べばこのルートには乗らないので、今回の
       F-14実装(組み込みパッケージのアーキテクチャそのもの)はこの将来の実装を妨げていない |
-| F-15 | **mesh test --json** — 「型は通ったが挙動が違う」を機械可読で返し、生成→検証ループを完結させる | 既存TODOの優先度格上げ |
+| F-15 | ~~**mesh test --json**~~ | ✅ 決着・実装済み(2026-07-20、kanayama承認: 各設計判断は推奨案どおり)。
+      批評ドキュメントに具体案が無く、テストの書き方自体を新規設計した。**構文**: 新キーワードは
+      追加せず既存`fn`+命名規約(`fn test...() none | error`。`_test.mesh`ファイル限定)。
+      合否表現に新しい概念を作らず、既存の絶対/失敗語彙(`none`/`error`)をそのまま流用したのが
+      P1的に一番の勘所。**配置**: Goの`_test.go`を踏襲し`_test.mesh`規約(通常の`.mesh`とは
+      分離)。**障害分離**: テスト実行中のpanicは1件の失敗として隔離し他は続行 —
+      requirements.md 5.5「障害分離はstdlib/ランタイム内部の仕事、言語からは見せない」を
+      F-14で書いた備忘のとおり初めて実地適用した(ランナー内部のJSがtry/catchするだけで、
+      Mesh言語に`panic()`/`recover()`は追加していない)。
+      **アーキテクチャ**: checkerがfn登録時に`_test.mesh`内の`test`接頭辞fnを発見・シグネチャ検証し
+      (`CheckResult`に`tests`を追加。`checkPackage`/`checkModules`の返り値を拡張)、
+      codegenがtestMode時に`main().catch(__panic)`の代わりに`__runTests([...])`ハーネス呼び出しを
+      発行、CLIが`mesh test <file|dir>`でファイル/ディレクトリ両対応のロード(依存先パッケージは
+      本体コードのみ・自身のテストは実行しない)と結果表示(`--json`/人間向け)を行う |
 
 ### G. 推奨討議順(F節)
 
@@ -294,4 +307,5 @@ Kotlin(GlobalScope非推奨)・Swift(Task.detached)・Python(TaskGroup)と同方
 6. ~~**F-13(ツールチェーン契約)**~~ ✅ 2026-07-20実装(前半・後半とも完了)
 7. ~~**F-7〜F-11(討議項目の残り)**~~ ✅ 2026-07-20実装(F-5も含め討議項目は全て決着)
 8. ~~**F-14(mesh/io + mesh/json)**~~ ✅ 2026-07-20実装
-9. 残りは F-15(mesh test --json)。C-6の続き(環境別モジュール・`mesh/http`)も次の有力候補
+9. ~~**F-15(mesh test --json)**~~ ✅ 2026-07-20実装。F節(F-1〜F-15)は全項目決着
+10. 残るはC-6の続き(環境別モジュール・`mesh/http`)。F-14実装メモ(障害分離)がその着手時の参照先

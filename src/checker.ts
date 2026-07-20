@@ -71,13 +71,28 @@ export interface PackageSymbols {
   consts: Map<string, { type: Type; exported: boolean }>; // F-9c: トップレベル定数
 }
 
-// 単一ファイル(従来のAPI)。"main" パッケージ1ファイルとして検査する
-export function check(program: Program): Diagnostic[] {
-  return checkModules([{ pkg: "main", file: "main.mesh", program }]);
+// F-15: `mesh test` が発見したテスト関数。`_test.mesh` ファイル内のトップレベル fn で、
+// 名前が "test" で始まり、シグネチャが `() none | error` のものだけが対象(declareの時点で検証済み)
+export interface TestInfo {
+  name: string; // Mesh上の名前(例: testAddition)
+  jsName: string; // codegen後のJS名(pkgマングリング込み。mainならnameと同じ)
+  file: string;
+  pos: Pos;
 }
 
-export function checkModules(modules: ParsedModule[]): Diagnostic[] {
+export interface CheckResult {
+  diagnostics: Diagnostic[];
+  tests: TestInfo[]; // F-15
+}
+
+// 単一ファイル(従来のAPI)。"main" パッケージ1ファイルとして検査する
+export function check(program: Program): Diagnostic[] {
+  return checkModules([{ pkg: "main", file: "main.mesh", program }]).diagnostics;
+}
+
+export function checkModules(modules: ParsedModule[], opts?: { testMode?: boolean }): CheckResult {
   const diagnostics: Diagnostic[] = [];
+  const tests: TestInfo[] = []; // F-15
 
   // パッケージごとにファイルをまとめる(同一パッケージ内はimport不要のフラット名前空間)
   const packages = new Map<string, ParsedModule[]>();
@@ -128,7 +143,7 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
     }
     deps.set(pkg, set);
   }
-  if (diagnostics.length > 0) return diagnostics;
+  if (diagnostics.length > 0) return { diagnostics, tests: [] };
 
   // 依存順(importされる側が先)に並べる + 循環検出
   const order: string[] = [];
@@ -154,7 +169,7 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
     return true;
   };
   for (const pkg of packages.keys()) {
-    if (!visit(pkg, [])) return diagnostics;
+    if (!visit(pkg, [])) return { diagnostics, tests: [] };
   }
 
   // 依存順に検査。メソッド表は全パッケージ共有(struct名はパッケージ修飾済みで衝突しない)。
@@ -172,9 +187,13 @@ export function checkModules(modules: ParsedModule[]): Diagnostic[] {
       for (const imp of program.imports) importAliases.add(imp.alias);
     }
     const checker = new Checker(pkg, registry, sharedMethods, importAliases);
-    diagnostics.push(...checker.checkPackage(files, { requireMain: pkg === "main" }));
+    // F-15: mesh test はmain()の存在を要求しない(TDD的にテストだけ先に書ける。
+    // ライブラリパッケージ単体のテストにもmain()は無いのが普通)
+    const result = checker.checkPackage(files, { requireMain: pkg === "main" && !opts?.testMode });
+    diagnostics.push(...result.diagnostics);
+    tests.push(...result.tests);
   }
-  return diagnostics;
+  return { diagnostics, tests };
 }
 
 // 変数1つ分の情報。mutable は「mut 宣言されたか」(デフォルト不変、B-4決定)
@@ -210,6 +229,7 @@ class Checker {
   private typeExported = new Map<string, boolean>();
   private fnDecls = new Map<string, { type: Type; exported: boolean }>();
   private constDecls = new Map<string, { type: Type; exported: boolean }>(); // F-9c
+  private discoveredTests: TestInfo[] = []; // F-15: `mesh test`が実行する対象
   // error type X = ... / error struct X { ... }(F-2後半)で宣言された名前の集合。
   // resolveAliasがこれを見て、そのエイリアスの構造体メンバーに isErrorType を立てる
   private errorTypeNames = new Set<string>();
@@ -511,7 +531,7 @@ class Checker {
   // フェーズ順は単一ファイル時代と同じ(型登録→エイリアス解決→関数登録→本体)を
   // 全ファイル横断に広げただけ — ファイルをまたぐ前方参照・相互再帰も自然に許される
 
-  checkPackage(files: { file: string; program: Program }[], opts: { requireMain: boolean }): Diagnostic[] {
+  checkPackage(files: { file: string; program: Program }[], opts: { requireMain: boolean }): CheckResult {
     // 先に type 宣言を登録する(関数シグネチャがエイリアスを参照できるように)
     for (const { file, program } of files) {
       this.currentFile = file;
@@ -561,6 +581,27 @@ class Checker {
           }
           this.declare(fn.name, t, fn.pos);
           this.fnDecls.set(fn.name, { type: t, exported: fn.exported });
+          // F-15: `_test.mesh` 内の "test" で始まるトップレベル fn は `mesh test` が実行対象にする。
+          // シグネチャは常に `() none | error`(P1: テストの合否表現をunion路線から増やさない —
+          // 既存の absence/failure 表現をそのまま流用する。none=合格、error=失敗)
+          if (file.endsWith("_test.mesh") && fn.name.startsWith("test")) {
+            const ret = t.kind === "fn" ? t.ret : ANY; // fnTypeは常にkind:"fn"を返す(到達しない分岐)
+            if (fn.params.length > 0 || !typeEquals(ret, unionOf([NONE, ERROR]))) {
+              this.error(
+                fn.pos,
+                "invalid-test-signature",
+                `test function '${fn.name}' must take no parameters and return 'none | error', got ` +
+                  `(${fn.params.map((p) => typeToString(this.resolveType(p.type))).join(", ")}) ${typeToString(ret)}`,
+              );
+            } else {
+              this.discoveredTests.push({
+                name: fn.name,
+                jsName: this.pkg === "main" ? fn.name : `${this.pkg}$${fn.name}`,
+                file,
+                pos: fn.pos,
+              });
+            }
+          }
         }
       }
     }
@@ -619,7 +660,7 @@ class Checker {
       if (type) types.set(name, { type, exported });
     }
     this.registry.set(this.pkg, { types, fns: this.fnDecls, consts: this.constDecls });
-    return this.diagnostics;
+    return { diagnostics: this.diagnostics, tests: this.discoveredTests };
   }
 
   // fn (u: User) describe() ... のシグネチャを methodTable に登録する(グローバルscopeには置かない)
