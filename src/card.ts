@@ -207,6 +207,9 @@ Long union declarations can be split across lines — continuation lines start w
 
       if res is { kind: "notFound" } { return "404" }
       return "found: \${res.user.name}"   // res narrowed to the remaining member(s) here
+
+  This also narrows away \`none\`/\`error\` siblings in one step, not just other tagged members —
+  \`v := m[k]\` (\`Value | none\`) then \`if v is { kind: "str" } { ... }\` needs no separate \`is none\`.
 - Struct identity is NOMINAL (by name): two \`struct\` declarations with the same fields are
   DIFFERENT types — \`struct Meters { value: float }\` is rejected where \`Dollars\` is expected,
   so unit/ID wrapper structs actually protect you. The one place comparison is structural is
