@@ -15,13 +15,15 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に2つのフックが機械チェックする:
   `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の有無を、
   `enforce-squash-merge.sh`が`--squash`の有無を確認し、欠けていればdenyする。
-  2026-07-21のPR #2で`.claude/`をgit管理下に入れたので、どのマシンでも同じ強制が効く
-  (フックは`jq`と`gh`に依存。`/code-review`自体は`.claude/settings.json`で有効化した
-  `code-review@claude-code-plugins`プラグインが提供する)〕。それ以前はmain直push)
-- ローカル: マシンによって異なる。Mac は `/Users/kanayama/kanaami/language`、
-  Lightsail(2026-07-21〜)は `/home/ubuntu/development/mesh`。後者はツールを
-  **mise で管理**(`mise install`でbun/node/rust、`gh`はグローバル設定側)。
-  Rustのリンカ用に`gcc`だけaptで入れる必要がある(RAM 512MBなので`cargo`は`CARGO_BUILD_JOBS=1`推奨)
+  2026-07-21の#2で`.claude/`をgit管理下に入れたので、設定自体はcloneすれば付いてくる。
+  ただし**フックが動く条件は各マシンで揃える必要がある**(`jq`・`gh`・`/code-review`
+  プラグイン本体)——詳細と、揃っていないと何が起きるかは docs/setup.md〕。
+  それ以前はmain直push)
+- **PR番号について**: 2026-07-21に`ryota-kanayama/mesh`から現リポジトリへ移管し、旧リポジトリは
+  削除した。PR番号は1から振り直されているので、**#40以前の番号は旧リポジトリのもので現在は無効**
+  (書くとGitHubが現リポジトリの別PRへ誤リンクする)。過去の作業を指すときはコミットSHAを使うこと
+- 環境構築: **docs/setup.md が一次情報源**(mise・system パッケージ・認証・プラグイン)。
+  作業ディレクトリは固定していない
 - 実装言語: TypeScript(v0、本番)。**2026-07-21からRust移植が進行中**(`rust/`、
   lexer+parser一部まで完了。詳細は下記「Rust移植の現状」節)
 - ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
@@ -38,10 +40,10 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 7. **docs/syntax-proposals.md** — 構文採用/不採用会の決定記録(経緯。凍結済み)
 8. **docs/card-experiments.md** — 言語カード実証実験のログ(白紙AIに実タスクを書かせて穴を探す手法)
 9. 永続メモリ([[language-project-goal]] [[user-collaboration-style]] [[mesh-card-experiment]]) —
-   セッション横断の記憶。マシンごとに独立しており、上記3件は Mac 側
-   (`/Users/kanayama/.claude/projects/-Users-kanayama-kanaami-language/memory/`)にしか無い。
-   Lightsail 側は `/home/ubuntu/.claude/projects/-home-ubuntu-development-mesh/memory/`
-   ([[lightsail-dev-environment]] のみ)
+   セッション横断の記憶。ただし**マシンごとに独立していて共有されない**ので、
+   別マシンでは読めないことがある(上記3件は Mac 側の
+   `~/.claude/projects/.../memory/` にある)。全員に届けたい内容はメモリではなく
+   このリポジトリのドキュメントに書くこと
 
 ## 現在の実装状況(要約。詳細は必ず features.md を見る — ここは古くなりうる)
 
@@ -101,9 +103,10 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `lexer.rs`・`ast.rs`・`parser.rs`。lib+binハイブリッドのCargoプロジェクト
   (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
   checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
-- **進捗(PR番号順)**: #41 lexer全体(TS 393行→Rust、テスト15件)・
-  #42 parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
-  エラー復帰の枠組みをフル移植)・#43 struct/type宣言+判別可能union+match/is式。
+- **進捗(古い順。番号ではなくSHAで示す — 下記「PR番号について」参照)**:
+  `fffd0d9` lexer全体(TS 393行→Rust、テスト15件)・
+  `3ac059a` parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
+  エラー復帰の枠組みをフル移植)・`207802e` struct/type宣言+判別可能union+match/is式。
   現在テスト41件(lexer 15+parser 26)、`cargo clippy --all-targets -- -D warnings`
   クリーン
 - **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
@@ -130,10 +133,8 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `none`(`Expr::None`)を最初のスコープ見積もりで見落としていた——「実際に典型的な
   コード片を1つ最後まで組んでみる」まで気づけなかった。次のマイルストーンでも
   スコープを決めたら早めに実例(discriminated_union.mesh相当)で組んでみること
-- **開発環境の注意**: このセッションでは`cargo`/`rustc`が素のPATHに無く、
-  `export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"`を毎回叩く
-  必要があった(`mise.toml`に`rust = "1.97.1"`を追加済み、`mise install rust`は
-  実施済みのはず)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
+- **開発環境**: `mise.toml`に`rust = "1.97.1"`を追加済みなので`mise install`で入る
+  (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 
 ## 次にやるとしたら(Rust移植以外で未着手のトピック)
 
@@ -186,8 +187,7 @@ bun run mesh build <file.mesh> -o out   # JSを書き出す
 bun run mesh check <file.mesh> [--json] # 型検査のみ
 bun run mesh card                       # 言語カードを出力
 
-# Rust移植版(rust/) — cargo/rustcが素のPATHに無ければ先にこれを叩く:
-# export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"
+# Rust移植版(rust/) — 動かない場合はセットアップを docs/setup.md で確認
 mise run rust-test      # = cd rust && cargo test
 mise run rust-check     # = cd rust && cargo clippy --all-targets
 (cd rust && cargo run -- ../examples/hello.mesh)   # トークン/AST疎通確認CLI
