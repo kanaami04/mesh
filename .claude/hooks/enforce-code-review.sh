@@ -3,10 +3,19 @@
 # 実際に投稿されているかを確認する。無ければ deny して理由を返す。
 # それ以外のコマンドは素通り（exit 0 + 出力なし = allow 判定に委ねる）。
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 cmd=$(jq -r '.tool_input.command // ""')
 
-# gh pr merge 系コマンドだけを対象にする（実際の呼び出しにアンカーし、コメントやecho文字列への誤マッチを避ける）
-if ! printf '%s' "$cmd" | grep -Eq '\bgh[[:space:]]+pr[[:space:]]+merge\b'; then
+# マージの実行だけを対象にする（判定の詳細と限界は lib.sh の hook_is_pr_merge 参照）
+hook_is_pr_merge "$cmd" || exit 0
+
+hook_augment_path
+
+# gh が無ければレビューの有無は確認できない。ここで「コメント0件」として deny すると
+# 「レビューを投稿したのに拒否される」という嘘の理由になるので、原因をそのまま伝える。
+if ! command -v gh >/dev/null 2>&1; then
+  hook_deny "レビューコメントの有無を確認できません: gh コマンドが見つかりません（フックは非対話シェルで動くため ~/.bashrc は読まれません）。docs/setup.md を参照して gh を PATH の通る場所に入れてください。"
   exit 0
 fi
 
@@ -23,12 +32,16 @@ if [ -z "$pr_num" ]; then
   exit 0
 fi
 
-# /code-review が投稿するコメントは "### Code review" 見出しで始まる（issues found / no issues 共通）
-if gh pr view "$pr_num" --json comments -q '.comments[].body' 2>/dev/null | grep -q '^### Code review'; then
+# gh の失敗（認証切れ・ネットワーク断など）を「コメント0件」と区別する
+if ! comments=$(gh pr view "$pr_num" --json comments -q '.comments[].body' 2>&1); then
+  hook_deny "PR #$pr_num のレビューコメントを取得できませんでした（gh の実行に失敗）。認証やネットワークを確認してください: $comments"
   exit 0
 fi
 
-cat <<JSON
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"PR #$pr_num にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $pr_num --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。"}}
-JSON
+# /code-review が投稿するコメントは "### Code review" 見出しで始まる（issues found / no issues 共通）
+if printf '%s' "$comments" | grep -q '^### Code review'; then
+  exit 0
+fi
+
+hook_deny "PR #$pr_num にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $pr_num --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。"
 exit 0
