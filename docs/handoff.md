@@ -12,10 +12,12 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 
 - GitHub: https://github.com/kanaami04/mesh(公開。featureブランチ→PR→CI green確認と
   `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
-  PRフロー、2026-07-21から`/code-review`必須化〔`.claude/hooks/enforce-code-review.sh`が
-  `gh pr merge`実行時にレビューコメントの有無を機械的にチェックする。**ただしこのフックは
-  `.claude/`ごとgit管理外**なので、それを持たない環境では機械チェックが効かない——
-  その場合はフロー自体を手動で守ること〕。それ以前はmain直push)
+  PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に2つのフックが機械チェックする:
+  `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の有無を、
+  `enforce-squash-merge.sh`が`--squash`の有無を確認し、欠けていればdenyする。
+  2026-07-21のPR #2で`.claude/`をgit管理下に入れたので、どのマシンでも同じ強制が効く
+  (フックは`jq`と`gh`に依存。`/code-review`自体は`.claude/settings.json`で有効化した
+  `code-review@claude-code-plugins`プラグインが提供する)〕。それ以前はmain直push)
 - ローカル: マシンによって異なる。Mac は `/Users/kanayama/kanaami/language`、
   Lightsail(2026-07-21〜)は `/home/ubuntu/development/mesh`。後者はツールを
   **mise で管理**(`mise install`でbun/node/rust、`gh`はグローバル設定側)。
