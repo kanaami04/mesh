@@ -12,7 +12,7 @@
 // 戻り値の型にResultを持たない(=失敗しない関数、という型で表現している)
 
 use crate::ast::{
-    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, MatchArm, MatchPattern, Param, Program, Stmt,
+    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchArm, MatchPattern, Param, Program, Stmt,
     StructFieldNode, StructLitField, TypeDecl, TypeNode,
 };
 use crate::lexer::lex;
@@ -640,6 +640,17 @@ impl Parser {
         self.parse_binary(1)
     }
 
+    // 文字列補間の中身のように「式1つで完結する」入力をパースする(TS版と同じ)
+    fn parse_standalone_expr(&mut self) -> Result<Expr, Box<CompileError>> {
+        let expr = self.parse_expr()?;
+        self.skip_semis();
+        if !self.check(TokenType::Eof) {
+            let t = self.peek().clone();
+            return Err(self.error_at(t.pos, format!("unexpected '{}' in string interpolation", t.value), "syntax-error"));
+        }
+        Ok(expr)
+    }
+
     // 二項演算子の優先順位(大きいほど強く結合する)。今回のスコープでは`or`を対象外に
     // している(束縛形という特別扱いが要るため、`?`/`or`とセットで次回以降で追加)
     fn precedence(kind: TokenType) -> Option<u8> {
@@ -766,13 +777,23 @@ impl Parser {
             }
             TokenType::Str => {
                 self.next();
-                if t.parts.is_some() {
-                    // 文字列補間は次回以降(再字句解析が絡み複雑なため)。誠実に「未対応」と言う
-                    return Err(self.error_at(
-                        t.pos,
-                        "string interpolation isn't supported by the Rust parser yet",
-                        "unsupported-construct",
-                    ));
+                if let Some(parts) = t.parts {
+                    // 補間つき文字列: 式の断片を(元の位置情報つきで)再帰的にパースする。
+                    // TS版(parser.tsのparsePrimary)と同じ、lexer.rsが切り出した未パースの
+                    // ソース断片を`lex()`で再字句解析し、新しいParserでparse_standalone_expr
+                    // を呼ぶ形。エラーはそのまま`?`で外側に伝播する(TS版のthrowと同じ挙動)
+                    let mut segments = Vec::with_capacity(parts.len());
+                    for part in parts {
+                        segments.push(match part {
+                            crate::token::StringPart::Text { text } => InterpSegment::Text { text },
+                            crate::token::StringPart::Expr { source, pos } => {
+                                let lexed = lex(&source, Some(pos))?;
+                                let expr = Parser::new(lexed.tokens).parse_standalone_expr()?;
+                                InterpSegment::Expr { expr: Box::new(expr) }
+                            }
+                        });
+                    }
+                    return Ok(Expr::Interp { segments, pos: t.pos });
                 }
                 Ok(Expr::String { value: t.value, pos: t.pos })
             }
@@ -1087,14 +1108,65 @@ mod tests {
     }
 
     #[test]
+    fn 文字列補間_テキストと式の断片に分かれる() {
+        let stmts = parse_body(r#"msg := "worker ${id} done""#);
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Interp { segments, .. } = &values[0] else { panic!("expected interp, got {:?}", values[0]) };
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(&segments[0], InterpSegment::Text { text } if text == "worker "));
+        assert!(matches!(&segments[1], InterpSegment::Expr { expr } if matches!(**expr, Expr::Ident { .. })));
+        assert!(matches!(&segments[2], InterpSegment::Text { text } if text == " done"));
+    }
+
+    #[test]
+    fn 文字列補間_式部分はメンバーアクセスや呼び出しを含む任意の式() {
+        // examples/users.meshの実例相当: ${u.name} や ${res.user.name} のようなメンバーアクセス
+        let stmts = parse_body(r#"msg := "hello ${u.name} (${u.age})""#);
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Interp { segments, .. } = &values[0] else { panic!("expected interp") };
+        // ["hello ", ${u.name}, " (", ${u.age}, ")"] の5断片
+        assert_eq!(segments.len(), 5);
+        assert!(matches!(&segments[1], InterpSegment::Expr { expr } if matches!(**expr, Expr::Member { .. })));
+        assert!(matches!(&segments[3], InterpSegment::Expr { expr } if matches!(**expr, Expr::Member { .. })));
+    }
+
+    #[test]
+    fn 文字列補間_式部分の位置情報は元ソース上のもの() {
+        // 再字句解析した式のposが「断片の中の0番目」ではなく「元の文字列全体の中の位置」に
+        // なっていること(lexer.rsのstartPos伝播がparser側でも保たれているかの確認)
+        let stmts = parse_body(r#"msg := "x${id}""#);
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Interp { segments, .. } = &values[0] else { panic!("expected interp") };
+        let InterpSegment::Expr { expr } = &segments[1] else { panic!("expected expr segment") };
+        // parse_body は "fn main() {\n" の後にsrcを置くので2行目、"msg := \"x${" の直後 = 12列目
+        assert_eq!(expr.pos(), Pos { line: 2, col: 12 });
+    }
+
+    #[test]
+    fn 文字列補間_式部分の構文エラーは呼び出し元に伝播する() {
+        // "${1 +}" は二項演算子の右辺が無いまま式が終わる — 再帰的に呼んだ
+        // parse_standalone_expr内部のエラー(TSのthrow相当)がそのまま外側に伝わることを確認する
+        let err = parse(r#"fn main() { msg := "${1 +}" }"#).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].message.contains("eof"), "got: {}", err[0].message);
+    }
+
+    #[test]
+    fn 文字列補間_式部分に2つ以上の式は書けない() {
+        // "${1 2}" のように式の後にトークンが余る場合はparse_standalone_expr内でエラーになる
+        let err = parse(r#"fn main() { msg := "${1 2}" }"#).unwrap_err();
+        assert!(err[0].message.contains("unexpected '2' in string interpolation"), "got: {}", err[0].message);
+    }
+
+    #[test]
     fn 実例相当_struct_is_match_を組み合わせた一連の流れ() {
-        // examples/discriminated_union.meshの簡略版(文字列補間だけ避けた — 次回以降の対象なので)
+        // examples/discriminated_union.meshの簡略版(文字列補間も含む)
         let program = parse(
             "struct User {\n\tname: string\n}\n\
              type GetUserResponse = { kind: \"ok\", user: User } | { kind: \"notFound\" }\n\
              fn findUser(id: string) User | none {\n\tif id == \"1\" {\n\t\treturn User{name: \"alice\"}\n\t}\n\treturn none\n}\n\
              fn getUser(id: string) GetUserResponse {\n\tu := findUser(id)\n\tif u is none {\n\t\treturn GetUserResponse{kind: \"notFound\"}\n\t}\n\treturn GetUserResponse{kind: \"ok\", user: u}\n}\n\
-             fn describe(res: GetUserResponse) string {\n\treturn match res {\n\t\t{ kind: \"ok\" } => \"found\"\n\t\t{ kind: \"notFound\" } => \"not found\"\n\t}\n}\n\
+             fn describe(res: GetUserResponse) string {\n\treturn match res {\n\t\t{ kind: \"ok\" } => \"found: ${res.user.name}\"\n\t\t{ kind: \"notFound\" } => \"not found\"\n\t}\n}\n\
              fn main() {\n\tprint(describe(getUser(\"1\")))\n}",
         )
         .unwrap();

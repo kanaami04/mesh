@@ -173,6 +173,20 @@
         漏れていたので追加。(2) 値としての`none`(`Expr::None`。`return none`等)も
         見落としていた — Meshの核心語彙なので同様に追加。段階的に切っていくスコープの
         境界は「実際に典型的なコードを組んでみるまで正確に見積もれない」という教訓
+  - [x] **parser移植(第三弾・文字列補間)** ✅ 2026-07-22実装。lexer側(`StringPart::Text`/
+        `StringPart::Expr`への分解)は前弾までに既に移植済みだったため、今回は
+        `ast.rs`に`Expr::Interp`/`InterpSegment`を追加し、`parser.rs`の`parse_primary`で
+        TS版(`parsePrimary`)と同じ「式の断片を`lex()`で再字句解析し、新しい`Parser`で
+        `parse_standalone_expr()`(式1つ+EOFを要求)を呼んでASTに組み込む」処理を1:1移植する
+        だけで完了。新しい設計判断は不要だった(TS版で既に決着済みの設計をそのまま運ぶ形)。
+        `tests/parser.test.ts`相当のテスト5件(部品分解・メンバーアクセスを含む式・
+        元ソース上の位置情報・式部分の構文エラー伝播・式が複数あるときのエラー)を新規作成、
+        既存の統合テストにも実例(`"found: ${res.user.name}"`)を追加(lexer+parser計46件、
+        全件パス)。`examples/*.mesh`は6/11本が完全パース成功(前弾の4本から+2、
+        `discriminated_union.mesh`/`users.mesh`が前弾の見立て通り通った)。
+        残る5本(`channel_spec`/`channels`はchan型、`errors`は`or`束縛形、`maps`はmapリテラル、
+        `modules_demo`はimport/export)は全てスコープ外の構文で構文エラーになることを確認—
+        次の対象の優先順位付けにそのまま使える
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

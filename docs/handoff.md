@@ -92,7 +92,7 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   H-2: `mesh/json`ヘルパー+`json struct`自動デコード)・**C-6続き**(`mesh/http` v1、
   サーバー専用の生ハンドラ+障害分離)。詳細は design-agenda.md H節・I節を参照
 
-## Rust移植の現状(2026-07-21、todo.md「Rust移植の開始」参照)
+## Rust移植の現状(2026-07-22、todo.md「Rust移植の開始」参照)
 
 TS実装(477テスト)はそのまま本番として動き続けており、Rust版は**並行して**
 `rust/`ディレクトリにゼロから育てている(TSを書き換えているわけではない)。
@@ -105,23 +105,22 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
 - **進捗(古い順。番号ではなくSHAで示す — 下記「PR番号について」参照)**:
   `fffd0d9` lexer全体(TS 393行→Rust、テスト15件)・
   `3ac059a` parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
-  エラー復帰の枠組みをフル移植)・`207802e` struct/type宣言+判別可能union+match/is式。
-  現在テスト41件(lexer 15+parser 26)、`cargo clippy --all-targets -- -D warnings`
-  クリーン
+  エラー復帰の枠組みをフル移植)・`207802e` struct/type宣言+判別可能union+match/is式・
+  文字列補間(`Expr::Interp`/`InterpSegment`。lexer側の分解は既に済んでいたので
+  parser側の組み込みのみ)。現在テスト46件、
+  `cargo clippy --all-targets -- -D warnings` クリーン
 - **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
   無いと構造化エラーの旨みが薄いためセット予定)・spawn/wait/chan/select・
-  **文字列補間**・配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
+  配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
   失敗する(クラッシュしない)よう作ってある
-- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち4本
-  (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`)が完全にパース成功。
-  `discriminated_union.mesh`/`users.mesh`はstruct/union/match/isを全部通過し、
-  **文字列補間だけ**で止まることを確認済み——次に文字列補間を実装すればこの2本も
-  通る見込みが高い、という具体的な足がかりがある
-- **次にやるなら**: 文字列補間(再字句解析が絡むので複雑——`src/lexer.ts`の
-  `StringPart`/`t.parts`と`src/parser.ts`の`parsePrimary`内で`lex(p.source, p.pos)`を
-  再帰的に呼ぶ部分を参照)。その後はspawn/wait/chan/select、import/export、
-  ジェネリクス、error/json構造化エラーと続く見込み(todo.mdに書いていないだけで
-  まだ相当量残っている——parser.ts全体は1217行、現状のRust版はその半分強程度)
+- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち6本
+  (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`・`discriminated_union.mesh`・
+  `users.mesh`)が完全にパース成功。残る5本はスコープ外の構文で構文エラーになる
+  (`channel_spec.mesh`/`channels.mesh`はchan型、`errors.mesh`は`or`束縛形、
+  `maps.mesh`はmapリテラル、`modules_demo.mesh`はimport/export)
+- **次にやるなら**: spawn/wait/chan/select、import/export、ジェネリクス、
+  error/json構造化エラー(`?`/`or`)のどれか(todo.mdに書いていないだけでまだ
+  相当量残っている——parser.ts全体は1217行、現状のRust版はその半分強程度)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
