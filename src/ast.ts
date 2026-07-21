@@ -110,7 +110,8 @@ export type Stmt =
   | SendStmt
   | IncDecStmt
   | BreakStmt
-  | ContinueStmt;
+  | ContinueStmt
+  | DeferStmt;
 
 export interface ShortVarDecl {
   kind: "shortVarDecl"; // x := 1  /  mut x := 0  /  v, err := f()
@@ -204,6 +205,14 @@ export interface BreakStmt {
 
 export interface ContinueStmt {
   kind: "continue";
+  pos: Pos;
+}
+
+export interface DeferStmt {
+  // defer f(x) — 関数を抜けるとき(panicによる巻き戻りも含む)に呼び出す。
+  // checkerが call.kind === "call" であることを検証する(パーサは任意の式を許して渡すだけ)
+  kind: "deferStmt";
+  call: Expr;
   pos: Pos;
 }
 

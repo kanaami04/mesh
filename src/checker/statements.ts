@@ -124,6 +124,22 @@ export function checkStmt(ctx: CheckerCtx, stmt: Stmt) {
     case "exprStmt":
       checkExpr(ctx, stmt.expr);
       break;
+    case "deferStmt": {
+      // 'call'であることの検査が先 — そうでなければ中身を検査しても位置がずれた
+      // 別のエラーになるだけ(例えば裸のintリテラルを式として検査してもエラーにならず、
+      // 本来報告すべき「呼び出しじゃない」がまるごと消える)
+      if (stmt.call.kind !== "call") {
+        error(
+          ctx,
+          stmt.call.pos,
+          "defer-requires-call",
+          "'defer' must be followed by a function or method call, e.g. 'defer f(x)'",
+        );
+        break;
+      }
+      checkExpr(ctx, stmt.call);
+      break;
+    }
     case "return": {
       const expected = ctx.retStack[ctx.retStack.length - 1] ?? VOID;
       if (stmt.value === null) {

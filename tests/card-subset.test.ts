@@ -111,6 +111,7 @@ describe("サブセットカード(F-13後半): buildSubsetCard", () => {
       `struct User { name: string }`,
       `t := spawn f()`,
       `import "util"`,
+      `defer f()`,
     ];
     expect(buildSubsetCard(everything)).toBe(LANGUAGE_CARD);
   });

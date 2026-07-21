@@ -49,6 +49,7 @@ export type TokenType =
   | "false"
   | "break"
   | "continue"
+  | "defer"
   // 記号・演算子(トークン種別名 = 記号そのもの)
   | ":="
   | "=="
@@ -128,6 +129,7 @@ export const KEYWORDS = new Set<TokenType>([
   "false",
   "break",
   "continue",
+  "defer",
 ]);
 
 // コンパイルエラー(構文エラーなど)を位置情報つきで表す(F-13: code必須・fixは任意)

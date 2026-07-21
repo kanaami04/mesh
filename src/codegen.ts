@@ -35,6 +35,12 @@ class Codegen {
   // 関数ごとに「本体で spawn(detachではない)を使ったか」を記録する。
   // 使った関数だけ、本体全体を暗黙の wait スコープで包む(2段スコープ設計)
   private spawnStack: boolean[] = [];
+  // 関数ごとに「本体で defer を使ったか」を記録する。使った関数だけ __defers 配列を持たせ、
+  // 本体全体を try/finally で包む(finallyはpanicによる巻き戻りでも必ず走るJSの性質を
+  // そのまま利用する — Meshにrecover()は無いので「隔離してcatchする」意味は持たせない)
+  private deferStack: boolean[] = [];
+  // defer文の一時変数名の通し番号(引数・レシーバをdefer時点の値で固定するための変数)
+  private deferTempCounter = 0;
   // 今出力中のモジュールの文脈(パニック位置・関数名のマングルに使う)
   private file = "main.mesh";
   private pkg = "main";
@@ -160,6 +166,7 @@ class Codegen {
   private genFnBody(body: Block) {
     this.propStack.push(false);
     this.spawnStack.push(false);
+    this.deferStack.push(false);
     const saved = this.out;
     this.out = [];
     this.genBlockBody(body);
@@ -167,11 +174,13 @@ class Codegen {
     this.out = saved;
     const usesProp = this.propStack.pop()!;
     const usesSpawn = this.spawnStack.pop()!;
+    const usesDefer = this.deferStack.pop()!;
 
-    if (!usesProp && !usesSpawn) {
+    if (!usesProp && !usesSpawn && !usesDefer) {
       this.out.push(...lines);
       return;
     }
+    if (usesDefer) this.emit("  const __defers = [];");
     if (usesSpawn) this.emit("  __waitStack.push([]);");
     this.emit("  try {");
     this.out.push(...lines.map((l) => "  " + l));
@@ -180,9 +189,11 @@ class Codegen {
       this.emit("    if (e instanceof __Propagate) return e.value;");
       this.emit("    throw e;");
     }
-    if (usesSpawn) {
+    if (usesSpawn || usesDefer) {
       this.emit("  } finally {");
-      this.emit("    await Promise.all(__waitStack.pop());");
+      // spawnした子タスクを先に待ってから、自分のdeferを最後の後片付けとして走らせる
+      if (usesSpawn) this.emit("    await Promise.all(__waitStack.pop());");
+      if (usesDefer) this.emit("    for (let __i = __defers.length - 1; __i >= 0; __i--) await __defers[__i]();");
     }
     this.emit("  }");
   }
@@ -260,6 +271,11 @@ class Codegen {
       case "exprStmt":
         this.emit(`${this.genExpr(stmt.expr)};`);
         break;
+
+      case "deferStmt": {
+        this.genDeferStmt(stmt);
+        break;
+      }
 
       case "return": {
         if (stmt.value === null) this.emit("return;");
@@ -595,6 +611,48 @@ class Codegen {
         return expr.isErrorInstance ? `__errTag(${obj})` : `(${obj})`;
       }
     }
+  }
+
+  // defer f(a, b) / defer recv.method(a): 引数(メソッドならレシーバも)はdefer文の実行時点で
+  // 評価して固定する(Goと同じ — mutな変数を後で書き換えても、deferした呼び出しは古い値を見る)。
+  // 呼び出し本体はgenCallの通常の分岐(パッケージ修飾/メソッド/組み込み/素の関数)をそのまま
+  // 再利用したいので、レシーバ・引数を一時変数への参照に差し替えた「影武者」のcall式を作って
+  // genCallに渡す — 呼び出し形の分岐ロジックを重複させずに済む
+  private genDeferStmt(stmt: Stmt & { kind: "deferStmt" }) {
+    const call = stmt.call as Expr & { kind: "call" }; // checkerがcall.kind==="call"を検証済み
+    const assigns: string[] = [];
+    const freshTemp = (): string => `__d${this.deferTempCounter++}`;
+
+    let calleeForInvoke = call.callee;
+    if (call.callee.kind === "member") {
+      const member = call.callee;
+      const targetType = member.target.resolvedType;
+      // genCallと同じ判定: struct型かつフィールド名に無ければメソッド呼び出し
+      if (targetType?.kind === "struct" && !targetType.fields.some((f) => f.name === member.name)) {
+        const recvTemp = freshTemp();
+        assigns.push(`const ${recvTemp} = ${this.genExpr(member.target)};`);
+        calleeForInvoke = {
+          ...member,
+          target: { kind: "ident", name: recvTemp, pos: member.pos, resolvedType: targetType },
+        };
+      }
+    }
+
+    const argTemps = call.args.map((a) => {
+      const t = freshTemp();
+      assigns.push(`const ${t} = ${this.genExpr(a)};`);
+      return { kind: "ident" as const, name: t, pos: a.pos, resolvedType: a.resolvedType };
+    });
+
+    const invokeCode = this.genCall({ ...call, callee: calleeForInvoke, args: argTemps });
+
+    this.deferStack[this.deferStack.length - 1] = true;
+    this.emit("{");
+    this.indent++;
+    for (const a of assigns) this.emit(a);
+    this.emit(`__defers.push(async () => { ${invokeCode}; });`);
+    this.indent--;
+    this.emit("}");
   }
 
   private genCall(expr: Expr & { kind: "call" }): string {

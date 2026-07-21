@@ -560,6 +560,13 @@ class Parser {
       case "continue":
         this.next();
         return { kind: "continue", pos: t.pos };
+      case "defer": {
+        // checkerがcall.kind === "call"であることを検証する(defer-requires-call)。
+        // パーサはどんな式でも受け取っておき、意味的な制約はcheckerに一本化する
+        this.next();
+        const call = this.parseExpr();
+        return { kind: "deferStmt", call, pos: t.pos };
+      }
       default:
         return this.parseSimpleStmt();
     }

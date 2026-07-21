@@ -2542,3 +2542,141 @@ fn main() { charge(Meters{value: 100.0}) }`).diagnostics[0]?.message,
     expect(out).toBe("closed\n");
   });
 });
+
+describe("defer文", () => {
+  test("複数のdeferはLIFO順(登録の逆順)で関数を抜けるときに実行される", () => {
+    const out = runSource(`fn work() {
+      defer print("first")
+      defer print("second")
+      defer print("third")
+      print("body")
+    }
+    fn main() { work() }`);
+    expect(out).toBe("body\nthird\nsecond\nfirst\n");
+  });
+
+  test("引数はdeferを書いた時点の値で固定される(Goと同じ。後の再代入は見ない)", () => {
+    const out = runSource(`fn work() {
+      mut n := 1
+      defer print("deferred: \${n}")
+      n = 99
+      print("live: \${n}")
+    }
+    fn main() { work() }`);
+    expect(out).toBe("live: 99\ndeferred: 1\n");
+  });
+
+  test("メソッド呼び出しもdeferできる。レシーバもdefer時点の値で固定される", () => {
+    const out = runSource(`struct Box { label: string }
+    fn (b: Box) announce() { print("closing \${b.label}") }
+    fn work() {
+      mut b := Box{label: "first"}
+      defer b.announce()
+      b = Box{label: "second"}
+      print("done")
+    }
+    fn main() { work() }`);
+    // b は mut だが b.announce() はdefer時点のBox("first")を捉えて呼ばれる(Boxは値としてコピーされる)
+    expect(out).toBe("done\nclosing first\n");
+  });
+
+  test("組み込み関数(close)・パッケージ修飾関数もdeferできる", () => {
+    const out = runSource(`fn main() {
+      ch := chan<int>(1)
+      defer close(ch)
+      ch <- 5
+      v := <-ch
+      if v is closed { return }
+      print(v)
+    }`);
+    expect(out).toBe("5\n");
+  });
+
+  test("早期returnでもdeferは実行される(returnの直前に差し込まれるのではなく、必ず走る)", () => {
+    const out = runSource(`fn work(fail: bool) {
+      defer print("cleanup")
+      if fail {
+        print("early exit")
+        return
+      }
+      print("normal exit")
+    }
+    fn main() { work(true) }`);
+    expect(out).toBe("early exit\ncleanup\n");
+  });
+
+  test("panicで巻き戻るときもdeferは実行される(try/finallyで実装。stdoutの順序で確認)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-defer-panic-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(
+      path,
+      `fn work() {
+        defer print("cleanup ran")
+        nums := [1, 2, 3]
+        print(nums[10])
+      }
+      fn main() { work() }`,
+    );
+    const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+    const proc = spawnSync(process.execPath, [CLI, "run", path], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(1);
+    expect(proc.stdout).toBe("cleanup ran\n");
+    expect(proc.stderr).toContain("index 10 out of range");
+  });
+
+  test("ループ内のdeferは各回積み上がり、関数を抜けるときにまとめてLIFOで実行される(Goと同じ挙動)", () => {
+    const out = runSource(`fn work() {
+      for i := range 3 {
+        defer print("deferred \${i}")
+      }
+      print("loop done")
+    }
+    fn main() { work() }`);
+    expect(out).toBe("loop done\ndeferred 2\ndeferred 1\ndeferred 0\n");
+  });
+
+  test("spawnと併用すると、spawnした子タスクを待ってからdeferの後片付けが走る", () => {
+    const out = runSource(`fn slow() int {
+      sleep(5)
+      print("slow done")
+      return 1
+    }
+    fn work() {
+      defer print("final cleanup")
+      ch := spawn slow()
+      v := <-ch
+      if v is closed { return }
+      print("got \${v}")
+    }
+    fn main() { work() }`);
+    expect(out).toBe("slow done\ngot 1\nfinal cleanup\n");
+  });
+
+  test("無名関数(クロージャ)の中のdeferは、そのクロージャ自身が抜けるときに実行される", () => {
+    const out = runSource(`fn main() {
+      f := fn() {
+        defer print("closure cleanup")
+        print("closure body")
+      }
+      f()
+      print("after closure")
+    }`);
+    expect(out).toBe("closure body\nclosure cleanup\nafter closure\n");
+  });
+
+  test("複数パッケージ: パッケージ修飾関数もdeferできる", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "logger"\nfn main() {\n\tdefer logger.flush("done")\n\tprint("working")\n}`,
+      },
+      {
+        pkg: "logger",
+        file: "logger/logger.mesh",
+        source: `export fn flush(msg: string) { print("flush: \${msg}") }`,
+      },
+    ]);
+    expect(out).toBe("working\nflush: done\n");
+  });
+});

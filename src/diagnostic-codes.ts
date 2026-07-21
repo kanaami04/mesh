@@ -47,6 +47,7 @@ export type DiagnosticCode =
   | "void-used-as-value"
   | "invalid-main-signature"
   | "missing-main"
+  | "defer-requires-call"
   // struct・フィールド
   | "not-a-struct"
   | "unknown-field"
@@ -249,6 +250,10 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
   "missing-main":
     "No 'fn main()' (with no receiver) was found in the entry package. Every Mesh program starts from " +
     "'fn main() { ... }'.",
+  "defer-requires-call":
+    "'defer' must be followed by a function or method call (e.g. 'defer f(x)', 'defer file.close()') — " +
+    "not an arbitrary expression or block. This keeps 'defer' to a single, unambiguous shape: schedule " +
+    "one call to run when the enclosing function returns.",
   "not-a-struct":
     "This value or name isn't a struct type, so struct-only operations (field access, struct-literal " +
     "construction) don't apply to it.",

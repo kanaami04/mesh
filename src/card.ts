@@ -350,6 +350,24 @@ Methods use Go's syntax — a receiver clause right after \`fn\`, before the met
 
 \`if\` and \`match\` are the only branching. There is no switch and no while keyword.
 
+## defer (run a call when the enclosing function returns)
+
+    f := openFile(path)?
+    defer f.close()             // runs when work() returns — normal return, early return, or panic
+    mut lock := acquireLock()
+    defer lock.release()        // multiple defers run LAST-REGISTERED-FIRST (LIFO): release(), then close()
+
+- \`defer\` takes ONLY a function or method call (\`defer f(x)\`, \`defer r.method()\`) — never a bare
+  expression or a \`{ ... }\` block; \`defer x + 1\` is a compile error (\`defer-requires-call\`).
+- The call's arguments (and the receiver, for a method call) are evaluated IMMEDIATELY where
+  \`defer\` appears, not when the call actually runs — same as Go: \`mut n := 1; defer print(n); n = 2\`
+  prints \`1\`, not \`2\`. Only the invocation itself is postponed.
+  \`defer\` inside a \`for\` loop accumulates one deferred call per iteration (all run at function
+  exit, not loop-iteration exit) — this is the same well-known Go gotcha, not a bug.
+- Runs on every exit path, including a panic unwinding through the function — there is no
+  \`recover()\` in Mesh (panics are bugs, not meant to be caught), so \`defer\` here means guaranteed
+  cleanup (closing a file, releasing a lock), not a way to intercept or suppress a panic.
+
 ## Operators
 
     + - * / %            arithmetic (int/int stays int; / by 0 panics; + also concatenates strings)
@@ -641,6 +659,7 @@ instead of by code — use whichever is more convenient.
                                                         with a distinct string-literal value (F-7),
                                                         e.g. add kind: "ok" / kind: "notFound"
     '__proto__' can't be used as a field name     → pick a different field name
+    'defer' must be followed by a call            → defer f(x), not a bare expression or block
     'X{...}' needs its tag field 'kind' set         → you left out the tag (or gave a non-literal
                                                         value); write kind: "..." to select a member
     no member of 'X' has kind: "..."                → check the tag value for a typo (F-7)

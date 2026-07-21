@@ -1637,6 +1637,39 @@ fn main() {
     });
   });
 
+  describe("defer文", () => {
+    test("関数呼び出しのdeferはエラーなし(素の関数・メソッド・組み込み)", () => {
+      expect(inMain(`defer print("bye")`)).toEqual([]);
+      const errors = errorsOf(`struct Resource { name: string }
+fn (r: Resource) release() { print(r.name) }
+fn main() {
+	r := Resource{name: "a"}
+	defer r.release()
+	ch := chan<int>(1)
+	defer close(ch)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("退行防止: 呼び出し以外をdeferすると'defer-requires-call'で拒否される", () => {
+      expect(inMain(`defer 1 + 1`)).toEqual([
+        expect.stringContaining("'defer' must be followed by a function or method call"),
+      ]);
+      expect(inMain(`x := 1\ndefer x`)).toEqual([
+        expect.stringContaining("'defer' must be followed by a function or method call"),
+      ]);
+    });
+
+    test("deferした呼び出し自体は通常の呼び出しと同じ型検査を受ける(引数の型不一致等)", () => {
+      const errors = errorsOf(`fn needsInt(n: int) { print(n) }
+fn main() {
+	mut s := "not an int"
+	defer needsInt(s)
+}`);
+      expect(errors).toEqual([expect.stringContaining("argument 1: cannot use string as int")]);
+    });
+  });
+
   describe("診断コード(F-13): code/fixの付与", () => {
     test("代表的な診断にそれぞれ意味のあるcodeが付く", () => {
       const cases: { src: string; code: DiagnosticCode }[] = [
