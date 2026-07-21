@@ -15,7 +15,8 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   PRフロー、2026-07-21から`/code-review`必須化〔`.claude/hooks/enforce-code-review.sh`が
   `gh pr merge`実行時にレビューコメントの有無を機械的にチェックする〕。それ以前はmain直push)
 - ローカル: `/Users/kanayama/kanaami/language`
-- 実装言語: TypeScript(v0)。将来Rust移植構想あり(未着手)
+- 実装言語: TypeScript(v0、本番)。**2026-07-21からRust移植が進行中**(`rust/`、
+  lexer+parser一部まで完了。詳細は下記「Rust移植の現状」節)
 - ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
   ([[user-collaboration-style]] メモリ参照)
 
@@ -80,15 +81,58 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   H-2: `mesh/json`ヘルパー+`json struct`自動デコード)・**C-6続き**(`mesh/http` v1、
   サーバー専用の生ハンドラ+障害分離)。詳細は design-agenda.md H節・I節を参照
 
-## 次にやるとしたら(未着手のトピック)
+## Rust移植の現状(2026-07-21、todo.md「Rust移植の開始」参照)
+
+TS実装(477テスト)はそのまま本番として動き続けており、Rust版は**並行して**
+`rust/`ディレクトリにゼロから育てている(TSを書き換えているわけではない)。
+進め方はTS実装と同じくClaudeが実装+日本語で解説するスタイル(kanayamaと確認済み)。
+
+- **アーキテクチャ**: `rust/src/token.rs`(Pos/TokenType/Token/CompileError)・
+  `lexer.rs`・`ast.rs`・`parser.rs`。lib+binハイブリッドのCargoプロジェクト
+  (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
+  checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
+- **進捗(PR番号順)**: #41 lexer全体(TS 393行→Rust、テスト15件)・
+  #42 parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
+  エラー復帰の枠組みをフル移植)・#43 struct/type宣言+判別可能union+match/is式。
+  現在テスト41件(lexer 15+parser 26)、`cargo clippy --all-targets -- -D warnings`
+  クリーン
+- **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
+  無いと構造化エラーの旨みが薄いためセット予定)・spawn/wait/chan/select・
+  **文字列補間**・配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
+  失敗する(クラッシュしない)よう作ってある
+- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち4本
+  (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`)が完全にパース成功。
+  `discriminated_union.mesh`/`users.mesh`はstruct/union/match/isを全部通過し、
+  **文字列補間だけ**で止まることを確認済み——次に文字列補間を実装すればこの2本も
+  通る見込みが高い、という具体的な足がかりがある
+- **次にやるなら**: 文字列補間(再字句解析が絡むので複雑——`src/lexer.ts`の
+  `StringPart`/`t.parts`と`src/parser.ts`の`parsePrimary`内で`lex(p.source, p.pos)`を
+  再帰的に呼ぶ部分を参照)。その後はspawn/wait/chan/select、import/export、
+  ジェネリクス、error/json構造化エラーと続く見込み(todo.mdに書いていないだけで
+  まだ相当量残っている——parser.ts全体は1217行、現状のRust版はその半分強程度)
+- **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
+  `CompileError`を`Box`で包む(clippy::result_large_err対策)/
+  TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
+  二項演算子等はlexerの`TokenType`をそのまま流用/ `allow_struct_lit`フラグは
+  `with_struct_lit_flag`という「必ず戻す」ヘルパー経由でしか触らない(code reviewで
+  1回踏んだ罠——早期returnで復元をすり抜けるパターンを避ける)
+- **教訓(milestone 3で発覚)**: 文字列リテラル型(`TypeNode::Literal`)と値としての
+  `none`(`Expr::None`)を最初のスコープ見積もりで見落としていた——「実際に典型的な
+  コード片を1つ最後まで組んでみる」まで気づけなかった。次のマイルストーンでも
+  スコープを決めたら早めに実例(discriminated_union.mesh相当)で組んでみること
+- **開発環境の注意**: このセッションでは`cargo`/`rustc`が素のPATHに無く、
+  `export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"`を毎回叩く
+  必要があった(`mise.toml`に`rust = "1.97.1"`を追加済み、`mise install rust`は
+  実施済みのはず)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
+
+## 次にやるとしたら(Rust移植以外で未着手のトピック)
 
 todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+`mesh/http` v1)は
-2026-07-21時点ですべて決着・実装済み。次点の候補(todo.md記載順):
+2026-07-21時点ですべて決着・実装済み。Rust移植は上記の通り進行中。それ以外の候補
+(todo.md記載順):
 
 - **言語カード実証実験の継続**(docs/card-experiments.md): 第11回まで実施済み。
   単体機能の検証はほぼ出尽くしたため、次はより大規模な複合タスクでの再測定
-- **Rust移植の開始**: 現行テストスイート(477件)を合格基準に、
-  lexer→parser→checker→codegenの順に移植
 - 保留中の未決事項: Q2(npm相互運用の深さ)、Q3(フロントエンドの形。`mesh/dom`の中身と
   環境自動推定の実装はこれとセット)、E-2(スナップショットテストの採否)
 
@@ -131,6 +175,12 @@ bun run mesh run   <file.mesh>          # コンパイルして即実行
 bun run mesh build <file.mesh> -o out   # JSを書き出す
 bun run mesh check <file.mesh> [--json] # 型検査のみ
 bun run mesh card                       # 言語カードを出力
+
+# Rust移植版(rust/) — cargo/rustcが素のPATHに無ければ先にこれを叩く:
+# export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"
+mise run rust-test      # = cd rust && cargo test
+mise run rust-check     # = cd rust && cargo clippy --all-targets
+(cd rust && cargo run -- ../examples/hello.mesh)   # トークン/AST疎通確認CLI
 ```
 
 ## 用語集(初見だと分かりにくい決定)
