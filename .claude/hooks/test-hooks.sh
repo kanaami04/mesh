@@ -41,6 +41,9 @@ check_match match   'sudo 経由'              'sudo gh pr merge 11 --squash'
 check_match match   'if/thenの内側'          'if true; then gh pr merge 12 --squash; fi'
 check_match match   'for/doの内側'           'for i in 1; do gh pr merge 13 --squash; done'
 check_match match   '波括弧の内側'           '{ gh pr merge 14 --squash; }'
+# stderrリダイレクト(`2>&1`)を含む実コマンド。単独&を区切り文字にしていた版では
+# 断片が `2>` で断ち切られ、PR番号抽出が壊れていた(このPR自身のマージ実行で発覚)
+check_match match   'stderrリダイレクト付き'  'gh pr merge 15 --squash 2>&1 | tail -5'
 
 # 文章中の言及は検出しない（誤検知の回帰防止）
 check_match nomatch 'バッククォート内の言及' 'gh api repos/o/r/pulls/1/comments -f body="`gh pr merge` が deny されます"'
@@ -66,6 +69,12 @@ check_pr_num() {
 check_pr_num 1 '素の断片'                 'gh pr merge 1 --squash'
 check_pr_num 1 'ラッパー付きの断片'       'sudo gh pr merge 1 --squash'
 check_pr_num '' '番号無しの断片'          'gh pr merge --squash'
+# 以下2件は実際に自分自身のマージ実行(`gh pr merge 3 ... 2>&1 | tail -5`)で踏んだ
+# 回帰。単独&での分割と、grep -m1(先頭1行)をhead -1(先頭1件)の代用にしていたのが
+# 原因だった(-oは1行内の複数マッチを別々の行に出すため、2>&1がリダイレクトの
+# 一部として残った断片では「2」も一緒に拾ってしまっていた)
+check_pr_num 3 'stderrリダイレクトを含む断片' 'gh pr merge 3 --squash --delete-branch 2>&1 '
+check_pr_num 5 '同一行に複数の数字がある断片' 'gh pr merge 5 --repo owner/repo2'
 
 # ---------------------------------------------------------------------------
 # 3. 複数マージ・すり抜けの回帰防止（実際に gh を叩かず、モックで挙動を確認する）
