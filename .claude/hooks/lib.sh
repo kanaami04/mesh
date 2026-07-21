@@ -31,26 +31,82 @@ hook_augment_path() {
   export PATH
 }
 
-# コマンド文字列に `gh pr merge` の *実際の呼び出し* が含まれるかを判定する。
+# コマンド文字列を、実際のマージ呼び出しが区切られうる位置（; & | ( ) { } および
+# && / ||）で断片に分割する。1本の文字列全体を一括で grep するのではなく、断片ごとに
+# 「これは merge 呼び出しか」を判定することで、次の2つの不具合を同時に解消している:
 #
-# 単純に全体を grep すると、マージ手順を説明する文章（PRコメント・ドキュメント・
-# echo する文字列など）に誤マッチして無関係なコマンドまで deny してしまう。
-# 一方で先頭に厳しくアンカーすると `FOO=1 gh pr merge` のような実際の呼び出しを
-# 取りこぼす。そこで「コマンドの先頭（行頭 / ; && || | ( の直後）＋ 環境変数代入や
-# env・sudo などのラッパーを任意個」まで許す形にしている。
+# 1. `if ...; then gh pr merge 1; fi` のような制御構文の内側にある呼び出しも、
+#    断片単位で見れば `then gh pr merge 1` として素直に判定できる
+# 2. `gh pr merge 1 && gh pr merge 2` のように複数のマージが連結されていても、
+#    断片ごとにPR番号を抽出するので、後続のマージを見落とさない
+#    （文字列全体を1回grepして「最初に現れた数値」を拾う方式だと、無関係な言及や
+#    2件目以降のマージ呼び出しを取りこぼす — 実際に発生した不具合）
 #
-# 既知の限界: ヒアドキュメントや複数行文字列の *行頭* に `gh pr merge` が現れる
-# ケースはまだ誤マッチする。シェルの構文解析なしに完全な判別はできないため、
-# 誤マッチ側（＝安全側に倒れて deny する）に寄せた上で限界を明示しておく。
-hook_is_pr_merge() {
+# 外部コマンドを使わず bash の文字列置換だけで行う（sed/awk 等への依存を増やさない）。
+# 既知の限界: クォート・ヒアドキュメントの中身も区切り文字として解釈してしまう
+# （シェルの構文解析はしていないため）。安全側（誤マッチしてdenyする）に倒す設計。
+hook_split_segments() {
+  local s=$1
+  s=${s//&&/$'\n'}
+  s=${s//'||'/$'\n'}
+  s=${s//&/$'\n'}
+  s=${s//'|'/$'\n'}
+  s=${s//;/$'\n'}
+  s=${s//(/$'\n'}
+  s=${s//)/$'\n'}
+  s=${s//\{/$'\n'}
+  s=${s//\}/$'\n'}
+  printf '%s' "$s"
+}
+
+# 断片(hook_split_segments の1行)が実際のマージ呼び出しかを判定する。
+# 先頭（行頭の空白の後）から、環境変数代入・ラッパーコマンド（sudo/env/time/nohup/
+# command/xargs）・`then`/`else`/`elif`/`do` のようなシェルキーワードを任意個許した上で
+# `gh pr merge` に一致するかを見る。断片単位なので `^` アンカーで十分（誤マッチ防止に
+# 「文中の言及」を拾わない効果もそのまま持つ）。
+hook_segment_is_merge() {
   printf '%s' "$1" | grep -Eq \
-    '(^|[;&|(]|&&|\|\|)[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*gh[[:space:]]+pr[[:space:]]+merge\b'
+    '^[[:space:]]*((then|else|elif|do)[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*gh[[:space:]]+pr[[:space:]]+merge\b'
+}
+
+# hook_segment_is_merge で真と判定された断片から、その呼び出しのPR番号を取り出す。
+# 断片単位で行うので「文字列全体で最初に現れた数値」ではなく「その呼び出し自身の
+# 数値」を正しく拾える。番号が書かれていない場合は空文字列を返す（呼び出し元が
+# 現在のブランチのPRとして解決する）。
+hook_segment_pr_num() {
+  # head ではなく grep -m1（最初の1件だけ出力）にする。head は fail-closed の
+  # 対象ツールに含めていないので、無いと「PR番号を特定できない」という誤った
+  # 理由でdenyされてしまう（実際にテストで発覚した）。grep はどのみち必須なので
+  # 依存ツールを増やさずに済む。
+  printf '%s' "$1" | grep -oE 'pr[[:space:]]+merge\b.*' | grep -oEm1 '[0-9]+'
+}
+
+# コマンド文字列に `gh pr merge` の実際の呼び出しが（どこかの断片に）含まれるかを
+# 判定する。yes/no の判定だけで済む呼び出し元向け（PR番号の抽出が要る場合は
+# hook_split_segments + hook_segment_is_merge/hook_segment_pr_num を直接使うこと）。
+hook_is_pr_merge() {
+  local seg
+  while IFS= read -r seg; do
+    hook_segment_is_merge "$seg" && return 0
+  done <<< "$(hook_split_segments "$1")"
+  return 1
+}
+
+# 文字列を JSON の値として安全な形にエスケープする（\ " タブ 改行 復帰）。
+# jq に依存せず bash 組み込みのパラメータ展開だけで行う — enforce-code-review.sh の
+# bail() は lib.sh を読み込む前に使われることがあるため、jq はもちろん sed/awk のような
+# 外部コマンドにも頼れない。同じロジックを bail() 側にも複製している（コメント参照）。
+hook_json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  printf '%s' "$s"
 }
 
 # PreToolUse フックの deny 応答を出力する。$1 = 理由（ユーザーに表示される）。
 hook_deny() {
-  local reason
-  # JSON 文字列として安全になるようエスケープする（\ と " と改行）
-  reason=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS=""} {print sep $0; sep="\\n"}')
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$(hook_json_escape "$1")"
 }
