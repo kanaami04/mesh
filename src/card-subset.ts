@@ -19,7 +19,8 @@ export type Feature =
   | "arrays"
   | "concurrency"
   | "modules"
-  | "defer";
+  | "defer"
+  | "httpServer";
 
 // 見出し文字列は src/card.ts の `## ...` 行と完全一致させること(ズレると常時「含める」側に落ちる —
 // FEATURE_HEADINGSに無い見出しはALWAYSでなくても含める仕様なので実害は無いが、
@@ -33,6 +34,7 @@ const FEATURE_HEADINGS: Record<Feature, string> = {
   concurrency: "Concurrency (structured — every task has an owner, leaks are impossible)",
   modules: "Modules (import / export)",
   defer: "defer (run a call when the enclosing function returns)",
+  httpServer: "Standard library: mesh/http (C-6: server-only, v1)",
 };
 
 // ソース文字列に対する簡易パターン検出(字句解析まではしない — 誤検出より見逃しの方が
@@ -46,6 +48,7 @@ const FEATURE_PATTERNS: Record<Feature, RegExp> = {
   concurrency: /\b(spawn|detach|chan|select|wait)\b/,
   modules: /\b(import|export)\b/,
   defer: /\bdefer\b/,
+  httpServer: /"mesh\/http"/,
 };
 
 export function detectFeatures(source: string): Set<Feature> {

@@ -14,6 +14,10 @@ function anonStruct(fields: StructField[]): Type & { kind: "struct" } {
   return { kind: "struct", name: "(anonymous)", fields };
 }
 
+function namedStruct(name: string, fields: StructField[]): Type & { kind: "struct" } {
+  return { kind: "struct", name, fields };
+}
+
 function literal(value: string): Type {
   return { kind: "literal", value };
 }
@@ -58,6 +62,27 @@ function buildJsonValueType(): Type {
 
 const JSON_VALUE = buildJsonValueType();
 
+// C-6続き: mesh/http — サーバー専用(クライアント機能は無い)。v1は「生ハンドラ1本+
+// http.listen」のみ(Go net/httpの最小形。ルーティングは無い — req.path/req.methodを
+// 見てユーザーが自分でif分岐する)。メソッド別登録(http.get/post等)は将来のv2で
+// mesh/http自身に追加する構想(design-agenda.md C-6参照。フレームワークに切り出さない
+// 理由: MeshにはまだサードパーティパッケージエコシステムがなくQ2が未決着のため)
+const STRING_MAP: Type = { kind: "map", key: STRING, value: STRING };
+
+const HTTP_REQUEST = namedStruct("Request", [
+  { name: "method", type: STRING },
+  { name: "path", type: STRING }, // クエリを含まないURLパスのみ
+  { name: "query", type: STRING }, // 生のクエリ文字列(無ければ空文字列。未パース)
+  { name: "headers", type: STRING_MAP },
+  { name: "body", type: STRING },
+]);
+
+const HTTP_RESPONSE = namedStruct("Response", [
+  { name: "status", type: INT },
+  { name: "body", type: STRING },
+  { name: "headers", type: STRING_MAP },
+]);
+
 const exportedFn = (type: Type) => ({ type, exported: true });
 
 // パス("mesh/io"等)で引く — checkerのimport検証はimp.path(ディスク上のパス)を見るため。
@@ -93,6 +118,22 @@ export const BUILTIN_PACKAGES: ReadonlyMap<string, PackageSymbols> = new Map([
         ["asFloat", exportedFn(fn([JSON_VALUE], unionOf([FLOAT, ERROR])))],
         ["asBool", exportedFn(fn([JSON_VALUE], unionOf([BOOL, ERROR])))],
         ["asArray", exportedFn(fn([JSON_VALUE], unionOf([{ kind: "array", elem: JSON_VALUE }, ERROR])))],
+      ]),
+    },
+  ],
+  [
+    "mesh/http",
+    {
+      types: new Map([
+        ["Request", { type: HTTP_REQUEST, exported: true }],
+        ["Response", { type: HTTP_RESPONSE, exported: true }],
+      ]),
+      consts: new Map(),
+      fns: new Map([
+        // 起動できたら(bindが成功したら)ほぼ即座に none を返す — 「サーバーが止まるまで
+        // 待つ」わけではない。プロセスがそのまま生き続けるのはNodeのイベントループが
+        // listen中のソケットを保持するため(mesh/http自体に「待つ」機構は無い)
+        ["listen", exportedFn(fn([STRING, fn([HTTP_REQUEST], HTTP_RESPONSE)], unionOf([NONE, ERROR])))],
       ]),
     },
   ],

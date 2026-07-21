@@ -1226,10 +1226,10 @@ fn main() {
     expect(proc.stdout).toBe("foo\nbar\n");
   });
 
-  test("mesh/io, mesh/json 以外の mesh/* は未実装のまま(回帰確認)", () => {
-    const result = compile(`import "mesh/http"\nfn main() { print(1) }`);
+  test("mesh/io, mesh/json, mesh/http 以外の mesh/* は未実装のまま(回帰確認)", () => {
+    const result = compile(`import "mesh/dom"\nfn main() { print(1) }`);
     expect(result.code).toBeNull();
-    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'mesh/http'");
+    expect(result.diagnostics.map((d) => d.message).join("\n")).toContain("unknown package 'mesh/dom'");
   });
 
   test("退行防止: 組み込みパッケージと同名のユーザーパッケージ('io'/'json')は検査時にエラーになる", () => {

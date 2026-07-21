@@ -321,6 +321,101 @@ const json$asInt = (v) => {
 const json$asFloat = (v) => (v.kind === "num" ? v.n : new Error("expected a number, got " + v.kind));
 const json$asBool = (v) => (v.kind === "bool" ? v.b : new Error("expected a boolean, got " + v.kind));
 const json$asArray = (v) => (v.kind === "arr" ? v.items : new Error("expected an array, got " + v.kind));
+// C-6続き: mesh/http — サーバー専用の組み込みパッケージ。node:httpはNode専用なので
+// mesh/ioと同じく動的import(ブラウザ実行では素直にerrorへ落ちる)。
+// addrは"host:port"/":port"/"port"のいずれも受け付ける(Go風。ホスト省略=全インターフェース)
+const __httpParseAddr = (addr) => {
+  const i = addr.lastIndexOf(":");
+  const host = i > 0 ? addr.slice(0, i) : undefined;
+  const port = parseInt(i === -1 ? addr : addr.slice(i + 1), 10);
+  return { host, port };
+};
+// code review(PR #39): 上限が無いと1リクエストが無限にボディを送り込むだけでプロセス全体を
+// メモリ枯渇で落とせてしまい、ハンドラのpanicだけを隔離しても「1リクエストがサーバー全体を
+// 道連れにしない」という約束を守れていなかった。上限超過は__HttpBodyTooLargeでreject し、
+// __httpDispatch側でハンドラのpanicとは区別して413にする(こちらも隔離の一種)
+const MAX_HTTP_BODY_BYTES = 10 * 1024 * 1024; // v1は固定値(設定フックは無し)
+class __HttpBodyTooLarge extends Error {}
+const __httpReadBody = (req) =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (total > MAX_HTTP_BODY_BYTES) {
+        // req.destroy()だと、これから413を書き込むための接続そのものを即座に断ってしまい
+        // クライアント側はレスポンスを受け取れずECONNRESETになる。pause()で読み取りだけ止め
+        // (残りはTCP受信バッファ止まりでJSヒープは増えない)、接続を閉じるのは
+        // __httpDispatch側でConnection: closeを付けたレスポンスを書き終えた後に任せる
+        req.pause();
+        reject(new __HttpBodyTooLarge("request body exceeds " + MAX_HTTP_BODY_BYTES + " bytes"));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+const __httpBuildRequest = (req, body) => {
+  const qIdx = req.url.indexOf("?");
+  const path = qIdx === -1 ? req.url : req.url.slice(0, qIdx);
+  const query = qIdx === -1 ? "" : req.url.slice(qIdx + 1);
+  const headers = new Map();
+  for (const [k, v] of Object.entries(req.headers)) headers.set(k, Array.isArray(v) ? v.join(", ") : (v ?? ""));
+  return { method: req.method, path, query, headers, body };
+};
+// F-14実装メモの障害分離方針をここで実地適用: 1リクエストのハンドラがpanicしても
+// プロセス全体を落とさず、そのリクエストだけ500にして他のリクエストは通常どおり続行する
+// (requirements.md 5.5。Go net/httpが内部でrecoverするのと同じ構図 — Mesh言語自体に
+// panic()/recover()は増やさない)。パニックの詳細はサーバー側ログにだけ出し、
+// クライアントへは一般的な500だけ返す(内部情報を漏らさない)
+const __httpDispatch = async (req, res, handler) => {
+  try {
+    const body = await __httpReadBody(req);
+    const meshReq = __httpBuildRequest(req, body);
+    const meshRes = await handler(meshReq);
+    res.writeHead(meshRes.status, Object.fromEntries(meshRes.headers));
+    res.end(meshRes.body);
+  } catch (e) {
+    if (e instanceof __HttpBodyTooLarge) {
+      // ボディを最後まで読み切っていない(pause()した)ので、このソケットで次のリクエストを
+      // 続けるとフレーミングが壊れる。Connection: closeでNodeに正しく閉じさせる
+      // (レスポンスを書き終えるより先にソケットを破棄すると413が届かずECONNRESETになる)
+      if (!res.headersSent) {
+        res.writeHead(413, { "content-type": "text/plain", connection: "close" });
+        res.end("request body too large");
+      } else {
+        res.end();
+      }
+      return;
+    }
+    console.error("panic (isolated to this request):", e instanceof Error ? e.message : String(e));
+    if (!res.headersSent) {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("internal server error");
+    } else {
+      res.end();
+    }
+  }
+};
+const http$listen = async (addr, handler) => {
+  try {
+    const { createServer } = await import("node:http");
+    const { host, port } = __httpParseAddr(addr);
+    const server = createServer((req, res) => __httpDispatch(req, res, handler));
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, host, () => {
+        server.removeListener("error", reject);
+        server.on("error", (e) => console.error("http server error:", e.message));
+        resolve();
+      });
+    });
+    return null;
+  } catch (e) {
+    return new Error(e instanceof Error ? e.message : String(e));
+  }
+};
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v === __CLOSED ? "closed"

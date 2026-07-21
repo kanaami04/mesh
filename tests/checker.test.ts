@@ -647,9 +647,9 @@ fn main() { print(describe(json.Value{kind: "str", s: "hi"})) }`);
     ]);
   });
 
-  test("F-14: mesh/io, mesh/json 以外の mesh/* は未実装のまま(回帰確認)", () => {
-    expect(errorsOf(`import "mesh/http"\nfn main() { print(1) }`)).toEqual([
-      expect.stringContaining("unknown package 'mesh/http'"),
+  test("F-14/C-6: mesh/io, mesh/json, mesh/http 以外の mesh/* は未実装のまま(回帰確認)", () => {
+    expect(errorsOf(`import "mesh/dom"\nfn main() { print(1) }`)).toEqual([
+      expect.stringContaining("unknown package 'mesh/dom'"),
     ]);
   });
 
@@ -1887,6 +1887,75 @@ fn main() {}`),
         },
       ]);
       expect(result.diagnostics).toEqual([]);
+    });
+  });
+
+  describe("C-6続き: mesh/http(検証つきサーバーAPI)", () => {
+    test("正しい使い方は型検査を通る", () => {
+      expect(
+        errorsOf(`import "mesh/http"
+fn handler(req: http.Request) http.Response {
+	return http.Response{status: 200, body: req.path, headers: map<string, string>{}}
+}
+fn main() {
+	r := http.listen(":8080", handler)
+	if r is error { return }
+}`),
+      ).toEqual([]);
+    });
+
+    test("handlerの型が合わないとエラーになる(引数がRequestでない)", () => {
+      const errors = errorsOf(`import "mesh/http"
+fn badHandler(req: string) http.Response {
+	return http.Response{status: 200, body: req, headers: map<string, string>{}}
+}
+fn main() {
+	http.listen(":8080", badHandler)
+}`);
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    test("http.Response{...}のフィールド不足はmissing-fieldsになる", () => {
+      expect(
+        errorsOf(`import "mesh/http"
+fn main() {
+	r := http.Response{status: 200, body: "hi"}
+}`),
+      ).toEqual([expect.stringContaining("missing field(s)")]);
+    });
+
+    test("importせずにhttp.Request/http.listenを使うとundefined-nameになる", () => {
+      const errors = errorsOf(`fn handler(req: http.Request) http.Response {
+	return http.Response{status: 200, body: "hi", headers: map<string, string>{}}
+}
+fn main() {
+	http.listen(":8080", handler)
+}`);
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    test("req.headers[key]はstring | noneなのでnarrowingせずに使うとエラーになる", () => {
+      const errors = errorsOf(`import "mesh/http"
+fn handler(req: http.Request) http.Response {
+	v := req.headers["x-id"]
+	return http.Response{status: 200, body: v, headers: map<string, string>{}}
+}
+fn main() {}`);
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    test("is noneで絞り込めばreq.headers[key]をそのままbodyに使える", () => {
+      expect(
+        errorsOf(`import "mesh/http"
+fn handler(req: http.Request) http.Response {
+	v := req.headers["x-id"]
+	if v is none {
+		return http.Response{status: 400, body: "missing", headers: map<string, string>{}}
+	}
+	return http.Response{status: 200, body: v, headers: map<string, string>{}}
+}
+fn main() {}`),
+      ).toEqual([]);
     });
   });
 });

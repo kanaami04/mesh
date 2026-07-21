@@ -552,10 +552,10 @@ in a package directory and import it:
 - Accessing an unexported symbol, importing an unknown package, and import cycles are all
   compile errors. A package cannot import itself.
 - v1 limits: package paths are single directory names (no \`"a/b"\` nesting). \`"mesh/..."\` is
-  reserved for the standard library — \`mesh/io\` and \`mesh/json\` exist (see next section);
-  any other \`mesh/...\` path is not implemented yet and is an \`unknown package\` error.
-- Your own package directories can't be named \`io\` or \`json\` — those short names are reserved
-  by the built-in packages above, and a same-named directory is a compile error.
+  reserved for the standard library — \`mesh/io\`, \`mesh/json\`, and \`mesh/http\` exist (see next
+  section); any other \`mesh/...\` path is not implemented yet and is an \`unknown package\` error.
+- Your own package directories can't be named \`io\`, \`json\`, or \`http\` — those short names are
+  reserved by the built-in packages above, and a same-named directory is a compile error.
 
 ## Standard library: mesh/io, mesh/json (F-14)
 
@@ -619,6 +619,51 @@ turn a \`json.Value\` into a specific \`struct\`, both erroring instead of guess
   else (a plain \`struct\` field, \`map\`, a general union) is a compile error naming the field —
   write a hand-written decoder for that struct instead. \`json struct\` needs \`import "mesh/json"\`
   in the same file. \`export json struct\` also exports the generated decoder.
+
+## Standard library: mesh/http (C-6: server-only, v1)
+
+A minimal, Go \`net/http\`-style server — one handler function, no router. There is no client
+(no \`fetch\`-equivalent) in v1; this package only lets Mesh code SERVE HTTP.
+
+    import "mesh/http"
+
+    fn handler(req: http.Request) http.Response {
+        if req.path == "/hello" {
+            return http.Response{status: 200, body: "hi", headers: map<string, string>{}}
+        }
+        return http.Response{status: 404, body: "not found", headers: map<string, string>{}}
+    }
+
+    fn main() {
+        r := http.listen(":8080", handler)   // none | error — resolves once the port is bound
+        if r is error { print("failed to start: \${r}"); return }
+    }
+
+- \`http.Request { method: string, path: string, query: string, headers: map<string, string>,
+  body: string }\` — \`path\` never includes the query string; \`query\` is the raw, unparsed
+  remainder after \`?\` (empty string if none). Header lookups (\`req.headers["x"]\`) are
+  \`string | none\` like any map read.
+- \`http.Response { status: int, body: string, headers: map<string, string> }\` — struct
+  literals require every field (no v1 route-registration sugar means you always build one by
+  hand: use \`map<string, string>{}\` for "no custom headers").
+- \`http.listen(addr: string, handler: fn(http.Request) http.Response) none | error\` — \`addr\` is
+  \`"host:port"\`, \`":port"\` (all interfaces), or a bare \`"port"\`. Returns \`none\` almost
+  immediately once bound (it does NOT block until the server stops) — the program keeps running
+  afterward because the open socket keeps the event loop alive, same as any Node/Go server.
+  Binding failure (e.g. the port is already in use) is \`error\`, never a panic.
+- Request bodies are capped at 10MiB (fixed in v1, no config hook) — exceeding it gets that one
+  request a \`413\`, same isolation story as a handler panic; the server keeps serving everything
+  else.
+- **Fault isolation is automatic and invisible**: if a handler call panics (e.g. an out-of-range
+  index), that ONE request gets a generic \`500\` response and the panic is logged server-side —
+  the server keeps running and serves the next request normally. This mirrors Go's \`net/http\`
+  recovering panics per-request; Mesh does not gain a \`panic()\`/\`recover()\` construct for it.
+- No routing: branch on \`req.path\`/\`req.method\` yourself (a real ServeMux-style
+  \`http.get(path, handler)\`/\`http.post(...)\` is planned as a later addition to this SAME
+  package, not a separate framework — see design-agenda.md C-6).
+- Compose with \`mesh/json\`: read \`req.body\` as a string, then \`json.parse\`/a \`json struct\`
+  decoder on it exactly as you would anywhere else — there's no special request-body-decoding
+  mechanism, it's the same JSON tooling used everywhere.
 
 ## Does NOT exist in Mesh — never write these
 

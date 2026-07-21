@@ -335,6 +335,42 @@
       `compiler.ts`のparse直後・check直前で実行)。既存のchecker/codegenを一切変更せず
       再利用でき、生成コードも普通の関数として型検査される(安全網が「無料」で付く)。
       テスト12件追加(checker 6件・e2e 6件) |
+| `mesh/http`(C-6続き) | ✅ | 2026-07-21実装(kanayamaと討議のうえ、案1=Go `net/http`直訳の
+      生ハンドラ+単純listenを採用。ルーター内蔵は却下ではなく「v2でmesh/http自身に追加」と
+      design-agenda.md C-6へ明記 — Meshにはまだサードパーティパッケージのエコシステムが無く
+      〈Q2未決着〉、フレームワークに切り出す選択肢が実質存在しないため)。サーバー専用
+      (クライアント機能=fetch相当は無い)。`http.Request{method, path, query, headers:
+      map<string,string>, body}` / `http.Response{status, body, headers}` / `http.listen(addr:
+      string, handler: fn(Request) Response) none \| error`。`addr`は`"host:port"`/`":port"`/
+      `"port"`。`listen`はbindが成功したらほぼ即座に`none`を返す(サーバーが止まるまで待つ
+      わけではない — プロセスが生き続けるのはlisten中のソケットがNodeのイベントループを
+      保持するため。`mesh/http`自体に「待つ」機構は無い)。
+      **障害分離を自動で適用**: requirements.md 5.5「障害分離」方針・F-14実装メモをここで実地
+      適用 — 1リクエストのハンドラがpanicしてもそのリクエストだけ`500`になり(詳細はサーバー側
+      ログにのみ出し、クライアントには一般的な文言だけ返す)、サーバーは他のリクエストに応答し
+      続ける(Go `net/http`が内部でrecoverするのと同じ構図。Mesh言語自体に`panic()`/
+      `recover()`は追加しない)。
+      **code review(PR #39)で発見・追加修正**: 当初はリクエストボディの読み取りに上限が無く、
+      1リクエストが巨大なボディを送るだけでプロセス全体をメモリ枯渇で落とせてしまい、
+      ハンドラpanicの隔離だけでは「1リクエストがサーバー全体を道連れにしない」という約束を
+      守れていなかった。10MiB(v1は固定値)の上限を追加し、超過時は`__HttpBodyTooLarge`で
+      readBodyをrejectして`413`にする形で同じ隔離パターンに合流させた。`req.destroy()`で
+      即座に切断すると413のレスポンス自体がクライアントに届かず`ECONNRESET`になったため、
+      `req.pause()`で読み取りだけ止め、`Connection: close`ヘッダを付けたレスポンスを
+      書き終えてからNodeにソケットを閉じさせる方式にした(この順序を誤ると回帰する)。
+      **アーキテクチャ**: mesh/io・mesh/jsonと同じ「組み込みパッケージ」(`.mesh`ソース無し)
+      方式 — `src/stdlib.ts`に型シグネチャ、`runtime.ts`のPRELUDEに`node:http`を動的import
+      する実装(ブラウザ実行では`error`に落ちる)。checker/codegen側の変更は一切不要
+      (`BUILTIN_PACKAGES`マップへの追加のみでテーブル駆動)。
+      **テスト戦略の工夫**: 既存の`spawnSync`+「exit 0を待つ」e2eヘルパーは使えない
+      (listen中のソケットがプロセスを生かし続けるため)。代わりに`node:child_process`の
+      非同期`spawn`でサーバーを子プロセスとして起動したまま残し、実ネットワーク越しに`fetch`
+      でリクエストし、アサーション後に必ずkillする専用ヘルパーを`tests/http.test.ts`に新設。
+      `mesh/json`の`json struct`デコードと組み合わせたPOSTボディの検証つきデコードもテスト済み。
+      `mesh card --for`は`import "mesh/http"`検出時のみこの節を含める(未使用プログラムの
+      サブセットカードを肥大させない — H-2までで60%比率テストが限界に近づいていたため、
+      H-2までと違いこちらは`card-subset.ts`でゲート対象にした)。
+      テスト12件追加(checker 6件・e2e 6件。うち1件はcode review指摘の巨大ボディ413回帰テスト) |
 
 ## ツールチェーン
 

@@ -44,6 +44,11 @@ describe("サブセットカード(F-13後半): detectFeatures", () => {
     expect(detectFeatures(`export fn f() {}`).has("modules")).toBe(true);
   });
 
+  test("mesh/http: import \"mesh/http\" を検出する(C-6続き)", () => {
+    expect(detectFeatures(`import "mesh/http"`).has("httpServer")).toBe(true);
+    expect(detectFeatures(`import "mesh/json"`).has("httpServer")).toBe(false);
+  });
+
   test("複数ファイル分を渡すと、どれか1つが使っていれば検出される(呼び出し側でjoinする想定)", () => {
     const features = detectFeatures(["fn main() { print(1) }", "struct User { name: string }"].join("\n"));
     expect(features.has("structs")).toBe(true);
@@ -76,6 +81,7 @@ describe("サブセットカード(F-13後半): buildSubsetCard", () => {
     "## Arrays",
     "## Concurrency",
     "## Modules (import / export)",
+    "## Standard library: mesh/http",
   ];
 
   test("何も使わない小さなプログラムでは、常時セクションだけが残り機能セクションは全部落ちる", () => {
@@ -89,6 +95,14 @@ describe("サブセットカード(F-13後半): buildSubsetCard", () => {
     expect(card).toContain("Structs, maps & methods");
     expect(card).not.toContain("Concurrency (structured");
     expect(card).not.toContain("Generic functions");
+  });
+
+  test("mesh/httpをimportしているときだけmesh/httpセクションが入る(C-6続き)", () => {
+    const withHttp = buildSubsetCard([`import "mesh/http"\nfn main() {}`]);
+    expect(withHttp).toContain("Standard library: mesh/http");
+
+    const withoutHttp = buildSubsetCard([`fn main() { print(1) }`]);
+    expect(withoutHttp).not.toContain("Standard library: mesh/http");
   });
 
   test("全部載りカードの「COMPLETE reference」主張は、サブセットである旨の注記に置き換わる", () => {
@@ -112,6 +126,7 @@ describe("サブセットカード(F-13後半): buildSubsetCard", () => {
       `t := spawn f()`,
       `import "util"`,
       `defer f()`,
+      `import "mesh/http"`,
     ];
     expect(buildSubsetCard(everything)).toBe(LANGUAGE_CARD);
   });
