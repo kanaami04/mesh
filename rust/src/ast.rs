@@ -4,9 +4,10 @@
 // **今回までのスコープ**: fn宣言(ジェネリクス・レシーバは次回)、トップレベル定数、
 // if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・複合代入・
 // インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
-// **struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式**。
+// **struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
+// 文字列補間**。
 // **対象外(次回以降のPRで追加)**: ジェネリクス、`or`束縛形・`?`伝播、
-// spawn/wait/chan/select、文字列補間、配列/mapリテラル、import/export、defer、
+// spawn/wait/chan/select、配列/mapリテラル、import/export、defer、
 // 添字アクセス、範囲for、send文、型注釈つき変数宣言、error/jsonマーカー
 // (`?`/`or`が無いと構造化エラーの旨みが薄いため、それらとセットで後回し)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
@@ -151,7 +152,8 @@ pub enum MatchPattern {
 pub enum Expr {
     Int { value: String, pos: Pos },
     Float { value: String, pos: Pos },
-    String { value: String, pos: Pos }, // 補間(InterpExpr)は次回以降 — 再字句解析が絡み複雑なため
+    String { value: String, pos: Pos },
+    Interp { segments: Vec<InterpSegment>, pos: Pos }, // "worker ${id} done"
     Bool { value: bool, pos: Pos },
     None { pos: Pos }, // 不在の値。T | none の union にだけ入れられる(checker移植後に検査)
     Ident { name: String, pos: Pos },
@@ -164,12 +166,22 @@ pub enum Expr {
     Match { subject: Box<Expr>, arms: Vec<MatchArm>, pos: Pos },
 }
 
+// 文字列補間の部品。TS版のInterpSegmentと同じ形(text部品はそのまま、expr部品は
+// 再字句解析・再パース済みのExprを持つ — lexer.rsのStringPartは未パースのソース断片
+// だったのに対し、こちらはパース後のASTノードである点が違う)
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpSegment {
+    Text { text: String },
+    Expr { expr: Box<Expr> },
+}
+
 impl Expr {
     pub fn pos(&self) -> Pos {
         match self {
             Expr::Int { pos, .. }
             | Expr::Float { pos, .. }
             | Expr::String { pos, .. }
+            | Expr::Interp { pos, .. }
             | Expr::Bool { pos, .. }
             | Expr::None { pos, .. }
             | Expr::Ident { pos, .. }
