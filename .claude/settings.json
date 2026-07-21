@@ -9,11 +9,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-squash-merge.sh\"",
-            "if": "Bash(gh pr merge*)"
-          },
-          {
-            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-code-review.sh\"",
             "if": "Bash(gh pr merge*)"
           }

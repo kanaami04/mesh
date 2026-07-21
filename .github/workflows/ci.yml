@@ -24,6 +24,11 @@ jobs:
       - name: Tests
         run: bun test
 
+      # 開発フローを守るフック（.claude/hooks/）のテスト。ネットワーク・gh認証に
+      # 依存しない。走らせておかないと、フックが無言で効かなくなっても気づけない
+      - name: Hook tests
+        run: .claude/hooks/test-hooks.sh
+
       - name: Run examples
         run: |
           for f in examples/*.mesh; do
