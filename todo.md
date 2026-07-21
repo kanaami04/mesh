@@ -113,9 +113,26 @@
   - ~~`spawn` 式 / `wait` ブロック / `select`~~ ✅ 実装済み(2026-07-18)
   - ~~map型(`m[k]` は `V | none`)/ for range(完全形のみ)~~ ✅ 実装済み(2026-07-18)
   - 決定記録は [docs/syntax-proposals.md](docs/syntax-proposals.md) と [docs/design-agenda.md](docs/design-agenda.md)
-- [ ] **Rust移植の開始**
-  - 現行テストスイート(350件、2026-07-20時点)を「合格基準」にする
+- [ ] **Rust移植の開始** — 2026-07-21着手(kanayamaと討議のうえ。進め方は今まで通り
+      Claudeが実装+日本語で解説するスタイルを継続)
+  - 現行テストスイート(477件、2026-07-21時点)を「合格基準」にする
   - lexer → parser → checker → codegen の順に移植
+  - [x] **lexer移植(第一弾)** ✅ 2026-07-21実装。`rust/`にCargoプロジェクト新設
+        (lib+binのハイブリッド構成)。`src/token.ts`+`src/lexer.ts`(計393行)を
+        `rust/src/token.rs`+`rust/src/lexer.rs`に1:1移植、`tests/lexer.test.ts`の
+        15件のテストも`#[cfg(test)]`インラインテストとして移植し全件パス。
+        `cargo clippy`警告ゼロも確認。`mise.toml`に`rust = "1.97.1"`を追加、
+        `rust-test`/`rust-check`タスクを新設。
+        **移植で出てきたTS→Rustの主な設計判断**: (1) TSの文字列リテラルunion
+        (`TokenType`)はRustのenumに1:1対応するが、フィールド名`type`は予約語なので
+        `kind`に改名(Meshの判別可能unionのタグ名と同じ呼び方になり、むしろ整合)。
+        (2) TSの`throw`はRustに無いので`Result<T, E>`+`?`に変換
+        (Mesh自身の`T | error` + `?`が着想を得た元ネタと同じ形なので自然に対応した)。
+        (3) TSのクロージャ(advance/pos/last)が外側の変数を直接書き換える形は、
+        Rustの借用チェッカと相性が悪いため、状態をまとめた`Lexer`構造体+
+        `&mut self`メソッドに置き換えた。(4) 文字列は`Vec<char>`でUnicodeスカラ値
+        単位に扱う(JSのUTF-16コード単位ベースの`source[i]`とは厳密には異なるが、
+        BMP内の文字〈日本語含む〉であれば実質差が出ない、という意図的な簡略化)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

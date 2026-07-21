@@ -4,6 +4,7 @@
 [tools]
 bun = "1.3.9"   # コンパイラの実行・テスト (bun test)
 node = "24"     # 生成された JavaScript の実行確認用
+rust = "1.97.1" # Rust移植版コンパイラ(rust/)のビルド
 
 [tasks.test]
 description = "コンパイラのテストを実行"
@@ -25,3 +26,11 @@ for f in examples/*.mesh; do
   bun src/cli.ts run "$f"
 done
 """
+
+[tasks."rust-test"]
+description = "Rust移植版のテスト(rust/)"
+run = "cd rust && cargo test"
+
+[tasks."rust-check"]
+description = "Rust移植版のlint(clippy)"
+run = "cd rust && cargo clippy --all-targets"

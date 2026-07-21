@@ -30,3 +30,25 @@ jobs:
             echo "=== $f ==="
             bun src/cli.ts run "$f"
           done
+
+  rust-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1" # mise.toml と揃える
+          components: clippy
+
+      - name: Build
+        run: cargo build
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

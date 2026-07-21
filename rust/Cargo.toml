@@ -1,0 +1,14 @@
+[package]
+name = "mesh"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mesh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mesh"
+path = "src/main.rs"
+
+[dependencies]
