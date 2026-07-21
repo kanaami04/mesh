@@ -351,7 +351,7 @@ critique-2026-07.md(B-5-2)の指摘: 「TSでよくない?」への3つの答え
 - テスト7件追加(checker: any-type-removed・cannot-infer-type(ローカル/トップレベル)・
   二重報告防止・既存の文脈つきパターンが壊れていないことの確認・予約名の維持)
 
-### H-2. API境界の検証つきデコード(P6の実質化) — 討議未了
+### H-2. API境界の検証つきデコード(P6の実質化) — ✅ 決着(2026-07-21): 手書き用ヘルパー + json struct自動生成の両方を実装
 
 critique-2026-07.md(B-5-2)の指摘: 「P6(フロント/バック型共有)は現状空手形。型共有だけなら
 TSが既にやっている。**API境界で型が検証される**まで行って初めて存在理由」。
@@ -366,3 +366,33 @@ Unmarshal相当、union路線なら`T | error`を返すデコーダ)がまだ無
   典型例として批判している
 - 着手順としてはC-6(環境別モジュール・`mesh/http`)より前に置く価値がある
   (HTTP自体より先にJSONデコードの安全性を固める方が土台として筋が良い)
+
+**討議の経緯(2026-07-21)**: 当初A案(手書きデコーダ+ヘルパー関数のみ)を提案したが、
+kanayamaから「他言語は自動でやっているはず」との指摘でB案(struct単位の自動生成)を採用。
+ただしMeshのジェネリクスは`T`のフィールドに触れない設計(意図的な制約)なので、
+`fn decode<T>(v: json.Value) T | error`という本当に汎用的なデコーダはユーザーコードでは
+書けない。新しい型引数構文(`decode<User>(v)`)も増やさず、既存の「宣言前のマーカー」
+パターン(`error struct`と同型)を再利用する形に決定。
+
+**実装メモ**:
+- ヘルパー関数(`mesh/json`に追加、A案はこれの単体利用として引き続き有効):
+  `json.field(v, key) json.Value | error`(欠損/非objectはerror)・
+  `json.optField(v, key) json.Value | none`(欠損/null→none、errorにしない)・
+  `json.asString/asInt/asFloat/asBool(v) T | error`・`json.asArray(v) json.Value[] | error`。
+  `asInt`は小数を丸めずerrorにする(F-10の精度方針を踏襲)
+- 自動生成(`json struct X { ... }`): 新しい生JS文字列を書くのではなく、**Meshの構文レベルの
+  AST(Stmt/Expr)をfield形状から合成し、通常のFnDeclとしてprogram.fnsへ追加する**方式を採用
+  (`src/json-decode.ts`、`compiler.ts`のparse直後・check直前に配線)。手書きデコーダと
+  全く同じ形(`json.field`/`json.asXxx`を`?`で繋ぐ)のコードを機械的に組み立てるので、
+  以降のcheck/codegenは無改造のまま流用でき、生成コードにもバグがあれば普通に型検査で捕まる
+- 対応範囲(v1): `int/float/string/bool`・**同一ファイル内**の他の`json struct`(ネスト)・
+  それらの配列・`T | none`(欠損/null→none)。それ以外(素のstruct・map・一般union等)は
+  合成時に該当フィールドを指してエラーにし、手書きデコーダへ誘導する。ネスト参照が
+  ファイルをまたぐケースは対象外(v1制約、必要なら手書きで対応)
+- `json type`(union)は意図的に非対応 — メンバー選択ロジックが要り自動導出できないため、
+  専用のエラーで手書きデコーダへ誘導する
+- `export json struct`は生成された`decode<Name>`も一緒にexportされる(他パッケージから
+  `pkg.decodeX(v)`で呼べる。手動検証済み)
+- テスト12件追加(checker 6件・e2e 6件: フラット・ネスト+配列+optionalの組み合わせ・
+  各種エラー(欠損/型不一致/非object/サポート外フィールド/import漏れ/json type)・
+  整数フィールドの精度検査・複数パッケージでのexport)

@@ -108,6 +108,9 @@ export type DiagnosticCode =
   | "invalid-test-signature"
   | "invalid-import-path"
   | "bare-struct-shape"
+  | "json-type-not-supported"
+  | "json-struct-unsupported-field"
+  | "json-struct-missing-import"
   | "method-export-redundant"
   | "multiple-return-values-removed"
   | "interpolation-in-type"
@@ -438,6 +441,18 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "A bare '{ field: Type, ... }' shape was written outside of a union — that syntax is only valid as " +
     "a member of a 'type X = { ... } | { ... }' discriminated union. For a standalone data shape, use " +
     "'struct X { ... }' instead.",
+  "json-type-not-supported":
+    "'json' (H-2's automatic JSON-decoding marker) only works on 'struct', not 'type' — a union needs " +
+    "member-selection logic that can't be auto-derived. Write a hand-written decoder using " +
+    "json.field/json.asString/json.asInt/etc. instead.",
+  "json-struct-unsupported-field":
+    "This field's type can't be auto-decoded by 'json struct' — only int/float/string/bool, a nested " +
+    "'json struct' type, an array of those, or 'T | none' of those are supported. Either change the " +
+    "field's type, mark a nested struct 'json struct' too, or write a hand-written decoder for this " +
+    "struct instead (using json.field/json.asString/etc.).",
+  "json-struct-missing-import":
+    "A 'json struct' declaration needs 'import \"mesh/json\"' in the same file — its generated decoder " +
+    "calls json.field/json.asString/etc., which aren't in scope without the import.",
   "method-export-redundant":
     "A method's visibility follows its struct's visibility, so 'export' on the method itself is " +
     "meaningless — export the struct instead (methods are then visible wherever the struct is).",

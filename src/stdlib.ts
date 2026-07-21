@@ -4,7 +4,7 @@
 // 実行時の実体(JS実装)は runtime.ts の PRELUDE 側にある。
 
 import type { PackageSymbols } from "./checker";
-import { BOOL, ERROR, FLOAT, STRING, type StructField, type Type, unionOf } from "./types";
+import { BOOL, ERROR, FLOAT, INT, NONE, STRING, type StructField, type Type, unionOf } from "./types";
 
 function fn(params: Type[], ret: Type): Type {
   return { kind: "fn", params, ret };
@@ -82,6 +82,17 @@ export const BUILTIN_PACKAGES: ReadonlyMap<string, PackageSymbols> = new Map([
       fns: new Map([
         ["parse", exportedFn(fn([STRING], unionOf([JSON_VALUE, ERROR])))],
         ["stringify", exportedFn(fn([JSON_VALUE], STRING))],
+        // H-2(2026-07-21): 検証つきデコード用の小さなヘルパー群。`json struct`の自動生成
+        // デコーダはこれらを`?`で連結して組み立てる(下のjson-decode.ts参照)。素の`json.Value`を
+        // own hand-written デコーダから直接使うことも想定している(自動生成が対応しない
+        // 形〈union・mapフィールド等〉のフォールバック手段)
+        ["field", exportedFn(fn([JSON_VALUE, STRING], unionOf([JSON_VALUE, ERROR])))],
+        ["optField", exportedFn(fn([JSON_VALUE, STRING], unionOf([JSON_VALUE, NONE])))],
+        ["asString", exportedFn(fn([JSON_VALUE], unionOf([STRING, ERROR])))],
+        ["asInt", exportedFn(fn([JSON_VALUE], unionOf([INT, ERROR])))],
+        ["asFloat", exportedFn(fn([JSON_VALUE], unionOf([FLOAT, ERROR])))],
+        ["asBool", exportedFn(fn([JSON_VALUE], unionOf([BOOL, ERROR])))],
+        ["asArray", exportedFn(fn([JSON_VALUE], unionOf([{ kind: "array", elem: JSON_VALUE }, ERROR])))],
       ]),
     },
   ],

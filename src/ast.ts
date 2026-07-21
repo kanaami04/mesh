@@ -60,6 +60,7 @@ export interface TypeDecl {
   node: TypeNode;
   exported: boolean; // export type X = ... / export struct X { ... }
   isError: boolean; // error type X = ... / error struct X { ... }(F-2後半): '?'/'or'の伝播対象にする
+  isJson: boolean; // json struct X { ... }(H-2): decode<X>(v: json.Value) X | error を自動生成する
   pos: Pos;
 }
 

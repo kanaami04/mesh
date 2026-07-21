@@ -595,6 +595,31 @@ directly into the compiler instead of being a directory of Mesh files.
   \`json.stringify(v: json.Value) string\` — the inverse; never fails (a well-formed \`Value\`
   tree always serializes).
 
+## Validated JSON decoding (H-2: json.Value → struct, with real validation)
+
+\`json.parse\` alone gets you an untyped \`json.Value\` tree — there is no unchecked \`as User\` cast
+to jump straight to a typed value (unlike TypeScript's \`response.json() as User\`). Two ways to
+turn a \`json.Value\` into a specific \`struct\`, both erroring instead of guessing on bad input:
+
+    struct Address { city: string }
+    fn decodeAddress(v: json.Value) Address | error {
+        city := json.asString(json.field(v, "city")?)?
+        return Address{city: city}
+    }
+
+- Hand-written: \`json.field(v, key) json.Value | error\` (missing key / \`v\` not an object → error),
+  \`json.optField(v, key) json.Value | none\` (missing key or JSON \`null\` → \`none\`, no error),
+  \`json.asString/asInt/asFloat/asBool(v) T | error\`, \`json.asArray(v) json.Value[] | error\`.
+  Chain with \`?\` as above. \`asInt\` errors (doesn't round) on a non-whole number — same
+  no-silent-precision-loss stance as F-10.
+- Automatic: \`json struct User { name: string, age: int }\` (like \`error struct\`) makes the
+  compiler generate \`decodeUser(v: json.Value) User | error\` for you — call it directly, no
+  boilerplate. Supported field types: \`int/float/string/bool\`, another \`json struct\` in the
+  SAME FILE (nested), arrays of those, or \`T | none\` of those (missing/null → \`none\`). Anything
+  else (a plain \`struct\` field, \`map\`, a general union) is a compile error naming the field —
+  write a hand-written decoder for that struct instead. \`json struct\` needs \`import "mesh/json"\`
+  in the same file. \`export json struct\` also exports the generated decoder.
+
 ## Does NOT exist in Mesh — never write these
 
 null, undefined, nil / try, catch, throw, exceptions / panic(), recover /

@@ -17,9 +17,14 @@
         センチネルは残すが到達不能。副作用として、文脈の無い空配列/mapリテラル
         (`x := []`)も`cannot-infer-type`エラーになった(`xs: Todo[] = []`のように文脈が
         あれば今まで通り動く)。詳細は design-agenda.md H-1参照
-  - [ ] **H-2: API境界の検証つきデコード(P6の実質化)** — `json.Value`→`struct`を検証つきで
-        変換する手段が無い。「TSは型共有だけ、Meshは境界で検証もする」という主張の成立に必須。
-        C-6(`mesh/http`)より前に着手する価値がある(HTTPより先にJSONデコードの安全性を固める方が筋が良い)
+  - [x] **H-2: API境界の検証つきデコード(P6の実質化)** ✅ **2026-07-21実装**(kanayamaと討議のうえ、
+        構造体単位の自動生成を採用)。`mesh/json`にヘルパー(`json.field`/`json.optField`/
+        `json.asString`/`asInt`/`asFloat`/`asBool`/`asArray`)を追加。さらに`json struct X {...}`
+        (`error struct`と同じマーカー構文)と書くと、`decode<X>(v: json.Value) X | error`を
+        コンパイラが自動生成する(Meshの構文レベルAST=FnDeclを合成し、以降のcheck/codegenは
+        無改造で流用)。対応範囲: int/float/string/bool・同一ファイル内の他のjson struct
+        (ネスト)・それらの配列・`T | none`。それ以外は合成時にフィールドを指してエラーにし、
+        ヘルパー関数での手書きデコーダへ誘導する。詳細は design-agenda.md H-2参照
 
 - [ ] **C-6の続き: 環境別モジュール・`mesh/http`**(2026-07-20、kanayamaと討議のうえ後回しに決定)
   - `mesh/io`+`mesh/json`(F-14)と違い、これは「importした環境を見て自動判別する」という

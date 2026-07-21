@@ -5,6 +5,7 @@
 
 import { checkModules, type Diagnostic, type ParsedModule, type TestInfo } from "./checker";
 import { generateModules } from "./codegen";
+import { synthesizeJsonDecoders } from "./json-decode";
 import { parse } from "./parser";
 import { CompileError, MultiCompileError } from "./token";
 
@@ -30,7 +31,11 @@ export function compileModules(modules: ModuleSource[], opts?: { testMode?: bool
   const parseErrors: Diagnostic[] = [];
   for (const m of modules) {
     try {
-      parsed.push({ pkg: m.pkg, file: m.file, program: parse(m.source) });
+      const program = parse(m.source);
+      // H-2: 'json struct'から decode<Name> を合成する(checkの前 — 生成した関数も
+      // 普通のFnDeclとして以降の型検査・codegenにそのまま乗せる)
+      synthesizeJsonDecoders(program);
+      parsed.push({ pkg: m.pkg, file: m.file, program });
     } catch (e) {
       // 構文エラーからの復帰(パーサ側)で複数件集まっていればMultiCompileError、
       // 1件だけなら従来どおり素のCompileError — どちらも同じ形のDiagnosticへ均す

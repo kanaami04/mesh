@@ -299,6 +299,28 @@ const json$parse = (text) => {
   }
 };
 const json$stringify = (v) => JSON.stringify(__valueToJson(v));
+// H-2(2026-07-21): 検証つきデコード用の小さなヘルパー群。'json struct'の自動生成デコーダは
+// これらを'?'で連結して組み立てる(src/json-decode.ts参照)。手書きデコーダからも直接使える
+const json$field = (v, key) => {
+  if (v.kind !== "obj") return new Error("expected a JSON object, got " + v.kind);
+  if (!v.entries.has(key)) return new Error("missing field '" + key + "'");
+  return v.entries.get(key);
+};
+const json$optField = (v, key) => {
+  if (v.kind !== "obj") return null;
+  const raw = v.entries.get(key);
+  if (raw === undefined || raw.kind === "null") return null;
+  return raw;
+};
+const json$asString = (v) => (v.kind === "str" ? v.s : new Error("expected a string, got " + v.kind));
+const json$asInt = (v) => {
+  if (v.kind !== "num") return new Error("expected a number, got " + v.kind);
+  if (!Number.isSafeInteger(v.n)) return new Error("expected a whole number, got " + v.n);
+  return v.n;
+};
+const json$asFloat = (v) => (v.kind === "num" ? v.n : new Error("expected a number, got " + v.kind));
+const json$asBool = (v) => (v.kind === "bool" ? v.b : new Error("expected a boolean, got " + v.kind));
+const json$asArray = (v) => (v.kind === "arr" ? v.items : new Error("expected an array, got " + v.kind));
 const __fmt = (v) =>
   v === null || v === undefined ? "none"
   : v === __CLOSED ? "closed"

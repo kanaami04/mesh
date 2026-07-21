@@ -310,6 +310,31 @@
       `json.Value{kind: "str", s: "x"}`のように書ける。
       **副産物**: この実装中に`typeToString`が自己参照structで無限再帰する既存バグを発見・修正
       (`Tree`型でも再現した。再帰中の型を`seen`集合で追跡し「...」で打ち切るガードを追加) |
+      | 検証つきJSONデコード(H-2) | ✅ | 2026-07-21実装(kanayamaと討議のうえ、B案=構造体単位の
+      自動生成を採用)。TSの`response.json() as User`のような無検査castはMeshに存在しない —
+      `json.Value`から具体的な`struct`への変換は必ず失敗しうる操作として扱う。
+      **手書き用ヘルパー**(`mesh/json`に追加): `json.field(v, key) json.Value \| error`
+      (キー不在/`v`がobjでない→error)、`json.optField(v, key) json.Value \| none`
+      (キー不在またはJSON `null`→`none`、エラーにしない)、
+      `json.asString/asInt/asFloat/asBool(v) T \| error`、`json.asArray(v) json.Value[] \| error`。
+      `?`で連結してデコーダを書く。`asInt`は非整数値をエラーにする(丸めない) — F-10の
+      「暗黙の精度損失を許さない」方針と統一。
+      **自動生成**: `json struct User { name: string, age: int }`と書くと(`error struct`と同じ
+      文脈依存キーワードのパターン)、コンパイラが`decodeUser(v: json.Value) User \| error`を
+      自動生成する — 新しい呼び出し構文は導入せず、生成された関数を普通の関数として呼ぶだけ。
+      対応フィールド型(v1スコープ): `int/float/string/bool`、同一ファイル内の他の`json struct`
+      (ネスト、`?`で再帰的にデコード)、それらの配列、それらの`T \| none`
+      (欠落/null→`none`)。それ以外(素の`struct`・`map`・一般unionなど)はフィールド名を
+      名指しした`json-struct-unsupported-field`エラーになり、手書きデコーダへ誘導する。
+      `import "mesh/json"`が同ファイルに必要(なければ`json-struct-missing-import`)。
+      `json type`(union)は非対応と明示的に拒否(`json-type-not-supported`) —
+      どのメンバーを選ぶかの判定はユーザー定義ロジックが要るため。`export json struct`は
+      生成されたデコーダ関数もエクスポートする。
+      **実装アーキテクチャ**: 生JSを手組みするのではなく、Meshの構文レベルのAST(Stmt/Expr)を
+      合成し通常の`FnDecl`として`program.fns`へ注入する(`src/json-decode.ts`、
+      `compiler.ts`のparse直後・check直前で実行)。既存のchecker/codegenを一切変更せず
+      再利用でき、生成コードも普通の関数として型検査される(安全網が「無料」で付く)。
+      テスト12件追加(checker 6件・e2e 6件) |
 
 ## ツールチェーン
 

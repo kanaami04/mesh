@@ -230,10 +230,27 @@ class Parser {
           this.check("ident") && this.peek().value === "error" &&
           (this.peek(1).type === "type" || this.peek(1).type === "struct");
         if (isError) this.next();
+        // json struct X { ... }(H-2): 同じ文脈依存キーワードのパターン。structのみ対応
+        // (unionの自動デコードはメンバー選択のロジックが要り複雑なので対象外 — 手書きの
+        // デコーダ関数を書く)。"json type"は意図的に弾いて誘導する
+        const isJson =
+          this.check("ident") && this.peek().value === "json" && this.peek(1).type === "struct";
+        if (isJson) this.next();
+        if (
+          this.check("ident") && this.peek().value === "json" && this.peek(1).type === "type"
+        ) {
+          throw new CompileError(
+            "'json type' isn't supported — automatic JSON decoding only works for 'json struct' " +
+              "(a union needs custom logic to pick a member; write a hand-written decoder using " +
+              "json.field/json.asString/etc. instead)",
+            this.peek().pos,
+            "json-type-not-supported",
+          );
+        }
         if (this.check("type")) {
           types.push(this.parseTypeDecl(exported, isError));
         } else if (this.check("struct")) {
-          types.push(this.parseStructDecl(exported, isError));
+          types.push(this.parseStructDecl(exported, isError, isJson));
         } else if (this.check("fn")) {
           fns.push(this.parseFnDecl(exported));
         } else if (this.check("ident") && (this.peek(1).type === ":=" || this.peek(1).type === ":")) {
@@ -291,7 +308,7 @@ class Parser {
 
   // struct User { name: string  age: int } — 意味的には型への名付け(typeと同じ)なので
   // TypeDecl として登録する。フィールドは改行区切り
-  private parseStructDecl(exported: boolean, isError: boolean): TypeDecl {
+  private parseStructDecl(exported: boolean, isError: boolean, isJson: boolean): TypeDecl {
     const start = this.expect("struct", "at start of struct declaration");
     const name = this.expect("ident", "as struct name").value;
     this.expect("{", "after struct name");
@@ -311,6 +328,7 @@ class Parser {
       node: { kind: "structType", fields, pos: start.pos },
       exported,
       isError,
+      isJson,
       pos: start.pos,
     };
   }
@@ -350,11 +368,12 @@ class Parser {
               },
         );
       }
-      return { kind: "typeDecl", name, node: first, exported, isError, pos: start.pos };
+      return { kind: "typeDecl", name, node: first, exported, isError, isJson: false, pos: start.pos };
     }
     return {
       kind: "typeDecl",
       name,
+      isJson: false,
       node: {
         kind: "union",
         members,

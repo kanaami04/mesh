@@ -2734,3 +2734,126 @@ describe("defer文", () => {
     expect(out).toBe("working\nflush: done\n");
   });
 });
+
+describe("H-2: json struct(検証つきJSONデコードの自動生成)", () => {
+  test("フラットなstructを正しくデコードできる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct User {
+      name: string
+      age: int
+    }
+    fn main() {
+      v := json.parse("{\\"name\\": \\"alice\\", \\"age\\": 30}") or _ => json.Value{kind: "null"}
+      u := decodeUser(v)
+      if u is error { print("failed"); return }
+      print(u.name, u.age)
+    }`);
+    expect(out).toBe("alice 30\n");
+  });
+
+  test("欠けているフィールド・型が違うフィールド・JSON objectでない値は、それぞれ分かるエラーになる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct User {
+      name: string
+      age: int
+    }
+    fn main() {
+      missing := json.parse("{\\"name\\": \\"bob\\"}") or _ => json.Value{kind: "null"}
+      u1 := decodeUser(missing)
+      if u1 is error { print(u1) }
+
+      wrongType := json.parse("{\\"name\\": \\"bob\\", \\"age\\": \\"nope\\"}") or _ => json.Value{kind: "null"}
+      u2 := decodeUser(wrongType)
+      if u2 is error { print(u2) }
+
+      notObj := json.parse("[1,2,3]") or _ => json.Value{kind: "null"}
+      u3 := decodeUser(notObj)
+      if u3 is error { print(u3) }
+    }`);
+    expect(out).toBe("missing field 'age'\nexpected a number, got str\nexpected a JSON object, got arr\n");
+  });
+
+  test("ネストしたjson struct・配列・optionalフィールドを組み合わせて正しくデコードできる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct Address {
+      city: string
+      zip: string
+    }
+    json struct Person {
+      name: string
+      address: Address
+      tags: string[]
+      nickname: string | none
+    }
+    fn main() {
+      text := "{\\"name\\": \\"alice\\", \\"address\\": {\\"city\\": \\"Tokyo\\", \\"zip\\": \\"100-0001\\"}, \\"tags\\": [\\"a\\", \\"b\\"], \\"nickname\\": \\"al\\"}"
+      v := json.parse(text) or _ => json.Value{kind: "null"}
+      p := decodePerson(v)
+      if p is error { print("failed: " + str(p)); return }
+      print(p.name, p.address.city, p.address.zip, p.tags, p.nickname)
+
+      textNoNick := "{\\"name\\": \\"bob\\", \\"address\\": {\\"city\\": \\"Osaka\\", \\"zip\\": \\"500-0001\\"}, \\"tags\\": []}"
+      v2 := json.parse(textNoNick) or _ => json.Value{kind: "null"}
+      p2 := decodePerson(v2)
+      if p2 is error { print("failed2: " + str(p2)); return }
+      print(p2.name, p2.nickname, len(p2.tags))
+    }`);
+    expect(out).toBe("alice Tokyo 100-0001 [a b] al\nbob none 0\n");
+  });
+
+  test("配列フィールドの要素がjson struct(ネスト配列)の場合も、配列自体がoptionalの場合も正しく動く", () => {
+    const out = runSource(`import "mesh/json"
+    json struct Item {
+      sku: string
+      qty: int
+    }
+    json struct Cart {
+      items: Item[]
+      notes: string[] | none
+    }
+    fn main() {
+      text := "{\\"items\\": [{\\"sku\\": \\"a1\\", \\"qty\\": 2}, {\\"sku\\": \\"b2\\", \\"qty\\": 5}], \\"notes\\": [\\"fragile\\"]}"
+      v := json.parse(text) or _ => json.Value{kind: "null"}
+      c := decodeCart(v)
+      if c is error { print("failed: " + str(c)); return }
+      print(len(c.items), c.items[0].sku, c.items[1].qty, c.notes)
+
+      textNoNotes := "{\\"items\\": []}"
+      v2 := json.parse(textNoNotes) or _ => json.Value{kind: "null"}
+      c2 := decodeCart(v2)
+      if c2 is error { print("failed2: " + str(c2)); return }
+      print(len(c2.items), c2.notes)
+    }`);
+    expect(out).toBe("2 a1 5 [fragile]\n0 none\n");
+  });
+
+  test("整数フィールドに小数(30.5等)が来たら、丸めずにエラーにする(F-10の精度方針と一致)", () => {
+    const out = runSource(`import "mesh/json"
+    json struct User {
+      name: string
+      age: int
+    }
+    fn main() {
+      v := json.parse("{\\"name\\": \\"a\\", \\"age\\": 30.5}") or _ => json.Value{kind: "null"}
+      u := decodeUser(v)
+      if u is error { print(u) }
+    }`);
+    expect(out).toBe("expected a whole number, got 30.5\n");
+  });
+
+  test("複数パッケージ: exportしたjson structのdecode関数を他パッケージから呼べる", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "mesh/json"\nimport "models"\nfn main() {\n\tv := json.parse("{\\"name\\": \\"alice\\"}") or _ => json.Value{kind: "null"}\n\tu := models.decodeUser(v)\n\tif u is error { print("failed"); return }\n\tprint(u.name)\n}`,
+      },
+      {
+        pkg: "models",
+        file: "models/models.mesh",
+        source: `import "mesh/json"\nexport json struct User {\n\tname: string\n}`,
+      },
+    ]);
+    expect(out).toBe("alice\n");
+  });
+});

@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { check, checkModules } from "../src/checker";
+import { compile, compileModules } from "../src/compiler";
 import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "../src/diagnostic-codes";
 import { parse } from "../src/parser";
 import { CompileError } from "../src/token";
+
+// H-2: 'json struct'はcompiler.ts(parse→synthesizeJsonDecoders→check)側でのみ
+// decode<Name>を合成するので、checker.tsを直接叩くerrorsOf/check(parse(...))では
+// 合成が起きない。このテスト群だけはcompile()/compileModules()を使う
+const jsonErrorsOf = (src: string) => compile(src).diagnostics.map((d) => d.message);
 
 const diagnosticsOf = (src: string) => check(parse(src));
 const errorsOf = (src: string) => check(parse(src)).map((d) => d.message);
@@ -1794,6 +1800,93 @@ fn main() {
       expect(errorsOf(`struct any { x: int }\nfn main() {}`)).toEqual([
         expect.stringContaining("'any' is a builtin type and cannot be redeclared"),
       ]);
+    });
+  });
+
+  describe("H-2: json struct(検証つきJSONデコードの自動生成)", () => {
+    test("フラットなjson structは型検査を通り、decode<Name>が呼び出せる", () => {
+      const errors = jsonErrorsOf(`import "mesh/json"
+json struct User {
+	name: string
+	age: int
+}
+fn main() {
+	v := json.parse("{}") or _ => json.Value{kind: "null"}
+	u := decodeUser(v)
+	if u is error { return }
+	print(u.name, u.age)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("ネスト・配列・optionalの組み合わせも型検査を通る", () => {
+      const errors = jsonErrorsOf(`import "mesh/json"
+json struct Address { city: string }
+json struct Person {
+	name: string
+	address: Address
+	tags: string[]
+	nickname: string | none
+}
+fn main() {
+	v := json.parse("{}") or _ => json.Value{kind: "null"}
+	p := decodePerson(v)
+	if p is error { return }
+	print(p.name, p.address.city, p.tags, p.nickname)
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("退行防止: サポート外のフィールド型(素のstruct・map)は合成時にjson-struct-unsupported-fieldで拒否される", () => {
+      expect(
+        jsonErrorsOf(`import "mesh/json"
+struct Address { city: string }
+json struct Person {
+	name: string
+	address: Address
+}
+fn main() {}`),
+      ).toEqual([expect.stringContaining("can't auto-decode field 'address'")]);
+
+      expect(
+        jsonErrorsOf(`import "mesh/json"
+json struct Config {
+	settings: map<string, string>
+}
+fn main() {}`),
+      ).toEqual([expect.stringContaining("can't auto-decode field 'settings'")]);
+    });
+
+    test("退行防止: import \"mesh/json\"が無いとjson-struct-missing-importで拒否される", () => {
+      expect(
+        jsonErrorsOf(`json struct User {
+	name: string
+}
+fn main() {}`),
+      ).toEqual([expect.stringContaining("needs 'import \"mesh/json\"'")]);
+    });
+
+    test("退行防止: 'json type'はunion向けの自動デコードが複雑すぎるため明示的に拒否される", () => {
+      expect(
+        jsonErrorsOf(`json type Status = "active" | "banned"
+fn main() {}`),
+      ).toEqual([expect.stringContaining("'json type' isn't supported")]);
+    });
+
+    test("export json structは、生成されたdecode<Name>もexportされる(他パッケージから呼べる)", () => {
+      const result = compileModules([
+        {
+          pkg: "main",
+          file: "app.mesh",
+          source: `import "mesh/json"\nimport "models"\nfn main() {\n\tv := json.parse("{}") or _ => json.Value{kind: "null"}\n\tu := models.decodeUser(v)\n\tif u is error { return }\n\tprint(u.name)\n}`,
+        },
+        {
+          pkg: "models",
+          file: "models/models.mesh",
+          source: `import "mesh/json"\nexport json struct User {\n\tname: string\n}`,
+        },
+      ]);
+      expect(result.diagnostics).toEqual([]);
     });
   });
 });
