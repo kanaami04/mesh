@@ -121,14 +121,15 @@
       テスト13件追加(checker 3件・e2e 10件: LIFO順・引数の即時評価・メソッドレシーバの固定・
       panic時の実行・早期returnでの実行・ループ内蓄積・spawn併用時の順序・クロージャ内のスコープ・
       複数パッケージでの呼び出し)
-  - **副産物として見つかった既存のバグ(未修正・別対応が必要)**: `spawn recv.method()`と
-        `detach recv.method()`は検査を通るが実行時にクラッシュする(`f is not a function`)。
+  - ~~副産物として見つかった既存のバグ: `spawn recv.method()`/`detach recv.method()`は検査を
+        通るが実行時にクラッシュする(`f is not a function`)~~ ✅ **2026-07-21修正**。
         `__spawn(callee, args)`/`__detach(callee, args)`が`this.genExpr(callee)`の結果を
         素の関数値として扱っており、struct メソッドが`recv.method`という(存在しない)プロパティ
-        アクセスとして誤ってコンパイルされるため(メソッドは実際には`__m_Struct_method(recv, ...)`
-        という別関数)。defer文の実装では同じ問題を避けるため、メソッド呼び出しかどうかを
-        判定してレシーバを正しく引き渡す形にした(genDeferStmt参照)。spawn/detach側の修正は
-        呼び出し規約の変更を伴うためスコープ外とし、別タスクとして残す
+        アクセスとして誤ってコンパイルされていたのが原因(メソッドは実際には
+        `__m_Struct_method(recv, ...)`という別関数)。defer文の実装(genDeferStmt)と同じ
+        メソッド判定を再利用し、`spawn`/`detach`ともレシーバを引数列の先頭に回して
+        `__m_Struct_method`を素の関数として渡す形に修正(`genSpawnOrDetach`)。
+        素の関数・パッケージ修飾関数・引数ありメソッドの回帰なしを確認。テスト3件追加(e2e)
 
 ## ツール・品質(中期)
 

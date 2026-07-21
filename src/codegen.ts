@@ -593,13 +593,22 @@ class Codegen {
       case "spawn": {
         // 引数は spawn の時点で評価する(Goと同じ)。await せず起動し、受取口を返す。
         // spawn は現在の wait スコープ(=囲む関数 or waitブロック)に登録され、detach はされない
-        const callee = this.genExpr(expr.call.callee);
-        const args = expr.call.args.map((a) => this.genExpr(a)).join(", ");
-        if (expr.detached) {
-          return `__detach(${callee}, [${args}])`;
+        //
+        // メソッド呼び出し(spawn recv.method())は特別扱いが要る: genExprの"member"ケースは
+        // 素朴に `recv.method` というプロパティ参照を返すが、structのメソッドは実際には
+        // __m_Struct_method(recv, ...) という別関数にコンパイルされるので、そのプロパティは
+        // 実行時に存在せず `f is not a function` でクラッシュする(レビューで発見した既存バグ)。
+        // genCall/genDeferStmtと同じ判定でメソッド呼び出しを見分け、レシーバを引数列の
+        // 先頭に回して __m_Struct_method を素の関数として渡す
+        const member = expr.call.callee.kind === "member" ? expr.call.callee : null;
+        const targetType = member?.target.resolvedType;
+        const isMethodCall = targetType?.kind === "struct" && !targetType.fields.some((f) => f.name === member!.name);
+        const args = expr.call.args.map((a) => this.genExpr(a));
+        if (isMethodCall && member && targetType?.kind === "struct") {
+          const callee = this.methodJsName(targetType.name, member.name);
+          return this.genSpawnOrDetach(expr.detached, callee, [this.genExpr(member.target), ...args]);
         }
-        this.spawnStack[this.spawnStack.length - 1] = true;
-        return `__spawn(${callee}, [${args}])`;
+        return this.genSpawnOrDetach(expr.detached, this.genExpr(expr.call.callee), args);
       }
 
       case "structLit": {
@@ -611,6 +620,14 @@ class Codegen {
         return expr.isErrorInstance ? `__errTag(${obj})` : `(${obj})`;
       }
     }
+  }
+
+  // spawn/detachの共通部分: detachなら__detach、spawnなら__spawn(かつ現在の関数を
+  // spawnStackへマーク=暗黙waitの対象にする)を、素の関数値+引数配列の形で呼び出す
+  private genSpawnOrDetach(detached: boolean, callee: string, args: string[]): string {
+    if (detached) return `__detach(${callee}, [${args.join(", ")}])`;
+    this.spawnStack[this.spawnStack.length - 1] = true;
+    return `__spawn(${callee}, [${args.join(", ")}])`;
   }
 
   // defer f(a, b) / defer recv.method(a): 引数(メソッドならレシーバも)はdefer文の実行時点で

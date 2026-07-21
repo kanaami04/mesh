@@ -1716,6 +1716,47 @@ describe("e2e", () => {
     expect(out).toBe("42\n");
   });
 
+  test("退行防止: spawnはstructメソッド呼び出しも正しく動く(以前は'f is not a function'でクラッシュ)", () => {
+    // レビューで見つかった穴: __spawn(callee, args)がcalleeを素朴にgenExpr(member式)していたため、
+    // recv.method()が(実体は__m_Struct_method(recv,...)という別関数なのに)存在しない
+    // recv.methodというプロパティ参照にコンパイルされ、実行時にクラッシュしていた
+    const out = runSource(`struct Counter { n: int }
+    fn (c: Counter) show() int { return c.n }
+    fn main() {
+      c := Counter{n: 5}
+      ch := spawn c.show()
+      v := <-ch
+      if v is closed { return }
+      print(v)
+    }`);
+    expect(out).toBe("5\n");
+  });
+
+  test("退行防止: detachもstructメソッド呼び出しが正しく動く", () => {
+    const out = runSource(`struct Logger { name: string }
+    fn (l: Logger) announce() { print("hi from \${l.name}") }
+    fn main() {
+      l := Logger{name: "bg"}
+      detach l.announce()
+      sleep(20)
+      print("done")
+    }`);
+    expect(out).toBe("hi from bg\ndone\n");
+  });
+
+  test("退行防止: spawnしたメソッド呼び出しに引数があっても正しく渡る", () => {
+    const out = runSource(`struct Adder { base: int }
+    fn (a: Adder) addTo(x: int) int { return a.base + x }
+    fn main() {
+      a := Adder{base: 10}
+      ch := spawn a.addTo(5)
+      v := <-ch
+      if v is closed { return }
+      print(v)
+    }`);
+    expect(out).toBe("15\n");
+  });
+
   test("int同士の除算は切り捨て、floatが混ざれば小数", () => {
     expect(runSource(`fn main() { print(7 / 2) }`)).toBe("3\n");
     expect(runSource(`fn main() { print(7.0 / 2) }`)).toBe("3.5\n");
