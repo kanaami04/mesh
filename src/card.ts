@@ -50,7 +50,7 @@ top-level reference value for things meant to be genuinely package-wide (a cache
 
 ## Types
 
-    int  float  string  bool  error  none  any
+    int  float  string  bool  error  none
     T[]                // array:   nums := [1, 2, 3]  /  empty: items: Todo[] = []
     map<K, V>          // map:     ages := map<string, int>{"a": 1}  /  empty: map<string, int>{}
     chan<T>            // channel: ch := chan<string>(none)
@@ -598,6 +598,8 @@ directly into the compiler instead of being a directory of Mesh files.
 ## Does NOT exist in Mesh — never write these
 
 null, undefined, nil / try, catch, throw, exceptions / panic(), recover /
+\`any\` (H-1: removed — it was the same unchecked escape hatch as TypeScript's \`as any\`; an empty
+array/map literal with no type context is a compile error instead of silently becoming \`any[]\`) /
 class, inheritance, interfaces, generics (monomorphic function types like \`fn(int) int\` DO exist — see Types) / switch, while, do-while /
 (T, error) multi-value returns / enum (use unions) / default args, overloads /
 semicolons / backtick strings / comma-ok map reads (v, ok := m[k]) / ternary ?: (use match or if) /
@@ -648,6 +650,8 @@ instead of by code — use whichever is more convenient.
     range over an array needs two names             → for i, v := range arr (use _ to drop one)
     cannot use any[] as Todo[] / cannot return any[] → the [] has no type context here; add one
                                                         (xs: Todo[] = [] or a declared return type)
+    cannot infer a complete type for 'x' (got any)   → 'x := []' has no type context at all (H-1:
+                                                        'any' isn't a real type); write 'x: T[] = []'
     empty typed array literal 'T[]{}' was removed    → write 'xs: T[] = []' instead
     cannot use '+=' on a map entry                   → read with a fallback first:
                                                         m[k] = (m[k] or 0) + 1

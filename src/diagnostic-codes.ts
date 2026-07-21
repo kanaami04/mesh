@@ -27,6 +27,8 @@ export type DiagnosticCode =
   | "type-alias-cycle"
   | "error-type-must-be-struct"
   | "error-type-aliases-existing"
+  | "any-type-removed"
+  | "cannot-infer-type"
   // 代入可能性・演算
   | "type-mismatch"
   | "not-bool"
@@ -196,6 +198,16 @@ export const DIAGNOSTIC_EXPLANATIONS: Record<DiagnosticCode, string> = {
     "'error type X = SomeOtherType' tries to tag a type that's already declared elsewhere by " +
     "reference, which would leak the error marker onto every other use of that type. Use an inline " +
     "struct shape ({ ... }) or declare a fresh 'error struct' instead.",
+  "any-type-removed":
+    "'any' is not a type in Mesh — every value has a specific, known type, with no escape hatch to " +
+    "bypass the checker (H-1: 'any' used to exist and was removed once it was clear it undermined " +
+    "that guarantee the same way TypeScript's 'as any' does). If you don't know the type yet, that " +
+    "usually means a type annotation is missing (e.g. an empty array 'xs: T[] = []'); if you're trying " +
+    "to accept a genuinely dynamic value at a JS/npm interop boundary, that isn't supported yet.",
+  "cannot-infer-type":
+    "This binding's inferred type still contains 'any' with no way to resolve it — almost always an " +
+    "empty array/map literal ('[]') with no surrounding type context to pin down its element type. " +
+    "Add an explicit type annotation instead, e.g. 'xs: T[] = []' instead of 'xs := []'.",
   "type-mismatch":
     "A value's type isn't assignable at this position (assignment, return, argument, struct field, " +
     "array/map element, channel send, ...). Check the expected type named in the message; narrowing " +

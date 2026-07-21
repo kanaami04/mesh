@@ -1731,4 +1731,69 @@ fn main() {
       }
     });
   });
+
+  describe("H-1: any型の撤去(2026-07-21決定)", () => {
+    test("退行防止: 'x: any'と書くとany-type-removedで拒否される(TSのas anyと同じ穴だった)", () => {
+      expect(inMain(`x: any = 5\nprint(x)`)).toEqual([
+        expect.stringContaining("'any' is not a type in Mesh"),
+      ]);
+    });
+
+    test("退行防止: 撤去前は型不整合な演算がany経由で素通りしていた(このテストはエラーになることを確認する)", () => {
+      // レビューで実測した穴そのもの: x: any = 5 の後、x + "文字列" が無検査で通っていた
+      const errors = errorsOf(`fn main() {\n\tx: any = 5\n\ty := x + "no longer silent"\n\tprint(y)\n}`);
+      expect(errors.some((e) => e.includes("'any' is not a type in Mesh"))).toBe(true);
+    });
+
+    test("退行防止: 文脈の無い空配列/mapリテラル(mut x := [])はcannot-infer-typeで拒否される", () => {
+      // レビューで実測したもう1つの穴: mut arr := [] は any[] になり、push(arr, 1)と
+      // push(arr, "混在")のどちらも検査を素通りしていた
+      expect(inMain(`mut arr := []\nprint(arr)`)).toEqual([
+        expect.stringContaining("cannot infer a complete type for 'arr'"),
+      ]);
+      expect(inMain(`x := []\nprint(x)`)).toEqual([
+        expect.stringContaining("cannot infer a complete type for 'x'"),
+      ]);
+    });
+
+    test("退行防止: トップレベル定数の文脈無し空配列リテラルも同様に拒否される(F-9c)", () => {
+      const errors = errorsOf(`xs := []\nfn main() { print(xs) }`);
+      expect(errors).toEqual([expect.stringContaining("cannot infer a complete type for 'xs'")]);
+    });
+
+    test("二重報告防止: 値の評価自体が既にエラーなら、cannot-infer-typeは重ねて出さない", () => {
+      // undefined変数からの:=は、undefined-nameだけが出て、cannot-infer-typeは便乗しない
+      expect(inMain(`x := notDefined\nprint(x)`)).toEqual([
+        expect.stringContaining("undefined: 'notDefined'"),
+      ]);
+    });
+
+    test("型注釈がある場合・関数引数・戻り値・structフィールドとしての空配列は今まで通り動く", () => {
+      // any撤去後もassignable()の「配列要素がanyなら互換」ルールは残しているので、
+      // 「既知の型と照合するだけ」の文脈では空配列リテラルはそのまま使える
+      const errors = errorsOf(`struct Todo { title: string }
+struct Container { items: Todo[] }
+fn count(ts: Todo[]) int { return len(ts) }
+fn makeEmpty() Todo[] { return [] }
+xs: int[] = []
+fn main() {
+	ys: Todo[] = []
+	print(len(xs), len(ys))
+	print(count([]))
+	print(len(makeEmpty()))
+	c := Container{items: []}
+	print(len(c.items))
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("'any'という名前のtype/struct宣言は今まで通り予約名として拒否される", () => {
+      expect(errorsOf(`type any = string\nfn main() {}`)).toEqual([
+        expect.stringContaining("'any' is a builtin type and cannot be redeclared"),
+      ]);
+      expect(errorsOf(`struct any { x: int }\nfn main() {}`)).toEqual([
+        expect.stringContaining("'any' is a builtin type and cannot be redeclared"),
+      ]);
+    });
+  });
 });

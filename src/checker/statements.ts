@@ -1,7 +1,19 @@
 // 文の検査。narrowing(F-6)の facts をブロック/if文に適用する部分もここ
 
 import type { Block, Expr, Stmt } from "../ast";
-import { ANY, BOOL, INT, VOID, assignable, isNumeric, typeEquals, typeToString, widenLiteral, type Type } from "../types";
+import {
+  ANY,
+  BOOL,
+  INT,
+  VOID,
+  assignable,
+  containsAny,
+  isNumeric,
+  typeEquals,
+  typeToString,
+  widenLiteral,
+  type Type,
+} from "../types";
 import type { Pos } from "../token";
 import { declareBinding, error, lookup, popScope, pushScope, type CheckerCtx } from "./context";
 import { checkArithOp, checkExpr, checkExprSingle } from "./expressions";
@@ -31,10 +43,25 @@ export function blockTerminates(block: Block): boolean {
 export function checkStmt(ctx: CheckerCtx, stmt: Stmt) {
   switch (stmt.kind) {
     case "shortVarDecl": {
+      // H-1: any混入チェック(下記)は「値の評価自体は既にエラー無く済んだのに、まだ
+      // any が残っている」ケース(空配列/mapリテラット等)だけを狙う。値の評価中に
+      // 何か別のエラーが既に出ていれば(undefined変数・判別可能unionの不一致等)、
+      // そのANYはエラー回復用でしかないので、ここで二重にエラーを出さない
+      const diagsBefore = ctx.diagnostics.length;
       const types = checkExprList(ctx, stmt.values, stmt.names.length, stmt.pos);
+      const alreadyErrored = ctx.diagnostics.length > diagsBefore;
       for (let i = 0; i < stmt.names.length; i++) {
         // mut 宣言はリテラル型を string に広げる(後で別の文字列を代入できるように)
         const t = stmt.mutable ? widenLiteral(types[i] ?? ANY) : (types[i] ?? ANY);
+        if (!alreadyErrored && stmt.names[i] !== "_" && containsAny(t)) {
+          error(
+            ctx,
+            stmt.pos,
+            "cannot-infer-type",
+            `cannot infer a complete type for '${stmt.names[i]}' (got ${typeToString(t)}) — ` +
+              `add a type annotation, e.g. '${stmt.names[i]}: T[] = []'`,
+          );
+        }
         declareBinding(ctx, stmt.names[i], t, stmt.pos, stmt.mutable);
       }
       break;

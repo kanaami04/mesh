@@ -317,7 +317,7 @@ Kotlin(GlobalScope非推奨)・Swift(Task.detached)・Python(TaskGroup)と同方
 > critique-2026-07.md(B-5-2)が既に指摘していた2点が、その後の討議に一度も上がらないまま
 > 未決着だったことが判明したため、ここに討議項目として起こす。
 
-### H-1. `any` 型の扱い — 討議未了
+### H-1. `any` 型の扱い — ✅ 決着(2026-07-21): 選択肢(a)完全撤去を採用
 
 critique-2026-07.md(B-5-2)の指摘: 「TSでよくない?」への3つの答え(①リークが構文的に
 書けない並行、②不在/closedを無視できない強制、③抜け穴の無さ)のうち、**③はMeshの`any`型の
@@ -332,6 +332,24 @@ critique-2026-07.md(B-5-2)の指摘: 「TSでよくない?」への3つの答え
   型検査経路からは到達不能にする
 - 外部記事の裏付け: [Why TypeScript Won't Save You](https://cekrem.github.io/posts/why-typescript-wont-save-you/)
   「You're only as safe as your weakest `any`」
+
+**実装メモ(2026-07-21)**: 実際に手を動かして穴を再現してから着手 — `x: any = 5` からの
+型不整合な演算、`mut arr := []` への型混在push、どちらもコンパイルエラー無しで通ることを
+実測確認した。`src/checker/*.ts`の`ANY`返却箇所を全数調査した結果、ほぼ全てが`error()`
+呼び出し後のエラー回復(既にエラー報告済みなので無害)で、**唯一の無音の穴**は空配列
+リテラル(`expr.elems.length === 0`)の型推論だった。よって:
+- `resolveType`の`"any"`ケースを撤去し、書かれたら`any-type-removed`エラーにした
+  (内部の`ANY`センチネル自体は残すが、もうユーザー構文からは到達できない)
+- `containsAny(t)`(型を再帰的に走査し`any`混入を検出するヘルパ、`types.ts`)を新設し、
+  `:=`(ローカルの`shortVarDecl`・トップレベル定数)で束縛の型を確定させる直前にだけ呼ぶ
+  `cannot-infer-type`エラーとした。`typedVarDecl`・関数引数・struct リテラルのフィールドの
+  ような「既存の型と照合するだけ」の文脈は対象外(`assignable()`の配列要素any許容ルールは
+  維持したままなので`xs: Todo[] = []`等は今まで通り動く)
+- 二重エラー防止: 値の評価中に既に`error()`が呼ばれていれば(未定義変数・判別可能unionの
+  不一致等)`containsAny`チェック自体をスキップする(診断件数の差分で検出)。そうしないと
+  既存のエラーに`cannot-infer-type`が便乗して二重報告になる
+- テスト7件追加(checker: any-type-removed・cannot-infer-type(ローカル/トップレベル)・
+  二重報告防止・既存の文脈つきパターンが壊れていないことの確認・予約名の維持)
 
 ### H-2. API境界の検証つきデコード(P6の実質化) — 討議未了
 

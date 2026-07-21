@@ -202,6 +202,34 @@ export function assignable(from: Type, to: Type): boolean {
   return typeEquals(from, to);
 }
 
+// tのどこかに any が含まれるか(配列/channel/mapのkey・value/union/関数の引数・戻り値の中まで
+// 再帰。structのフィールドは常に宣言済みの具体型なので再帰不要)。
+//
+// H-1(2026-07-21決定): any はユーザーが書ける型としては撤去したが、空配列/mapリテラル
+// (`[]`)は文脈(代入先の宣言型・関数の引数型など)から要素型が決まるまでの一時的な
+// プレースホルダとして内部的にまだ any を使う — typedVarDecl・関数引数・struct
+// リテラルのフィールドのように「既知の型と照合するだけ」の文脈では assignable() が
+// 素通しするので問題ない。危険なのは := で束縛の型がそのまま確定してしまう瞬間
+// (`x := []` 等)だけで、そこでこの関数を呼んで「まだ any が残っている」= 文脈が
+// 無くて解決できなかった、を検出しコンパイルエラーにする(呼び出し側で使う)
+export function containsAny(t: Type): boolean {
+  switch (t.kind) {
+    case "any":
+      return true;
+    case "array":
+    case "chan":
+      return containsAny(t.elem);
+    case "map":
+      return containsAny(t.key) || containsAny(t.value);
+    case "union":
+      return t.members.some(containsAny);
+    case "fn":
+      return t.params.some(containsAny) || containsAny(t.ret);
+    default:
+      return false;
+  }
+}
+
 export function isNumeric(t: Type): boolean {
   return t.kind === "any" || (t.kind === "prim" && (t.name === "int" || t.name === "float"));
 }

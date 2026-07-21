@@ -60,7 +60,18 @@ export function resolveType(ctx: CheckerCtx, node: TypeNode): Type {
         case "error": return ERROR;
         case "none": return NONE;
         case "closed": return CLOSED;
-        case "any": return ANY;
+        case "any": {
+          // H-1(2026-07-21決定): any は撤去 — 書かれたら常にエラー。ANYそのものは
+          // まだ内部のエラー回復センチネルとして残す(ここで返すANYは既にエラー報告済みなので無害)
+          error(
+            ctx,
+            node.pos,
+            "any-type-removed",
+            "'any' is not a type in Mesh — use a specific type, or add a type annotation if this is " +
+              "for an empty array/map literal",
+          );
+          return ANY;
+        }
         default:
           // ジェネリック関数(F-1後半)の型パラメータ: fn first<T>(...) の T のような名前は
           // 通常のtype宣言より先に「今アクティブな型パラメータか」を確認する

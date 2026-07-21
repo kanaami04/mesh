@@ -4,7 +4,7 @@
 import type { Program } from "../ast";
 import type { Diagnostic } from "../diagnostic-codes";
 import { BUILTIN_PACKAGES } from "../stdlib";
-import { ANY, ERROR, NONE, assignable, typeEquals, typeToString, unionOf, type Type } from "../types";
+import { ANY, ERROR, NONE, assignable, containsAny, typeEquals, typeToString, unionOf, type Type } from "../types";
 import {
   BUILTIN_TYPE_NAMES,
   createCheckerCtx,
@@ -246,7 +246,11 @@ export function checkPackage(
     ctx.currentFile = file;
     for (const c of program.consts) {
       const declared = c.typeNode ? resolveType(ctx, c.typeNode) : null;
+      // H-1: any混入チェックはshortVarDeclと同じ理由で「値の評価自体が既にエラー無く
+      // 済んだのに、まだanyが残っている」ケースだけを狙う(cf. statements.tsのコメント)
+      const diagsBefore = ctx.diagnostics.length;
       const valueType = checkExprSingle(ctx, c.value);
+      const alreadyErrored = ctx.diagnostics.length > diagsBefore;
       if (declared && !assignable(valueType, declared)) {
         error(
           ctx,
@@ -256,6 +260,16 @@ export function checkPackage(
         );
       }
       const finalType = declared ?? valueType;
+      // 型注釈が無い場合(:=形)だけが対象(型注釈があればそちらが「本当の型」)
+      if (!declared && !alreadyErrored && containsAny(finalType)) {
+        error(
+          ctx,
+          c.pos,
+          "cannot-infer-type",
+          `cannot infer a complete type for '${c.name}' (got ${typeToString(finalType)}) — ` +
+            `add a type annotation, e.g. '${c.name}: T[] = []'`,
+        );
+      }
       declareBinding(ctx, c.name, finalType, c.pos, false);
       ctx.constDecls.set(c.name, { type: finalType, exported: c.exported });
     }
