@@ -175,7 +175,17 @@
         直後の文のleadingとして出る(消えはしない)。
         テスト: `tests/formatter.test.ts`(24件、examples全11本のべき等性・実行結果一致を含む)+
         `mesh fmt` CLI配線テスト3件。tsc/bun test(422件)全てグリーン
-- [ ] VS Code拡張(シンタックスハイライトだけでも)
+- [x] **VS Code拡張**(2026-07-21実装)。v1はシンタックスハイライトのみ(言語サーバー無し —
+      診断・定義ジャンプ等は`mesh check`/`mesh fmt` CLIに委ねる)。`editors/vscode/`に
+      TextMate文法(`syntaxes/mesh.tmLanguage.json`)+ 拡張マニフェスト(`package.json`)+
+      `language-configuration.json`(コメント`//`・括弧の自動補完)。キーワード・組み込み型・
+      組み込み関数・struct/typeの宣言名・関数宣言名/呼び出し・文字列補間(`${...}`。エスケープ
+      `\$`と区別)・判別可能unionの部分構造パターン(`{ kind: "..." }`)・ジェネリクス(`fn f<T>`)を
+      個別のスコープでハイライト。実装時に`vscode-textmate`/`vscode-oniguruma`(VS Code本体と
+      同じトークナイズエンジン)を使い、代表的なMeshソース片を実際にトークナイズして
+      スコープを検証($nix向けCLIツールでは検証できないため、スクラッチパッドで一時的に使用。
+      リポジトリの依存には追加していない)。マーケットプレイス未公開 —
+      `editors/vscode/README.md`にローカルインストール手順を記載
 - [ ] ソースマップ出力(生成JSのエラーを .mesh の行に対応させる)
 
 ## 完了

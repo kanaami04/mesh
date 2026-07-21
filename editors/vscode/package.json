@@ -1,0 +1,29 @@
+{
+  "name": "mesh-language",
+  "displayName": "Mesh Language",
+  "description": "Syntax highlighting for the Mesh programming language (.mesh)",
+  "version": "0.1.0",
+  "publisher": "kanayama-mesh",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "mesh",
+        "aliases": ["Mesh", "mesh"],
+        "extensions": [".mesh"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mesh",
+        "scopeName": "source.mesh",
+        "path": "./syntaxes/mesh.tmLanguage.json"
+      }
+    ]
+  }
+}

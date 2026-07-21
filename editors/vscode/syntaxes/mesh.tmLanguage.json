@@ -1,0 +1,215 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mesh",
+  "scopeName": "source.mesh",
+  "fileTypes": ["mesh"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#error-marker" },
+    { "include": "#struct-or-type-decl" },
+    { "include": "#function-decl" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#builtin-types" },
+    { "include": "#builtin-functions" },
+    { "include": "#function-call" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.mesh",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.mesh",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.mesh" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.mesh" } },
+          "patterns": [
+            {
+              "name": "constant.character.escape.mesh",
+              "match": "\\\\[ntr\"\\\\$]"
+            },
+            {
+              "name": "meta.embedded.line.mesh",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.mesh" } },
+              "endCaptures": { "0": { "name": "punctuation.section.embedded.end.mesh" } },
+              "patterns": [{ "include": "#expression" }]
+            }
+          ]
+        }
+      ]
+    },
+    "expression": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#constants" },
+        { "include": "#builtin-types" },
+        { "include": "#builtin-functions" },
+        { "include": "#function-call" },
+        { "include": "#operators" },
+        { "include": "#punctuation" },
+        {
+          "name": "string.quoted.double.mesh",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.mesh", "match": "\\\\[ntr\"\\\\$]" },
+            {
+              "name": "meta.embedded.line.mesh",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "#expression" }]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.mesh",
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+        }
+      ]
+    },
+    "error-marker": {
+      "comment": "F-2後半: 'error' が 'type'/'struct' の直前に来たときだけ文脈依存キーワードとして扱う",
+      "patterns": [
+        {
+          "match": "\\berror\\b(?=\\s+(type|struct)\\b)",
+          "name": "keyword.other.error-marker.mesh"
+        }
+      ]
+    },
+    "struct-or-type-decl": {
+      "patterns": [
+        {
+          "comment": "struct Name { ... } / type Name = ...",
+          "match": "\\b(struct|type)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.mesh" },
+            "2": { "name": "entity.name.type.mesh" }
+          }
+        }
+      ]
+    },
+    "function-decl": {
+      "patterns": [
+        {
+          "comment": "メソッド宣言: fn (recv: Type) name(...) — レシーバの型もentity.name.typeとして拾う",
+          "match": "\\b(fn)\\b\\s*\\(\\s*[A-Za-z_][A-Za-z0-9_]*\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.mesh" },
+            "2": { "name": "entity.name.type.mesh" },
+            "3": { "name": "entity.name.function.mesh" }
+          }
+        },
+        {
+          "comment": "通常の関数宣言: fn name(...)",
+          "match": "\\b(fn)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.mesh" },
+            "2": { "name": "entity.name.function.mesh" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.mesh",
+          "match": "\\b(if|else|for|return|break|continue|match|select|is|or|range)\\b"
+        },
+        {
+          "name": "keyword.control.concurrency.mesh",
+          "match": "\\b(spawn|detach|wait|defer)\\b"
+        },
+        {
+          "name": "keyword.other.mesh",
+          "match": "\\b(fn|struct|type|import|export)\\b"
+        },
+        {
+          "name": "storage.modifier.mesh",
+          "match": "\\bmut\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.mesh",
+          "match": "\\b(true|false|none|closed)\\b"
+        }
+      ]
+    },
+    "builtin-types": {
+      "patterns": [
+        {
+          "name": "support.type.builtin.mesh",
+          "match": "\\b(int|float|string|bool|void|error|any)\\b"
+        },
+        {
+          "name": "support.type.builtin.mesh",
+          "match": "\\b(chan|map)\\b(?=\\s*<)"
+        }
+      ]
+    },
+    "builtin-functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.mesh",
+          "match": "\\b(print|len|push|str|sleep|delete|contains|indexOf|get|keys|values|sort|split|join|trim|upper|lower|toInt|toFloat|round|floor|ceil|filter|reduce|close)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "'map'/'error' は文脈依存キーワードなので、'(' が続くときだけ組み込み関数として拾う",
+          "name": "support.function.builtin.mesh",
+          "match": "\\b(map|error)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "comment": "ユーザー定義関数/メソッドの呼び出し: 識別子の直後に'('が続けば呼び出しとみなす",
+          "name": "entity.name.function.mesh",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.mesh",
+          "match": ":=|==|!=|<=|>=|&&|\\|\\||<-|\\+\\+|--|\\+=|-=|\\*=|/=|%=|=>|=|<|>|\\+|-|\\*|/|%|!|\\?|\\|"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.mesh",
+          "match": "[,:;]"
+        },
+        {
+          "name": "punctuation.accessor.mesh",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}
