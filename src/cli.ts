@@ -17,8 +17,10 @@ import {
   type ModuleSource,
 } from "./compiler";
 import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "./diagnostic-codes";
+import { format } from "./formatter";
 import { parse } from "./parser";
 import { BUILTIN_PACKAGES } from "./stdlib";
+import { CompileError } from "./token";
 
 // F-15: `__runTests`(runtime.ts)がstdoutの最終行に書く構造化結果と対応する形
 interface TestReport {
@@ -35,6 +37,8 @@ Usage:
                                        診断ごとに code と、機械適用可能なら fix パッチを含む)
   mesh test    <file.mesh|dir> [--json]  '_test.mesh' 内の fn test...() を実行する(F-15)。
                                        ディレクトリを渡せばそのパッケージ自身をテストする
+  mesh fmt     <file.mesh> [-w]        正規形に整形して標準出力へ(gofmt相当。設定オプション
+                                       なし)。-w で元ファイルに書き戻す
   mesh explain <code>                 診断コードの意味を説明する(引数無しで全コード一覧)
   mesh card                           言語カードを出力(AIのコンテキストに貼る圧縮仕様書)
   mesh card --for <file.mesh>...      渡したソースが使っている機能のセクションだけに絞った
@@ -157,14 +161,15 @@ function loadModulesForTest(targetPath: string): ModuleSource[] {
   return [...target, ...loadDependencies(root, queue)];
 }
 
-function compileEntry(file: string): CompileResult {
-  return compileModules(loadModules(file));
+function compileEntry(file: string): { result: CompileResult; sources: Map<string, string> } {
+  const modules = loadModules(file);
+  return { result: compileModules(modules), sources: new Map(modules.map((m) => [m.file, m.source])) };
 }
 
 function compileFile(file: string): string {
-  const result = compileEntry(file);
+  const { result, sources } = compileEntry(file);
   if (result.code === null) {
-    console.error(formatDiagnostics(file, result.diagnostics));
+    console.error(formatDiagnostics(file, result.diagnostics, sources));
     process.exit(1);
   }
   return result.code;
@@ -242,7 +247,7 @@ function main() {
     case "check": {
       if (rest.includes("--json")) {
         // AIエージェント向け: 成否にかかわらず構造化JSONを stdout に出す
-        const result = compileEntry(file);
+        const { result } = compileEntry(file);
         console.log(diagnosticsToJson(file, result.diagnostics));
         process.exit(result.diagnostics.length > 0 ? 1 : 0);
       }
@@ -250,14 +255,41 @@ function main() {
       console.log(`${file}: no errors`);
       break;
     }
+    case "fmt": {
+      let source: string;
+      try {
+        source = readFileSync(file, "utf8");
+      } catch {
+        console.error(`error: cannot read file '${file}'`);
+        process.exit(1);
+      }
+      let formatted: string;
+      try {
+        formatted = format(source);
+      } catch (e) {
+        if (e instanceof CompileError) {
+          console.error(formatDiagnostics(file, [{ pos: e.pos, code: e.code, message: e.message, file, fix: e.fix }]));
+          process.exit(1);
+        }
+        throw e;
+      }
+      if (rest.includes("-w")) {
+        writeFileSync(file, formatted);
+      } else {
+        process.stdout.write(formatted);
+      }
+      break;
+    }
     case "test": {
       const jsonMode = rest.includes("--json");
-      const result = compileModules(loadModulesForTest(file), { testMode: true });
+      const testModules = loadModulesForTest(file);
+      const result = compileModules(testModules, { testMode: true });
       if (result.code === null) {
         if (jsonMode) {
           console.log(diagnosticsToJson(file, result.diagnostics));
         } else {
-          console.error(formatDiagnostics(file, result.diagnostics));
+          const sources = new Map(testModules.map((m) => [m.file, m.source]));
+          console.error(formatDiagnostics(file, result.diagnostics, sources));
         }
         process.exit(1);
       }

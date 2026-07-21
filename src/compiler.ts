@@ -47,9 +47,19 @@ export function compileModules(modules: ModuleSource[], opts?: { testMode?: bool
   return { code, diagnostics: [], tests };
 }
 
-export function formatDiagnostics(file: string, diagnostics: Diagnostic[]): string {
+// sources: file → 全文。渡せば各診断の下にソース行 + `^` の指し示しを添える(渡さなければ
+// 従来どおりheader行のみ)。colはlexerがタブも1文字として数えるので、桁合わせの空白列も
+// タブはタブのまま残す(端末のタブ描画幅がずれないように、実文字を空白に置換するだけ)
+export function formatDiagnostics(file: string, diagnostics: Diagnostic[], sources?: Map<string, string>): string {
   return diagnostics
-    .map((d) => `${d.file ?? file}:${d.pos.line}:${d.pos.col}: error[${d.code}]: ${d.message}`)
+    .map((d) => {
+      const targetFile = d.file ?? file;
+      const header = `${targetFile}:${d.pos.line}:${d.pos.col}: error[${d.code}]: ${d.message}`;
+      const line = sources?.get(targetFile)?.split("\n")[d.pos.line - 1];
+      if (line === undefined) return header;
+      const caretPrefix = line.slice(0, d.pos.col - 1).replace(/[^\t]/g, " ");
+      return `${header}\n  ${line}\n  ${caretPrefix}^`;
+    })
     .join("\n");
 }
 

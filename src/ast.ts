@@ -3,7 +3,7 @@
 //   ShortVarDecl { names: ["x"], values: [Binary { op: "+", left: Int(1), right: Int(2) }] }
 // のようなノードになる。
 
-import type { Pos } from "./token";
+import type { CommentInfo, Pos } from "./token";
 import type { Type } from "./types";
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
@@ -13,7 +13,8 @@ export type TypeNode =
   | { kind: "array"; elem: TypeNode; pos: Pos } // int[]
   | { kind: "chan"; elem: TypeNode; pos: Pos } // chan<int>
   | { kind: "mapType"; key: TypeNode; value: TypeNode; pos: Pos } // map<string, int>
-  | { kind: "union"; members: TypeNode[]; pos: Pos } // int | error
+  // int | error。multiline: mesh fmt(gofmt方式)がユーザーの改行選択をそのまま尊重するための印
+  | { kind: "union"; members: TypeNode[]; pos: Pos; multiline?: boolean }
   | { kind: "structType"; fields: StructFieldNode[]; pos: Pos } // struct 宣言の中身
   // fn(int, string) bool — 関数型。宣言と同じ読み(戻り値のunionは戻り値側に束縛)。
   // ret が null なら戻り値なし(void)。パラメータ名は書かない(型のみ)
@@ -32,6 +33,9 @@ export interface Program {
   types: TypeDecl[];
   fns: FnDecl[];
   consts: ConstDecl[];
+  // 生のコメント一覧(位置つき、AST上のどのノードにも紐づいていない)。将来のmesh fmtが
+  // 印字時に再合成するための素材 — checker/codegenは一切参照しない
+  comments: CommentInfo[];
 }
 
 export interface ConstDecl {
@@ -87,6 +91,10 @@ export interface Receiver {
 export interface Block {
   kind: "block";
   stmts: Stmt[];
+  // mesh fmt用: 元ソースで複数行だったか(空でも{}のまま1行、ということもある)。
+  // fnExpr(インラインクロージャ)の印字だけがこれを見る — fn宣言/if/for/wait本体は
+  // 常に複数行が既存の慣習なので参照しない
+  multiline?: boolean;
 }
 
 export type Stmt =
@@ -264,6 +272,7 @@ export interface ArrayLit extends ExprBase {
   kind: "arrayLit"; // [1, 2, 3]  /  Todo[]{}  /  int[]{1, 2}
   elems: Expr[];
   elemType?: TypeNode; // T[]{...} で明示された要素型。空配列や型固定に使う
+  multiline?: boolean; // mesh fmt用: 元ソースで要素が複数行にまたがっていたか
 }
 export interface BinaryExpr extends ExprBase {
   kind: "binary";
@@ -287,6 +296,7 @@ export interface CallExpr extends ExprBase {
   kind: "call";
   callee: Expr;
   args: Expr[];
+  multiline?: boolean; // mesh fmt用: 元ソースで引数が複数行にまたがっていたか
 }
 export interface IndexExpr extends ExprBase {
   kind: "index"; // a[i]
@@ -336,6 +346,7 @@ export interface MapLit extends ExprBase {
   key: TypeNode;
   value: TypeNode;
   entries: { key: Expr; value: Expr; pos: Pos }[];
+  multiline?: boolean; // mesh fmt用: 元ソースでエントリが複数行にまたがっていたか
 }
 export interface SpawnExpr extends ExprBase {
   kind: "spawn"; // task := spawn f(x) — 並行起動して結果の受取口(chan<T>)を返す
@@ -353,6 +364,7 @@ export interface StructLit extends ExprBase {
   // checkerが埋める(F-2後半): このリテラルの型がerror typeとしてマークされていれば、
   // codegenが実行時マーカーを埋め込んで '?'/'or' が実際の値から判定できるようにする
   isErrorInstance?: boolean;
+  multiline?: boolean; // mesh fmt用: 元ソースでフィールドが複数行にまたがっていたか
 }
 export interface MatchExpr extends ExprBase {
   kind: "match"; // match r { error => "failed"  int => "ok: ${r}" }

@@ -697,4 +697,5 @@ failed (no new pass/fail concept; this reuses the existing absence/failure vocab
     mesh explain <code>            # longer explanation of a diagnostic code (no code = list them all)
     mesh run file.mesh             # compile and execute
     mesh test file.mesh            # run *_test.mesh files next to it (--json for structured output)
+    mesh fmt file.mesh [-w]        # canonical formatting to stdout (-w writes the file in place)
 `;

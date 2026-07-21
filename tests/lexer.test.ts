@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { lex } from "../src/lexer";
 
-const types = (src: string) => lex(src).map((t) => t.type);
+const types = (src: string) => lex(src).tokens.map((t) => t.type);
 
 describe("lexer", () => {
   test("基本的なトークン分解", () => {
@@ -35,16 +35,24 @@ describe("lexer", () => {
   });
 
   test("文字列のエスケープ", () => {
-    const tokens = lex(`"a\\nb"`);
+    const { tokens } = lex(`"a\\nb"`);
     expect(tokens[0].value).toBe("a\nb");
   });
 
-  test("コメントは無視される", () => {
+  test("コメントはトークン列には乗らない(セミコロン挿入だけ普通に効く)", () => {
     expect(types("x // comment\ny")).toEqual(["ident", ";", "ident", ";", "eof"]);
   });
 
+  test("コメントは別配列(comments)へ位置つきで退避される(mesh fmt向け)", () => {
+    const { comments } = lex(`x := 1 // trailing\n// leading\ny := 2`);
+    expect(comments).toEqual([
+      { text: "// trailing", pos: { line: 1, col: 8 } },
+      { text: "// leading", pos: { line: 2, col: 1 } },
+    ]);
+  });
+
   test("文字列補間: text/expr の部品に分解される", () => {
-    const [token] = lex(`"worker \${id} done"`);
+    const [token] = lex(`"worker \${id} done"`).tokens;
     expect(token.parts).toEqual([
       { kind: "text", text: "worker " },
       { kind: "expr", source: "id", pos: { line: 1, col: 11 } },
@@ -53,18 +61,18 @@ describe("lexer", () => {
   });
 
   test("文字列補間: 入れ子の文字列と波括弧を正しく数える", () => {
-    const [token] = lex(`"x\${f({"k": 1})}y"`);
+    const [token] = lex(`"x\${f({"k": 1})}y"`).tokens;
     expect(token.parts?.[1]).toMatchObject({ kind: "expr", source: `f({"k": 1})` });
   });
 
   test("補間なしの文字列は従来どおり", () => {
-    const [token] = lex(`"plain"`);
+    const [token] = lex(`"plain"`).tokens;
     expect(token.parts).toBeUndefined();
     expect(token.value).toBe("plain");
   });
 
   test("\\$ で補間をエスケープできる", () => {
-    const [token] = lex(`"price \\$100"`);
+    const [token] = lex(`"price \\$100"`).tokens;
     expect(token.parts).toBeUndefined();
     expect(token.value).toBe("price $100");
   });

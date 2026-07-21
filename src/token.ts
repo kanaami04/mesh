@@ -10,6 +10,13 @@ export interface Pos {
   col: number;
 }
 
+// 行コメント1つ分。mesh fmt(将来)がASTへ再合成するための素材 — lexerはこれとは別に
+// トークン列も返すので、既存の文法規則は一切コメントを意識せずに済む(パーサへの影響ゼロ)
+export interface CommentInfo {
+  text: string; // "//"を含む生テキスト("// foo" のまま。整形時の再現性を優先し、trimしない)
+  pos: Pos;
+}
+
 export type TokenType =
   // リテラル・識別子
   | "ident"

@@ -23,7 +23,7 @@ import type {
   TypeNode,
 } from "./ast";
 import { lex } from "./lexer";
-import { CompileError, type Pos, type Token, type TokenType } from "./token";
+import { CompileError, type CommentInfo, type Pos, type Token, type TokenType } from "./token";
 
 // 二項演算子の優先順位(大きいほど強く結合する)
 const PRECEDENCE: Record<string, number> = {
@@ -45,7 +45,8 @@ const PRECEDENCE: Record<string, number> = {
 };
 
 export function parse(source: string): Program {
-  return new Parser(lex(source)).parseProgram();
+  const { tokens, comments } = lex(source);
+  return new Parser(tokens, comments).parseProgram();
 }
 
 class Parser {
@@ -53,7 +54,7 @@ class Parser {
   // if/for/match のヘッダでは `User{...}` を禁止する(ブロック開始の `{` と曖昧になるため。Goと同じ規則)
   private allowStructLit = true;
 
-  constructor(private tokens: Token[]) {}
+  constructor(private tokens: Token[], private comments: CommentInfo[] = []) {}
 
   private withoutStructLit<T>(parse: () => T): T {
     const saved = this.allowStructLit;
@@ -153,7 +154,7 @@ class Parser {
       }
       this.skipSemis();
     }
-    return { kind: "program", imports, types, fns, consts };
+    return { kind: "program", imports, types, fns, consts, comments: this.comments };
   }
 
   // F-9c: トップレベル定数。x := 10 / x: int = 10(常に不変。'mut'は上のparseProgramで先に弾く)
@@ -256,7 +257,12 @@ class Parser {
     return {
       kind: "typeDecl",
       name,
-      node: { kind: "union", members, pos: first.pos },
+      node: {
+        kind: "union",
+        members,
+        pos: first.pos,
+        multiline: members[members.length - 1].pos.line !== members[0].pos.line,
+      },
       exported,
       isError,
       pos: start.pos,
@@ -376,7 +382,12 @@ class Parser {
     if (!this.check("|")) return first;
     const members: TypeNode[] = [first];
     while (this.match("|")) members.push(this.parseSingleType());
-    return { kind: "union", members, pos: first.pos };
+    return {
+      kind: "union",
+      members,
+      pos: first.pos,
+      multiline: members[members.length - 1].pos.line !== members[0].pos.line,
+    };
   }
 
   // `for` の直後が「ident (, ident)? := range」の形かを先読みで判定する
@@ -503,15 +514,17 @@ class Parser {
   // ---- 文 ----
 
   private parseBlock(): Block {
-    this.expect("{", "at start of block");
+    const openBrace = this.expect("{", "at start of block");
     const stmts: Stmt[] = [];
     this.skipSemis();
     while (!this.check("}") && !this.check("eof")) {
       stmts.push(this.parseStatement());
       this.skipSemis();
     }
-    this.expect("}", "at end of block");
-    return { kind: "block", stmts };
+    const closeBrace = this.expect("}", "at end of block");
+    // mesh fmt用: fnExpr(インラインクロージャ)は1行書きが慣習的に多いので、元が1行だったかを
+    // 覚えておく(fn宣言・if/for/wait本体は常に複数行が既存の慣習なので、印字側で見ない)
+    return { kind: "block", stmts, multiline: closeBrace.pos.line !== openBrace.pos.line };
   }
 
   private parseStatement(): Stmt {
@@ -757,7 +770,7 @@ class Parser {
   // structリテラルの中身 `{ field: value, ... }` を読む(名前の直後の `{` から)。
   // 素の User{...} と修飾つき math.Point{...} の両方から使う共通部分
   private parseStructLitBody(name: string, pos: Pos): Extract<Expr, { kind: "structLit" }> {
-    this.next(); // {
+    const openBrace = this.next(); // {
     this.skipSemis();
     const fields: { name: string; value: Expr; pos: Pos }[] = [];
     const saved = this.allowStructLit;
@@ -771,8 +784,10 @@ class Parser {
       this.skipSemis();
     }
     this.allowStructLit = saved;
-    this.expect("}", "at end of struct literal");
-    return { kind: "structLit", name, fields, pos };
+    const closeBrace = this.expect("}", "at end of struct literal");
+    // mesh fmt(gofmt方式): 元のソースで複数行にまたがっていたかを覚えておき、
+    // 印字時にユーザーの改行選択をそのまま尊重する(幅に応じた自動折り返しはしない)
+    return { kind: "structLit", name, fields, pos, multiline: closeBrace.pos.line !== openBrace.pos.line };
   }
 
   // 呼び出し・添字・メンバアクセス・伝播は後置で連鎖する: f(x)[0].name / f()!
@@ -796,7 +811,7 @@ class Parser {
             this.next();
             this.next();
           }
-          this.next(); // {
+          const openBrace = this.next(); // {
           this.skipSemis();
           const elems: Expr[] = [];
           while (!this.check("}") && !this.check("eof")) {
@@ -804,7 +819,7 @@ class Parser {
             this.match(",");
             this.skipSemis();
           }
-          this.expect("}", "at end of array literal");
+          const closeBrace = this.expect("}", "at end of array literal");
           if (elems.length === 0) {
             // F-9a: 空の型付き配列は `xs: T[] = []` に一本化(素の [] が文脈から型を得られるため重複だった)
             throw new CompileError(
@@ -814,7 +829,13 @@ class Parser {
               "empty-typed-array-literal-removed",
             );
           }
-          expr = { kind: "arrayLit", elems, elemType, pos: expr.pos };
+          expr = {
+            kind: "arrayLit",
+            elems,
+            elemType,
+            pos: expr.pos,
+            multiline: closeBrace.pos.line !== openBrace.pos.line,
+          };
           continue;
         }
       }
@@ -859,14 +880,21 @@ class Parser {
           },
         );
       }
-      if (this.match("(")) {
+      if (this.check("(")) {
+        const openParen = this.next();
         const args: Expr[] = [];
         while (!this.check(")")) {
           args.push(this.parseExpr());
           if (!this.check(")")) this.expect(",", "between arguments");
         }
-        this.expect(")", "after arguments");
-        expr = { kind: "call", callee: expr, args, pos: expr.pos };
+        const closeParen = this.expect(")", "after arguments");
+        expr = {
+          kind: "call",
+          callee: expr,
+          args,
+          pos: expr.pos,
+          multiline: closeParen.pos.line !== openParen.pos.line,
+        };
       } else if (this.match("[")) {
         const index = this.parseExpr();
         this.expect("]", "after index");
@@ -896,7 +924,7 @@ class Parser {
           const segments: InterpSegment[] = t.parts.map((p) =>
             p.kind === "text"
               ? { kind: "text", text: p.text }
-              : { kind: "expr", expr: new Parser(lex(p.source, p.pos)).parseStandaloneExpr() },
+              : { kind: "expr", expr: new Parser(lex(p.source, p.pos).tokens).parseStandaloneExpr() },
           );
           return { kind: "interp", segments, pos: t.pos };
         }
@@ -927,8 +955,8 @@ class Parser {
           this.match(",");
           this.skipSemis();
         }
-        this.expect("]", "after array elements");
-        return { kind: "arrayLit", elems, pos: t.pos };
+        const closeBracket = this.expect("]", "after array elements");
+        return { kind: "arrayLit", elems, pos: t.pos, multiline: closeBracket.pos.line !== t.pos.line };
       }
       case "fn": {
         // 無名関数: fn(x: int) int { ... }
@@ -1031,7 +1059,7 @@ class Parser {
         this.expect(",", "between map key and value types");
         const value = this.parseType();
         this.expect(">", "after map value type");
-        this.expect("{", "to create a map: map<K, V>{ ... }");
+        const openBrace = this.expect("{", "to create a map: map<K, V>{ ... }");
         this.skipSemis();
         const entries: { key: Expr; value: Expr; pos: Pos }[] = [];
         while (!this.check("}") && !this.check("eof")) {
@@ -1043,8 +1071,15 @@ class Parser {
           this.match(",");
           this.skipSemis();
         }
-        this.expect("}", "at end of map literal");
-        return { kind: "mapLit", key, value, entries, pos: t.pos };
+        const closeBrace = this.expect("}", "at end of map literal");
+        return {
+          kind: "mapLit",
+          key,
+          value,
+          entries,
+          pos: t.pos,
+          multiline: closeBrace.pos.line !== openBrace.pos.line,
+        };
       }
       default:
         throw new CompileError(`unexpected '${t.value === "" ? t.type : t.value}'`, t.pos, "syntax-error");

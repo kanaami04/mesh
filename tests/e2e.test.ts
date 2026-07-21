@@ -116,6 +116,119 @@ describe("mesh check --json", () => {
   });
 });
 
+describe("エラー表示: ソース行 + ^ での位置表示(ツール品質改善)", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+  test("mesh run(非JSON): エラーの下にソース行と桁位置を指す ^ が付く", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-caret-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, `fn main() {\n\tx := 10\n\ty := "hi"\n\tz := x + y\n\tprint(z)\n}`);
+    const proc = spawnSync(process.execPath, [CLI, "run", path], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(1);
+    const lines = proc.stderr.trim().split("\n");
+    expect(lines[0]).toContain("invalid operation: int + \"hi\"");
+    expect(lines[1]).toContain('z := x + y');
+    // タブは実文字のまま残し、それ以外は空白にした桁合わせなので、^ の手前は
+    // タブ1つ+スペースのみ(ソース行の "+" の位置と揃う)
+    expect(lines[2]).toMatch(/^\s*\t? *\^$/);
+    expect(lines[2].endsWith("^")).toBe(true);
+  });
+
+  test("mesh check --json: 従来どおりソース行を含まない(機械可読フォーマットは変えない)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-caret-json-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, `fn main() {\n\tprint(nothing)\n}`);
+    const proc = spawnSync(process.execPath, [CLI, "check", path, "--json"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    const parsed = JSON.parse(proc.stdout);
+    expect(Object.keys(parsed.diagnostics[0])).toEqual(["file", "line", "col", "severity", "code", "message"]);
+  });
+
+  test("複数パッケージ: 依存先ファイルのエラーもそのファイル自身のソース行を表示する", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-caret-multipkg-"));
+    mkdirSync(join(dir, "utils"));
+    writeFileSync(join(dir, "app.mesh"), `import "utils"\nfn main() {\n\tprint(utils.broken())\n}`);
+    writeFileSync(
+      join(dir, "utils", "utils.mesh"),
+      `export fn broken() int {\n\tx := "not an int"\n\treturn x\n}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "run", join(dir, "app.mesh")], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(proc.status).toBe(1);
+    const lines = proc.stderr.trim().split("\n");
+    expect(lines[0]).toContain("utils.mesh:3:");
+    expect(lines[1]).toContain("return x");
+    expect(lines[2].endsWith("^")).toBe(true);
+  });
+
+  test("mesh test(非JSON): コンパイル失敗時もソース行 + ^ が付く", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-caret-test-"));
+    writeFileSync(join(dir, "main.mesh"), `fn main() { print(1) }`);
+    writeFileSync(
+      join(dir, "main_test.mesh"),
+      `fn testBad() none | error {\n\tx := 1 + "oops"\n\treturn none\n}`,
+    );
+    const proc = spawnSync(process.execPath, [CLI, "test", join(dir, "main.mesh")], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(proc.status).toBe(1);
+    const lines = proc.stderr.trim().split("\n");
+    expect(lines[0]).toContain("main_test.mesh:2:");
+    expect(lines[1]).toContain('x := 1 + "oops"');
+    expect(lines[2].endsWith("^")).toBe(true);
+  });
+
+  test("位置がファイル先頭(missing-main等)でもクラッシュしない", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-caret-nomain-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, `fn helper() int {\n\treturn 1\n}`);
+    const proc = spawnSync(process.execPath, [CLI, "run", path], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(1);
+    const lines = proc.stderr.trim().split("\n");
+    expect(lines[0]).toContain("missing-main");
+    expect(lines[1]).toContain("fn helper() int {");
+    expect(lines[2]).toBe("  ^");
+  });
+});
+
+describe("mesh fmt(CLIコマンドの配線)", () => {
+  const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+  test("引数無しは標準出力へ整形結果を書き、元ファイルは変えない", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-fmt-cli-"));
+    const path = join(dir, "prog.mesh");
+    const original = `fn main() {\n    print(1)\n}\n`;
+    writeFileSync(path, original);
+    const proc = spawnSync(process.execPath, [CLI, "fmt", path], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("\tprint(1)");
+    expect(readFileSync(path, "utf8")).toBe(original); // 元ファイルは書き換えない
+  });
+
+  test("-w は元ファイルへ書き戻す", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-fmt-cli-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, `fn main() {\n    print(1)\n}\n`);
+    const proc = spawnSync(process.execPath, [CLI, "fmt", path, "-w"], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(0);
+    expect(readFileSync(path, "utf8")).toContain("\tprint(1)");
+  });
+
+  test("構文エラーはソース行 + ^ 付きで報告する(exit 1)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-fmt-cli-"));
+    const path = join(dir, "prog.mesh");
+    writeFileSync(path, `fn main( {\n`);
+    const proc = spawnSync(process.execPath, [CLI, "fmt", path], { encoding: "utf8", timeout: 10_000 });
+    expect(proc.status).toBe(1);
+    expect(proc.stderr).toContain("syntax-error");
+  });
+});
+
 describe("mesh explain <code>(F-13)", () => {
   const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 

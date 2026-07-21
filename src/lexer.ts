@@ -1,4 +1,4 @@
-import { CompileError, KEYWORDS, type Pos, type StringPart, type Token, type TokenType } from "./token";
+import { CompileError, KEYWORDS, type CommentInfo, type Pos, type StringPart, type Token, type TokenType } from "./token";
 
 // Go と同じ「セミコロン自動挿入」ルール:
 // 行末のトークンがこの集合に含まれるとき、改行を ";" として扱う。
@@ -40,8 +40,9 @@ const ESCAPES: Record<string, string> = {
 };
 
 // startPos: 文字列補間の式断片を再字句解析するとき、元ソース上の位置から数え始めるために使う
-export function lex(source: string, startPos?: Pos): Token[] {
+export function lex(source: string, startPos?: Pos): { tokens: Token[]; comments: CommentInfo[] } {
   const tokens: Token[] = [];
+  const comments: CommentInfo[] = [];
   let i = 0;
   let line = startPos?.line ?? 1;
   let col = startPos?.col ?? 1;
@@ -80,9 +81,16 @@ export function lex(source: string, startPos?: Pos): Token[] {
       continue;
     }
 
-    // 行コメント(改行は消費しない = セミコロン挿入は生きる)
+    // 行コメント(改行は消費しない = セミコロン挿入は生きる)。トークン列には一切乗せず、
+    // 別配列へ退避するだけ — 既存の文法規則(パーサ)はコメントの存在を意識せずに済む
     if (ch === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") advance();
+      const start = pos();
+      let text = "";
+      while (i < source.length && source[i] !== "\n") {
+        text += source[i];
+        advance();
+      }
+      comments.push({ text, pos: start });
       continue;
     }
 
@@ -227,5 +235,5 @@ export function lex(source: string, startPos?: Pos): Token[] {
     tokens.push({ type: ";", value: ";", pos: pos() });
   }
   tokens.push({ type: "eof", value: "", pos: pos() });
-  return tokens;
+  return { tokens, comments };
 }
