@@ -309,3 +309,42 @@ Kotlin(GlobalScope非推奨)・Swift(Task.detached)・Python(TaskGroup)と同方
 8. ~~**F-14(mesh/io + mesh/json)**~~ ✅ 2026-07-20実装
 9. ~~**F-15(mesh test --json)**~~ ✅ 2026-07-20実装。F節(F-1〜F-15)は全項目決着
 10. 残るはC-6の続き(環境別モジュール・`mesh/http`)。F-14実装メモ(障害分離)がその着手時の参照先
+
+## H. TS不満調査からの追加討議項目(2026-07-21追記)
+
+> 「フロント/バック両方書きたいならTSでいいのでは?」という問いに対し、実際にTS/Reactへの
+> 不満からMoonBit等へ移行した記事群(mizchi氏・lehti氏ら)を広く調査([related-languages.md](related-languages.md)参照)。
+> critique-2026-07.md(B-5-2)が既に指摘していた2点が、その後の討議に一度も上がらないまま
+> 未決着だったことが判明したため、ここに討議項目として起こす。
+
+### H-1. `any` 型の扱い — 討議未了
+
+critique-2026-07.md(B-5-2)の指摘: 「TSでよくない?」への3つの答え(①リークが構文的に
+書けない並行、②不在/closedを無視できない強制、③抜け穴の無さ)のうち、**③はMeshの`any`型の
+存在によって毀損されている**(TSの`as any`と同じ穴)。`src/checker/*.ts`を確認すると、
+関数呼び出し・二項演算・インデックス・チャネル操作など広範囲で`t.kind === "any"`が
+型検査をバイパスしており、TSの`any`と構造的に同じ効き方をする([features.md:63](features.md)は
+「脱出口。乱用しない」という運用規約があるのみで、言語機構としての歯止めは無い)。
+
+- 選択肢(a): `any`を完全撤去。用途(空配列の暫定型付け等)は他の機構(型注釈必須化・
+  ジェネリクス)で代替できないか検討
+- 選択肢(b): 用途をJS相互運用境界(Q2, npm interop)専用に限定し、ユーザーコードの通常の
+  型検査経路からは到達不能にする
+- 外部記事の裏付け: [Why TypeScript Won't Save You](https://cekrem.github.io/posts/why-typescript-wont-save-you/)
+  「You're only as safe as your weakest `any`」
+
+### H-2. API境界の検証つきデコード(P6の実質化) — 討議未了
+
+critique-2026-07.md(B-5-2)の指摘: 「P6(フロント/バック型共有)は現状空手形。型共有だけなら
+TSが既にやっている。**API境界で型が検証される**まで行って初めて存在理由」。
+`mesh/json`の`json.parse`は`json.Value | error`を返す(無検証の`as User`キャストは
+構造的に書けない)ところまでは実装済み([features.md:297](features.md))だが、
+`json.Value`から具体的な`struct`へ**検証つきで変換する**手段(Goの`encoding/json`
+Unmarshal相当、union路線なら`T | error`を返すデコーダ)がまだ無い。ここが埋まって
+初めて「TSは型を共有しているだけ、Meshは境界で検証もする」という主張が成立する。
+
+- 外部記事の裏付け: [Why TypeScript Won't Save You](https://cekrem.github.io/posts/why-typescript-wont-save-you/)
+  — `return await response.json()`を`User`型として無検証で返す実例を「偽りの安全感」の
+  典型例として批判している
+- 着手順としてはC-6(環境別モジュール・`mesh/http`)より前に置く価値がある
+  (HTTP自体より先にJSONデコードの安全性を固める方が土台として筋が良い)

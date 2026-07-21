@@ -74,11 +74,14 @@ Meshの中核コンセプト①(AIが書きやすい)③(1言語でフロント/
 TS/Reactからの不満を起点にMoonBitへ移行した実践記事群(出典参照)を調査。
 解決できる/できないは別として、現時点でMeshが**同じ弱点を抱えている、または未対応**な点を記録する。
 
-- **構造的型付けの緩さは未解消**: [Reactをやめて〜](https://zenn.dev/lehti/articles/c4b813a9192701)は
-  「TSは構造的部分型で意図しない値が通る」ことを不満として挙げている。Meshも構造的型付けを
-  採用している([requirements.md](requirements.md) 5.2: 「型付けは構造的(形が同じなら同じ型。TS方式)」)ため、
-  この批判はMeshにもそのまま当てはまる。API境界の透過性(P6)とのトレードオフとして意図した選択だが、
-  「意図しない値が通る」事故そのものへの対策は無い
+- ~~構造的型付けの緩さは未解消~~ **訂正(2026-07-21)**: [Reactをやめて〜](https://zenn.dev/lehti/articles/c4b813a9192701)の
+  「TSは構造的部分型で意図しない値が通る」という批判は、**Meshには当てはまらない**。
+  当初`requirements.md`5.2の記述(「型付けは構造的」)を根拠にMeshも同じ弱点を持つと書いたが、
+  これは2026-07-19時点の古い記述で、同日の[design-agenda.md](design-agenda.md) F-3で
+  **名前的型付けに巻き戻し済み**(`src/types.ts`の`typeEquals`で確認: 名前付きstruct同士は
+  名前で判定し、形が同じでも`Meters`と`Dollars`は別型としてコンパイルエラーになる。
+  構造的比較は無名`{...}`型式=判別可能unionメンバーのみに限定)。`requirements.md`5.2は
+  この決定を反映しておらず記述が古いまま — ドキュメント更新の宿題として残る
 - **判別可能unionの`kind`タグ方式がTS批判と表面的に同型**: [introduce-moonbit](https://zenn.dev/mizchi/articles/introduce-moonbit)は
   「オブジェクトをレコード代わりに使い`type: "datatype"`のようなプロパティが増えて無理がある」ことを
   TSの弱点として指摘。Meshの判別可能unionも`{ kind: "ok", ... }`という同じ形([features.md](features.md) 該当箇所)。
