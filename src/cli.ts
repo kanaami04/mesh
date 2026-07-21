@@ -20,7 +20,7 @@ import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "./diagnostic-codes
 import { format } from "./formatter";
 import { parse } from "./parser";
 import { BUILTIN_PACKAGES } from "./stdlib";
-import { CompileError } from "./token";
+import { CompileError, MultiCompileError } from "./token";
 
 // F-15: `__runTests`(runtime.ts)がstdoutの最終行に書く構造化結果と対応する形
 interface TestReport {
@@ -267,6 +267,11 @@ function main() {
       try {
         formatted = format(source);
       } catch (e) {
+        if (e instanceof MultiCompileError) {
+          const diags = e.errors.map((err) => ({ pos: err.pos, code: err.code, message: err.message, file, fix: err.fix }));
+          console.error(formatDiagnostics(file, diags));
+          process.exit(1);
+        }
         if (e instanceof CompileError) {
           console.error(formatDiagnostics(file, [{ pos: e.pos, code: e.code, message: e.message, file, fix: e.fix }]));
           process.exit(1);

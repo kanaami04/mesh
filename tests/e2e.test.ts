@@ -100,6 +100,19 @@ describe("mesh check --json", () => {
     expect(parsed.diagnostics[0].code).toBe("syntax-error");
   });
 
+  test("退行防止: 独立した構文エラーが複数あれば、1つで止まらず全部JSONで返る", () => {
+    // レビューで見つかった穴の裏返し(todo.mdの積み残し項目): 以前は最初の構文エラーで
+    // パースが止まり、直してもらってから2件目が初めて見える、という往復が必要だった
+    const { exit, parsed } = checkJson(
+      `struct User {\n\tname string\n}\nfn main() {\n\tx := 1 + * 2\n\tprint(x)\n}`,
+    );
+    expect(exit).toBe(1);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics.length).toBe(2);
+    expect(parsed.diagnostics[0]).toMatchObject({ line: 2, code: "syntax-error" });
+    expect(parsed.diagnostics[1]).toMatchObject({ line: 5, code: "syntax-error" });
+  });
+
   test("F-13: 機械適用可能な診断にはfixパッチが付く(code+fix)", () => {
     const { parsed } = checkJson(`fn main() {\n\tx: int | none = 1\n\tif x == none {\n\t}\n}`);
     expect(parsed.diagnostics[0].code).toBe("use-is-none");

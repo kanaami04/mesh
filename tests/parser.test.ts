@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parse } from "../src/parser";
-import { CompileError } from "../src/token";
+import { parse, parseIgnoringErrors } from "../src/parser";
+import { CompileError, MultiCompileError } from "../src/token";
 
 const parseBody = (body: string) => parse(`fn main() {\n${body}\n}`).fns[0].body.stmts;
 
@@ -425,6 +425,61 @@ fn main() {}`);
     test("構文エラーの一般形はsyntax-errorコードを持つ", () => {
       const e = throwsWith(`fn main() { x := }`);
       expect(e.code).toBe("syntax-error");
+    });
+  });
+
+  describe("エラー復帰: 1つの構文エラーで止まらず複数報告する", () => {
+    const messagesOf = (src: string): string[] => {
+      try {
+        parse(src);
+      } catch (e) {
+        if (e instanceof MultiCompileError) return e.errors.map((err) => err.message);
+        if (e instanceof CompileError) return [e.message];
+        throw e;
+      }
+      return [];
+    };
+
+    test("退行防止: 構文エラーが1件だけなら、従来どおり素のCompileErrorを投げる(MultiCompileErrorにしない)", () => {
+      expect(() => parse(`fn main() { x := }`)).toThrow(CompileError);
+      try {
+        parse(`fn main() { x := }`);
+        throw new Error("expected parse() to throw");
+      } catch (e) {
+        expect(e instanceof MultiCompileError).toBe(false);
+        expect(e instanceof CompileError).toBe(true);
+      }
+    });
+
+    test("別々のトップレベル宣言にある独立した構文エラーを両方報告する", () => {
+      const messages = messagesOf(`struct User {\n\tname string\n}\nfn main() {\n\tx := 1 + * 2\n\tprint(x)\n}`);
+      expect(messages).toEqual([
+        expect.stringContaining("expected ':' after field name"),
+        expect.stringContaining("unexpected '*'"),
+      ]);
+    });
+
+    test("同じ関数内の複数の文にある独立した構文エラーを両方報告する", () => {
+      const messages = messagesOf(`fn main() {\n\tx := 1 + * 2\n\ty := 3 + * 4\n\tprint(x, y)\n}`);
+      expect(messages).toEqual([
+        expect.stringContaining("unexpected '*'"),
+        expect.stringContaining("unexpected '*'"),
+      ]);
+    });
+
+    test("エラーの後も残りの宣言・文は正しくパースされる(全部エラーというわけではない)", () => {
+      const program = parseIgnoringErrors(`struct User {\n\tname string\n}\nfn greet(u: User) {\n\tprint("hi \${u.name}")\n}\nfn main() {\n\tx := 1 + * 2\n\tprint(x)\n\tgreet(User{name: "a"})\n}`);
+      expect(program.fns.map((f) => f.name)).toEqual(["greet", "main"]);
+      const mainBody = program.fns[1].body.stmts;
+      // 壊れた文(x := 1 + * 2)の後もprint(x)とgreet(...)は文として正しく読めている
+      expect(mainBody.length).toBe(2);
+    });
+
+    test("エラー文を読み飛ばしても、直後の別の関数宣言をトップレベルの残骸と誤認しない", () => {
+      // 壊れた文の中の '*' で止まった後、次の ';' か '}' まで飛ばして復帰する。
+      // その後に続く 'fn other() {...}' が正しく2つ目の関数として認識されることを確認する
+      const program = parseIgnoringErrors(`fn main() {\n\tx := 1 + * 2\n}\nfn other() { print(2) }`);
+      expect(program.fns.map((f) => f.name)).toEqual(["main", "other"]);
     });
   });
 });

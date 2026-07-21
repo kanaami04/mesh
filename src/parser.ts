@@ -23,7 +23,7 @@ import type {
   TypeNode,
 } from "./ast";
 import { lex } from "./lexer";
-import { CompileError, type CommentInfo, type Pos, type Token, type TokenType } from "./token";
+import { CompileError, MultiCompileError, type CommentInfo, type Pos, type Token, type TokenType } from "./token";
 
 // 二項演算子の優先順位(大きいほど強く結合する)
 const PRECEDENCE: Record<string, number> = {
@@ -44,7 +44,23 @@ const PRECEDENCE: Record<string, number> = {
   "%": 7,
 };
 
+// エラー復帰(パニックモード)が収集する構文エラー件数の上限。病的に壊れた入力で
+// カスケードが延々続くのを防ぐ安全弁(通常のMeshファイルの規模では実質当たらない)
+const MAX_PARSE_ERRORS = 50;
+
 export function parse(source: string): Program {
+  const { tokens, comments } = lex(source);
+  const parser = new Parser(tokens, comments);
+  const program = parser.parseProgram();
+  const errors = parser.collectedErrors();
+  if (errors.length === 1) throw errors[0]; // 1件なら従来どおり素のCompileErrorを投げる(挙動互換)
+  if (errors.length > 1) throw new MultiCompileError(errors);
+  return program;
+}
+
+// テスト・デバッグ専用: 構文エラーがあっても投げず、パニックモード復帰後のベストエフォートASTを
+// そのまま返す(本番のcheck/compileパイプラインはparse()の例外を正として使う)
+export function parseIgnoringErrors(source: string): Program {
   const { tokens, comments } = lex(source);
   return new Parser(tokens, comments).parseProgram();
 }
@@ -53,8 +69,80 @@ class Parser {
   private pos = 0;
   // if/for/match のヘッダでは `User{...}` を禁止する(ブロック開始の `{` と曖昧になるため。Goと同じ規則)
   private allowStructLit = true;
+  // 構文エラーからの復帰(パニックモード)で集めたエラー。1件で止めず複数報告するための蓄積先 —
+  // parseProgram()の呼び出し元(parse()）がまとめて投げる
+  private errors: CompileError[] = [];
 
   constructor(private tokens: Token[], private comments: CommentInfo[] = []) {}
+
+  collectedErrors(): CompileError[] {
+    return this.errors;
+  }
+
+  // 構文エラーを1件記録し、次の再開点まで読み飛ばす。復帰が全く前進しない
+  // (無限ループになる)ことがないよう、最低1トークンは必ず消費することを呼び出し側の
+  // sync関数が保証する
+  private recordAndRecover(e: unknown, startPos: number, sync: (startPos: number) => void) {
+    if (!(e instanceof CompileError)) throw e;
+    this.errors.push(e);
+    if (this.errors.length >= MAX_PARSE_ERRORS) {
+      this.pos = this.tokens.length - 1; // eofまで飛んで打ち切る(安全弁)
+      return;
+    }
+    sync(startPos);
+  }
+
+  // startPosからthis.pos(エラーが投げられた時点)までの間に開いたまま閉じていない
+  // { の深さを数える。エラー発生時点で構文的にまだ{の中にいることがあるため
+  // (例: selectのアーム検査に失敗した場合、select自身の{はまだ開いたまま) —
+  // 復帰時にそれを0扱いで数え始めると、内側の}を外側のブロック/宣言の終わりと誤認する
+  private braceDepthSince(startPos: number): number {
+    let depth = 0;
+    for (let i = startPos; i < this.pos; i++) {
+      if (this.tokens[i].type === "{") depth++;
+      else if (this.tokens[i].type === "}") depth--;
+    }
+    return Math.max(depth, 0);
+  }
+
+  // トップレベル宣言の構文エラーから復帰: まず(エラー発生時点で開いたままの{があれば)
+  // それを全部閉じきり、そのうえで次の宣言の先頭らしきトークンまで読み飛ばす
+  // (import/export/fn/struct/type、またはトップレベル定数の `ident :=`/`ident :`)
+  private syncToTopLevel(startPos: number) {
+    let depth = this.braceDepthSince(startPos);
+    while (depth > 0 && !this.check("eof")) {
+      if (this.check("{")) depth++;
+      else if (this.check("}")) depth--;
+      this.next();
+    }
+    while (!this.check("eof")) {
+      if (
+        this.check("import") || this.check("export") || this.check("fn") ||
+        this.check("struct") || this.check("type") ||
+        (this.check("ident") && (this.peek(1).type === ":=" || this.peek(1).type === ":"))
+      ) {
+        break;
+      }
+      this.next();
+    }
+    if (this.pos === startPos) this.next(); // 前進保証
+  }
+
+  // 文レベルの構文エラーから復帰: 次の文区切り(;)か、このブロックの終わり(}）まで読み飛ばす。
+  // 深さはbraceDepthSinceから数え始める(壊れた文自身が{...}を含む/開いたままのときも、
+  // 内側の}をこのブロック自身の終わりと誤認してカスケードしないため)。
+  // ";" は消費して止まる。"}" は消費しない(囲むブロックの終了判定に譲る)
+  private syncToStatementBoundary(startPos: number) {
+    let depth = this.braceDepthSince(startPos);
+    while (!this.check("eof")) {
+      if (depth === 0 && (this.check(";") || this.check("}"))) break;
+      if (this.check("{")) depth++;
+      else if (this.check("}")) depth--;
+      this.next();
+    }
+    this.match(";");
+    if (this.pos === startPos) this.next(); // 前進保証
+  }
 
   private withoutStructLit<T>(parse: () => T): T {
     const saved = this.allowStructLit;
@@ -111,46 +199,56 @@ class Parser {
     this.skipSemis();
     // import はファイル先頭にまとめる(宣言が始まったら以後の import はエラー)
     while (this.check("import")) {
-      imports.push(this.parseImportDecl());
+      const startPos = this.pos;
+      try {
+        imports.push(this.parseImportDecl());
+      } catch (e) {
+        this.recordAndRecover(e, startPos, (p) => this.syncToTopLevel(p));
+      }
       this.skipSemis();
     }
     while (!this.check("eof")) {
-      if (this.check("import")) {
-        throw new CompileError("imports must come before all declarations", this.peek().pos, "import-order");
-      }
-      const exported = this.match("export");
-      // F-9c: トップレベル定数は常に不変(共有可変状態を作らないため)。'mut' はここでは使えない
-      if (this.check("mut")) {
-        throw new CompileError(
-          "top-level bindings are always immutable — 'mut' is not allowed here " +
-            "(there are no mutable globals; pass mutable state as a parameter instead)",
-          this.peek().pos,
-          "top-level-mut-not-allowed",
-        );
-      }
-      // error type X = ... / error struct X { ... }(F-2後半): "error" は予約語ではなく
-      // ("error"は組み込み型名としてチェッカー側で守られている)、直後が type/struct のときだけ
-      // マーカーとして読む文脈依存キーワード。1トークン先読みで曖昧さなく判定できる
-      const isError =
-        this.check("ident") && this.peek().value === "error" &&
-        (this.peek(1).type === "type" || this.peek(1).type === "struct");
-      if (isError) this.next();
-      if (this.check("type")) {
-        types.push(this.parseTypeDecl(exported, isError));
-      } else if (this.check("struct")) {
-        types.push(this.parseStructDecl(exported, isError));
-      } else if (this.check("fn")) {
-        fns.push(this.parseFnDecl(exported));
-      } else if (this.check("ident") && (this.peek(1).type === ":=" || this.peek(1).type === ":")) {
-        consts.push(this.parseConstDecl(exported));
-      } else {
-        throw new CompileError(
-          exported
-            ? "'export' must be followed by a 'fn', 'struct', 'type' or constant (name := value) declaration"
-            : "only 'fn', 'struct', 'type' declarations and top-level constants (name := value) are allowed at the top level",
-          this.peek().pos,
-          "invalid-top-level-declaration",
-        );
+      const startPos = this.pos;
+      try {
+        if (this.check("import")) {
+          throw new CompileError("imports must come before all declarations", this.peek().pos, "import-order");
+        }
+        const exported = this.match("export");
+        // F-9c: トップレベル定数は常に不変(共有可変状態を作らないため)。'mut' はここでは使えない
+        if (this.check("mut")) {
+          throw new CompileError(
+            "top-level bindings are always immutable — 'mut' is not allowed here " +
+              "(there are no mutable globals; pass mutable state as a parameter instead)",
+            this.peek().pos,
+            "top-level-mut-not-allowed",
+          );
+        }
+        // error type X = ... / error struct X { ... }(F-2後半): "error" は予約語ではなく
+        // ("error"は組み込み型名としてチェッカー側で守られている)、直後が type/struct のときだけ
+        // マーカーとして読む文脈依存キーワード。1トークン先読みで曖昧さなく判定できる
+        const isError =
+          this.check("ident") && this.peek().value === "error" &&
+          (this.peek(1).type === "type" || this.peek(1).type === "struct");
+        if (isError) this.next();
+        if (this.check("type")) {
+          types.push(this.parseTypeDecl(exported, isError));
+        } else if (this.check("struct")) {
+          types.push(this.parseStructDecl(exported, isError));
+        } else if (this.check("fn")) {
+          fns.push(this.parseFnDecl(exported));
+        } else if (this.check("ident") && (this.peek(1).type === ":=" || this.peek(1).type === ":")) {
+          consts.push(this.parseConstDecl(exported));
+        } else {
+          throw new CompileError(
+            exported
+              ? "'export' must be followed by a 'fn', 'struct', 'type' or constant (name := value) declaration"
+              : "only 'fn', 'struct', 'type' declarations and top-level constants (name := value) are allowed at the top level",
+            this.peek().pos,
+            "invalid-top-level-declaration",
+          );
+        }
+      } catch (e) {
+        this.recordAndRecover(e, startPos, (p) => this.syncToTopLevel(p));
       }
       this.skipSemis();
     }
@@ -518,7 +616,12 @@ class Parser {
     const stmts: Stmt[] = [];
     this.skipSemis();
     while (!this.check("}") && !this.check("eof")) {
-      stmts.push(this.parseStatement());
+      const startPos = this.pos;
+      try {
+        stmts.push(this.parseStatement());
+      } catch (e) {
+        this.recordAndRecover(e, startPos, (p) => this.syncToStatementBoundary(p));
+      }
       this.skipSemis();
     }
     const closeBrace = this.expect("}", "at end of block");

@@ -6,7 +6,7 @@
 import { checkModules, type Diagnostic, type ParsedModule, type TestInfo } from "./checker";
 import { generateModules } from "./codegen";
 import { parse } from "./parser";
-import { CompileError } from "./token";
+import { CompileError, MultiCompileError } from "./token";
 
 export interface CompileResult {
   code: string | null; // エラーがあれば null
@@ -32,7 +32,13 @@ export function compileModules(modules: ModuleSource[], opts?: { testMode?: bool
     try {
       parsed.push({ pkg: m.pkg, file: m.file, program: parse(m.source) });
     } catch (e) {
-      if (e instanceof CompileError) {
+      // 構文エラーからの復帰(パーサ側)で複数件集まっていればMultiCompileError、
+      // 1件だけなら従来どおり素のCompileError — どちらも同じ形のDiagnosticへ均す
+      if (e instanceof MultiCompileError) {
+        for (const err of e.errors) {
+          parseErrors.push({ pos: err.pos, code: err.code, message: err.message, file: m.file, fix: err.fix });
+        }
+      } else if (e instanceof CompileError) {
         parseErrors.push({ pos: e.pos, code: e.code, message: e.message, file: m.file, fix: e.fix });
       } else {
         throw e;

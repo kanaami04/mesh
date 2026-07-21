@@ -143,3 +143,12 @@ export class CompileError extends Error {
     super(message);
   }
 }
+
+// 構文エラーからの復帰(パニックモード): パーサはトップレベル宣言・文の境界まで読み飛ばして
+// 再開し、1つの構文エラーで止まらず複数集める。集まったエラーが2件以上のときだけこれを投げる
+// (1件だけなら従来どおり素のCompileErrorを投げ、既存の呼び出し側・テストの挙動を変えない)
+export class MultiCompileError extends Error {
+  constructor(public errors: CompileError[]) {
+    super(errors.map((e) => e.message).join("\n"));
+  }
+}
