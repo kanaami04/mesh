@@ -253,13 +253,15 @@
       コンパイルエラー。エントリプログラムはエントリファイル1つ(分割はパッケージ単位で行う)。
       **v1の制限**: パスは単一ディレクトリ名のみ(`"a/b"`ネスト不可)。`"mesh/..."`は
       標準ライブラリ用に予約 — `mesh/io`・`mesh/json`は2026-07-20実装済み(F-14、下記参照)、
-      それ以外(`mesh/http`等)は未実装のまま`unknown package`。コンパイラ本体はfs非依存
+      `mesh/http`は2026-07-21実装済み(C-6続き、下記参照)。それ以外(`mesh/dom`等)は
+      未実装のまま`unknown package`。コンパイラ本体はfs非依存
       (`compileModules`にソース列を渡す設計)で、ファイル読み込みはCLIの仕事
       (プレイグラウンドは従来通り単一ファイル) |
-| 標準ライブラリの層分け(C-6) | 🔜 | モジュールシステム(上)が土台として完成。環境別モジュール
-      (`mesh/http`=サーバー、`mesh/dom`=ブラウザ等)の中身とimportからの環境自動推定は、
-      Q3(フロントエンドの形)の討議とセットで次段階。`mesh/io`は`mesh/dom`と共存できない
-      前提(C-6のimport元推定方式)だが、環境判別自体はまだ未実装 |
+| 標準ライブラリの層分け(C-6) | 🔜 | モジュールシステム(上)は土台として完成、`mesh/http` v1も
+      2026-07-21実装済み(下記参照)。残るのは`mesh/dom`(ブラウザ側)の中身とimportからの
+      環境自動推定の実装 — どちらもQ3(フロントエンドの形)の討議とセットで次段階。
+      「`mesh/http`と`mesh/dom`の同居はエラーにする」という設計自体は決定済みだが、
+      `mesh/dom`が存在しない現状ではまだ検査コードとして実装されていない |
 | npm ライブラリの呼び出し | ❓ | 未決Q2。直接importか、ラッパー経由か |
 | JS例外の境界変換 | 🔜 | 境界で catch して `T \| error` に変換 |
 | null / `undefined` の正規化 | 🔜 | JS境界でどちらも `none` に変換(Mesh内には汎用空値が無いため) |
@@ -410,8 +412,9 @@
       絞った縮小版カードを返す。トークン節約が目的。常時含むセクション(Program structure・
       Bindings・Types・Absence & failure・Control flow・Operators・Strings・Builtins・
       Does NOT exist・診断コード関連・Verify)は変わらず、Generic functions・Discriminated
-      unions・Structured errors・Structs/maps/methods・Arrays・Concurrency・Modulesの7つだけが
-      検出対象。全機能を検出したときはフルカードをそのまま返す(「COMPLETE reference」の主張が
+      unions・Structured errors・Structs/maps/methods・Arrays・Concurrency・Modules・
+      defer・Standard library: mesh/httpの9つだけが検出対象(後者2つは2026-07-21に追加)。
+      全機能を検出したときはフルカードをそのまま返す(「COMPLETE reference」の主張が
       正しいままなので注記に置き換えない)。何か削った場合だけ「これはプロジェクト限定のサブセットで
       あり完全な機能リストではない」という注記に置き換える(AIが「載っていない=存在しない」と
       誤読して未使用機能の存在を否定しないように) |

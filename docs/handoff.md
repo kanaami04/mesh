@@ -1,4 +1,4 @@
-# 引き継ぎ文書(2026-07-19時点)
+# 引き継ぎ文書(2026-07-21時点)
 
 > 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
 > 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
@@ -10,8 +10,10 @@
 のが核心コンセプト(要件定義 P1〜P6)。言語カード(`src/card.ts`)を渡せば、この会話を知らない
 AIエージェントでもMeshのコードを書ける、という実証実験(`docs/card-experiments.md`)まで行った。
 
-- GitHub: https://github.com/ryota-kanayama/mesh(公開。featureブランチ→PR→CI green確認→
-  squash mergeの運用。2026-07-19からこの形。それ以前はmain直push)
+- GitHub: https://github.com/ryota-kanayama/mesh(公開。featureブランチ→PR→CI green確認と
+  `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
+  PRフロー、2026-07-21から`/code-review`必須化〔`.claude/hooks/enforce-code-review.sh`が
+  `gh pr merge`実行時にレビューコメントの有無を機械的にチェックする〕。それ以前はmain直push)
 - ローカル: `/Users/kanayama/kanaami/language`
 - 実装言語: TypeScript(v0)。将来Rust移植構想あり(未着手)
 - ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
@@ -49,8 +51,11 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 - **判別可能union(discriminated union)完成**(2026-07-19実装、design-agenda **C-1**): `type X =
   { kind: "ok", user: User } | { kind: "notFound" }`。union内だけで無名`{...}`型式が書ける。
   構築は union自身の名前をstructリテラル名に流用(`X{kind: "ok", ...}`)、matchは部分構造
-  パターン`{kind: "ok"}`で絞り込み。この実装のため struct の同一性を名前ベース→全面的な
-  構造的比較に変更(構造的型付けの前倒し実装)。**自己参照(木構造・AST等)も同日中に追加実装**
+  パターン`{kind: "ok"}`で絞り込み。**訂正(2026-07-21、調査で発覚)**: この実装のため一時的に
+  structの同一性を名前ベース→全面的な構造的比較に変更したが、同日中のF-3で名前的型付けへ
+  巻き戻された——名前付きstruct同士は名前で判定し(`Meters`と`Dollars`は別型)、無名`{...}`型式
+  (判別可能unionメンバー)が絡む比較だけ構造的、が最終的な確定仕様(`src/types.ts`の
+  `typeEquals`参照)。**自己参照(木構造・AST等)も同日中に追加実装**
   ——structフィールド越しの参照(`{kind:"node", left: Tree, right: Tree}`)なら知恵の輪
   (knot-tying)で解決できる。structを挟まない「union同士が裸で直接参照し合う」形だけは
   意図的に`type alias cycle`のまま(下記参照)
@@ -62,26 +67,30 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   コンパイラはfs非依存の`compileModules`(ソース列を受ける)で、ファイル読み込みはCLIの仕事。
   環境判別は「importしたモジュールから自動推定」方式に決定済み(実装は環境別stdlibとセットで次段階)。
   v1制限: エントリは1ファイル・パスは単一セグメント・`mesh/...`予約。詳細は features.md
-- **テスト287件**(2026-07-19時点。F-6のnarrowing拡張・F-1後半のジェネリクス・F-2後半の
-  構造化エラーテスト込み。`bun test`で最新件数を確認)、CI green
+- **テスト477件**(2026-07-21時点。`bun test`で最新件数を必ず確認 — この行はすぐ古くなる)、CI green
   (直近コミットは`git log origin/main -1`で確認)
 
 - **言語批評ターン**(2026-07-19)実施: 言語設計者レンズ+実務レンズの2独立サブエージェント
   (実機検証つき)+内部批評の3視点。全記録は docs/critique-2026-07.md。
-  再討議項目は design-agenda.md の **F節**(F-1〜F-15)に整理済み
+  再討議項目は design-agenda.md の **F節**(F-1〜F-15、2026-07-20までに全項目決着・実装済み)
+
+- **2026-07-19以降に完了した主なもの**(詳細はfeatures.md/todo.mdの一次情報源を見ること):
+  F節(F-1〜F-15)全項目・ベンチマーク第1/第2ラウンド・`mesh fmt`・エラー表示改善
+  (ソース行表示・複数エラー報告への復帰)・VS Code拡張・**H節**(H-1: `any`型の完全撤去、
+  H-2: `mesh/json`ヘルパー+`json struct`自動デコード)・**C-6続き**(`mesh/http` v1、
+  サーバー専用の生ハンドラ+障害分離)。詳細は design-agenda.md H節・I節を参照
 
 ## 次にやるとしたら(未着手のトピック)
 
-- **批評起点のF節**(design-agenda参照)が最優先。推奨順:
-  ~~F-1 関数型注釈+ジェネリクス(前半・後半とも)~~・
-  ~~F-2 エラー設計(前半`? "文脈"`・後半`error type`/`error struct`の構造化エラー伝播)~~・
-  ~~F-3 名前的へ巻き戻し~~・~~F-4 `?`改名~~・~~F-5 or束縛形~~・
-  ~~F-6 narrowing拡張(フィールドパス・`&&`・`!`/`||`)~~(すべて✅ 2026-07-19)
-  → F-12 対TS/Go比較ベンチ(F-1/F-2/F-6が揃ったので効果測定に良いタイミング)
-- **C-6の続き**: 環境別標準ライブラリ(`mesh/http`・`mesh/dom`等)の中身の設計(=F-14)。
-  Q3(フロントエンドの形)の討議とセット。先行依存だったF-1は完了、着手可能
-- その他: defer文、エラー表示改善(ソース行表示・複数エラー報告)、mesh fmt、Rust移植、
-  npm相互運用(Q2)
+todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+`mesh/http` v1)は
+2026-07-21時点ですべて決着・実装済み。次点の候補(todo.md記載順):
+
+- **言語カード実証実験の継続**(docs/card-experiments.md): 第11回まで実施済み。
+  単体機能の検証はほぼ出尽くしたため、次はより大規模な複合タスクでの再測定
+- **Rust移植の開始**: 現行テストスイート(477件)を合格基準に、
+  lexer→parser→checker→codegenの順に移植
+- 保留中の未決事項: Q2(npm相互運用の深さ)、Q3(フロントエンドの形。`mesh/dom`の中身と
+  環境自動推定の実装はこれとセット)、E-2(スナップショットテストの採否)
 
 ## 開発の進め方(重要な合意事項 — 必ず守る)
 
@@ -90,15 +99,22 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 - **設計判断は先に討議・決定してから実装する**。特に既存構文と衝突する可能性がある場合は、
   必ず複数の選択肢とトレードオフを具体的なMeshコード例つきで提示し、`AskUserQuestion`で確認する
   (このセッションでは `map`名の衝突、channel容量、structメソッド構文などをこの形で決めてきた)
-- **実装したら必ず一通り検証してからコミットする**(2026-07-19からPRフロー):
+- **実装したら必ず一通り検証してからコミットする**(2026-07-19からPRフロー、2026-07-21から
+  `/code-review`必須化):
   1. `bun test` → 全パス確認
   2. `bunx tsc --noEmit` → 型エラーなし確認
   3. プレイグラウンド(`mise run playground`)で実際に動かして目視確認
-  4. ドキュメント更新: `src/card.ts`(言語カード)/ `docs/features.md` / `todo.md` / `README.md`
+  4. ドキュメント更新: `src/card.ts`(言語カード)/ `docs/features.md` / `todo.md` / `docs/design-agenda.md`
   5. featureブランチに `git add -A && git commit`(決定の経緯・却下した代替案もメッセージに書く)
      → `git push` → `gh pr create`
-  6. `gh pr checks <番号> --watch` でCI green確認 → `gh pr merge <番号> --squash`
-     → ローカルブランチを `git rebase origin/main` で追従(squash mergeで履歴が分岐するため)
+  6. 次の2つを並行して進める(順不同): `gh pr checks <番号> --watch` でCI green確認、
+     **`/code-review <番号> --comment` を実行**(PRにレビューコメントを投稿。指摘があれば
+     対応してコミットを追加し、CIとレビューをやり直す)——`.claude/hooks/enforce-code-review.sh`が
+     このコメントの有無を`gh pr merge`実行時に機械チェックし、無ければ拒否する
+  7. 両方(CI green・レビューコメント)が揃ったら `gh pr merge <番号> --squash --delete-branch`
+     → ローカルは
+     `git checkout main && git fetch --prune origin && git merge --ff-only origin/main` で同期
+     (featureブランチはリモート側で自動削除されるので、ローカルでrebaseして使い回す必要はない)
 - **無関係な変更は別コミットに分ける**(例: MoonBit調査ドキュメントと機能実装を分けてコミットした)
 - 大きな機能追加後は既存の`<-ch`等の使用箇所が壊れていないか`bun test`で確認し、
   壊れていたら**個別に narrowing を足して直す**(型を緩めて回避しない)
