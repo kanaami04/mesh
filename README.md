@@ -1,6 +1,6 @@
 # Mesh
 
-[![CI](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml)
+[![CI](https://github.com/kanaami04/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/kanaami04/mesh/actions/workflows/ci.yml)
 
 **TypeScript の型 × Go のシンプルさ・並行処理** を目指した、JavaScript にコンパイルされる言語。
 
@@ -35,7 +35,7 @@ fn main() {
 
 ## 使い方
 
-ツールは [mise](https://mise.jdx.dev/) で管理しています。初回は `mise install` を実行してください。
+環境構築の手順は [docs/setup.md](docs/setup.md) を参照してください(mise・system パッケージ等)。
 
 ```sh
 mise run playground     # ブラウザプレイグラウンド (http://localhost:8765)
