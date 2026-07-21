@@ -12,9 +12,13 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 
 - GitHub: https://github.com/kanaami04/mesh(公開。featureブランチ→PR→CI green確認と
   `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
-  PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に2つのフックが機械チェックする:
-  `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の有無を、
-  `enforce-squash-merge.sh`が`--squash`の有無を確認し、欠けていればdenyする。
+  PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に
+  `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の
+  有無を機械チェックし、欠けていればdenyする。squash統一は当初ローカルフック
+  (`enforce-squash-merge.sh`)で強制していたが、正規表現でシェルコマンドの意味を
+  判定する方式は誤検知・すり抜けの両方を避けられないと判明したため撤去し、
+  リポジトリ設定側(merge commit・rebase mergeを無効化)でサーバ側に強制させる形に
+  変更した(詳細は#3のPRとdesign-agenda.md参照)。
   2026-07-21の#2で`.claude/`をgit管理下に入れたので、設定自体はcloneすれば付いてくる。
   ただし**フックが動く条件は各マシンで揃える必要がある**(`jq`・`gh`・`/code-review`
   プラグイン本体)——詳細と、揃っていないと何が起きるかは docs/setup.md〕。
