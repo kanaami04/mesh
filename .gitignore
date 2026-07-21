@@ -3,3 +3,9 @@ node_modules/
 !tests/**/*.mjs
 .mesh-cache/
 rust/target/
+
+# CLAUDE.md and .claude/ are ignored by a global ~/.config/git/ignore rule;
+# un-ignore them for this repo so team config gets tracked.
+!CLAUDE.md
+!.claude/
+.claude/settings.local.json
