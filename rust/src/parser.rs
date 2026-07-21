@@ -55,6 +55,18 @@ enum TopLevelItem {
     Type(TypeDecl),
 }
 
+// 文字列補間のネスト(`"${"${"${...}"}"}"`のような形)は、1段ごとにlex()→新しいParser→
+// parse_expr()→...→parse_primary()という実フレームを積むため、上限が無いと本物の
+// スタックオーバーフローでプロセスごと落ちる(code reviewで指摘・実機で再現)。
+// TS版は同じ再帰設計だがJSの呼び出しスタック超過は捕捉可能な例外(RangeError)であり、
+// 実際`src/cli.ts`がparse()呼び出しをtry/catchで包んでいるため実害が無い。Rustの
+// スタックオーバーフローはResult/?/panic!のいずれでも捕捉できないため、この差は
+// 移植によって新たに生まれた深刻度の格上げであり、放置できない。
+// 実際のMeshコードが補間をこの深さまでネストすることは実質無い、という前提の余裕を
+// 持った上限(TS側にも無い制限だが、Rustではプロセスクラッシュとの引き換えになるため
+// Rust版だけが持つ安全弁として導入する)
+const MAX_INTERP_DEPTH: usize = 64;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -62,11 +74,14 @@ struct Parser {
     // if/forのヘッダでは`User{...}`を禁止する(ブロック開始の`{`と曖昧になるため。Goと同じ規則)。
     // struct literalを扱うようになったので今回から必要になった
     allow_struct_lit: bool,
+    // 文字列補間のネスト深さ。新しいParserを作るたびに増える(new()自体は常に0から
+    // 始まるので、補間の再帰呼び出し側が生成直後に明示的に設定する)
+    interp_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, errors: Vec::new(), allow_struct_lit: true }
+        Parser { tokens, pos: 0, errors: Vec::new(), allow_struct_lit: true, interp_depth: 0 }
     }
 
     // allow_struct_litを一時的にvalueにしてfを実行し、終わったら(?で早期returnした場合も
@@ -781,14 +796,25 @@ impl Parser {
                     // 補間つき文字列: 式の断片を(元の位置情報つきで)再帰的にパースする。
                     // TS版(parser.tsのparsePrimary)と同じ、lexer.rsが切り出した未パースの
                     // ソース断片を`lex()`で再字句解析し、新しいParserでparse_standalone_expr
-                    // を呼ぶ形。エラーはそのまま`?`で外側に伝播する(TS版のthrowと同じ挙動)
+                    // を呼ぶ形。エラーはそのまま`?`で外側に伝播する(TS版のthrowと同じ挙動)。
+                    // ネスト深さの上限だけはTS版に無い、Rust固有の安全弁(MAX_INTERP_DEPTHの
+                    // コメント参照)
+                    if self.interp_depth >= MAX_INTERP_DEPTH {
+                        return Err(self.error_at(
+                            t.pos,
+                            format!("string interpolation nested too deeply (max {MAX_INTERP_DEPTH})"),
+                            "interpolation-too-deep",
+                        ));
+                    }
                     let mut segments = Vec::with_capacity(parts.len());
                     for part in parts {
                         segments.push(match part {
                             crate::token::StringPart::Text { text } => InterpSegment::Text { text },
                             crate::token::StringPart::Expr { source, pos } => {
                                 let lexed = lex(&source, Some(pos))?;
-                                let expr = Parser::new(lexed.tokens).parse_standalone_expr()?;
+                                let mut nested = Parser::new(lexed.tokens);
+                                nested.interp_depth = self.interp_depth + 1;
+                                let expr = nested.parse_standalone_expr()?;
                                 InterpSegment::Expr { expr: Box::new(expr) }
                             }
                         });
@@ -1156,6 +1182,34 @@ mod tests {
         // "${1 2}" のように式の後にトークンが余る場合はparse_standalone_expr内でエラーになる
         let err = parse(r#"fn main() { msg := "${1 2}" }"#).unwrap_err();
         assert!(err[0].message.contains("unexpected '2' in string interpolation"), "got: {}", err[0].message);
+    }
+
+    // "${...}"の中に同じ形をもう1つ入れ子にして深さdepth段のネスト補間ソースを作る。
+    // 各段は`"${` + 前段 + `}"`を足すだけ(前段の中身をエスケープしない)ので長さは
+    // 線形にしか伸びない — クォートやバックスラッシュの中身をエスケープする方式だと
+    // 段ごとに長さが倍増し、200段程度で現実的なメモリを使い切る(実際に検証で踏んだ)
+    fn nested_interp_source(depth: usize) -> String {
+        let mut s = "1".to_string();
+        for _ in 0..depth {
+            s = format!("\"${{{s}}}\"");
+        }
+        s
+    }
+
+    #[test]
+    fn 文字列補間_上限未満のネストは正しくパースできる() {
+        let src = format!("fn main() {{ msg := {} }}", nested_interp_source(MAX_INTERP_DEPTH - 1));
+        parse(&src).unwrap();
+    }
+
+    #[test]
+    fn 文字列補間_上限を超えるネストはクラッシュせず構文エラーになる() {
+        // 実際にスタックオーバーフローでプロセスごと落ちていたのを直した回帰テスト
+        // (code reviewでの指摘・実機での再現を踏まえてMAX_INTERP_DEPTHのガードを追加した)
+        let src = format!("fn main() {{ msg := {} }}", nested_interp_source(MAX_INTERP_DEPTH + 10));
+        let err = parse(&src).unwrap_err();
+        assert_eq!(err[0].code, "interpolation-too-deep");
+        assert!(err[0].message.contains("too deeply"), "got: {}", err[0].message);
     }
 
     #[test]
