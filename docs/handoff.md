@@ -14,15 +14,10 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
   PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に
   `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の
-  有無を機械チェックし、欠けていればdenyする。squash統一は当初ローカルフック
-  (`enforce-squash-merge.sh`)で強制していたが、正規表現でシェルコマンドの意味を
-  判定する方式は誤検知・すり抜けの両方を避けられないと判明したため撤去し、
-  リポジトリ設定側(merge commit・rebase mergeを無効化)でサーバ側に強制させる形に
-  変更した(詳細は#3のPRとdesign-agenda.md参照)。
-  2026-07-21の#2で`.claude/`をgit管理下に入れたので、設定自体はcloneすれば付いてくる。
-  ただし**フックが動く条件は各マシンで揃える必要がある**(`jq`・`gh`・`/code-review`
-  プラグイン本体)——詳細と、揃っていないと何が起きるかは docs/setup.md〕。
-  それ以前はmain直push)
+  有無を機械チェックし、欠けていればdenyする。squash統一はリポジトリ設定
+  (merge commit・rebase mergeを無効化)でサーバ側に強制(経緯は`13405bf`参照)。
+  フックが動く条件(`jq`・`gh`・`grep`・`/code-review`プラグイン本体)は各マシンで
+  揃える必要がある——詳細は docs/setup.md〕。それ以前はmain直push)
 - **PR番号について**: 2026-07-21に`ryota-kanayama/mesh`から現リポジトリへ移管し、旧リポジトリは
   削除した。PR番号は1から振り直されているので、**#40以前の番号は旧リポジトリのもので現在は無効**
   (書くとGitHubが現リポジトリの別PRへ誤リンクする)。過去の作業を指すときはコミットSHAを使うこと
@@ -137,7 +132,7 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `none`(`Expr::None`)を最初のスコープ見積もりで見落としていた——「実際に典型的な
   コード片を1つ最後まで組んでみる」まで気づけなかった。次のマイルストーンでも
   スコープを決めたら早めに実例(discriminated_union.mesh相当)で組んでみること
-- **開発環境**: `mise.toml`に`rust = "1.97.1"`を追加済みなので`mise install`で入る
+- **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 
 ## 次にやるとしたら(Rust移植以外で未着手のトピック)

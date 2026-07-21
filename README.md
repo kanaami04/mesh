@@ -35,9 +35,7 @@ fn main() {
 
 ## 使い方
 
-ツールは [mise](https://mise.jdx.dev/) で管理しています。初回は `mise install` と
-`bun install` を実行してください。Rust 移植版(`rust/`)もビルドする場合は、リンカに使う
-C コンパイラ(`gcc` 等)が別途必要です — 詳しくは [docs/setup.md](docs/setup.md) を参照してください。
+環境構築の手順は [docs/setup.md](docs/setup.md) を参照してください(mise・system パッケージ等)。
 
 ```sh
 mise run playground     # ブラウザプレイグラウンド (http://localhost:8765)
