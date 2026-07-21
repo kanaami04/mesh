@@ -69,6 +69,35 @@ Meshの中核コンセプト①(AIが書きやすい)③(1言語でフロント/
    「仕様の小ささ+言語カードでプロンプトだけで戦う」。言語カード実験(往復回数の計測)は
    MoonBitがやっていない定量アプローチ
 
+### 実ユーザー記事からの追加知見(2026-07-21調査)— Meshが未解決/MoonBitに劣る点
+
+TS/Reactからの不満を起点にMoonBitへ移行した実践記事群(出典参照)を調査。
+解決できる/できないは別として、現時点でMeshが**同じ弱点を抱えている、または未対応**な点を記録する。
+
+- **構造的型付けの緩さは未解消**: [Reactをやめて〜](https://zenn.dev/lehti/articles/c4b813a9192701)は
+  「TSは構造的部分型で意図しない値が通る」ことを不満として挙げている。Meshも構造的型付けを
+  採用している([requirements.md](requirements.md) 5.2: 「型付けは構造的(形が同じなら同じ型。TS方式)」)ため、
+  この批判はMeshにもそのまま当てはまる。API境界の透過性(P6)とのトレードオフとして意図した選択だが、
+  「意図しない値が通る」事故そのものへの対策は無い
+- **判別可能unionの`kind`タグ方式がTS批判と表面的に同型**: [introduce-moonbit](https://zenn.dev/mizchi/articles/introduce-moonbit)は
+  「オブジェクトをレコード代わりに使い`type: "datatype"`のようなプロパティが増えて無理がある」ことを
+  TSの弱点として指摘。Meshの判別可能unionも`{ kind: "ok", ... }`という同じ形([features.md](features.md) 該当箇所)。
+  言語組み込み構文+match網羅性検査がある分、TSの自己流運用よりは堅牢だが、表層構文としては同種
+- **型情報はJSトランスパイル時に消える**: [introduce-moonbit](https://zenn.dev/mizchi/articles/introduce-moonbit)の
+  「型システムがトランスパイル時点で捨てられ、コンパイラに使われずもったいない」という指摘は、
+  JSへコンパイルする構造上Meshにも当てはまる。絞り込み前使用のコンパイルエラー化(P2)で
+  「型を回避する余地」は減らしているが、実行時に型情報そのものが残るわけではない
+- **WebAssembly出力は非対応**: MoonBitはWasmが第一級ターゲット(E-1参照)。Meshはスコープ外
+  (5.4「独自VM・ネイティブコンパイル」はやらないことに明記、JSエコシステム専任)
+- **ツールチェーン成熟度で劣後**: [MoonBit最高2025](https://zenn.dev/mizchi/articles/moonbit-is-good-2025)は
+  「TS(Node/Npm)/Rust(Cargo)と同レベルの安心感」「生成コードサイズの小ささでnpm publish可能な
+  ライブラリも書ける」水準に達したと評価。MeshはVSCode拡張未着手(todo.md)、npm相互運用も未決(Q2)で、
+  この水準には遠い
+- **動的スキーマからの型導出は未検証**: [introduce-mizchi-js](https://zenn.dev/mizchi/articles/introduce-mizchi-js)は
+  TSで「Zodのようなバリデーションスキーマからの型推論はどう頑張っても無理」と指摘。
+  Meshの標準ライブラリは`json.Value`(判別可能unionによる手書き表現、F-14)止まりで、
+  スキーマ駆動の型導出に対応できるかは未検証・未設計
+
 ### 出典
 
 - [MoonBit公式](https://www.moonbitlang.com/) / [1.0ロードマップ](https://www.moonbitlang.com/blog/roadmap) / [v0.10.0リリース](https://www.moonbitlang.com/updates/2026/06/08/moonbit-0-10-0-release)
@@ -76,3 +105,7 @@ Meshの中核コンセプト①(AIが書きやすい)③(1言語でフロント/
 - [エラーハンドリング公式ドキュメント](https://docs.moonbitlang.com/en/latest/language/error-handling.html) / [async(実験的)ドキュメント](https://docs.moonbitlang.com/en/latest/language/async-experimental.html)
 - [mizchi氏によるJS開発者視点レビュー](https://dev.to/mizchi/moonbit-a-modern-language-for-webassemblyjsnative-4p71)
 - [Hongbo Zhang氏インタビュー](http://pldb.info/blog/hongboZhang) / [ベータ発表](https://www.moonbitlang.com/blog/beta-release)
+- [mizchi「MoonBitが WebAssembly 時代の理想(の原型)だった」](https://zenn.dev/mizchi/articles/introduce-moonbit)
+- [mizchi「MoonBit 最高 2025」](https://zenn.dev/mizchi/articles/moonbit-is-good-2025)
+- [mizchi「mizchi/js.mbt で TS の代わりに Moonbit を書く」](https://zenn.dev/mizchi/articles/introduce-mizchi-js)
+- [lehti「Reactをやめて MoonBit で50ページの業務システムを作った」](https://zenn.dev/lehti/articles/c4b813a9192701)
