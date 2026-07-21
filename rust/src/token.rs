@@ -99,6 +99,87 @@ pub enum TokenType {
     Eof,
 }
 
+// parser.rsのエラーメッセージ用(`expected ':' after field name`のように、期待した
+// トークン種別を人が読める形に戻す)。TS版はTokenType自体が文字列そのものだったので
+// 素通しで済んでいたが、Rustのenumはここで文字列表現を明示的に用意する必要がある。
+// 各キーワード・記号のTS側の綴りと一致させている(挙動の同一性を保つため)
+impl std::fmt::Display for TokenType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use TokenType::*;
+        let s = match self {
+            Ident => "ident",
+            Int => "int",
+            Float => "float",
+            Str => "string",
+            Fn => "fn",
+            Return => "return",
+            If => "if",
+            Else => "else",
+            For => "for",
+            Spawn => "spawn",
+            Detach => "detach",
+            Wait => "wait",
+            Mut => "mut",
+            Chan => "chan",
+            Map => "map",
+            Range => "range",
+            NoneKw => "none",
+            Is => "is",
+            Or => "or",
+            Match => "match",
+            Select => "select",
+            Type => "type",
+            Struct => "struct",
+            Import => "import",
+            Export => "export",
+            True => "true",
+            False => "false",
+            Break => "break",
+            Continue => "continue",
+            Defer => "defer",
+            ColonEq => ":=",
+            EqEq => "==",
+            NotEq => "!=",
+            Le => "<=",
+            Ge => ">=",
+            AndAnd => "&&",
+            OrOr => "||",
+            Pipe => "|",
+            Arrow => "<-",
+            PlusPlus => "++",
+            MinusMinus => "--",
+            PlusEq => "+=",
+            MinusEq => "-=",
+            StarEq => "*=",
+            SlashEq => "/=",
+            PercentEq => "%=",
+            FatArrow => "=>",
+            Eq => "=",
+            Lt => "<",
+            Gt => ">",
+            Plus => "+",
+            Minus => "-",
+            Star => "*",
+            Slash => "/",
+            Percent => "%",
+            Bang => "!",
+            Question => "?",
+            Comma => ",",
+            Colon => ":",
+            Semi => ";",
+            LParen => "(",
+            RParen => ")",
+            LBrace => "{",
+            RBrace => "}",
+            LBracket => "[",
+            RBracket => "]",
+            Dot => ".",
+            Eof => "eof",
+        };
+        f.write_str(s)
+    }
+}
+
 // 文字列補間: "worker ${id} done" は
 // [Text("worker "), Expr("id", ...), Text(" done")] という部品列に分解される
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,13 +232,28 @@ pub fn keyword_from_str(s: &str) -> Option<TokenType> {
     })
 }
 
-// コンパイルエラー(構文エラーなど)を位置情報つきで表す。
-// TS版のCompileErrorはdiagnostic-codes.tsのDiagnosticCode(87種の診断コード)を
-// 参照していたが、そちらはまだ移植していない(checker.ts移植時にまとめて持ってくる)。
-// 今はlexerが投げる5種類のコードだけを直接文字列で持たせる、意図的な簡略化
+// コンパイルエラー(構文エラーなど)を位置情報つきで表す。lexer/parser共通(TS版と同じ —
+// parser.tsもtoken.tsのCompileErrorをそのまま使っている)。
+// TS版のDiagnosticCode(diagnostic-codes.ts、87種)はまだ移植していない(checker.ts移植時に
+// まとめて持ってくる)ので、今は各段が投げるコードを直接文字列で持たせる、意図的な簡略化
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LexError {
+pub struct CompileError {
     pub message: String,
     pub pos: Pos,
     pub code: &'static str,
+    pub fix: Option<Fix>, // F-13: 機械適用可能な自動修正(範囲+置換テキスト)。無いことの方が多い
+}
+
+// diagnostic-codes.tsのFixと同じ形
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub description: String,
+    pub range: Range,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Range {
+    pub start: Pos,
+    pub end: Pos,
 }

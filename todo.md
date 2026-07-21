@@ -133,6 +133,28 @@
         `&mut self`メソッドに置き換えた。(4) 文字列は`Vec<char>`でUnicodeスカラ値
         単位に扱う(JSのUTF-16コード単位ベースの`source[i]`とは厳密には異なるが、
         BMP内の文字〈日本語含む〉であれば実質差が出ない、という意図的な簡略化)
+  - [x] **parser移植(第一弾・実用サブセット)** ✅ 2026-07-21実装。`src/parser.ts`
+        (1217行)+`src/ast.ts`(403行)全体は一度に移さず、意味のある実用サブセットに
+        絞った——`fn`宣言(ジェネリクス・レシーバは次回)・トップレベル定数・
+        if/else-ifチェーン・for(3形態)・break/continue・変数宣言/代入/複合代入/
+        インクリメント・二項演算子(優先順位込み)・関数呼び出し。対象外(struct/type宣言・
+        ジェネリクス・match/is/or・spawn/wait/chan/select・文字列補間・配列/mapリテラル・
+        import/export等)は次回以降のPRで追加していく。構文エラー復帰(パニックモード)の
+        枠組みは今後ずっと使う土台なのでフルで移植した。`tests/parser.test.ts`
+        (35件)のうちスコープ内の16件を移植し全件パス(lexerと合わせて計31件)。
+        `examples/*.mesh`全13本のうち`hello.mesh`/`fizzbuzz.mesh`(スコープ内)は
+        正しくパース、残りはスコープ外の構文(chan型・struct宣言・is式・mapリテラル等)で
+        クラッシュせず明確な構文エラーになることを確認(誠実な「未対応」の失敗の仕方)。
+        **移植で出てきた主な設計判断**: (1) `CompileError`にlexer/parser共通のエラー型として
+        `Fix`(自動修正情報)を追加したところ136バイトまで育ち、`Result`の`Err`に素で
+        置くと成功時の戻り値まで重くなる(clippy::result_large_err)ため`Box<CompileError>`
+        に統一(公開APIの`parse()`/`parse_ignoring_errors()`だけは呼び出し側の使い勝手を
+        優先してBoxを漏らさない)。(2) TS版の「1件ならCompileError、2件以上なら
+        MultiCompileError」という互換維持の型分けは、合わせるべき既存Rust呼び出し側が
+        無いので`Vec<CompileError>`に統一する簡略化をした。(3) 二項演算子は専用enumを
+        作らずlexerの`TokenType`をそのまま流用(意味の重複するenumを増やさない)。
+        (4) parseProgram()はTS版と同じく「回復してでも必ずProgramを返す」設計を
+        戻り値の型(Resultを持たない)で表現した
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

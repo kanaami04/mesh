@@ -10,8 +10,13 @@
 // (パニックはある。ここではあくまで「予期されるエラー」)。代わりに`Result<T, E>`を返し、
 // 呼び出し側は`?`で伝播させる。これはMesh自身の`T | error` + `?`が着想を得た元ネタそのもの
 // なので、書いていて答え合わせをしている感覚になるはず。
+//
+// `CompileError`は`Box`で包んで返す(clippy::result_large_err) — Fix(自動修正情報)を
+// 持てるようになってCompileError自体が136バイトまで育ったため、素で`Result`の`Err`に
+// 置くと成功時の戻り値まで毎回そのサイズ分コピーされてしまう。ポインタ1つ分(8バイト)に
+// 抑えるための定石の対処
 
-use crate::token::{keyword_from_str, CommentInfo, LexError, Pos, StringPart, Token, TokenType};
+use crate::token::{keyword_from_str, CommentInfo, CompileError, Pos, StringPart, Token, TokenType};
 
 #[derive(Debug)]
 pub struct LexOutput {
@@ -131,9 +136,13 @@ impl Lexer {
         }
     }
 
+    fn err(&self, pos: Pos, message: impl Into<String>, code: &'static str) -> Box<CompileError> {
+        Box::new(CompileError { message: message.into(), pos, code, fix: None })
+    }
+
     // 文字列リテラル(補間 ${式} 対応)。最初の`"`はすでに読んでいない前提(呼び出し元でchar自体は
     // まだ消費前 — TS版と同じく、この関数の先頭でadvance(1)して開き"を読み飛ばす)
-    fn lex_string(&mut self) -> Result<Token, LexError> {
+    fn lex_string(&mut self) -> Result<Token, Box<CompileError>> {
         let start = self.pos();
         self.advance(1); // 開きの"
         let mut parts: Vec<StringPart> = Vec::new();
@@ -141,22 +150,14 @@ impl Lexer {
 
         while self.i < self.chars.len() && self.chars[self.i] != '"' {
             if self.chars[self.i] == '\n' {
-                return Err(LexError {
-                    message: "string literal not terminated".into(),
-                    pos: start,
-                    code: "unterminated-string",
-                });
+                return Err(self.err(start, "string literal not terminated", "unterminated-string"));
             }
             if self.chars[self.i] == '\\' {
                 let next = self.peek(1);
                 let esc = next.and_then(escape_char);
                 match esc {
                     None => {
-                        return Err(LexError {
-                            message: format!("unknown escape \\{}", next.unwrap_or(' ')),
-                            pos: self.pos(),
-                            code: "unknown-escape",
-                        });
+                        return Err(self.err(self.pos(), format!("unknown escape \\{}", next.unwrap_or(' ')), "unknown-escape"));
                     }
                     Some(c) => {
                         text.push(c);
@@ -190,11 +191,7 @@ impl Lexer {
                             }
                         }
                         if self.i >= self.chars.len() || self.chars[self.i] == '\n' {
-                            return Err(LexError {
-                                message: "string literal not terminated".into(),
-                                pos: expr_pos,
-                                code: "unterminated-string",
-                            });
+                            return Err(self.err(expr_pos, "string literal not terminated", "unterminated-string"));
                         }
                         expr_src.push('"');
                         self.advance(1);
@@ -213,19 +210,11 @@ impl Lexer {
                     self.advance(1);
                 }
                 if depth > 0 {
-                    return Err(LexError {
-                        message: "interpolation not terminated — missing '}'".into(),
-                        pos: expr_pos,
-                        code: "unterminated-interpolation",
-                    });
+                    return Err(self.err(expr_pos, "interpolation not terminated — missing '}'", "unterminated-interpolation"));
                 }
                 self.advance(1); // 閉じの}
                 if expr_src.trim().is_empty() {
-                    return Err(LexError {
-                        message: "empty interpolation '${}'".into(),
-                        pos: expr_pos,
-                        code: "empty-interpolation",
-                    });
+                    return Err(self.err(expr_pos, "empty interpolation '${}'", "empty-interpolation"));
                 }
                 if !text.is_empty() {
                     parts.push(StringPart::Text { text: std::mem::take(&mut text) });
@@ -237,11 +226,7 @@ impl Lexer {
             self.advance(1);
         }
         if self.i >= self.chars.len() {
-            return Err(LexError {
-                message: "string literal not terminated".into(),
-                pos: start,
-                code: "unterminated-string",
-            });
+            return Err(self.err(start, "string literal not terminated", "unterminated-string"));
         }
         self.advance(1); // 閉じの"
         if !parts.is_empty() {
@@ -254,7 +239,7 @@ impl Lexer {
         }
     }
 
-    fn run(mut self) -> Result<LexOutput, LexError> {
+    fn run(mut self) -> Result<LexOutput, Box<CompileError>> {
         while self.i < self.chars.len() {
             let ch = self.chars[self.i];
 
@@ -336,11 +321,7 @@ impl Lexer {
                 continue;
             }
 
-            return Err(LexError {
-                message: format!("unexpected character '{ch}'"),
-                pos: self.pos(),
-                code: "unexpected-character",
-            });
+            return Err(self.err(self.pos(), format!("unexpected character '{ch}'"), "unexpected-character"));
         }
 
         // 最終行の文もセミコロンで閉じる
@@ -354,7 +335,7 @@ impl Lexer {
 }
 
 // start_pos: 文字列補間の式断片を再字句解析するとき、元ソース上の位置から数え始めるために使う
-pub fn lex(source: &str, start_pos: Option<Pos>) -> Result<LexOutput, LexError> {
+pub fn lex(source: &str, start_pos: Option<Pos>) -> Result<LexOutput, Box<CompileError>> {
     let start = start_pos.unwrap_or(Pos { line: 1, col: 1 });
     let lexer = Lexer {
         chars: source.chars().collect(),
