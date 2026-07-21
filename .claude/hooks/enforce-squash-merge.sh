@@ -5,10 +5,10 @@
 
 cmd=$(jq -r '.tool_input.command // ""')
 
-# gh pr merge 系コマンドだけを対象にする
-if printf '%s' "$cmd" | grep -Eq '\bgh\b.+\bpr\b.+\bmerge\b'; then
-  # --squash もしくは単独トークンの -s が含まれていれば OK
-  if printf '%s' "$cmd" | grep -Eq -- '(--squash|(^|[[:space:]])-s([[:space:]]|$))'; then
+# gh pr merge 系コマンドだけを対象にする（実際の呼び出しにアンカーし、コメントやecho文字列への誤マッチを避ける）
+if printf '%s' "$cmd" | grep -Eq '\bgh[[:space:]]+pr[[:space:]]+merge\b'; then
+  # --squash、単独トークンの -s、または -sd のような結合ショートフラグに -s が含まれていれば OK
+  if printf '%s' "$cmd" | grep -Eq -- '(--squash|(^|[[:space:]])-[A-Za-z]*s[A-Za-z]*([[:space:]]|$))'; then
     exit 0
   fi
 

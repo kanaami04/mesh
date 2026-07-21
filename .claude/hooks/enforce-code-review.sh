@@ -5,14 +5,15 @@
 
 cmd=$(jq -r '.tool_input.command // ""')
 
-# gh pr merge 系コマンドだけを対象にする
-if ! printf '%s' "$cmd" | grep -Eq '\bgh\b.+\bpr\b.+\bmerge\b'; then
+# gh pr merge 系コマンドだけを対象にする（実際の呼び出しにアンカーし、コメントやecho文字列への誤マッチを避ける）
+if ! printf '%s' "$cmd" | grep -Eq '\bgh[[:space:]]+pr[[:space:]]+merge\b'; then
   exit 0
 fi
 
-# コマンド中のPR番号を拾う（`gh pr merge 38 ...`のような形）。
+# コマンド中のPR番号を拾う（`gh pr merge 38 ...`、`gh pr merge --squash 38` のようにフラグが
+# 前後どちらにあっても、"merge" 以降で最初に現れる独立した数値トークンを拾う）。
 # 番号が書かれていない場合は現在のブランチに紐づくPRを解決する。
-pr_num=$(printf '%s' "$cmd" | grep -oE 'pr[[:space:]]+merge[[:space:]]+[0-9]+' | grep -oE '[0-9]+$')
+pr_num=$(printf '%s' "$cmd" | grep -oE 'pr[[:space:]]+merge\b.*' | grep -oE '(^|[[:space:]])[0-9]+([[:space:]]|$)' | grep -oE '[0-9]+' | head -1)
 if [ -z "$pr_num" ]; then
   pr_num=$(gh pr view --json number -q .number 2>/dev/null)
 fi
