@@ -10,11 +10,16 @@
 のが核心コンセプト(要件定義 P1〜P6)。言語カード(`src/card.ts`)を渡せば、この会話を知らない
 AIエージェントでもMeshのコードを書ける、という実証実験(`docs/card-experiments.md`)まで行った。
 
-- GitHub: https://github.com/ryota-kanayama/mesh(公開。featureブランチ→PR→CI green確認と
+- GitHub: https://github.com/kanaami04/mesh(公開。featureブランチ→PR→CI green確認と
   `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
   PRフロー、2026-07-21から`/code-review`必須化〔`.claude/hooks/enforce-code-review.sh`が
-  `gh pr merge`実行時にレビューコメントの有無を機械的にチェックする〕。それ以前はmain直push)
-- ローカル: `/Users/kanayama/kanaami/language`
+  `gh pr merge`実行時にレビューコメントの有無を機械的にチェックする。**ただしこのフックは
+  `.claude/`ごとgit管理外**なので、それを持たない環境では機械チェックが効かない——
+  その場合はフロー自体を手動で守ること〕。それ以前はmain直push)
+- ローカル: マシンによって異なる。Mac は `/Users/kanayama/kanaami/language`、
+  Lightsail(2026-07-21〜)は `/home/ubuntu/development/mesh`。後者はツールを
+  **mise で管理**(`mise install`でbun/node/rust、`gh`はグローバル設定側)。
+  Rustのリンカ用に`gcc`だけaptで入れる必要がある(RAM 512MBなので`cargo`は`CARGO_BUILD_JOBS=1`推奨)
 - 実装言語: TypeScript(v0、本番)。**2026-07-21からRust移植が進行中**(`rust/`、
   lexer+parser一部まで完了。詳細は下記「Rust移植の現状」節)
 - ユーザー(kanayamaさん)はコードを書かない。Claudeが実装しながら日本語で解説する学習スタイル
@@ -31,7 +36,10 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
 7. **docs/syntax-proposals.md** — 構文採用/不採用会の決定記録(経緯。凍結済み)
 8. **docs/card-experiments.md** — 言語カード実証実験のログ(白紙AIに実タスクを書かせて穴を探す手法)
 9. 永続メモリ([[language-project-goal]] [[user-collaboration-style]] [[mesh-card-experiment]]) —
-   `/Users/kanayama/.claude/projects/-Users-kanayama-kanaami-language/memory/` にあるセッション横断の記憶
+   セッション横断の記憶。マシンごとに独立しており、上記3件は Mac 側
+   (`/Users/kanayama/.claude/projects/-Users-kanayama-kanaami-language/memory/`)にしか無い。
+   Lightsail 側は `/home/ubuntu/.claude/projects/-home-ubuntu-development-mesh/memory/`
+   ([[lightsail-dev-environment]] のみ)
 
 ## 現在の実装状況(要約。詳細は必ず features.md を見る — ここは古くなりうる)
 

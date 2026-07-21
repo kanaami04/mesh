@@ -1,6 +1,6 @@
 # Mesh
 
-[![CI](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/ryota-kanayama/mesh/actions/workflows/ci.yml)
+[![CI](https://github.com/kanaami04/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/kanaami04/mesh/actions/workflows/ci.yml)
 
 **TypeScript の型 × Go のシンプルさ・並行処理** を目指した、JavaScript にコンパイルされる言語。
 
