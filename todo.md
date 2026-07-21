@@ -155,6 +155,24 @@
         作らずlexerの`TokenType`をそのまま流用(意味の重複するenumを増やさない)。
         (4) parseProgram()はTS版と同じく「回復してでも必ずProgramを返す」設計を
         戻り値の型(Resultを持たない)で表現した
+  - [x] **parser移植(第二弾・struct/type宣言+判別可能union+match/is)** ✅ 2026-07-21実装。
+        「Meshの型システムの全部乗せ」(examples/users.meshのコメントより)にあたる
+        struct/type宣言・構造体リテラル・メンバーアクセス(`.field`)・is式・match式を
+        追加。対象外(引き続き次回以降): ジェネリクス・レシーバ・error/jsonマーカー
+        (`?`/`or`が無いと構造化エラーの旨みが薄いためセットで後回し)・
+        パッケージ修飾structリテラル(import前提)・spawn/wait/chan/select・
+        文字列補間・配列/mapリテラル・import/export。
+        `tests/parser.test.ts`からスコープ内の8件相当を移植+実例相当の統合テスト2件を
+        新規作成し全件パス(lexer+parser計41件)。`examples/*.mesh`は4/11本が完全に
+        パース成功(前弾の2本から倍増)、うち`discriminated_union.mesh`/`users.mesh`は
+        struct/union/match/isを全部通過し文字列補間だけで止まることを確認(次弾の
+        対象がまさにそこだと裏付けられた)。
+        **実装中に見つけた当初スコープの見落とし2件**(実例で組んでみて発覚): (1) 判別可能
+        unionのタグ(`{ kind: "ok" }`の`"ok"`部分)に必須な文字列リテラル型
+        (`TypeNode::Literal`)を入れ忘れていた — struct/union対応に含めていたつもりが
+        漏れていたので追加。(2) 値としての`none`(`Expr::None`。`return none`等)も
+        見落としていた — Meshの核心語彙なので同様に追加。段階的に切っていくスコープの
+        境界は「実際に典型的なコードを組んでみるまで正確に見積もれない」という教訓
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

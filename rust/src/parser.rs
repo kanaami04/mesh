@@ -11,7 +11,10 @@
 // (エラーはself.errorsに溜め込むだけで、呼び出し元のparse()がまとめて返す)なので
 // 戻り値の型にResultを持たない(=失敗しない関数、という型で表現している)
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Param, Program, Stmt, TypeNode};
+use crate::ast::{
+    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, MatchArm, MatchPattern, Param, Program, Stmt,
+    StructFieldNode, StructLitField, TypeDecl, TypeNode,
+};
 use crate::lexer::lex;
 use crate::token::{CompileError, Fix, Pos, Range, Token, TokenType};
 
@@ -49,17 +52,41 @@ pub fn parse_ignoring_errors(source: &str) -> Result<Program, CompileError> {
 enum TopLevelItem {
     Fn(FnDecl),
     Const(ConstDecl),
+    Type(TypeDecl),
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<CompileError>,
+    // if/forのヘッダでは`User{...}`を禁止する(ブロック開始の`{`と曖昧になるため。Goと同じ規則)。
+    // struct literalを扱うようになったので今回から必要になった
+    allow_struct_lit: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, errors: Vec::new() }
+        Parser { tokens, pos: 0, errors: Vec::new(), allow_struct_lit: true }
+    }
+
+    // allow_struct_litを一時的にvalueにしてfを実行し、終わったら(?で早期returnした場合も
+    // 含めて)必ず元に戻す。fが`Result`を返す形にしているのはこのため——ループの後で
+    // 素朴に戻すと、ループ内の`?`が復元をすり抜ける罠になる(code review, PR #43で指摘)
+    fn with_struct_lit_flag<T>(
+        &mut self,
+        value: bool,
+        f: impl FnOnce(&mut Self) -> Result<T, Box<CompileError>>,
+    ) -> Result<T, Box<CompileError>> {
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = value;
+        let result = f(self);
+        self.allow_struct_lit = saved;
+        result
+    }
+
+    // TSの`withoutStructLit`相当
+    fn with_no_struct_lit<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Box<CompileError>>) -> Result<T, Box<CompileError>> {
+        self.with_struct_lit_flag(false, f)
     }
 
     // ---- エラー復帰(パニックモード) ----
@@ -186,17 +213,19 @@ impl Parser {
     fn parse_program(&mut self) -> Program {
         let mut fns = Vec::new();
         let mut consts = Vec::new();
+        let mut types = Vec::new();
         self.skip_semis();
         while !self.check(TokenType::Eof) {
             let start_pos = self.pos;
             match self.parse_top_level_item() {
                 Ok(TopLevelItem::Fn(f)) => fns.push(f),
                 Ok(TopLevelItem::Const(c)) => consts.push(c),
+                Ok(TopLevelItem::Type(t)) => types.push(t),
                 Err(e) => self.record_and_recover(*e, start_pos, Self::sync_to_top_level),
             }
             self.skip_semis();
         }
-        Program { fns, consts }
+        Program { fns, consts, types }
     }
 
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, Box<CompileError>> {
@@ -211,6 +240,10 @@ impl Parser {
         }
         if self.check(TokenType::Fn) {
             Ok(TopLevelItem::Fn(self.parse_fn_decl(exported)?))
+        } else if self.check(TokenType::Struct) {
+            Ok(TopLevelItem::Type(self.parse_struct_decl(exported)?))
+        } else if self.check(TokenType::Type) {
+            Ok(TopLevelItem::Type(self.parse_type_decl(exported)?))
         } else if self.check(TokenType::Ident) && matches!(self.peek_at(1).kind, TokenType::ColonEq | TokenType::Colon) {
             Ok(TopLevelItem::Const(self.parse_const_decl(exported)?))
         } else {
@@ -221,6 +254,107 @@ impl Parser {
             };
             Err(self.error_here(message, "invalid-top-level-declaration"))
         }
+    }
+
+    // struct User { name: string  age: int } — 意味的には型への名付け(typeと同じ)なので
+    // TypeDecl として登録する。フィールドは改行区切り。error/jsonマーカーは次回以降
+    fn parse_struct_decl(&mut self, exported: bool) -> Result<TypeDecl, Box<CompileError>> {
+        let start = self.expect(TokenType::Struct, "at start of struct declaration")?;
+        let name = self.expect(TokenType::Ident, "as struct name")?.value;
+        self.expect(TokenType::LBrace, "after struct name")?;
+        self.skip_semis();
+        let mut fields = Vec::new();
+        while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+            let fname = self.expect(TokenType::Ident, "as field name")?;
+            self.expect(TokenType::Colon, "after field name")?;
+            let type_node = self.parse_type()?;
+            fields.push(StructFieldNode { name: fname.value, type_node, pos: fname.pos });
+            self.skip_semis();
+        }
+        self.expect(TokenType::RBrace, "at end of struct declaration")?;
+        Ok(TypeDecl { name, node: TypeNode::StructType { fields, pos: start.pos }, exported, pos: start.pos })
+    }
+
+    // type Status = "active" | "banned" / type X = { kind: "ok" } | { kind: "notFound" }(判別可能union)。
+    // 長いunionは複数行に折れる — 行末`|`と行頭`|`(複数行の`;`越しの継続)の両方を許す
+    fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, Box<CompileError>> {
+        let start = self.expect(TokenType::Type, "at start of type declaration")?;
+        let name = self.expect(TokenType::Ident, "as type name")?.value;
+        let eq = self.expect(TokenType::Eq, "after type name")?;
+        let first = self.parse_union_member()?;
+        let mut members = vec![first];
+        while self.match_union_continuation() {
+            members.push(self.parse_union_member()?);
+        }
+        if members.len() == 1 {
+            let first = members.into_iter().next().unwrap();
+            if let TypeNode::StructType { ref fields, pos } = first {
+                // fix: `type Name =`を`struct Name`に置き換えれば、続く`{ ... }`はそのまま使える —
+                // ただしこれが安全なのはフィールドが1行1つ(改行区切り)のときだけ
+                let one_field_per_line =
+                    fields.iter().enumerate().all(|(i, f)| i == 0 || f.pos.line != fields[i - 1].pos.line);
+                let fix = if one_field_per_line {
+                    Some(Fix {
+                        description: format!("replace 'type {name} =' with 'struct {name}'"),
+                        range: Range { start: start.pos, end: Pos { line: eq.pos.line, col: eq.pos.col + 1 } },
+                        replacement: format!("struct {name}"),
+                    })
+                } else {
+                    None
+                };
+                return Err(Box::new(CompileError {
+                    message: format!("use 'struct {name} {{ ... }}' to define a data shape ('{{...}}' alone is only allowed inside a union)"),
+                    pos,
+                    code: "bare-struct-shape",
+                    fix,
+                }));
+            }
+            return Ok(TypeDecl { name, node: first, exported, pos: start.pos });
+        }
+        let pos = members[0].pos();
+        Ok(TypeDecl { name, node: TypeNode::Union { members, pos }, exported, pos: start.pos })
+    }
+
+    // unionの継続`|`を読む。行頭`|`スタイルでは直前の改行がASIで';'になっているので、
+    // ';'の並びの先に`|`があればそこまでまとめて消費して継続とみなす
+    fn match_union_continuation(&mut self) -> bool {
+        let mut i = 0;
+        while self.peek_at(i).kind == TokenType::Semi {
+            i += 1;
+        }
+        if self.peek_at(i).kind != TokenType::Pipe {
+            return false;
+        }
+        for _ in 0..=i {
+            self.next();
+        }
+        true
+    }
+
+    // unionの1メンバー: 無名struct型{...}(判別可能union用)か、通常の単一型
+    fn parse_union_member(&mut self) -> Result<TypeNode, Box<CompileError>> {
+        if self.check(TokenType::LBrace) {
+            self.parse_inline_struct_type()
+        } else {
+            self.parse_single_type()
+        }
+    }
+
+    // { kind: "ok", user: User } — 無名の構造体型リテラル。フィールドはカンマまたは改行区切り
+    fn parse_inline_struct_type(&mut self) -> Result<TypeNode, Box<CompileError>> {
+        let start = self.expect(TokenType::LBrace, "at start of inline struct type")?;
+        self.skip_semis();
+        let mut fields = Vec::new();
+        while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+            let fname = self.expect(TokenType::Ident, "as field name")?;
+            self.expect(TokenType::Colon, "after field name")?;
+            let type_node = self.parse_type()?;
+            fields.push(StructFieldNode { name: fname.value, type_node, pos: fname.pos });
+            self.eat(TokenType::Comma);
+            self.skip_semis();
+        }
+        self.expect(TokenType::RBrace, "at end of inline struct type")?;
+        Ok(TypeNode::StructType { fields, pos: start.pos })
     }
 
     // F-9c: トップレベル定数。x := 10 / x: int = 10(常に不変)
@@ -295,12 +429,20 @@ impl Parser {
         self.parse_type_atom()
     }
 
-    // 今回のスコープはname型(int, string, math.User)とnoneのみ。array/chan/map/fnType/
-    // structType/literalは次回以降のPRで追加する
+    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・noneのみ。
+    // array/chan/map/fnTypeは次回以降のPRで追加する
     fn parse_type_atom(&mut self) -> Result<TypeNode, Box<CompileError>> {
         if self.check(TokenType::NoneKw) {
             let t = self.next();
             return Ok(TypeNode::Name { name: "none".into(), pkg: None, pos: t.pos });
+        }
+        // 文字列リテラル型: "active"(判別可能unionのタグに必須)
+        if self.check(TokenType::Str) {
+            let t = self.next();
+            if t.parts.is_some() {
+                return Err(self.error_at(t.pos, "interpolation cannot be used in a type", "interpolation-in-type"));
+            }
+            return Ok(TypeNode::Literal { value: t.value, pos: t.pos });
         }
         let name_tok = self.expect(TokenType::Ident, "as type name")?;
         // math.User — パッケージ修飾された型名
@@ -448,7 +590,9 @@ impl Parser {
 
     fn parse_if(&mut self) -> Result<IfStmt, Box<CompileError>> {
         let start = self.expect(TokenType::If, "at start of if statement")?;
-        let cond = self.parse_expr()?; // Goと同じく条件に丸括弧は不要
+        // Goと同じく条件に丸括弧は不要。`if User{...} {`のような曖昧さを避けるため、
+        // 条件式の中ではstruct literalを禁止する(ブロック開始の`{`と区別できないため)
+        let cond = self.with_no_struct_lit(|p| p.parse_expr())?;
         let then = self.parse_block()?;
         let else_ = if self.eat(TokenType::Else) {
             if self.check(TokenType::If) {
@@ -470,7 +614,7 @@ impl Parser {
             return Ok(Stmt::For { init: None, cond: None, post: None, body: self.parse_block()?, pos: start.pos });
         }
 
-        let first = self.parse_simple_stmt()?;
+        let first = self.with_no_struct_lit(|p| p.parse_simple_stmt())?;
 
         if self.check(TokenType::LBrace) {
             let Stmt::ExprStmt { expr, .. } = first else {
@@ -480,9 +624,13 @@ impl Parser {
         }
 
         self.expect(TokenType::Semi, "after for init statement")?;
-        let cond = if self.check(TokenType::Semi) { None } else { Some(self.parse_expr()?) };
+        let cond = if self.check(TokenType::Semi) { None } else { Some(self.with_no_struct_lit(|p| p.parse_expr())?) };
         self.expect(TokenType::Semi, "after for condition")?;
-        let post = if self.check(TokenType::LBrace) { None } else { Some(Box::new(self.parse_simple_stmt()?)) };
+        let post = if self.check(TokenType::LBrace) {
+            None
+        } else {
+            Some(Box::new(self.with_no_struct_lit(|p| p.parse_simple_stmt())?))
+        };
         Ok(Stmt::For { init: Some(Box::new(first)), cond, post, body: self.parse_block()?, pos: start.pos })
     }
 
@@ -492,14 +640,14 @@ impl Parser {
         self.parse_binary(1)
     }
 
-    // 二項演算子の優先順位(大きいほど強く結合する)。今回のスコープでは`or`/`is`を
-    // 対象外にしている(束縛形・型ターゲットという特別扱いが要るため、次回以降で追加)
+    // 二項演算子の優先順位(大きいほど強く結合する)。今回のスコープでは`or`を対象外に
+    // している(束縛形という特別扱いが要るため、`?`/`or`とセットで次回以降で追加)
     fn precedence(kind: TokenType) -> Option<u8> {
         use TokenType::*;
         Some(match kind {
             OrOr => 2,
             AndAnd => 3,
-            EqEq | NotEq => 4,
+            EqEq | NotEq | Is => 4, // x is none
             Lt | Le | Gt | Ge => 5,
             Plus | Minus => 6,
             Star | Slash | Percent => 7,
@@ -516,6 +664,12 @@ impl Parser {
                 return Ok(left);
             }
             let op_tok = self.next();
+            // x is none — 右辺は式ではなく型(matchのパターンと同じ: 型名 or 部分構造{...})
+            if op == TokenType::Is {
+                let target = if self.check(TokenType::LBrace) { self.parse_inline_struct_type()? } else { self.parse_single_type()? };
+                left = Expr::Is { operand: Box::new(left), target, pos: op_tok.pos };
+                continue;
+            }
             let right = self.parse_binary(prec + 1)?; // 左結合
             left = Expr::Binary { op: op_tok.kind, left: Box::new(left), right: Box::new(right), pos: op_tok.pos };
         }
@@ -532,9 +686,37 @@ impl Parser {
         self.parse_postfix(primary)
     }
 
-    // 呼び出しは後置で連鎖する: f(x)(y)。index/member/prop(`?`)/struct literalは次回以降
+    // structリテラルの中身`{ field: value, ... }`を読む(名前の直後の`{`から)
+    fn parse_struct_lit_body(&mut self, name: String, pos: Pos) -> Result<Expr, Box<CompileError>> {
+        self.next(); // {
+        self.skip_semis();
+        // フィールド値の中では再びstruct literalを許可する(ネストしたliteral用)
+        let fields = self.with_struct_lit_flag(true, |p| {
+            let mut fields = Vec::new();
+            while !p.check(TokenType::RBrace) && !p.check(TokenType::Eof) {
+                let fname = p.expect(TokenType::Ident, "as field name")?;
+                p.expect(TokenType::Colon, "after field name")?;
+                let value = p.parse_expr()?;
+                fields.push(StructLitField { name: fname.value, value, pos: fname.pos });
+                p.eat(TokenType::Comma);
+                p.skip_semis();
+            }
+            Ok(fields)
+        })?;
+        self.expect(TokenType::RBrace, "at end of struct literal")?;
+        Ok(Expr::StructLit { name, fields, pos })
+    }
+
+    // 呼び出し・メンバアクセス・structリテラルは後置で連鎖する: f(x)[0].name。
+    // 添字(`[`)とパッケージ修飾structリテラル(`pkg.Name{...}`。importが要る)は次回以降
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, Box<CompileError>> {
         loop {
+            // structリテラル: User{name: "alice", age: 30}(カンマまたは改行区切り)
+            if let Expr::Ident { name, pos } = &expr
+                && self.allow_struct_lit && self.check(TokenType::LBrace) {
+                    expr = self.parse_struct_lit_body(name.clone(), *pos)?;
+                    continue;
+                }
             if self.check(TokenType::Bang) {
                 // 旧記法(2026-07-19に?へ改名)。負の転移対策の誘導エラー
                 let bang_pos = self.peek().pos;
@@ -561,6 +743,10 @@ impl Parser {
                 self.expect(TokenType::RParen, "after arguments")?;
                 let call_pos = expr.pos();
                 expr = Expr::Call { callee: Box::new(expr), args, pos: call_pos };
+            } else if self.eat(TokenType::Dot) {
+                let name = self.expect(TokenType::Ident, "after '.'")?.value;
+                let member_pos = expr.pos();
+                expr = Expr::Member { target: Box::new(expr), name, pos: member_pos };
             } else {
                 return Ok(expr);
             }
@@ -594,6 +780,10 @@ impl Parser {
                 self.next();
                 Ok(Expr::Bool { value: t.kind == TokenType::True, pos: t.pos })
             }
+            TokenType::NoneKw => {
+                self.next();
+                Ok(Expr::None { pos: t.pos })
+            }
             TokenType::Ident => {
                 self.next();
                 Ok(Expr::Ident { name: t.value, pos: t.pos })
@@ -604,11 +794,46 @@ impl Parser {
                 self.expect(TokenType::RParen, "after expression")?;
                 Ok(expr)
             }
+            TokenType::Match => {
+                // match式: match r { error => "failed"  int => "ok"  _ => "?" }
+                self.next();
+                let subject = self.with_no_struct_lit(|p| p.parse_expr())?;
+                self.expect(TokenType::LBrace, "after match subject")?;
+                self.skip_semis();
+                let mut arms = Vec::new();
+                while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+                    let arm_pos = self.peek().pos;
+                    let mut patterns = vec![self.parse_match_pattern()?];
+                    while self.eat(TokenType::Comma) {
+                        patterns.push(self.parse_match_pattern()?);
+                    }
+                    self.expect(TokenType::FatArrow, "after match pattern")?;
+                    let body = self.parse_expr()?;
+                    arms.push(MatchArm { patterns, body, pos: arm_pos });
+                    self.skip_semis();
+                }
+                self.expect(TokenType::RBrace, "at end of match")?;
+                Ok(Expr::Match { subject: Box::new(subject), arms, pos: t.pos })
+            }
             _ => {
                 let text = if t.value.is_empty() { t.kind.to_string() } else { t.value.clone() };
                 Err(self.error_at(t.pos, format!("unexpected '{text}'"), "syntax-error"))
             }
         }
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern, Box<CompileError>> {
+        let t = self.peek().clone();
+        if t.kind == TokenType::Ident && t.value == "_" {
+            self.next();
+            return Ok(MatchPattern::Wildcard { pos: t.pos });
+        }
+        // 判別可能union用の部分構造パターン: { kind: "ok" }。書いたフィールドが一致する
+        // unionメンバーへ絞り込む
+        if t.kind == TokenType::LBrace {
+            return Ok(MatchPattern::Type(self.parse_inline_struct_type()?));
+        }
+        Ok(MatchPattern::Type(self.parse_single_type()?))
     }
 }
 
@@ -770,5 +995,110 @@ mod tests {
         // parse_ignoring_errorsはlexエラーだけCompileErrorをそのまま返す(recoveryはしない)ことの確認
         let err: CompileError = parse_ignoring_errors("fn main() { x := \"unterminated\n}").unwrap_err();
         assert_eq!(err.code, "unterminated-string");
+    }
+
+    // ---- struct/type宣言・構造体リテラル・member access・is/match(今回追加分) ----
+
+    #[test]
+    fn struct宣言とリテラルとmember_access() {
+        let program = parse("struct User {\n\tname: string\n\tage: int\n}\nfn main() {\n\tu := User{name: \"alice\", age: 30}\n\tprint(u.name)\n}").unwrap();
+        assert_eq!(program.types.len(), 1);
+        let TypeNode::StructType { fields, .. } = &program.types[0].node else { panic!("expected structType") };
+        assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["name", "age"]);
+
+        let stmts = program.fns[0].body.stmts.clone();
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::StructLit { name, fields, .. } = &values[0] else { panic!("expected structLit") };
+        assert_eq!(name, "User");
+        assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["name", "age"]);
+
+        let Stmt::ExprStmt { expr: Expr::Call { args, .. }, .. } = &stmts[1] else { panic!("expected call") };
+        assert!(matches!(&args[0], Expr::Member { name, .. } if name == "name"));
+    }
+
+    #[test]
+    fn union宣言_行頭パイプの複数行フォーマットで書ける() {
+        // ベンチ第1ラウンドでMeshが唯一落ちた負転移パターン(bench/tasks/04参照)。TS版のテストを移植
+        let program = parse(
+            "type Expr = { kind: \"num\", value: int }\n| { kind: \"add\", left: Expr, right: Expr }\n| { kind: \"neg\", operand: Expr }\nfn main() {}",
+        )
+        .unwrap();
+        let TypeNode::Union { members, .. } = &program.types[0].node else { panic!("expected union") };
+        assert_eq!(members.len(), 3);
+
+        // 行末パイプスタイル(元々可)も引き続き動く
+        let program = parse("type Status = \"active\" |\n\"banned\"\nfn main() {}").unwrap();
+        let TypeNode::Union { members, .. } = &program.types[0].node else { panic!("expected union") };
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn 判別可能union_type宣言のunion内に無名構造体型式を書ける() {
+        let program = parse(
+            "type GetUserResponse = { kind: \"ok\", user: User } | { kind: \"notFound\" }\nfn main() {}",
+        )
+        .unwrap();
+        let decl = program.types.iter().find(|t| t.name == "GetUserResponse").unwrap();
+        let TypeNode::Union { members, .. } = &decl.node else { panic!("expected union") };
+        assert_eq!(members.len(), 2);
+        let TypeNode::StructType { fields, .. } = &members[0] else { panic!("expected structType") };
+        assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["kind", "user"]);
+    }
+
+    #[test]
+    fn 判別可能union_単独の裸構造体型式はbare_struct_shapeでエラー() {
+        let errors = parse("type Resp = { kind: \"ok\" }\nfn main() {}").unwrap_err();
+        assert_eq!(errors[0].code, "bare-struct-shape");
+        assert!(errors[0].message.contains("use 'struct Resp { ... }'"));
+    }
+
+    #[test]
+    fn 判別可能union_matchパターンに部分構造を書ける() {
+        let stmts = parse_body("x := match res {\n{ kind: \"ok\" } => 1\n_ => 0\n}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Match { arms, .. } = &values[0] else { panic!("expected match") };
+        assert!(matches!(&arms[0].patterns[0], MatchPattern::Type(TypeNode::StructType { .. })));
+    }
+
+    #[test]
+    fn match式_アーム_複数パターン_ワイルドカード() {
+        let stmts = parse_body("x := match r {\n\tnone, error => \"fail\"\n\tint => \"ok\"\n\t_ => \"other\"\n}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Match { arms, .. } = &values[0] else { panic!("expected match") };
+        assert_eq!(arms.len(), 3);
+        assert_eq!(arms[0].patterns.len(), 2);
+        assert!(matches!(arms[2].patterns[0], MatchPattern::Wildcard { .. }));
+    }
+
+    #[test]
+    fn isは型を右辺に取る() {
+        let stmts = parse_body("ok := x is none");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        assert!(matches!(values[0], Expr::Is { .. }));
+    }
+
+    #[test]
+    fn モジュール_修飾型名math_userをパースできる() {
+        // pkg修飾structリテラル(math.Point{...})はimportが要るので次回以降。型名側は今回のスコープ
+        let program = parse("fn f(u: math.User) {}").unwrap();
+        let TypeNode::Name { name, pkg, .. } = &program.fns[0].params[0].type_node else { panic!("expected name") };
+        assert_eq!(name, "User");
+        assert_eq!(pkg.as_deref(), Some("math"));
+    }
+
+    #[test]
+    fn 実例相当_struct_is_match_を組み合わせた一連の流れ() {
+        // examples/discriminated_union.meshの簡略版(文字列補間だけ避けた — 次回以降の対象なので)
+        let program = parse(
+            "struct User {\n\tname: string\n}\n\
+             type GetUserResponse = { kind: \"ok\", user: User } | { kind: \"notFound\" }\n\
+             fn findUser(id: string) User | none {\n\tif id == \"1\" {\n\t\treturn User{name: \"alice\"}\n\t}\n\treturn none\n}\n\
+             fn getUser(id: string) GetUserResponse {\n\tu := findUser(id)\n\tif u is none {\n\t\treturn GetUserResponse{kind: \"notFound\"}\n\t}\n\treturn GetUserResponse{kind: \"ok\", user: u}\n}\n\
+             fn describe(res: GetUserResponse) string {\n\treturn match res {\n\t\t{ kind: \"ok\" } => \"found\"\n\t\t{ kind: \"notFound\" } => \"not found\"\n\t}\n}\n\
+             fn main() {\n\tprint(describe(getUser(\"1\")))\n}",
+        )
+        .unwrap();
+        assert_eq!(program.types.len(), 2);
+        assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["findUser", "getUser", "describe", "main"]);
     }
 }
