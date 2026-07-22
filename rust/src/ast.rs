@@ -5,8 +5,7 @@
 // if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・複合代入・
 // インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
 // struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
-// 文字列補間、**並行処理(spawn/detach/wait/chan/select/send/recv。ジェネリクス実装後の
-// 次マイルストーン)**。
+// 文字列補間・**並行処理(spawn/detach/wait/chan/select/send/recv)**。
 // **対象外(次回以降のPRで追加)**: ジェネリクス、`or`束縛形・`?`伝播、
 // 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、import/export、defer、
 // 添字アクセス、範囲for、型注釈つき変数宣言、error/jsonマーカー
