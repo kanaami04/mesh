@@ -12,8 +12,8 @@
 // 戻り値の型にResultを持たない(=失敗しない関数、という型で表現している)
 
 use crate::ast::{
-    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchArm, MatchPattern, Param, Program,
-    SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
+    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, ImportDecl, InterpSegment, MatchArm, MatchPattern, Param,
+    Program, SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
 };
 use crate::lexer::lex;
 use crate::token::{CompileError, Fix, Pos, Range, Token, TokenType};
@@ -240,10 +240,20 @@ impl Parser {
     // ---- 宣言 ----
 
     fn parse_program(&mut self) -> Program {
+        let mut imports = Vec::new();
         let mut fns = Vec::new();
         let mut consts = Vec::new();
         let mut types = Vec::new();
         self.skip_semis();
+        // importはファイル先頭にまとめる(宣言が始まったら以後のimportはエラー)
+        while self.check(TokenType::Import) {
+            let start_pos = self.pos;
+            match self.parse_import_decl() {
+                Ok(i) => imports.push(i),
+                Err(e) => self.record_and_recover(*e, start_pos, Self::sync_to_top_level),
+            }
+            self.skip_semis();
+        }
         while !self.check(TokenType::Eof) {
             let start_pos = self.pos;
             match self.parse_top_level_item() {
@@ -254,10 +264,31 @@ impl Parser {
             }
             self.skip_semis();
         }
-        Program { fns, consts, types }
+        Program { imports, fns, consts, types }
+    }
+
+    // import "math" — v1制限: パスは単一セグメントのみ(examples/mathutil相当のパッケージ名を
+    // そのまま指す)。パスの最終セグメントが修飾名(alias)になる
+    fn parse_import_decl(&mut self) -> Result<ImportDecl, Box<CompileError>> {
+        let start = self.expect(TokenType::Import, "at start of import")?;
+        let path_tok = self.expect(TokenType::Str, "as import path (like: import \"math\")")?;
+        if path_tok.parts.is_some() {
+            return Err(self.error_at(path_tok.pos, "import path cannot use string interpolation", "invalid-import-path"));
+        }
+        let path = path_tok.value;
+        // TS版と同じく`path.split("/").pop()`相当(pathが空でもsplitは必ず1要素返すため
+        // 実質到達しないフォールバックだが、TS版の`?? path`に忠実に合わせてある)
+        let alias = path.split('/').next_back().unwrap_or(path.as_str()).to_string();
+        if alias.is_empty() {
+            return Err(self.error_at(path_tok.pos, "import path cannot be empty", "invalid-import-path"));
+        }
+        Ok(ImportDecl { path, alias, pos: start.pos })
     }
 
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, Box<CompileError>> {
+        if self.check(TokenType::Import) {
+            return Err(self.error_here("imports must come before all declarations", "import-order"));
+        }
         let exported = self.eat(TokenType::Export);
         // F-9c: トップレベル定数は常に不変(共有可変状態を作らないため)。'mut'はここでは使えない
         if self.check(TokenType::Mut) {
@@ -550,6 +581,16 @@ impl Parser {
         let start = self.peek().clone();
         let mutable = self.eat(TokenType::Mut);
 
+        // 型注釈つき宣言: x: T = v  /  mut best: string | none = none
+        if self.check(TokenType::Ident) && self.peek_at(1).kind == TokenType::Colon {
+            let name_tok = self.next();
+            self.next(); // :
+            let type_node = self.parse_type()?;
+            self.expect(TokenType::Eq, "in typed declaration ('name: T = value')")?;
+            let value = self.parse_expr()?;
+            return Ok(Stmt::TypedVarDecl { name: name_tok.value, type_node, value, mutable, pos: start.pos });
+        }
+
         let first = self.parse_expr()?;
 
         // x := ... / x, y := ... / x = ... / x, y = f()
@@ -771,8 +812,9 @@ impl Parser {
         self.parse_postfix(primary)
     }
 
-    // structリテラルの中身`{ field: value, ... }`を読む(名前の直後の`{`から)
-    fn parse_struct_lit_body(&mut self, name: String, pos: Pos) -> Result<Expr, Box<CompileError>> {
+    // structリテラルの中身`{ field: value, ... }`を読む(名前の直後の`{`から)。
+    // pkgはパッケージ修飾(math.Point{...})のときだけSome
+    fn parse_struct_lit_body(&mut self, pkg: Option<String>, name: String, pos: Pos) -> Result<Expr, Box<CompileError>> {
         self.next(); // {
         self.skip_semis();
         // フィールド値の中では再びstruct literalを許可する(ネストしたliteral用)
@@ -789,17 +831,25 @@ impl Parser {
             Ok(fields)
         })?;
         self.expect(TokenType::RBrace, "at end of struct literal")?;
-        Ok(Expr::StructLit { name, fields, pos })
+        Ok(Expr::StructLit { name, pkg, fields, pos })
     }
 
     // 呼び出し・メンバアクセス・structリテラルは後置で連鎖する: f(x)[0].name。
-    // 添字(`[`)とパッケージ修飾structリテラル(`pkg.Name{...}`。importが要る)は次回以降
+    // 添字(`[`)は次回以降
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, Box<CompileError>> {
         loop {
+            // 修飾structリテラル: math.Point{x: 1, y: 2}(importしたパッケージのexported struct)
+            if let Expr::Member { target, name, .. } = &expr
+                && let Expr::Ident { name: pkg, .. } = &**target
+                && self.allow_struct_lit && self.check(TokenType::LBrace) {
+                    let member_pos = expr.pos();
+                    expr = self.parse_struct_lit_body(Some(pkg.clone()), name.clone(), member_pos)?;
+                    continue;
+                }
             // structリテラル: User{name: "alice", age: 30}(カンマまたは改行区切り)
             if let Expr::Ident { name, pos } = &expr
                 && self.allow_struct_lit && self.check(TokenType::LBrace) {
-                    expr = self.parse_struct_lit_body(name.clone(), *pos)?;
+                    expr = self.parse_struct_lit_body(None, name.clone(), *pos)?;
                     continue;
                 }
             if self.check(TokenType::Bang) {
@@ -1522,5 +1572,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["divide", "main"]);
+    }
+
+    // ---- モジュール(import/export)・型注釈つき変数宣言 ----
+
+    #[test]
+    fn モジュール_import宣言とexport修飾をパースできる() {
+        let program = parse(
+            "import \"mathutil\"\n\n\
+             export fn add(a: int, b: int) int { return a + b }\n\
+             fn helper() int { return 1 }\n\
+             export struct Point { x: int }\n\
+             export type Status = \"on\" | \"off\"\n\
+             fn main() {}",
+        )
+        .unwrap();
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].path, "mathutil");
+        assert_eq!(program.imports[0].alias, "mathutil");
+        assert!(program.fns.iter().find(|f| f.name == "add").unwrap().exported);
+        assert!(!program.fns.iter().find(|f| f.name == "helper").unwrap().exported);
+        assert!(program.types.iter().find(|t| t.name == "Point").unwrap().exported);
+        assert!(program.types.iter().find(|t| t.name == "Status").unwrap().exported);
+    }
+
+    #[test]
+    fn モジュール_importは宣言より前に置く必要がある() {
+        let err = parse("fn main() {}\nimport \"x\"").unwrap_err();
+        assert_eq!(err[0].code, "import-order");
+    }
+
+    #[test]
+    fn モジュール_importパスは補間も空文字列も使えない() {
+        let err = parse("import \"foo${1}\"\nfn main() {}").unwrap_err();
+        assert_eq!(err[0].code, "invalid-import-path");
+
+        let err2 = parse("import \"\"\nfn main() {}").unwrap_err();
+        assert_eq!(err2[0].code, "invalid-import-path");
+    }
+
+    #[test]
+    fn モジュール_修飾型名math_userと修飾structリテラルmath_pointをパースできる() {
+        let program = parse("fn f(u: math.User) {}").unwrap();
+        let TypeNode::Name { name, pkg, .. } = &program.fns[0].params[0].type_node else { panic!("expected name type") };
+        assert_eq!(name, "User");
+        assert_eq!(pkg.as_deref(), Some("math"));
+
+        let stmts = parse_body("p := math.Point{x: 1, y: 2}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::StructLit { name, pkg, .. } = &values[0] else { panic!("expected structLit, got {:?}", values[0]) };
+        assert_eq!(name, "Point");
+        assert_eq!(pkg.as_deref(), Some("math"));
+    }
+
+    #[test]
+    fn 型注釈つき変数宣言をパースできる() {
+        let stmts = parse_body("q: mathutil.Point = mathutil.origin()");
+        let Stmt::TypedVarDecl { name, type_node, mutable, .. } = &stmts[0] else { panic!("expected typedVarDecl, got {:?}", stmts[0]) };
+        assert_eq!(name, "q");
+        assert!(!mutable);
+        assert!(matches!(type_node, TypeNode::Name { pkg: Some(p), .. } if p == "mathutil"));
+
+        let stmts2 = parse_body("mut best: string | none = none");
+        let Stmt::TypedVarDecl { mutable, type_node, .. } = &stmts2[0] else { panic!("expected typedVarDecl, got {:?}", stmts2[0]) };
+        assert!(*mutable);
+        assert!(matches!(type_node, TypeNode::Union { .. }));
+    }
+
+    #[test]
+    fn 実例相当_modules_demo_meshの簡略版() {
+        let program = parse(
+            "import \"mathutil\"\n\n\
+             fn main() {\n\tprint(mathutil.add(1, 2))\n\
+             \tp := mathutil.Point{x: 3, y: 4}\n\tprint(p.magnitudeSq())\n\
+             \tq: mathutil.Point = mathutil.origin()\n\tprint(q.x, q.y)\n}",
+        )
+        .unwrap();
+        assert_eq!(program.imports[0].alias, "mathutil");
+        assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
     }
 }

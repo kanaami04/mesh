@@ -234,6 +234,26 @@
         mapリテラル、`modules_demo`はimport/export)は引き続きスコープ外の構文で構文エラーに
         なることを確認。`error struct X {...}`/`json struct X {...}`宣言マーカーは対象外の
         まま(checkerが無いと`isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)
+  - [x] **parser移植(第六弾・import/export)** ✅ 2026-07-22実装(kanayamaと討議のうえ、
+        残り2候補〈import・export/ジェネリクス+レシーバ〉の中からimport/exportを採用。
+        `modules_demo.mesh`が新たに完全パースできるようになる)。`import "path"`宣言
+        (`parse_program`。ファイル先頭にまとめる必要があり、以後に書くと`import-order`
+        エラー)を追加。`export`修飾自体はfn/struct/type/トップレベル定数の`exported`
+        フィールドとして以前のマイルストーンから既に実装済みだったと判明(`parse_top_level_item`
+        が`self.eat(TokenType::Export)`を最初から持っていた)。パッケージ修飾型名
+        (`math.User`)・パッケージ修飾呼び出し(`math.add(1, 2)`)はメンバーアクセス/呼び出しの
+        通常構文で既に表現できていたため無変更。実例(`modules_demo.mesh`)を最後まで組んでみて
+        判明した2つの見落としも合わせて実装:
+        (1) **パッケージ修飾structリテラル**(`math.Point{x: 1, y: 2}`。`parse_postfix`に
+        `Expr::Member`+`{`の組み合わせを追加、`StructLit`に`pkg: Option<String>`フィールドを追加)、
+        (2) **型注釈つき変数宣言**(`x: T = v` / `mut best: string | none = none`。
+        `parse_simple_stmt`の先頭に追加、新規`Stmt::TypedVarDecl`)——どちらもimport自体とは
+        独立した小さな機能だが、前回milestone 3の教訓(「実際に典型的なコード片を組んでみるまで
+        スコープの見落としに気づけない」)通り、実例を最後まで通そうとして発覚したため
+        同じPRでまとめて追加した。`tests/parser.test.ts`相当のテスト4件+自作テスト2件
+        (型注釈つき変数宣言・実例テスト)を新規作成(67→73件、全件パス)。`cargo clippy`クリーン。
+        `examples/*.mesh`は10/11本が完全パース成功(前弾の9本から+1、`modules_demo.mesh`が
+        想定通り通った)。残る1本(`maps.mesh`)はmapリテラルが未実装のため引き続き構文エラーになる
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
