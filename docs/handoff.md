@@ -161,8 +161,24 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   80点未満(75・75・25)と判定され、「診断は出さない」という本リゾルバの既定方針と
   整合的と判断してブロックせず記録のみに留めた(kanayama確認済み)。error/json以降で
   診断機構を入れる際にまとめて対応する候補
-- **次にやるなら**: milestone 3(error/json構造化エラーの`?`/`or`。次いで配列/map →
-  並行処理 → モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
+- **checker+codegen milestone 3(`?`/`or`/`error struct`)完了(2026-07-22)**。
+  途中でmilestone 2の実バグ(`resolve_struct_decls`が`error struct`宣言を丸ごと無視
+  していた——フィルタの`!t.is_error`条件を削るだけで修正、struct構築コード自体は
+  既に`is_error_type`を正しく渡していた)を発見・修正。`checker.rs`に`is_failure_type`/
+  `or_binding_type`(TS版の「unionでない被演算子は無条件でANY」という実際の挙動も
+  忠実に踏襲)/`has_structured_failure`(**Rust版だけの追加ガード**——ランタイムの
+  `__propCtx`が構造化errorを処理できないため、TS版の診断より意図的に広く取る)を追加。
+  `gen_fn_decl`を「本体を生成してから`?`使用有無でtry/catch包みを事後に決める」形に
+  書き換えた(TS版`genFnBody`の`propStack`と同じ設計、`Expr::FnExpr`未対応のため
+  スタックではなく単一フラグで足りる)。**`examples/error_propagation.mesh`を新規作成し
+  実行確認**——生成JSを`bun`で走らせてTS版と標準出力が完全一致。現在テスト162件、
+  `cargo clippy --all-targets -- -D warnings`クリーン。**検証で踏んだ新しい罠**: TS版は
+  `or`のfallback式の型を成功側の残り型と照合する(`or-fallback-type-mismatch`)ため、
+  診断を出さないRust版なら通る組み合わせを書くとTS版側でコンパイルエラーになり
+  比較できない——example作成時は必ずTS版でも成立する組み合わせにすること。
+  詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: milestone 4(配列/map。次いで並行処理 → モジュール、の順で
+  `examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

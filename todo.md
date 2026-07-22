@@ -491,6 +491,64 @@
           間違っている」バグとは性質が異なる)。**修正はせず既知の限界として記録**
           (kanayama確認済み、2026-07-22)。将来、error/json以降のmilestoneで診断機構を
           本格的に入れる際にまとめて対応する候補
+  - [x] **checker+codegen milestone 3(`?`/`or`/`error struct`)** ✅ 2026-07-22実装
+        (kanayamaと確認済みの順序——struct/メソッド → error/json → 配列/map → 並行処理 →
+        モジュール——の3番目)。`error type X = A | B`(union形式)・`json struct`/`json type`・
+        `match`/`is`式・判別可能union・配列/map・パッケージ修飾は引き続き対象外
+        (構文はパーサ済みだがcodegenは明確な「まだ対応していません」を返す)。
+        - **milestone 2の実バグを発見・修正**: `resolve_struct_decls`のフィルタが
+          `!t.is_error && !t.is_json && ...`になっており、`error struct`宣言そのものを
+          丸ごと無視していた(milestone 2実装時の見落とし)。`!t.is_json && ...`に修正する
+          だけで、struct構築コードが既に持っていた`is_error_type: decl.is_error`が
+          正しく効くようになった(新しいタグ付けロジックは不要だった)。
+        - `checker.rs`: `is_failure_type`(TS版`isFailureType`——none/errorに加えて
+          error struct/error typeでタグ付けされたstructも「失敗」とみなす)・
+          `or_binding_type`(`or e => ...`の`e`の型。**TS版の実際の挙動を忠実に移植**——
+          unionでない被演算子は無条件でANYになるという、一見「賢くない」挙動もそのまま
+          踏襲した)・`has_structured_failure`(**Rust版だけの追加ガード**、下記参照)を追加。
+          `infer_expr`に`Expr::Prop`/`Expr::OrElse`(結果型はどちらも「被演算子の失敗
+          メンバーを除いた残り」——TS版と同じ式で、contextやright/bindingの中身は
+          結果型に影響しない)を追加。
+        - `codegen.rs`: `generate_all`のTypeDecl拒否を「json structのみ拒否」に変更
+          (`error type`のunion形式は`node`がUnionなので既存の「StructTypeのみ許可」
+          チェックに自動的に引っかかり、追加のロジック無しで対象外のまま)。
+          `gen_fn_decl`を「本体をいったん別バッファに生成し、`?`を使ったかどうかを
+          事後に見てtry/catchで包むか決める」形に書き換えた(TS版`genFnBody`の
+          `propStack`と同じ設計。Rustでは`mem::take`/`mem::replace`で代用——
+          `Expr::FnExpr`がまだ未対応で関数本体生成がネストしないため、スタックではなく
+          単一のフラグ〈`Codegen.prop_used`〉で足りる)。`Expr::Prop`(`__prop(...)`/
+          `__propCtx(..., async () => ...)`)・`Expr::OrElse`(`__or(left, async (binding) =>
+          right)`。bindingをスコープへ`or_binding_type`で宣言してからrightを生成)・
+          `Expr::StructLit`の`__errTag`ラップ(`ctx.lookup_struct`が`is_error_type:true`を
+          返すときだけ)を実装。
+        - **Rust版だけの安全ガード(`has_structured_failure`)**: TS版の`?`のcontext形式
+          diagnosticはunion内のケースしか見ないが、ランタイムの`__propCtx`は
+          `null`/`instanceof Error`しか特別扱いせず、`__ERR`タグ付きの構造化errorは
+          素通りして「成功扱い」になってしまう(`src/runtime.ts`参照)。TS版はこの
+          組み合わせ自体を型検査で弾くので実害が無いが、診断を出さないこのリゾルバでは
+          ここで拾わないと実行時に静かに壊れた挙動になるため、意図的にTS版より広い
+          (bareの構造化errorも含めて再帰的に検出する)ガードを追加し、明確な`Err`にした。
+        - テスト: `checker.rs`に6件(is_failure_type・resolve_struct_declsのerror struct
+          解決・infer_exprのProp/OrElse・or_binding_type・has_structured_failure)、
+          `codegen.rs`に既存1件を置き換え+新規11件(error structの`__errTag`・通常structは
+          包まれない・`error type`/`json struct`は引き続き未対応・bare/context付き`?`・
+          構造化errorへのcontext付き`?`は明確なエラー・`?`を使う/使わない関数のtry/catch
+          有無・ネストした`?`でも関数レベルで包まれる・`or`の3形態〈裸/`_ =>`/`e =>`〉、
+          束縛でのフィールドアクセス)を追加(150→162件、全件パス)。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: 新規`examples/error_propagation.mesh`(`error struct`+`divide`/
+          `lookup`/`find`+bareとcontext付きの`?`+`or`の3形態、既存の`examples/errors.mesh`は
+          `is`/`match`を使うため対象外のまま変更せず)をRust版で実行し、`bun run mesh run`
+          (TS版)の出力とbyte-for-byte一致を確認。**検証中に踏んだ罠**: TS版は`or`の
+          fallback式の型を成功側の残り型と照合する(`or-fallback-type-mismatch`)ため、
+          診断を出さないRust版なら通ってしまう組み合わせ(例: `int`を期待する場所に
+          `string`のfallbackを書く)を書くとTS版側でコンパイルエラーになり比較できない
+          ——example作成時は必ずTS版でも成立する組み合わせにする必要がある(milestone 2
+          までには無かった新しい落とし穴)。`hello.mesh`/`fizzbuzz.mesh`/
+          `struct_methods.mesh`も回帰無しを再確認。
+        - **milestone 3のスコープ外(意図的)**: `error type X = A | B`(union形式)・
+          `json struct`/`json type`・`match`/`is`式・判別可能union・配列/map・並行処理・
+          パッケージ修飾。次のmilestone(配列/map)以降で順に対応する
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
