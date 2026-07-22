@@ -1,15 +1,13 @@
 // AST(抽象構文木)= パースした結果の木構造。TS版(src/ast.ts、403行)の移植。
 //
-// parser.ts(1217行)のほぼ全体を移植済み(fn宣言・ジェネリクス・レシーバ・トップレベル定数・
+// **parser.ts(1217行)を全面移植済み**(fn宣言・ジェネリクス・レシーバ・関数型注釈
+// 〈`fn(int, string) bool`〉・無名関数式〈`fn(x: int) int {...}`〉・トップレベル定数・
 // if/for/break/continue・変数宣言/代入/複合代入/インクリメント・二項/単項演算子・
 // struct/type宣言〈判別可能union・error/jsonマーカー込み〉・構造体リテラル・
 // メンバーアクセス/添字・is/match式・文字列補間・並行処理・`or`/`?`・型注釈つき変数宣言・
-// import・配列/mapリテラル・範囲for・defer)。
-// **対象外(未着手と判明——2026-07-22のスコープ調査で発覚。今回のマイルストーンの対象では
-// なかったため次回以降)**: 関数型注釈(`fn(int, string) bool`)・無名関数式
-// (`fn(x: int) int { return x * 2 }`)。これらを含む式・文に出会うと(対応するトークンを
-// 認識しないので)構文エラーとして検出される — クラッシュはしない、
-// 「まだ対応していません」という誠実な失敗の仕方になる。
+// import・配列/mapリテラル・範囲for・defer)。対象外の構文は今のところ無い
+// (未対応のトークンに出会うと構文エラーとして検出される — クラッシュはしない、
+// 「まだ対応していません」という誠実な失敗の仕方になる、という設計は変わらず維持している)
 //
 // 演算子(二項・単項・複合代入・インクリメント)は専用のenumを作らず`TokenType`を
 // そのまま使っている。Plus/Minus/EqEq等は既にlexer側で列挙済みなので、
@@ -18,8 +16,7 @@
 use crate::token::Pos;
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
-// TS版の8種のうち、今回はname/union/structType/literal/chan/array/mapTypeの7つ
-// (fnTypeのみ次回以降)。inline structType(判別可能unionのメンバー)もこの一種として表す。
+// TS版の8種すべてを移植済み。inline structType(判別可能unionのメンバー)もこの一種として表す。
 // literalは判別可能unionのタグ(`{ kind: "ok" }`の"ok"部分)に必須なため、
 // struct/union対応と同時に追加した(当初の見積もりで見落としていた)
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +28,9 @@ pub enum TypeNode {
     Chan { elem: Box<TypeNode>, pos: Pos },               // chan<int>
     Array { elem: Box<TypeNode>, pos: Pos },              // int[]
     MapType { key: Box<TypeNode>, value: Box<TypeNode>, pos: Pos }, // map<string, int>
+    // fn(int, string) bool — 関数型。宣言と同じ読み(戻り値のunionは戻り値側に束縛)。
+    // retがNoneなら戻り値なし(void)。パラメータ名は書かない(型のみ)
+    FnType { params: Vec<TypeNode>, ret: Option<Box<TypeNode>>, pos: Pos },
 }
 
 impl TypeNode {
@@ -42,7 +42,8 @@ impl TypeNode {
             | TypeNode::StructType { pos, .. }
             | TypeNode::Chan { pos, .. }
             | TypeNode::Array { pos, .. }
-            | TypeNode::MapType { pos, .. } => *pos,
+            | TypeNode::MapType { pos, .. }
+            | TypeNode::FnType { pos, .. } => *pos,
         }
     }
 }
@@ -216,6 +217,8 @@ pub enum Expr {
     ArrayLit { elems: Vec<Expr>, elem_type: Option<TypeNode>, pos: Pos },
     Index { target: Box<Expr>, index: Box<Expr>, pos: Pos }, // a[i]
     MapLit { key: TypeNode, value: TypeNode, entries: Vec<MapLitEntry>, pos: Pos }, // map<string, int>{"a": 1}
+    // 無名関数: fn(x: int) int { return x * 2 }
+    FnExpr { params: Vec<Param>, ret: Option<TypeNode>, body: Block, pos: Pos },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -267,7 +270,8 @@ impl Expr {
             | Expr::OrElse { pos, .. }
             | Expr::ArrayLit { pos, .. }
             | Expr::Index { pos, .. }
-            | Expr::MapLit { pos, .. } => *pos,
+            | Expr::MapLit { pos, .. }
+            | Expr::FnExpr { pos, .. } => *pos,
         }
     }
 }
