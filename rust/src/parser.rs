@@ -698,11 +698,11 @@ impl Parser {
         Ok(expr)
     }
 
-    // 二項演算子の優先順位(大きいほど強く結合する)。今回のスコープでは`or`を対象外に
-    // している(束縛形という特別扱いが要るため、`?`/`or`とセットで次回以降で追加)
+    // 二項演算子の優先順位(大きいほど強く結合する)
     fn precedence(kind: TokenType) -> Option<u8> {
         use TokenType::*;
         Some(match kind {
+            Or => 1, // f() or fallback は最も弱く結合する
             OrOr => 2,
             AndAnd => 3,
             EqEq | NotEq | Is => 4, // x is none
@@ -726,6 +726,17 @@ impl Parser {
             if op == TokenType::Is {
                 let target = if self.check(TokenType::LBrace) { self.parse_inline_struct_type()? } else { self.parse_single_type()? };
                 left = Expr::Is { operand: Box::new(left), target, pos: op_tok.pos };
+                continue;
+            }
+            // f() or fallback(noneのみ) / f() or e => fallback(失敗値を束縛。errorを含むなら必須)
+            if op == TokenType::Or {
+                let mut binding = None;
+                if self.check(TokenType::Ident) && self.peek_at(1).kind == TokenType::FatArrow {
+                    binding = Some(self.next().value);
+                    self.next(); // =>
+                }
+                let right = self.parse_binary(prec + 1)?;
+                left = Expr::OrElse { left: Box::new(left), right: Box::new(right), binding, pos: op_tok.pos };
                 continue;
             }
             let right = self.parse_binary(prec + 1)?; // 左結合
@@ -804,6 +815,14 @@ impl Parser {
                         replacement: "?".into(),
                     }),
                 }));
+            }
+            if self.eat(TokenType::Question) {
+                // f()? — 伝播。直後が文字列リテラルなら文脈つき: f() ? "line ${i}: bad"
+                // (文脈は文字列リテラル/補間のみ。任意の式を許すと`f()? - 1`等が曖昧になる)
+                let context = if self.check(TokenType::Str) { Some(Box::new(self.parse_primary()?)) } else { None };
+                let prop_pos = expr.pos();
+                expr = Expr::Prop { operand: Box::new(expr), context, pos: prop_pos };
+                continue;
             }
             if self.check(TokenType::LParen) {
                 self.next();
@@ -1448,5 +1467,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["worker", "main"]);
+    }
+
+    // ---- error/json構造化エラー(`?`伝播・`or`束縛形) ----
+
+    #[test]
+    fn 後置のとorをパースできる_文脈つき_束縛形も() {
+        let stmts = parse_body("x := f()? or _ => 0");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::OrElse { left, binding, .. } = &values[0] else { panic!("expected orElse expr, got {:?}", values[0]) };
+        assert_eq!(binding.as_deref(), Some("_"));
+        assert!(matches!(&**left, Expr::Prop { .. }));
+
+        // 文脈つき伝播: f() ? "ctx"
+        let stmts2 = parse_body("x := f() ? \"line ${i}: bad\"");
+        let Stmt::ShortVarDecl { values, .. } = &stmts2[0] else { panic!("expected shortVarDecl") };
+        let Expr::Prop { context, .. } = &values[0] else { panic!("expected prop expr, got {:?}", values[0]) };
+        assert!(context.is_some());
+
+        // 束縛形: or e => 式
+        let stmts3 = parse_body("x := f() or e => g(e)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts3[0] else { panic!("expected shortVarDecl") };
+        let Expr::OrElse { binding, .. } = &values[0] else { panic!("expected orElse expr, got {:?}", values[0]) };
+        assert_eq!(binding.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn orは束縛無しでも書ける() {
+        let stmts = parse_body("x := f() or 0");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::OrElse { binding, .. } = &values[0] else { panic!("expected orElse expr, got {:?}", values[0]) };
+        assert!(binding.is_none());
+    }
+
+    #[test]
+    fn orは最も弱く結合する() {
+        // f() or 0 + 1 は f() or (0 + 1) ではなく (f() or 0) + 1 ...ではなく、
+        // TS版と同じくorが最弱結合なので right側は `parseBinary(prec + 1)` で
+        // 0 + 1 全体を1つの右辺として読む(orは他の全演算子より弱いため左辺には来ない)
+        let stmts = parse_body("x := 1 + 2 or 0");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::OrElse { left, .. } = &values[0] else { panic!("expected orElse expr, got {:?}", values[0]) };
+        assert!(matches!(&**left, Expr::Binary { .. }));
+    }
+
+    #[test]
+    fn 実例相当_errors_meshの簡略版() {
+        let program = parse(
+            "fn divide(a: int, b: int) int | error {\n\tif b == 0 {\n\t\treturn error(\"division by zero\")\n\t}\n\treturn a / b\n}\n\
+             fn main() {\n\tresult := divide(10, 3)\n\tif result is error {\n\t\tprint(\"error:\", result)\n\t\treturn\n\t}\n\
+             \tfallback := divide(1, 0) or _ => 0\n\tprint(\"fallback: ${fallback}\")\n\
+             \tlogged := divide(1, 0) or e => len(\"${e}\")\n\tprint(\"logged: ${logged}\")\n\
+             \tr := divide(9, 3)\n\tprint(match r {\n\t\terror => \"failed: ${r}\"\n\t\tint => \"match says: ${r}\"\n\t})\n}",
+        )
+        .unwrap();
+        assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["divide", "main"]);
     }
 }
