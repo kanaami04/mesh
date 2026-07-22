@@ -407,6 +407,72 @@
           パースできるが、codegenはこれらに出会うと明確なエラーを返す。次のmilestone以降で
           順に対応していく想定(struct/メソッド → error/json → 配列/map → 並行処理 →
           モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画)
+        - **追記(PR #16のcode reviewで発覚・同PR内で修正)**: (1) 組み込み関数を引数不足で
+          呼ぶ(`round()`等)とパニックしていた——`gen_builtin_call`が個数検査無しで
+          `args[0]`/`args[1]`へ直接インデックスしていたのが原因。呼び出し前に個数を検査し
+          明確な`Err`を返すよう修正。(2) `round`/`floor`/`ceil`/`toInt`の戻り値型が
+          `infer_call`で解決されずANYへ落ちていたため、その結果同士の演算
+          (`round(5.0) / round(2.0)`)が本来のint除算(`__idiv`、結果2)ではなく
+          浮動小数点除算(結果2.5)になっていた——組み込みの戻り値型を引く
+          `infer_builtin_call`を追加して解決。テスト130→133件
+  - [x] **checker+codegen milestone 2(struct宣言 + レシーバメソッド)** ✅ 2026-07-22実装
+        (kanayamaと確認済みの順序——struct/メソッド → error/json → 配列/map → 並行処理 →
+        モジュール——の最初)。TS版の該当実装(knot-tying・methodTable・フィールド/メソッド
+        判別・struct関連codegen)を2本のExploreエージェント+1本のPlanエージェントで調査し、
+        Plan Mode経由で承認を得たうえで実装。
+        - **自己参照型を避ける設計判断**: TS版はstructを「空fieldsの殻を先に作ってmapへ登録し、
+          あとから`.push()`で埋める」knot-tyingで自己参照型(`struct Node { next: Node }`)を
+          表現するが、Rustの`Type::Struct{fields: Vec<StructField>}`は所有権ベースの木なので
+          この「同じオブジェクトを後から書き換える」パターンに向かない(`Rc<RefCell<>>`が要る
+          ——`types.rs`冒頭のコメントで将来のmilestoneへ先送り済みの判断)。代わりに
+          **固定点反復**(`checker::resolve_struct_decls`)で解決する: `N = types.len()`回、
+          現時点のレジストリを使って全struct宣言のfieldsを再解決するのを繰り返す——非循環
+          (DAG)なら宣言順に関係なく必ず収束する。ただし循環(自己参照含む)は固定点反復では
+          「クラッシュしないが深さが毎パス線形に伸びる中途半端な入れ子」になり「自己参照は
+          未対応」という前提を静かに裏切ってしまうため、固定点反復の前に生のTypeNode参照
+          関係だけを見た軽量なDFSサイクル検出を挟み、循環があれば明確な`Err`を返す。
+        - `checker.rs`: `CheckerCtx`に`struct_types`(名前→解決済みstruct型)・`method_table`
+          (struct名→メソッド名→関数型、レシーバを第1引数として含む)を追加。
+          `resolve_type_node`/`resolve_return_type`は`ctx`を取るよう変更(`struct_types`を
+          引けるようにするため)。`infer_expr`に`Expr::StructLit`(名前でstruct_typesを引く)・
+          `Expr::Member`(targetがstructならfieldsから型を引く)を追加。`infer_call`に
+          メソッド呼び出しの解決を追加(TS版`calls.ts`と同じ「フィールドが勝つ」順序——
+          targetがstruct型でnameが宣言済みフィールドでなければメソッドとして解決)。
+        - `codegen.rs`: struct宣言ごとの検査(error/json付き・非structは引き続き明確な
+          `Err`)+`resolve_struct_decls`呼び出しを`generate_all`に追加。レシーバの型が
+          未宣言/非struct型(`fn (x: int) foo()`等)なら、殻へ静かにフォールバックさせず
+          明確な`Err`(でないと`__m_int_foo`のようなおかしなJS関数名を生成してしまう)。
+          `gen_expr`に`Expr::StructLit`(オブジェクトリテラル。リテラルに書かれた順)・
+          `Expr::Member`(フィールド読み。targetがstruct型かつnameが宣言済みフィールドの
+          ときだけ許可——さもなくば「まだ対応していません」。パッケージ修飾参照
+          〈`math.add`〉が実行時ReferenceErrorになる素のJSを静かに生成しないためのガード)
+          を追加。`gen_call`にメソッド呼び出し分岐(`__m_Struct_method(recv, args)`。
+          structだがfieldにもmethodにも無い名前は明確な`Err`)を追加。新設
+          `gen_lvalue`ヘルパーで`Stmt::Assign`/`Stmt::IncDec`が`Expr::Member`ターゲット
+          (フィールドの読み書き`u.age = ...`/`u.age += 1`)にも対応。
+        - **`__proto__`ガード**: TS版が過去に実際に踏んだprototype汚染バグ(struct
+          リテラルの素朴なobject literal化で`__proto__`フィールドがJSのプロトタイプ
+          チェーンを汚染しうる)の再発防止として、struct literalのフィールド名と
+          代入先のフィールド名の両方で`__proto__`を明確な`Err`にした(前者はTS版の
+          checkFieldNameが担っていた保護、後者はTS版に無かった新しい代入経路——
+          milestone 2で新規追加したフィールド書き込み機能に伴う、TS版には無い攻撃面)。
+        - テスト: checker.rs 5件(前方参照structの解決・相互循環/自己参照structの検出・
+          struct_lit/フィールドアクセスの型推論・メソッド戻り値型)・codegen.rs 9件
+          (struct literal→フィールド読み書き・メソッド呼び出し・生成直後のリテラルへの
+          チェーン呼び出し・フィールドと同名メソッドはフィールドが勝つ・`__proto__`拒否
+          2件・未宣言レシーバ/未知メソッドの明確なエラー・error struct/パッケージ修飾
+          struct literalは引き続き未対応)を新規作成(133→146件、全件パス)。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: 新規`examples/struct_methods.mesh`(README記載の`Todo`例——
+          生成直後のリテラルへの直接メソッドチェーン込み——+ `User`構造体でのフィールド
+          直接変更・複合代入・文字列補間)をRust版で実行し、`bun run mesh run`(TS版)の
+          出力とbyte-for-byte一致することを確認。既存の`hello.mesh`/`fizzbuzz.mesh`も
+          回帰無しを再確認。`examples/mathutil/point.mesh`(レシーバメソッド)も単体で
+          クラッシュなくコンパイルできることを確認(import自体は引き続き対象外)。
+        - **milestone 2のスコープ外(意図的)**: error/jsonマーカー付きstruct・判別可能union/
+          `type X = A | B`・`match`/`is`式・パッケージ修飾structリテラル/メソッド
+          (`math.Point{...}`)・配列/map・並行処理・`?`/`or`。次のmilestone(error/json)
+          以降で順に対応する
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

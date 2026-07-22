@@ -128,13 +128,32 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   TSファイル(`export const PRELUDE = \`...\`;`というテンプレートリテラルでランタイムJSを
   包んでいる)なので、`include_str!`でファイル全体を素朴に埋め込むとTSの宣言構文まで
   生成JSに混入する実バグを発見・修正(バッククォート2箇所の間だけを切り出す方式)。
-  現在テスト130件(92 + types 11 + checker 11 + codegen 16)、
-  `cargo clippy --all-targets -- -D warnings` クリーン。
+  現在テスト133件(PR #16のcode reviewで見つかった実バグ2件——組み込み関数の引数不足パニック・
+  `round`/`floor`/`ceil`/`toInt`の戻り値型未解決による誤った浮動小数点演算——を同PR内で
+  修正した際に+3件)、`cargo clippy --all-targets -- -D warnings` クリーン。
   **スコープ外(milestone 2以降)**: struct/メソッド・配列/map・並行処理・`?`/`or`・
   import/export・ジェネリクス——パーサは既にパースできるが、codegenは明確な
   「まだ対応していません」エラーを返す
-- **次にやるなら**: milestone 2(struct/メソッド → error/json → 配列/map → 並行処理 →
-  モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
+- **checker+codegen milestone 2(struct宣言+レシーバメソッド)完了(2026-07-22)**。
+  TS版のknot-tying(structを「空fieldsの殻を先に作りあとから埋める」ことで自己参照型を
+  表現する手法)はRustの所有権ベースの木に向かないため、**固定点反復**(`N=types.len()`回、
+  現時点のレジストリを使って全struct宣言を再解決)で置き換えた——非循環なら宣言順に
+  関係なく収束する。ただし循環(自己参照含む)は固定点反復では「クラッシュしないが
+  中途半端な入れ子になる」だけなので、生のTypeNode参照関係を見た軽量なDFSサイクル検出を
+  別途挟み、循環があれば明確な`Err`にしている(`types.rs`が謳う「自己参照は未対応」という
+  前提を実装のズレで裏切らないため)。`checker.rs`に`struct_types`/`method_table`(フィールド
+  vs メソッドの判別は「フィールドが勝つ」——TS版`calls.ts`と同じ順序)を追加、`codegen.rs`に
+  struct literal・フィールド読み書き(新設`gen_lvalue`。`Stmt::Assign`/`IncDec`を
+  `Expr::Member`ターゲットにも対応)・メソッド呼び出し(`__m_Struct_method(recv, args)`)を
+  追加。**`__proto__`ガード**: TS版が過去に踏んだprototype汚染バグの再発防止として、
+  struct literalのフィールド名・代入先のフィールド名の両方で明確な`Err`にした(後者は
+  milestone 2で新設したフィールド書き込み機能に伴う、TS版には無かった新しい攻撃面)。
+  **`examples/struct_methods.mesh`を新規作成し実行確認**(README記載の`Todo`例の
+  生成直後リテラルへの直接メソッドチェーン込み)——生成JSを`bun`で走らせてTS版と
+  標準出力が完全一致。現在テスト146件、`cargo clippy --all-targets -- -D warnings`クリーン。
+  詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: milestone 3(error/json構造化エラーの`?`/`or`。次いで配列/map →
+  並行処理 → モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
