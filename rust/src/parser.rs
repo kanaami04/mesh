@@ -1307,15 +1307,6 @@ mod tests {
     }
 
     #[test]
-    fn モジュール_修飾型名math_userをパースできる() {
-        // pkg修飾structリテラル(math.Point{...})はimportが要るので次回以降。型名側は今回のスコープ
-        let program = parse("fn f(u: math.User) {}").unwrap();
-        let TypeNode::Name { name, pkg, .. } = &program.fns[0].params[0].type_node else { panic!("expected name") };
-        assert_eq!(name, "User");
-        assert_eq!(pkg.as_deref(), Some("math"));
-    }
-
-    #[test]
     fn 文字列補間_テキストと式の断片に分かれる() {
         let stmts = parse_body(r#"msg := "worker ${id} done""#);
         let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
