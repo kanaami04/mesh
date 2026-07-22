@@ -12,8 +12,8 @@
 // 戻り値の型にResultを持たない(=失敗しない関数、という型で表現している)
 
 use crate::ast::{
-    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchArm, MatchPattern, Param, Program, Stmt,
-    StructFieldNode, StructLitField, TypeDecl, TypeNode,
+    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchArm, MatchPattern, Param, Program,
+    SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
 };
 use crate::lexer::lex;
 use crate::token::{CompileError, Fix, Pos, Range, Token, TokenType};
@@ -458,8 +458,8 @@ impl Parser {
         self.parse_type_atom()
     }
 
-    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・noneのみ。
-    // array/chan/map/fnTypeは次回以降のPRで追加する
+    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・none・chan<T>のみ。
+    // array/map/fnTypeは次回以降のPRで追加する
     fn parse_type_atom(&mut self) -> Result<TypeNode, Box<CompileError>> {
         if self.check(TokenType::NoneKw) {
             let t = self.next();
@@ -472,6 +472,13 @@ impl Parser {
                 return Err(self.error_at(t.pos, "interpolation cannot be used in a type", "interpolation-in-type"));
             }
             return Ok(TypeNode::Literal { value: t.value, pos: t.pos });
+        }
+        if self.check(TokenType::Chan) {
+            let start = self.next();
+            self.expect(TokenType::Lt, "after 'chan'")?;
+            let elem = self.parse_type()?;
+            self.expect(TokenType::Gt, "after channel element type")?;
+            return Ok(TypeNode::Chan { elem: Box::new(elem), pos: start.pos });
         }
         let name_tok = self.expect(TokenType::Ident, "as type name")?;
         // math.User — パッケージ修飾された型名
@@ -520,6 +527,11 @@ impl Parser {
             }
             TokenType::If => self.parse_if().map(Stmt::If),
             TokenType::For => self.parse_for(),
+            TokenType::Wait => {
+                self.next();
+                let body = self.parse_block()?;
+                Ok(Stmt::Wait { body, pos: t.pos })
+            }
             TokenType::Break => {
                 self.next();
                 Ok(Stmt::Break { pos: t.pos })
@@ -612,6 +624,12 @@ impl Parser {
         if matches!(self.peek().kind, TokenType::PlusPlus | TokenType::MinusMinus) {
             let op = self.next().kind;
             return Ok(Stmt::IncDec { target: first, op, pos: start.pos });
+        }
+
+        // ch <- v
+        if self.eat(TokenType::Arrow) {
+            let value = self.parse_expr()?;
+            return Ok(Stmt::Send { channel: first, value, pos: start.pos });
         }
 
         Ok(Stmt::ExprStmt { expr: first, pos: start.pos })
@@ -721,6 +739,22 @@ impl Parser {
             self.next();
             let operand = self.parse_unary()?;
             return Ok(Expr::Unary { op: t.kind, operand: Box::new(operand), pos: t.pos });
+        }
+        // <-ch — チャネル受信
+        if t.kind == TokenType::Arrow {
+            self.next();
+            let channel = self.parse_unary()?;
+            return Ok(Expr::Recv { channel: Box::new(channel), pos: t.pos });
+        }
+        // spawn f(x) / detach f(x) — 並行起動して受取口を返す式。
+        // spawnは今の関数が所有(関数を抜けるとき暗黙wait)、detachはプログラムが所有
+        if matches!(t.kind, TokenType::Spawn | TokenType::Detach) {
+            self.next();
+            let call = self.parse_unary()?;
+            if !matches!(call, Expr::Call { .. }) {
+                return Err(self.error_at(t.pos, format!("'{}' must be followed by a function call", t.kind), "invalid-spawn-target"));
+            }
+            return Ok(Expr::Spawn { call: Box::new(call), detached: t.kind == TokenType::Detach, pos: t.pos });
         }
         let primary = self.parse_primary()?;
         self.parse_postfix(primary)
@@ -875,6 +909,57 @@ impl Parser {
                 }
                 self.expect(TokenType::RBrace, "at end of match")?;
                 Ok(Expr::Match { subject: Box::new(subject), arms, pos: t.pos })
+            }
+            TokenType::Select => {
+                // select { v := <-ch1 => ...  v := <-ch2 => ...  _ => ... }
+                // "_"は非ブロッキング用のdefaultアーム(あれば最大1つ)。matchと見た目は揃えるが、
+                // パターンが「型」ではなく「どのchannel操作が先に終わったか」なので独立構文にしてある
+                self.next();
+                self.expect(TokenType::LBrace, "after 'select'")?;
+                self.skip_semis();
+                let mut arms = Vec::new();
+                let mut default_arm = None;
+                while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+                    let arm_t = self.peek().clone();
+                    if arm_t.kind == TokenType::Ident && arm_t.value == "_" {
+                        self.next();
+                        if default_arm.is_some() {
+                            return Err(self.error_at(arm_t.pos, "select can only have one default ('_') arm", "multiple-select-defaults"));
+                        }
+                        self.expect(TokenType::FatArrow, "after '_' in select")?;
+                        default_arm = Some(Box::new(self.parse_expr()?));
+                    } else {
+                        let name_tok = self.expect(TokenType::Ident, "as select binding name")?;
+                        self.expect(TokenType::ColonEq, "in select arm ('name := <-ch => body')")?;
+                        self.expect(TokenType::Arrow, "select arms receive from a channel ('name := <-ch => body')")?;
+                        let channel = self.parse_expr()?;
+                        self.expect(TokenType::FatArrow, "after select arm channel")?;
+                        let body = self.parse_expr()?;
+                        arms.push(SelectArm { name: name_tok.value, channel, body, pos: arm_t.pos });
+                    }
+                    self.skip_semis();
+                }
+                self.expect(TokenType::RBrace, "at end of select")?;
+                Ok(Expr::Select { arms, default_arm, pos: t.pos })
+            }
+            TokenType::Chan => {
+                // チャネル生成: chan<int>(none)(無制限バッファ) / chan<int>(n)(容量n、送信がブロックしうる)。
+                // F-11: 容量は常に明示必須(省略はできない — 無制限を選ぶこと自体はnoneで引き続き可能)
+                self.next();
+                self.expect(TokenType::Lt, "after 'chan'")?;
+                let elem = self.parse_type()?;
+                self.expect(TokenType::Gt, "after channel element type")?;
+                self.expect(TokenType::LParen, "to create a channel: chan<T>(capacity) or chan<T>(none)")?;
+                if self.check(TokenType::RParen) {
+                    return Err(self.error_at(
+                        self.peek().pos,
+                        "chan<T>() no longer defaults to an unbounded buffer (F-11) — write chan<T>(none) for an unbounded channel, or chan<T>(n) for one that blocks sends once n values are buffered",
+                        "chan-capacity-required",
+                    ));
+                }
+                let capacity = self.parse_expr()?;
+                self.expect(TokenType::RParen, "to create a channel: chan<T>(capacity) or chan<T>(none)")?;
+                Ok(Expr::Chan { elem, capacity: Box::new(capacity), pos: t.pos })
             }
             _ => Err(self.error_at(t.pos, format!("unexpected {}", Self::describe_token(&t)), "syntax-error")),
         }
@@ -1264,5 +1349,104 @@ mod tests {
         .unwrap();
         assert_eq!(program.types.len(), 2);
         assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["findUser", "getUser", "describe", "main"]);
+    }
+
+    // ---- 並行処理(spawn/detach/wait/chan/select/send/recv) ----
+
+    #[test]
+    fn chan型を関数シグネチャで使える() {
+        let program = parse("fn worker(id: int, ch: chan<string>) {\n\tch <- \"done\"\n}").unwrap();
+        let param = &program.fns[0].params[1];
+        let TypeNode::Chan { elem, .. } = &param.type_node else { panic!("expected chan type, got {:?}", param.type_node) };
+        assert!(matches!(&**elem, TypeNode::Name { name, .. } if name == "string"));
+    }
+
+    #[test]
+    fn spawnはチャネル送受信_呼び出しと組み合わせられる() {
+        let stmts = parse_body("ch := chan<int>(none)\nspawn f(1, ch)\nx := <-ch\nch <- 2");
+        assert!(matches!(stmts[0], Stmt::ShortVarDecl { .. }));
+        assert!(matches!(stmts[1], Stmt::ExprStmt { .. }));
+        assert!(matches!(stmts[2], Stmt::ShortVarDecl { .. }));
+        assert!(matches!(stmts[3], Stmt::Send { .. }));
+    }
+
+    #[test]
+    fn spawnは式として受取口を返せる() {
+        let stmts = parse_body("task := spawn f(1)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        assert!(matches!(values[0], Expr::Spawn { detached: false, .. }));
+    }
+
+    #[test]
+    fn spawnの後は関数呼び出しのみ() {
+        let err = parse("fn main() { spawn 1 + 2 }").unwrap_err();
+        assert_eq!(err[0].code, "invalid-spawn-target");
+    }
+
+    #[test]
+    fn detachはspawnと同形でdetachedフラグが立つ() {
+        let stmts = parse_body("task := detach f(1)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        assert!(matches!(values[0], Expr::Spawn { detached: true, .. }));
+
+        let err = parse("fn main() { detach 1 + 2 }").unwrap_err();
+        assert_eq!(err[0].code, "invalid-spawn-target");
+    }
+
+    #[test]
+    fn waitブロックをパースできる() {
+        let stmts = parse_body("wait {\nspawn f(1)\n}");
+        assert!(matches!(stmts[0], Stmt::Wait { .. }));
+    }
+
+    #[test]
+    fn chan_t_nは容量式を持つ() {
+        let stmts = parse_body("ch := chan<int>(3)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Chan { elem, capacity, .. } = &values[0] else { panic!("expected chan expr, got {:?}", values[0]) };
+        assert!(matches!(elem, TypeNode::Name { name, .. } if name == "int"));
+        assert!(matches!(&**capacity, Expr::Int { value, .. } if value == "3"));
+    }
+
+    #[test]
+    fn f11_chan_t_noneは明示的な無制限バッファ() {
+        let stmts = parse_body("ch := chan<int>(none)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Chan { capacity, .. } = &values[0] else { panic!("expected chan expr, got {:?}", values[0]) };
+        assert!(matches!(&**capacity, Expr::None { .. }));
+    }
+
+    #[test]
+    fn f11_chan_tは容量の省略を許さない() {
+        let err = parse("fn main() { ch := chan<int>() }").unwrap_err();
+        assert_eq!(err[0].code, "chan-capacity-required");
+        assert!(err[0].message.contains("no longer defaults to an unbounded buffer"), "got: {}", err[0].message);
+    }
+
+    #[test]
+    fn select式_アームとdefaultをパースできる() {
+        let stmts = parse_body("msg := select {\nv := <-a => v\n_ => \"none\"\n}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Select { arms, default_arm, .. } = &values[0] else { panic!("expected select expr, got {:?}", values[0]) };
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].name, "v");
+        assert!(default_arm.is_some());
+    }
+
+    #[test]
+    fn select式_defaultは1つまで() {
+        let err = parse("fn main() { msg := select {\n_ => \"a\"\n_ => \"b\"\n} }").unwrap_err();
+        assert_eq!(err[0].code, "multiple-select-defaults");
+    }
+
+    #[test]
+    fn 実例相当_channels_meshの簡略版() {
+        // examples/channels.meshの簡略版: spawnで並行起動しchannelで結果を受け取る
+        let program = parse(
+            "fn worker(id: int, ch: chan<string>) {\n\tch <- \"worker ${id} done\"\n}\n\
+             fn main() {\n\tch := chan<string>(none)\n\tspawn worker(1, ch)\n\tmsg := <-ch\n\tprint(msg)\n}",
+        )
+        .unwrap();
+        assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["worker", "main"]);
     }
 }
