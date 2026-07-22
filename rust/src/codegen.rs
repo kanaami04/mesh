@@ -1,8 +1,9 @@
 // Codegen: 検査済み(このリゾルバの範囲で解決)のASTからJavaScriptを出力する。
-// TS版`src/codegen.ts`(762行、`Codegen`クラス)の移植だが、milestone 1では
-// struct/map/channel/並行処理/エラー伝播/パッケージが無い「スカラーのMesh」だけを対象にする
-// (構文はパーサで既にパースできるが、まだ対応していない構文には明確なエラーを返す
-// ——コンパイラ自体をcrashさせない。checker.rsのファイル冒頭コメントも参照)
+// TS版`src/codegen.ts`(762行、`Codegen`クラス)の移植だが、milestone 2までの対象は
+// 「スカラーのMesh」+ plain struct宣言/レシーバメソッドまで(判別可能union・match/is・
+// error/jsonマーカー・配列/map・並行処理・パッケージ修飾は未対応。構文はパーサで既に
+// パースできるが、まだ対応していない構文には明確なエラーを返す——コンパイラ自体を
+// crashさせない。checker.rsのファイル冒頭コメントも参照)
 //
 // 設計の要(TS版から踏襲): Meshの関数はすべて`async function`として出力し、呼び出しは
 // 常にawaitする。これにより将来`<-ch`(チャネル受信)を`await`に変換でき、Goの
@@ -13,7 +14,7 @@
 // Rust版も同じ`src/runtime.ts`を`include_str!`で読み込んで埋め込む(ランタイムの二重管理・
 // 意味のズレを避ける。TS/Rustどちらのコンパイラが吐いたJSも同じランタイムで動く)
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Stmt};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Receiver, Stmt, TypeNode};
 use crate::checker::{self, CheckerCtx};
 use crate::token::{Pos, TokenType};
 use crate::types::Type;
@@ -62,25 +63,48 @@ impl Codegen {
         if !program.imports.is_empty() {
             return Err("codegen: import/export are not yet supported (milestone 1 is single-file only)".to_string());
         }
-        if let Some(t) = program.types.first() {
-            return Err(format!("codegen: struct/type declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+        // struct宣言のみ対応。error/jsonマーカー付き・判別可能union等の非struct型宣言は
+        // まだ対象外(次のmilestone以降)
+        for t in &program.types {
+            if t.is_error || t.is_json {
+                return Err(format!("codegen: error/json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+            }
+            if !matches!(t.node, TypeNode::StructType { .. }) {
+                return Err(format!("codegen: only plain struct declarations are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+            }
         }
+        checker::resolve_struct_decls(&mut self.ctx, &program.types)?;
 
         self.out.push(prelude().trim_end().to_string());
         self.out.push(String::new());
 
-        // 呼び出し先の戻り値型を解決できるよう、先に全トップレベル関数のシグネチャを登録してから
-        // 本体を出力する(前方参照——後で宣言される関数を先に呼ぶ場合に対応するため)
+        // 呼び出し先の戻り値型を解決できるよう、先に全トップレベル関数・メソッドのシグネチャを
+        // 登録してから本体を出力する(前方参照——後で宣言される関数/メソッドを先に呼ぶ場合に
+        // 対応するため)
         for fn_decl in &program.fns {
-            if fn_decl.receiver.is_some() {
-                return Err(format!("codegen: struct methods are not yet supported (fn '{}' at {}:{})", fn_decl.name, fn_decl.pos.line, fn_decl.pos.col));
-            }
             if !fn_decl.type_params.is_empty() {
                 return Err(format!("codegen: generic functions are not yet supported (fn '{}' at {}:{})", fn_decl.name, fn_decl.pos.line, fn_decl.pos.col));
             }
-            let params = fn_decl.params.iter().map(|p| checker::resolve_type_node(&p.type_node)).collect();
-            let ret = Box::new(checker::resolve_return_type(&fn_decl.ret));
-            self.ctx.declare_fn(&fn_decl.name, Type::Fn { params, ret });
+            let params = fn_decl.params.iter().map(|p| checker::resolve_type_node(&self.ctx, &p.type_node)).collect();
+            let ret = Box::new(checker::resolve_return_type(&self.ctx, &fn_decl.ret));
+            match &fn_decl.receiver {
+                Some(recv) => {
+                    let struct_name = receiver_struct_name(recv)?;
+                    // レシーバが未宣言/非struct型(例: `fn (x: int) foo()`)なら殻へ静かに
+                    // フォールバックさせず、明確なErrにする(おかしなJS関数名`__m_int_foo`等を
+                    // 生成しないため)
+                    if self.ctx.lookup_struct(&struct_name).is_none() {
+                        return Err(format!(
+                            "codegen: receiver type '{struct_name}' is not a declared struct (fn '{}' at {}:{})",
+                            fn_decl.name, fn_decl.pos.line, fn_decl.pos.col
+                        ));
+                    }
+                    let mut all_params = vec![checker::resolve_type_node(&self.ctx, &recv.type_node)];
+                    all_params.extend(params);
+                    self.ctx.declare_method(&struct_name, &fn_decl.name, Type::Fn { params: all_params, ret });
+                }
+                None => self.ctx.declare_fn(&fn_decl.name, Type::Fn { params, ret }),
+            }
         }
 
         for c in &program.consts {
@@ -98,18 +122,27 @@ impl Codegen {
     fn gen_const_decl(&mut self, c: &ConstDecl) -> CodegenResult<()> {
         let value = self.gen_expr(&c.value)?;
         // 型注釈があればそちらが「本当の型」(TS版checker/modules.tsの`declared ?? valueType`)
-        let ty = c.type_node.as_ref().map(checker::resolve_type_node).unwrap_or_else(|| checker::infer_expr(&self.ctx, &c.value));
+        let ty = c.type_node.as_ref().map(|t| checker::resolve_type_node(&self.ctx, t)).unwrap_or_else(|| checker::infer_expr(&self.ctx, &c.value));
         self.ctx.declare(&c.name, ty);
         self.emit(format!("const {} = {value};", c.name));
         Ok(())
     }
 
     fn gen_fn_decl(&mut self, fn_decl: &FnDecl) -> CodegenResult<()> {
-        let params = fn_decl.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-        self.emit(format!("async function {}({params}) {{", fn_decl.name));
+        let recv_params = fn_decl.receiver.as_ref().map(|r| r.name.as_str());
+        let params =
+            recv_params.into_iter().chain(fn_decl.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(", ");
+        let js_name = match &fn_decl.receiver {
+            Some(recv) => method_js_name(&receiver_struct_name(recv)?, &fn_decl.name),
+            None => fn_decl.name.clone(),
+        };
+        self.emit(format!("async function {js_name}({params}) {{"));
         self.ctx.push_scope();
+        if let Some(recv) = &fn_decl.receiver {
+            self.ctx.declare(&recv.name, checker::resolve_type_node(&self.ctx, &recv.type_node));
+        }
         for p in &fn_decl.params {
-            self.ctx.declare(&p.name, checker::resolve_type_node(&p.type_node));
+            self.ctx.declare(&p.name, checker::resolve_type_node(&self.ctx, &p.type_node));
         }
         self.indent += 1;
         for stmt in &fn_decl.body.stmts {
@@ -152,7 +185,7 @@ impl Codegen {
             Stmt::TypedVarDecl { name, type_node, value, mutable, .. } => {
                 let kw = if *mutable { "let" } else { "const" };
                 let js_value = self.gen_expr(value)?;
-                self.ctx.declare(name, checker::resolve_type_node(type_node));
+                self.ctx.declare(name, checker::resolve_type_node(&self.ctx, type_node));
                 self.emit(format!("{kw} {name} = {js_value};"));
                 Ok(())
             }
@@ -160,12 +193,11 @@ impl Codegen {
                 if targets.len() != 1 || values.len() != 1 {
                     return Err(format!("codegen: multi-target assignment is not yet supported ({}:{})", pos.line, pos.col));
                 }
-                let Expr::Ident { name, .. } = &targets[0] else {
-                    return Err(format!("codegen: assignment to non-identifier targets is not yet supported ({}:{})", pos.line, pos.col));
-                };
+                let lvalue = self.gen_lvalue(&targets[0])?;
                 let rhs = self.gen_expr(&values[0])?;
-                let value = if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], name, &values[0], &rhs, *pos)? } else { rhs };
-                self.emit(format!("{name} = {value};"));
+                let value =
+                    if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], &lvalue, &values[0], &rhs, *pos)? } else { rhs };
+                self.emit(format!("{lvalue} = {value};"));
                 Ok(())
             }
             Stmt::ExprStmt { expr, .. } => {
@@ -195,11 +227,9 @@ impl Codegen {
                 self.ctx.pop_scope();
                 Ok(())
             }
-            Stmt::IncDec { target, op, pos } => {
-                let Expr::Ident { name, .. } = target else {
-                    return Err(format!("codegen: increment/decrement of non-identifier targets is not yet supported ({}:{})", pos.line, pos.col));
-                };
-                self.emit(format!("{name}{};", op));
+            Stmt::IncDec { target, op, .. } => {
+                let lvalue = self.gen_lvalue(target)?;
+                self.emit(format!("{lvalue}{op};"));
                 Ok(())
             }
             Stmt::Break { .. } => {
@@ -262,25 +292,22 @@ impl Codegen {
             }
             Stmt::TypedVarDecl { name, type_node, value, .. } => {
                 let js_value = self.gen_expr(value)?;
-                self.ctx.declare(name, checker::resolve_type_node(type_node));
+                self.ctx.declare(name, checker::resolve_type_node(&self.ctx, type_node));
                 Ok(format!("let {name} = {js_value}"))
             }
             Stmt::Assign { targets, values, compound_op, pos } => {
                 if targets.len() != 1 || values.len() != 1 {
                     return Err(format!("codegen: multi-target assignment is not yet supported ({}:{})", pos.line, pos.col));
                 }
-                let Expr::Ident { name, .. } = &targets[0] else {
-                    return Err(format!("codegen: assignment to non-identifier targets is not yet supported ({}:{})", pos.line, pos.col));
-                };
+                let lvalue = self.gen_lvalue(&targets[0])?;
                 let rhs = self.gen_expr(&values[0])?;
-                let value = if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], name, &values[0], &rhs, *pos)? } else { rhs };
-                Ok(format!("{name} = {value}"))
+                let value =
+                    if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], &lvalue, &values[0], &rhs, *pos)? } else { rhs };
+                Ok(format!("{lvalue} = {value}"))
             }
-            Stmt::IncDec { target, op, pos } => {
-                let Expr::Ident { name, .. } = target else {
-                    return Err(format!("codegen: increment/decrement of non-identifier targets is not yet supported ({}:{})", pos.line, pos.col));
-                };
-                Ok(format!("{name}{op}"))
+            Stmt::IncDec { target, op, .. } => {
+                let lvalue = self.gen_lvalue(target)?;
+                Ok(format!("{lvalue}{op}"))
             }
             Stmt::ExprStmt { expr, .. } => self.gen_expr(expr),
             other => Err(format!("codegen: unsupported statement in for-header ({}:{})", other_pos(other).line, other_pos(other).col)),
@@ -302,6 +329,32 @@ impl Codegen {
             return Ok(format!("__iarith({current_code}, \"{op}\", {rhs}, {at})"));
         }
         Ok(format!("({current_code} {op} {rhs})"))
+    }
+
+    // 代入・インクリメント/デクリメント対象(lvalue)のJSコード片を組み立てる。Identはそのまま、
+    // Memberはフィールド書き込み(`target.name`)。`__proto__`はTS版が過去に実際に踏んだ
+    // prototype汚染バグ(struct literalのフィールドと同じ攻撃面が、フィールドの直接代入
+    // `u.__proto__ = ...`という新しい経路でも起こりうる)の再発防止として明確なErrにする。
+    // Index等(配列/mapは対象外のまま)は他の対応構文が無いのでこの後の default アームで弾く
+    fn gen_lvalue(&mut self, expr: &Expr) -> CodegenResult<String> {
+        match expr {
+            Expr::Ident { name, .. } => Ok(name.clone()),
+            Expr::Member { target, name, pos } => {
+                if name == "__proto__" {
+                    return Err(format!("codegen: '__proto__' cannot be used as a field name ({}:{})", pos.line, pos.col));
+                }
+                // targetがstruct型だと分かる場合だけフィールド書き込みとして許す——パッケージ
+                // 修飾(`math.x = ...`)はまだ実装が無く「未解決の識別子」としてANYへ落ちるので、
+                // ここで弾かないと`math.x = ...`のような実行時ReferenceErrorになるJSを
+                // 静かに生成してしまう
+                if !matches!(checker::infer_expr(&self.ctx, target), Type::Struct { .. }) {
+                    return Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col));
+                }
+                let target_js = self.gen_expr(target)?;
+                Ok(format!("{target_js}.{name}"))
+            }
+            other => Err(format!("codegen: assignment to this kind of target is not yet supported ({}:{})", other.pos().line, other.pos().col)),
+        }
     }
 
     // ---- 式 ----
@@ -351,8 +404,37 @@ impl Codegen {
             Expr::Call { .. } => self.gen_call(expr),
             Expr::Is { pos, .. } => Err(format!("codegen: 'is' is not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Match { pos, .. } => Err(format!("codegen: 'match' is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Member { pos, .. } => Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::StructLit { pos, .. } => Err(format!("codegen: struct literals are not yet supported ({}:{})", pos.line, pos.col)),
+            // 裸のメンバーアクセス(呼び出しではない)。targetがstruct型かつnameが宣言済み
+            // フィールドのときだけ素の`.name`を出す——パッケージ修飾(`math.add`)はまだ
+            // 実装が無く「未解決の識別子」としてANYへ落ちるので、ここで弾かないと
+            // 実行時ReferenceErrorになるJSを静かに生成してしまう。メソッド名(フィールドでは
+            // ない名前)を値として参照する式もTS版と同じく対象外のまま(呼び出し式側でだけ解決)
+            Expr::Member { target, name, pos } => {
+                let target_ty = checker::infer_expr(&self.ctx, target);
+                let Type::Struct { fields, .. } = &target_ty else {
+                    return Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col));
+                };
+                if !fields.iter().any(|f| &f.name == name) {
+                    return Err(format!("codegen: '{name}' is a method — call it, it cannot be referenced as a value ({}:{})", pos.line, pos.col));
+                }
+                Ok(format!("{}.{name}", self.gen_expr(target)?))
+            }
+            // 生成JSにはstruct名自体は現れない(TS版と同じ、プレーンなobject literal)。
+            // error/jsonマーカー付きstructはgenerate_allで弾いてあるので、__errTagは
+            // 次のmilestone(error/json)まで出番が無い
+            Expr::StructLit { pkg, fields, pos, .. } => {
+                if pkg.is_some() {
+                    return Err(format!("codegen: package-qualified struct literals are not yet supported ({}:{})", pos.line, pos.col));
+                }
+                let mut js_fields = Vec::with_capacity(fields.len());
+                for f in fields {
+                    if f.name == "__proto__" {
+                        return Err(format!("codegen: '__proto__' cannot be used as a field name ({}:{})", f.pos.line, f.pos.col));
+                    }
+                    js_fields.push(format!("{}: {}", f.name, self.gen_expr(&f.value)?));
+                }
+                Ok(format!("({{ {} }})", js_fields.join(", ")))
+            }
             Expr::Recv { pos, .. } => Err(format!("codegen: channel receive is not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Chan { pos, .. } => Err(format!("codegen: channels are not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Spawn { pos, .. } => Err(format!("codegen: spawn/detach are not yet supported ({}:{})", pos.line, pos.col)),
@@ -377,6 +459,25 @@ impl Codegen {
         {
             let js_args = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
             return self.gen_builtin_call(name, &js_args, *pos);
+        }
+
+        // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)。
+        // TS版calls.ts/codegen.tsと同じ「フィールドが勝つ」順序——targetがstruct型で
+        // nameが宣言済みフィールドでなければメソッドと判定する
+        if let Expr::Member { target, name, .. } = &**callee
+            && let Type::Struct { fields, name: struct_name, .. } = checker::infer_expr(&self.ctx, target)
+            && !fields.iter().any(|f| &f.name == name)
+        {
+            if self.ctx.lookup_method(&struct_name, name).is_none() {
+                // structではあるがfieldにもmethodにも無い名前——実行時に
+                // `undefined is not a function`でクラッシュさせず、ここで明確なErrにする
+                return Err(format!("codegen: '{struct_name}' has no method '{name}' ({}:{})", pos.line, pos.col));
+            }
+            let recv_js = self.gen_expr(target)?;
+            let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
+            let js_name = method_js_name(&struct_name, name);
+            let all_args = std::iter::once(recv_js).chain(args_js).collect::<Vec<_>>().join(", ");
+            return Ok(format!("(await {js_name}({all_args}))"));
         }
 
         // ユーザー定義関数はすべてasyncなので常にawait
@@ -431,6 +532,25 @@ impl Codegen {
             _ => Err(format!("codegen: builtin '{name}' is not yet supported ({}:{})", pos.line, pos.col)),
         }
     }
+}
+
+// レシーバの型注釈からstruct名を取り出す。パッケージ修飾(`math.User`)はモジュールの
+// milestoneまで対象外、単純な名前(`(u: User)`)のみ受け付ける
+fn receiver_struct_name(recv: &Receiver) -> CodegenResult<String> {
+    match &recv.type_node {
+        TypeNode::Name { name, pkg: None, .. } => Ok(name.clone()),
+        TypeNode::Name { pkg: Some(_), pos, .. } => {
+            Err(format!("codegen: package-qualified receivers are not yet supported ({}:{})", pos.line, pos.col))
+        }
+        other => Err(format!("codegen: receiver type must be a plain struct name ({}:{})", other.pos().line, other.pos().col)),
+    }
+}
+
+// メソッドの生成JS名: struct名+メソッド名で一意にする(他structの同名メソッドと衝突しない
+// ように)。TS版のmethodJsNameを移植(パッケージ修飾structの"."を"$"に変換する部分は
+// パッケージ未対応のmilestone 2ではまだ現れないが、そのまま移植しておく)
+fn method_js_name(struct_name: &str, method_name: &str) -> String {
+    format!("__m_{}_{}", struct_name.replace('.', "$"), method_name)
 }
 
 fn other_pos(stmt: &Stmt) -> Pos {
@@ -592,14 +712,78 @@ mod tests {
     }
 
     #[test]
-    fn struct宣言は未対応として明確なエラーになる() {
-        let err = gen_js("struct User {\n  name: string\n}\nfn main() {}").unwrap_err();
+    fn struct_litとフィールド読み書きが生成できる() {
+        let js = gen_body(
+            "struct User {\n  name: string\n  age: int\n}\nfn main() {\n  u := User{name: \"alice\", age: 30}\n  print(u.name)\n  u.age = u.age + 1\n  u.age += 1\n}",
+        );
+        assert!(js.contains("const u = ({ name: \"alice\", age: 30 });"), "got: {js}");
+        assert!(js.contains("__print(u.name);"), "got: {js}");
+        // u.ageはstructのフィールド型(int)として正しく推論されるので、フィールド越しの
+        // 演算も__iarith等のint安全ヘルパを通る(単なる素の`+`にはならない)
+        assert!(js.contains("u.age = __iarith(u.age, \"+\", 1,"), "got: {js}");
+        assert!(js.matches("__iarith(u.age, \"+\", 1,").count() == 2, "got: {js}");
+    }
+
+    #[test]
+    fn レシーバメソッドの呼び出しが生成できる() {
+        let js = gen_body(
+            "struct User {\n  name: string\n  age: int\n}\nfn (u: User) describe() string {\n  return \"${u.name} (${u.age})\"\n}\nfn main() {\n  u := User{name: \"alice\", age: 30}\n  print(u.describe())\n}",
+        );
+        assert!(js.contains("async function __m_User_describe(u) {"), "got: {js}");
+        assert!(js.contains("(await __m_User_describe(u))"), "got: {js}");
+    }
+
+    #[test]
+    fn 生成直後のstruct_litへ直接メソッドチェーンできる() {
+        // README記載のTodo{...}.complete().render()のようなチェーンが
+        // 正しくtargetの型を追えることを確認する(struct_lit → メソッド呼び出し → メソッド呼び出し)
+        let js = gen_body(
+            "struct Todo {\n  title: string\n  done: bool\n}\nfn (t: Todo) complete() Todo {\n  return Todo{title: t.title, done: true}\n}\nfn (t: Todo) render() string {\n  return t.title\n}\nfn main() {\n  print(Todo{title: \"x\", done: false}.complete().render())\n}",
+        );
+        assert!(js.contains("(await __m_Todo_render((await __m_Todo_complete(({ title: \"x\", done: false })))))"), "got: {js}");
+    }
+
+    #[test]
+    fn フィールドと同名メソッドはフィールドアクセスが勝つ() {
+        // TS版calls.ts/codegen.tsと同じ「フィールドが勝つ」順序: 同名のメソッドがあっても
+        // 裸のメンバーアクセスはフィールドを読む
+        let js = gen_body("struct Box {\n  value: int\n}\nfn (b: Box) value() int {\n  return 999\n}\nfn main() {\n  b := Box{value: 1}\n  x := b.value\n}");
+        assert!(js.contains("const x = b.value;"), "got: {js}");
+    }
+
+    #[test]
+    fn proto拒否_struct_litのフィールド名として使えない() {
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{__proto__: \"x\"}\n}").unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn proto拒否_代入先のフィールド名としても使えない() {
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  u.__proto__ = \"x\"\n}").unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn 未宣言_非struct型のレシーバは明確なエラーになる() {
+        let err = gen_js("fn (u: int) describe() {\n  print(u)\n}\nfn main() {}").unwrap_err();
+        assert!(err.contains("not a declared struct"), "got: {err}");
+    }
+
+    #[test]
+    fn structにもフィールドにもないメソッド呼び出しは明確なエラーになる() {
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  u.unknown()\n}").unwrap_err();
+        assert!(err.contains("has no method"), "got: {err}");
+    }
+
+    #[test]
+    fn error_structはまだ未対応として明確なエラーになる() {
+        let err = gen_js("error struct Oops {\n  message: string\n}\nfn main() {}").unwrap_err();
         assert!(err.contains("not yet supported"), "got: {err}");
     }
 
     #[test]
-    fn struct_methodは未対応として明確なエラーになる() {
-        let err = gen_js("fn (u: int) describe() {\n  print(u)\n}\nfn main() {}").unwrap_err();
+    fn パッケージ修飾structリテラルはまだ未対応として明確なエラーになる() {
+        let err = gen_js("fn main() {\n  x := math.Point{x: 1, y: 2}\n}").unwrap_err();
         assert!(err.contains("not yet supported"), "got: {err}");
     }
 
