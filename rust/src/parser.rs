@@ -12,8 +12,8 @@
 // 戻り値の型にResultを持たない(=失敗しない関数、という型で表現している)
 
 use crate::ast::{
-    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, ImportDecl, InterpSegment, MatchArm, MatchPattern, Param,
-    Program, Receiver, SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
+    Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, ImportDecl, InterpSegment, MapLitEntry, MatchArm,
+    MatchPattern, Param, Program, Receiver, SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
 };
 use crate::lexer::lex;
 use crate::token::{CompileError, Fix, Pos, Range, Token, TokenType};
@@ -526,11 +526,25 @@ impl Parser {
     }
 
     fn parse_single_type(&mut self) -> Result<TypeNode, Box<CompileError>> {
-        self.parse_type_atom()
+        let atom = self.parse_type_atom()?;
+        Ok(self.parse_array_suffix(atom))
     }
 
-    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・none・chan<T>のみ。
-    // array/map/fnTypeは次回以降のPRで追加する
+    // T[] / T[][] のような配列サフィックス。要素型がchan<T>/map<K,V>でも同じく効く
+    // (chan<int>[] / map<string, int>[]のような「総称型の配列」を書けるようにするため)
+    fn parse_array_suffix(&mut self, base: TypeNode) -> TypeNode {
+        let base_pos = base.pos();
+        let mut type_node = base;
+        while self.check(TokenType::LBracket) && self.peek_at(1).kind == TokenType::RBracket {
+            self.next();
+            self.next();
+            type_node = TypeNode::Array { elem: Box::new(type_node), pos: base_pos };
+        }
+        type_node
+    }
+
+    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・none・chan<T>・
+    // 配列サフィックス(T[])・map<K,V>のみ。fnTypeは次回以降のPRで追加する
     fn parse_type_atom(&mut self) -> Result<TypeNode, Box<CompileError>> {
         if self.check(TokenType::NoneKw) {
             let t = self.next();
@@ -550,6 +564,15 @@ impl Parser {
             let elem = self.parse_type()?;
             self.expect(TokenType::Gt, "after channel element type")?;
             return Ok(TypeNode::Chan { elem: Box::new(elem), pos: start.pos });
+        }
+        if self.check(TokenType::Map) {
+            let start = self.next();
+            self.expect(TokenType::Lt, "after 'map'")?;
+            let key = self.parse_type()?;
+            self.expect(TokenType::Comma, "between map key and value types")?;
+            let value = self.parse_type()?;
+            self.expect(TokenType::Gt, "after map value type")?;
+            return Ok(TypeNode::MapType { key: Box::new(key), value: Box::new(value), pos: start.pos });
         }
         let name_tok = self.expect(TokenType::Ident, "as type name")?;
         // math.User — パッケージ修飾された型名
@@ -660,7 +683,7 @@ impl Parser {
 
             self.expect(TokenType::Eq, "in assignment")?;
             for e in &targets {
-                if !matches!(e, Expr::Ident { .. }) {
+                if !matches!(e, Expr::Ident { .. } | Expr::Index { .. } | Expr::Member { .. }) {
                     return Err(self.error_at(e.pos(), "invalid assignment target", "invalid-assignment-target"));
                 }
             }
@@ -676,7 +699,7 @@ impl Parser {
             if mutable {
                 return Err(self.error_at(start.pos, "'mut' can only be used with a ':=' declaration", "misplaced-mut"));
             }
-            if !matches!(first, Expr::Ident { .. }) {
+            if !matches!(first, Expr::Ident { .. } | Expr::Index { .. } | Expr::Member { .. }) {
                 return Err(self.error_at(first.pos(), "invalid assignment target", "invalid-assignment-target"));
             }
             let op_tok = self.next();
@@ -742,6 +765,19 @@ impl Parser {
             return Ok(Stmt::For { init: None, cond: None, post: None, body: self.parse_block()?, pos: start.pos });
         }
 
+        // range形: for i, v := range arr / for k, v := range m / for i := range 10
+        if self.is_range_header() {
+            let mut names = vec![self.expect(TokenType::Ident, "as range variable")?.value];
+            if self.eat(TokenType::Comma) {
+                names.push(self.expect(TokenType::Ident, "as range variable")?.value);
+            }
+            self.expect(TokenType::ColonEq, "in range header")?;
+            self.expect(TokenType::Range, "in range header")?;
+            let subject = self.with_no_struct_lit(|p| p.parse_expr())?;
+            let body = self.parse_block()?;
+            return Ok(Stmt::RangeFor { names, subject, body, pos: start.pos });
+        }
+
         let first = self.with_no_struct_lit(|p| p.parse_simple_stmt())?;
 
         if self.check(TokenType::LBrace) {
@@ -760,6 +796,20 @@ impl Parser {
             Some(Box::new(self.with_no_struct_lit(|p| p.parse_simple_stmt())?))
         };
         Ok(Stmt::For { init: Some(Box::new(first)), cond, post, body: self.parse_block()?, pos: start.pos })
+    }
+
+    // `for`の直後が「ident (, ident)? := range」の形かを先読みで判定する
+    fn is_range_header(&self) -> bool {
+        if self.peek_at(0).kind != TokenType::Ident {
+            return false;
+        }
+        if self.peek_at(1).kind == TokenType::ColonEq && self.peek_at(2).kind == TokenType::Range {
+            return true;
+        }
+        self.peek_at(1).kind == TokenType::Comma
+            && self.peek_at(2).kind == TokenType::Ident
+            && self.peek_at(3).kind == TokenType::ColonEq
+            && self.peek_at(4).kind == TokenType::Range
     }
 
     // ---- 式(優先順位法 / Pratt parsing) ----
@@ -874,10 +924,64 @@ impl Parser {
         Ok(Expr::StructLit { name, pkg, fields, pos })
     }
 
-    // 呼び出し・メンバアクセス・structリテラルは後置で連鎖する: f(x)[0].name。
-    // 添字(`[`)は次回以降
+    // 型付き配列リテラルの本体: Todo[]{}(空) / int[]{1, 2} / int[][]{...}(多次元)。
+    // 呼び出し元(parse_postfix)で`ident`+`[`+`]`の先頭だけ確認済み。ここでは`[]`の連なりを
+    // 数え、その後が`{`でなければNoneを返す(呼び出し元がpostfixループの他の分岐に処理を
+    // 委ねる——たとえば通常の添字アクセスとして再解釈される)。局所変数(dims/elem_type/elems)を
+    // parse_postfix自身のスタックフレームから追い出すために独立した関数にしてある——
+    // 文字列補間の再帰パース(`interp_depth`で深さ制限)と同じ呼び出し経路に乗る関数なので、
+    // フレームサイズがそのままスタックオーバーフローの安全マージンに直結する
+    // (実際にこの関数をparse_postfix本体にインライン展開していたとき、MAX_INTERP_DEPTH規定の
+    // ネスト数で本物のスタックオーバーフローが再発した——code reviewではなく自己検証で発見)
+    fn try_parse_typed_array_literal(&mut self, name: String, pos: Pos) -> Result<Option<Expr>, Box<CompileError>> {
+        let mut dims = 0;
+        while self.peek_at(2 * dims).kind == TokenType::LBracket && self.peek_at(2 * dims + 1).kind == TokenType::RBracket {
+            dims += 1;
+        }
+        if self.peek_at(2 * dims).kind != TokenType::LBrace {
+            return Ok(None);
+        }
+        // 要素型: Tを(dims-1)回arrayで包んだもの(int[]{}なら要素はint)
+        let mut elem_type = TypeNode::Name { name, pkg: None, pos };
+        for _ in 0..dims - 1 {
+            elem_type = TypeNode::Array { elem: Box::new(elem_type), pos };
+        }
+        for _ in 0..dims {
+            self.next();
+            self.next();
+        }
+        self.next(); // {
+        self.skip_semis();
+        let mut elems = Vec::new();
+        while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+            elems.push(self.parse_expr()?);
+            self.eat(TokenType::Comma);
+            self.skip_semis();
+        }
+        self.expect(TokenType::RBrace, "at end of array literal")?;
+        if elems.is_empty() {
+            // F-9a: 空の型付き配列は`xs: T[] = []`に一本化(素の[]が文脈から型を得られるため重複だった)
+            return Err(self.error_at(
+                pos,
+                "empty typed array literal 'T[]{}' was removed — write 'xs: T[] = []' instead (a plain '[]' becomes the right type wherever one is expected)",
+                "empty-typed-array-literal-removed",
+            ));
+        }
+        Ok(Some(Expr::ArrayLit { elems, elem_type: Some(elem_type), pos }))
+    }
+
+    // 呼び出し・メンバアクセス・structリテラル・添字は後置で連鎖する: f(x)[0].name。
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, Box<CompileError>> {
         loop {
+            // 型付き配列リテラル: Todo[]{}(空) / int[]{1, 2} / int[][]{...}(多次元)
+            if let Expr::Ident { name, pos } = &expr
+                && self.allow_struct_lit
+                && self.check(TokenType::LBracket)
+                && self.peek_at(1).kind == TokenType::RBracket
+                && let Some(lit) = self.try_parse_typed_array_literal(name.clone(), *pos)? {
+                    expr = lit;
+                    continue;
+                }
             // 修飾structリテラル: math.Point{x: 1, y: 2}(importしたパッケージのexported struct)
             if let Expr::Member { target, name, .. } = &expr
                 && let Expr::Ident { name: pkg, .. } = &**target
@@ -926,6 +1030,11 @@ impl Parser {
                 self.expect(TokenType::RParen, "after arguments")?;
                 let call_pos = expr.pos();
                 expr = Expr::Call { callee: Box::new(expr), args, pos: call_pos };
+            } else if self.eat(TokenType::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect(TokenType::RBracket, "after index")?;
+                let index_pos = expr.pos();
+                expr = Expr::Index { target: Box::new(expr), index: Box::new(index), pos: index_pos };
             } else if self.eat(TokenType::Dot) {
                 let name = self.expect(TokenType::Ident, "after '.'")?.value;
                 let member_pos = expr.pos();
@@ -1070,8 +1179,61 @@ impl Parser {
                 self.expect(TokenType::RParen, "to create a channel: chan<T>(capacity) or chan<T>(none)")?;
                 Ok(Expr::Chan { elem, capacity: Box::new(capacity), pos: t.pos })
             }
+            TokenType::LBracket => self.parse_array_literal(t.pos),
+            TokenType::Map => self.parse_map_literal_or_ident(t.pos),
             _ => Err(self.error_at(t.pos, format!("unexpected {}", Self::describe_token(&t)), "syntax-error")),
         }
+    }
+
+    // 配列リテラル: [1, 2, 3](空は[])。局所変数(elems)をparse_primary本体から追い出すために
+    // 独立した関数にしてある(文字列補間の再帰パースと同じ呼び出し経路のため、フレームサイズが
+    // スタックオーバーフローの安全マージンに直結する——詳細はtry_parse_typed_array_literalの
+    // コメント参照)
+    fn parse_array_literal(&mut self, pos: Pos) -> Result<Expr, Box<CompileError>> {
+        self.next();
+        self.skip_semis(); // 複数行の配列リテラルで、要素末尾のASI挿入セミコロンを読み飛ばす
+        let mut elems = Vec::new();
+        while !self.check(TokenType::RBracket) && !self.check(TokenType::Eof) {
+            elems.push(self.parse_expr()?);
+            self.eat(TokenType::Comma);
+            self.skip_semis();
+        }
+        self.expect(TokenType::RBracket, "after array elements")?;
+        Ok(Expr::ArrayLit { elems, elem_type: None, pos })
+    }
+
+    // F-8: 'map'は文脈依存キーワード。型位置と同じ'<'が続けばmapリテラル/型構築として読む。
+    // それ以外('('が続く式位置の組み込み関数呼び出しmap(arr, f)も、'map'を裸の値として書いた
+    // 場合も)は素の識別子に読み替える(以降はparse_postfixの通常の呼び出し解析に乗る)。
+    // '<'以外を全部ここで拾うことで、裸の値の場合にここで"expected '<' after 'map'"という
+    // 的外れなsyntax-errorを出さない。局所変数(key/value/entries)を追い出す理由は
+    // parse_array_literalのコメント参照
+    fn parse_map_literal_or_ident(&mut self, pos: Pos) -> Result<Expr, Box<CompileError>> {
+        if self.peek_at(1).kind != TokenType::Lt {
+            self.next();
+            return Ok(Expr::Ident { name: "map".into(), pos });
+        }
+        // mapリテラル: map<string, int>{"a": 1, "b": 2}(空は{})
+        self.next();
+        self.expect(TokenType::Lt, "after 'map'")?;
+        let key = self.parse_type()?;
+        self.expect(TokenType::Comma, "between map key and value types")?;
+        let value = self.parse_type()?;
+        self.expect(TokenType::Gt, "after map value type")?;
+        self.expect(TokenType::LBrace, "to create a map: map<K, V>{ ... }")?;
+        self.skip_semis();
+        let mut entries = Vec::new();
+        while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
+            let entry_pos = self.peek().pos;
+            let k = self.parse_expr()?;
+            self.expect(TokenType::Colon, "after map key")?;
+            let v = self.parse_expr()?;
+            entries.push(MapLitEntry { key: k, value: v, pos: entry_pos });
+            self.eat(TokenType::Comma);
+            self.skip_semis();
+        }
+        self.expect(TokenType::RBrace, "at end of map literal")?;
+        Ok(Expr::MapLit { key, value, entries, pos })
     }
 
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, Box<CompileError>> {
@@ -1727,5 +1889,125 @@ mod tests {
         .unwrap();
         let method = program.fns.iter().find(|f| f.name == "magnitudeSq").unwrap();
         assert_eq!(method.receiver.as_ref().unwrap().name, "p");
+    }
+
+    // ---- 配列/mapリテラル・添字アクセス・範囲for ----
+
+    #[test]
+    fn 配列型_chan_t_map_k_vのような総称型を要素にする配列型も書ける() {
+        let chan_arr = &parse("fn f(x: chan<int>[]) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::Array { elem, .. } = chan_arr else { panic!("expected array type, got {chan_arr:?}") };
+        assert!(matches!(&**elem, TypeNode::Chan { .. }));
+
+        let map_arr = &parse("fn f(x: map<string, int>[]) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::Array { elem, .. } = map_arr else { panic!("expected array type, got {map_arr:?}") };
+        assert!(matches!(&**elem, TypeNode::MapType { .. }));
+
+        let chan_arr_2d = &parse("fn f(x: chan<int>[][]) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::Array { elem, .. } = chan_arr_2d else { panic!("expected array type, got {chan_arr_2d:?}") };
+        assert!(matches!(&**elem, TypeNode::Array { .. }));
+    }
+
+    #[test]
+    fn 配列リテラル_複数行でも末尾カンマ無しでパースできる() {
+        let stmts = parse_body("xs := [\n1,\n2,\n3\n]");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::ArrayLit { elems, elem_type, .. } = &values[0] else { panic!("expected arrayLit, got {:?}", values[0]) };
+        assert_eq!(elems.len(), 3);
+        assert!(elem_type.is_none());
+
+        // structリテラルを要素にした複数行配列(末尾カンマ無し)も同様に通る
+        let stmts2 = parse_body("ys := [\nUser{name: \"a\"},\nUser{name: \"b\"}\n]");
+        let Stmt::ShortVarDecl { values, .. } = &stmts2[0] else { panic!("expected shortVarDecl") };
+        let Expr::ArrayLit { elems, .. } = &values[0] else { panic!("expected arrayLit, got {:?}", values[0]) };
+        assert_eq!(elems.len(), 2);
+    }
+
+    #[test]
+    fn 型付き配列リテラル_int_1_2_とint_int_1_2_3_4() {
+        let stmts = parse_body("xs := int[]{1, 2}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::ArrayLit { elems, elem_type, .. } = &values[0] else { panic!("expected arrayLit, got {:?}", values[0]) };
+        assert_eq!(elems.len(), 2);
+        assert!(matches!(elem_type, Some(TypeNode::Name { name, .. }) if name == "int"));
+
+        // 多次元: int[][]{...}の要素型はint[](array of array)
+        let stmts2 = parse_body("xss := int[][]{[1, 2], [3, 4]}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts2[0] else { panic!("expected shortVarDecl") };
+        let Expr::ArrayLit { elem_type, .. } = &values[0] else { panic!("expected arrayLit, got {:?}", values[0]) };
+        assert!(matches!(elem_type, Some(TypeNode::Array { .. })));
+    }
+
+    #[test]
+    fn f9a_空の型付き配列リテラルは廃止されている() {
+        let err = parse("fn main() { xs := Todo[]{} }").unwrap_err();
+        assert_eq!(err[0].code, "empty-typed-array-literal-removed");
+    }
+
+    #[test]
+    fn mapリテラルと添字アクセス_読み書き() {
+        let stmts = parse_body("ages := map<string, int>{\"alice\": 30, \"bob\": 25}");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::MapLit { key, value, entries, .. } = &values[0] else { panic!("expected mapLit, got {:?}", values[0]) };
+        assert!(matches!(key, TypeNode::Name { name, .. } if name == "string"));
+        assert!(matches!(value, TypeNode::Name { name, .. } if name == "int"));
+        assert_eq!(entries.len(), 2);
+
+        // 添字での書き込み: ages["carol"] = 28
+        let stmts2 = parse_body("ages[\"carol\"] = 28");
+        let Stmt::Assign { targets, .. } = &stmts2[0] else { panic!("expected assign, got {:?}", stmts2[0]) };
+        assert!(matches!(&targets[0], Expr::Index { .. }));
+
+        // 添字での読み出し: age := ages["alice"] or 0
+        let stmts3 = parse_body("age := ages[\"alice\"] or 0");
+        let Stmt::ShortVarDecl { values, .. } = &stmts3[0] else { panic!("expected shortVarDecl") };
+        let Expr::OrElse { left, .. } = &values[0] else { panic!("expected orElse, got {:?}", values[0]) };
+        assert!(matches!(&**left, Expr::Index { .. }));
+    }
+
+    #[test]
+    fn mapは式位置で裸の識別子としても使える() {
+        // 'map'は文脈依存キーワード。'<'が続かなければ識別子(組み込み高階関数呼び出し等)
+        let stmts = parse_body("xs := map(nums, f)");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::Call { callee, .. } = &values[0] else { panic!("expected call, got {:?}", values[0]) };
+        assert!(matches!(&**callee, Expr::Ident { name, .. } if name == "map"));
+    }
+
+    #[test]
+    fn 範囲forの3形態をパースできる() {
+        // for i, v := range arr
+        let stmts = parse_body("for i, v := range nums {\n\tprint(i, v)\n}");
+        let Stmt::RangeFor { names, .. } = &stmts[0] else { panic!("expected rangeFor, got {:?}", stmts[0]) };
+        assert_eq!(names, &vec!["i".to_string(), "v".to_string()]);
+
+        // for k, v := range m
+        let stmts2 = parse_body("for k, v := range ages {\n\tprint(k, v)\n}");
+        let Stmt::RangeFor { names, .. } = &stmts2[0] else { panic!("expected rangeFor, got {:?}", stmts2[0]) };
+        assert_eq!(names, &vec!["k".to_string(), "v".to_string()]);
+
+        // for i := range 10(単一変数)
+        let stmts3 = parse_body("for i := range 10 {\n\tprint(i)\n}");
+        let Stmt::RangeFor { names, subject, .. } = &stmts3[0] else { panic!("expected rangeFor, got {:?}", stmts3[0]) };
+        assert_eq!(names, &vec!["i".to_string()]);
+        assert!(matches!(subject, Expr::Int { .. }));
+    }
+
+    #[test]
+    fn 実例相当_maps_meshの簡略版() {
+        let program = parse(
+            "fn main() {\n\
+             \tages := map<string, int>{\"alice\": 30, \"bob\": 25}\n\
+             \tages[\"carol\"] = 28\n\
+             \tage := ages[\"alice\"] or 0\n\
+             \tprint(\"alice is ${age}\")\n\
+             \tfor k, v := range ages {\n\t\tprint(\"${k}: ${v}\")\n\t}\n\
+             \tnums := [10, 20, 30]\n\
+             \tmut total := 0\n\
+             \tfor _, v := range nums {\n\t\ttotal = total + v\n\t}\n\
+             \tfor i := range 3 {\n\t\tprint(\"tick ${i}\")\n\t}\n}",
+        )
+        .unwrap();
+        assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
     }
 }

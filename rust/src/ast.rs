@@ -15,9 +15,10 @@
 // 通常の型名(`TypeNode::Name`)と構文上見分かず、レシーバのメソッド呼び出し
 // (`obj.method(args)`)も通常のメンバーアクセス+呼び出しと構文上見分かないため、
 // どちらも追加の構文なしで既に表現できる——意味解決(型パラメータかどうか・レシーバ経由の
-// メソッドかどうか)はchecker側の仕事
-// **対象外(次回以降のPRで追加)**: 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも
-// 含む)、defer、添字アクセス、範囲for、error/jsonマーカー(`error struct X {...}`等。
+// メソッドかどうか)はchecker側の仕事。**配列型(`T[]`)・配列リテラル(`[1, 2, 3]` /
+// `Todo[]{}` / `int[]{1, 2}`)・map型(`map<K, V>`)・mapリテラル(`map<K, V>{"a": 1}`)・
+// 添字アクセス(`a[i]`。代入先としても可)・範囲for(`for i, v := range arr`等)**。
+// **対象外(次回以降のPRで追加)**: defer、error/jsonマーカー(`error struct X {...}`等。
 // checkerが無いと`isError`フラグの使い道が無いためまだ意味がない)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
 // 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
@@ -29,8 +30,8 @@
 use crate::token::Pos;
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
-// TS版の8種のうち、今回はname/union/structType/literal/chanの5つ(array/mapType/fnTypeは
-// 次回以降)。inline structType(判別可能unionのメンバー)もこの一種として表す。
+// TS版の8種のうち、今回はname/union/structType/literal/chan/array/mapTypeの7つ
+// (fnTypeのみ次回以降)。inline structType(判別可能unionのメンバー)もこの一種として表す。
 // literalは判別可能unionのタグ(`{ kind: "ok" }`の"ok"部分)に必須なため、
 // struct/union対応と同時に追加した(当初の見積もりで見落としていた)
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +41,8 @@ pub enum TypeNode {
     Union { members: Vec<TypeNode>, pos: Pos },           // int | error
     StructType { fields: Vec<StructFieldNode>, pos: Pos }, // struct宣言の中身 / union内の無名{...}
     Chan { elem: Box<TypeNode>, pos: Pos },               // chan<int>
+    Array { elem: Box<TypeNode>, pos: Pos },              // int[]
+    MapType { key: Box<TypeNode>, value: Box<TypeNode>, pos: Pos }, // map<string, int>
 }
 
 impl TypeNode {
@@ -49,7 +52,9 @@ impl TypeNode {
             | TypeNode::Literal { pos, .. }
             | TypeNode::Union { pos, .. }
             | TypeNode::StructType { pos, .. }
-            | TypeNode::Chan { pos, .. } => *pos,
+            | TypeNode::Chan { pos, .. }
+            | TypeNode::Array { pos, .. }
+            | TypeNode::MapType { pos, .. } => *pos,
         }
     }
 }
@@ -144,6 +149,9 @@ pub enum Stmt {
     Continue { pos: Pos },
     Wait { body: Block, pos: Pos }, // wait { spawn f()  spawn g() } — 中で起動したタスクを全部待つ
     Send { channel: Expr, value: Expr, pos: Pos }, // ch <- v
+    // for i, v := range arr / for k, v := range m / for i := range 10。
+    // namesは1個(int range)または2個。"_"で捨てられる(捨てる指定自体はcheckerの仕事)
+    RangeFor { names: Vec<String>, subject: Expr, body: Block, pos: Pos },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +217,18 @@ pub enum Expr {
     // f() or fallback — noneならright を使う。f() or e => fallback — 失敗値(none/error)を
     // e に束縛してrightを評価(errorを含むunionのフォールバックはこの束縛形が必須)
     OrElse { left: Box<Expr>, right: Box<Expr>, binding: Option<String>, pos: Pos },
+    // [1, 2, 3](elem_type: None) / Todo[]{}(空) / int[]{1, 2}(elem_type: Some。
+    // 空の型付き配列はF-9aで廃止済み — `xs: T[] = []`に一本化)
+    ArrayLit { elems: Vec<Expr>, elem_type: Option<TypeNode>, pos: Pos },
+    Index { target: Box<Expr>, index: Box<Expr>, pos: Pos }, // a[i]
+    MapLit { key: TypeNode, value: TypeNode, entries: Vec<MapLitEntry>, pos: Pos }, // map<string, int>{"a": 1}
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapLitEntry {
+    pub key: Expr,
+    pub value: Expr,
+    pub pos: Pos,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,7 +270,10 @@ impl Expr {
             | Expr::Spawn { pos, .. }
             | Expr::Select { pos, .. }
             | Expr::Prop { pos, .. }
-            | Expr::OrElse { pos, .. } => *pos,
+            | Expr::OrElse { pos, .. }
+            | Expr::ArrayLit { pos, .. }
+            | Expr::Index { pos, .. }
+            | Expr::MapLit { pos, .. } => *pos,
         }
     }
 }
