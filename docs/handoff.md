@@ -120,20 +120,23 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   並行処理(`chan<T>`型・`spawn`/`detach`/`wait`/`send`/`recv`/`select`式)を追加
   (4候補〈並行処理/import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から、
   READMEの一番最初のサンプルがこの機能であることを理由にkanayamaと討議のうえ採用)。
-  TS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。現在テスト63件、
+  TS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。テスト63件・
+  `cargo clippy --all-targets -- -D warnings` クリーン・`?`伝播式・`or`束縛形を追加
+  (残り3候補〈import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から採用。
+  優先順位表に`Or => 1`を追加——全演算子中最弱結合はTS版の`PRECEDENCE`表と同じ)。
+  これもTS版をほぼ1:1移植するだけで新しい設計判断は不要だった。現在テスト67件、
   `cargo clippy --all-targets -- -D warnings` クリーン
-- **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
-  無いと構造化エラーの旨みが薄いためセット予定)・配列/mapリテラル(型位置の配列サフィックス
-  `chan<int>[]`等も含む)・import/export。対象外の構文は誠実に構文エラーで
-  失敗する(クラッシュしない)よう作ってある
-- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち8本
+- **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・`error struct`/`json struct`宣言
+  マーカー(checkerが無いと`isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・
+  配列/mapリテラル(型位置の配列サフィックス`chan<int>[]`等も含む)・import/export。
+  対象外の構文は誠実に構文エラーで失敗する(クラッシュしない)よう作ってある
+- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち9本
   (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`・`discriminated_union.mesh`・
-  `users.mesh`・`channel_spec.mesh`・`channels.mesh`)が完全にパース成功。残る3本は
-  スコープ外の構文で構文エラーになる(`errors.mesh`は`or`束縛形、`maps.mesh`はmapリテラル、
+  `users.mesh`・`channel_spec.mesh`・`channels.mesh`・`errors.mesh`)が完全にパース成功。
+  残る2本はスコープ外の構文で構文エラーになる(`maps.mesh`はmapリテラル、
   `modules_demo.mesh`はimport/export)
-- **次にやるなら**: import/export、ジェネリクス+レシーバ、error/json構造化エラー(`?`/`or`)の
-  どれか(todo.mdに書いていないだけでまだ相当量残っている——parser.ts全体は1217行、
-  現状のRust版はその6割強程度)
+- **次にやるなら**: import/export、ジェネリクス+レシーバのどちらか(todo.mdに書いていない
+  だけでまだ相当量残っている——parser.ts全体は1217行、現状のRust版はその7割弱程度)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

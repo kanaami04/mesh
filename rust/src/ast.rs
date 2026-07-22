@@ -5,11 +5,12 @@
 // if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・複合代入・
 // インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
 // struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
-// 文字列補間・**並行処理(spawn/detach/wait/chan/select/send/recv)**。
-// **対象外(次回以降のPRで追加)**: ジェネリクス、`or`束縛形・`?`伝播、
+// 文字列補間・並行処理(spawn/detach/wait/chan/select/send/recv)・
+// **`or`束縛形・`?`伝播**。
+// **対象外(次回以降のPRで追加)**: ジェネリクス、
 // 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、import/export、defer、
-// 添字アクセス、範囲for、型注釈つき変数宣言、error/jsonマーカー
-// (`?`/`or`が無いと構造化エラーの旨みが薄いため、それらとセットで後回し)。
+// 添字アクセス、範囲for、型注釈つき変数宣言、error/jsonマーカー(`error struct X {...}`等。
+// checkerが無いと`isError`フラグの使い道が無いためまだ意味がない)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
 // 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
 //
@@ -77,7 +78,7 @@ pub struct ConstDecl {
 }
 
 // struct X { ... } / type X = ...。error/jsonマーカー(isError/isJson)は次回以降
-// (`?`/`or`が実装されてから意味を持つため)
+// (checkerが無いとフラグの使い道が無いため、checker移植までまだ意味がない)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub name: String,
@@ -174,6 +175,12 @@ pub enum Expr {
     // spawn=今の関数が所有(関数を抜けるとき暗黙に待たれる)/ detach=プログラムが所有(待たずに戻れる)
     Spawn { call: Box<Expr>, detached: bool, pos: Pos },
     Select { arms: Vec<SelectArm>, default_arm: Option<Box<Expr>>, pos: Pos }, // select { v := <-ch => ...  _ => ... }
+    // f()? — none/errorなら呼び出し元へ即伝播。contextは失敗時だけ評価される文脈
+    // (f() ? "line ${i}: bad")。文字列リテラル/補間のみ許す(任意の式だと`f()? - 1`等が曖昧)
+    Prop { operand: Box<Expr>, context: Option<Box<Expr>>, pos: Pos },
+    // f() or fallback — noneならright を使う。f() or e => fallback — 失敗値(none/error)を
+    // e に束縛してrightを評価(errorを含むunionのフォールバックはこの束縛形が必須)
+    OrElse { left: Box<Expr>, right: Box<Expr>, binding: Option<String>, pos: Pos },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,7 +220,9 @@ impl Expr {
             | Expr::Recv { pos, .. }
             | Expr::Chan { pos, .. }
             | Expr::Spawn { pos, .. }
-            | Expr::Select { pos, .. } => *pos,
+            | Expr::Select { pos, .. }
+            | Expr::Prop { pos, .. }
+            | Expr::OrElse { pos, .. } => *pos,
         }
     }
 }

@@ -221,6 +221,19 @@
         `modules_demo`はimport/export)は引き続きスコープ外の構文で構文エラーになることを確認。
         配列型サフィックス(`chan<int>[]`)はarray型自体が未実装のためスコープ外のまま
         (TS版の対応するテストも見送った)
+  - [x] **parser移植(第五弾・error/json構造化エラー)** ✅ 2026-07-22実装(kanayamaと討議のうえ、
+        残り3候補〈import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から採用。
+        `errors.mesh`が新たに完全パースできるようになる)。`?`伝播式(`parse_postfix`。
+        直後が文字列リテラルなら文脈つき`f() ? "ctx"`)・`or`束縛形(`parse_binary`。
+        優先順位表に`Or => 1`を追加——TS版の`PRECEDENCE`表と同じく全演算子中最弱結合。
+        `name := ` の形が続けば束縛、なければ単純な既定値式)を追加。TS版(`parser.ts`)の
+        該当箇所をほぼ1:1移植するだけで、新しい設計判断は不要だった。`tests/parser.test.ts`
+        相当のテスト1件相当を4件に分けて移植+実例テスト1件(`errors.mesh`簡略版)を
+        新規作成(63→67件、全件パス)。`cargo clippy`クリーン。`examples/*.mesh`は9/11本が
+        完全パース成功(前弾の8本から+1、`errors.mesh`が想定通り通った)。残る2本(`maps`は
+        mapリテラル、`modules_demo`はimport/export)は引き続きスコープ外の構文で構文エラーに
+        なることを確認。`error struct X {...}`/`json struct X {...}`宣言マーカーは対象外の
+        まま(checkerが無いと`isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
