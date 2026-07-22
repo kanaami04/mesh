@@ -13,7 +13,7 @@
 
 use crate::ast::{
     Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, ImportDecl, InterpSegment, MatchArm, MatchPattern, Param,
-    Program, SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
+    Program, Receiver, SelectArm, Stmt, StructFieldNode, StructLitField, TypeDecl, TypeNode,
 };
 use crate::lexer::lex;
 use crate::token::{CompileError, Fix, Pos, Range, Token, TokenType};
@@ -434,11 +434,51 @@ impl Parser {
 
     fn parse_fn_decl(&mut self, exported: bool) -> Result<FnDecl, Box<CompileError>> {
         let start = self.expect(TokenType::Fn, "at start of function declaration")?;
+        // fn (u: User) describe() ... — 直後が'('ならメソッドのレシーバ節(Goスタイル)。
+        // 関数名は常にidentなので、'('との1トークン先読みで曖昧さなく判定できる
+        let receiver = if self.check(TokenType::LParen) { Some(self.parse_receiver()?) } else { None };
+        if exported && receiver.is_some() {
+            // メソッドの可視性はstructに従う(structが見える場所ならメソッドも呼べる)ので、
+            // 個別のexportは意味を持たない。書き方を1通りに保つため誘導エラーにする
+            return Err(self.error_at(
+                start.pos,
+                "methods are visible wherever their struct is — export the struct instead of the method",
+                "method-export-redundant",
+            ));
+        }
         let name = self.expect(TokenType::Ident, "as function name")?.value;
+        // fn first<T>(...) — メソッド(レシーバ付き)にはgenericsを許さない(v1はfn限定)
+        let type_params = if receiver.is_none() { self.parse_type_params()? } else { Vec::new() };
         let params = self.parse_params()?;
         let ret = self.parse_return_type()?;
         let body = self.parse_block()?;
-        Ok(FnDecl { name, params, ret, body, exported, pos: start.pos })
+        Ok(FnDecl { name, receiver, type_params, params, ret, body, exported, pos: start.pos })
+    }
+
+    // fn first<T>(...) / fn zip<A, B>(...) の <T, ...> 部分。無ければ空配列
+    fn parse_type_params(&mut self) -> Result<Vec<String>, Box<CompileError>> {
+        if !self.check(TokenType::Lt) {
+            return Ok(Vec::new());
+        }
+        self.next();
+        let mut names = Vec::new();
+        while !self.check(TokenType::Gt) {
+            names.push(self.expect(TokenType::Ident, "as type parameter name")?.value);
+            if !self.check(TokenType::Gt) {
+                self.expect(TokenType::Comma, "between type parameters")?;
+            }
+        }
+        self.expect(TokenType::Gt, "after type parameters")?;
+        Ok(names)
+    }
+
+    fn parse_receiver(&mut self) -> Result<Receiver, Box<CompileError>> {
+        self.expect(TokenType::LParen, "at start of method receiver")?;
+        let name_tok = self.expect(TokenType::Ident, "as receiver name")?;
+        self.expect(TokenType::Colon, "after receiver name")?;
+        let type_node = self.parse_type()?;
+        self.expect(TokenType::RParen, "after receiver type")?;
+        Ok(Receiver { name: name_tok.value, type_node, pos: name_tok.pos })
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, Box<CompileError>> {
@@ -1641,5 +1681,51 @@ mod tests {
         .unwrap();
         assert_eq!(program.imports[0].alias, "mathutil");
         assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
+    }
+
+    // ---- ジェネリクス・レシーバ ----
+
+    #[test]
+    fn ジェネリクス_fn_first_tの型パラメータをパースできる() {
+        let fn1 = &parse("fn first<T>(x: T) T { return x }").unwrap().fns[0];
+        assert_eq!(fn1.type_params, vec!["T"]);
+        assert!(matches!(&fn1.params[0].type_node, TypeNode::Name { name, .. } if name == "T"));
+
+        // 複数の型パラメータ
+        let fn2 = &parse("fn pair<A, B>(a: A, b: B) A { return a }").unwrap().fns[0];
+        assert_eq!(fn2.type_params, vec!["A", "B"]);
+
+        // <> 無しは空配列(通常の関数と同じ)
+        let fn3 = &parse("fn plain(x: int) int { return x }").unwrap().fns[0];
+        assert!(fn3.type_params.is_empty());
+    }
+
+    #[test]
+    fn レシーバ_fn_u_user_describe形式をパースできる() {
+        let program = parse("fn (u: User) describe() string { return u.name }").unwrap();
+        let f = &program.fns[0];
+        let receiver = f.receiver.as_ref().expect("expected a receiver");
+        assert_eq!(receiver.name, "u");
+        assert!(matches!(&receiver.type_node, TypeNode::Name { name, .. } if name == "User"));
+        assert_eq!(f.name, "describe");
+        assert!(f.type_params.is_empty());
+    }
+
+    #[test]
+    fn レシーバ付きメソッドのexportはstructをexportしろと誘導() {
+        let err = parse("export fn (u: User) describe() string { return u.name }").unwrap_err();
+        assert_eq!(err[0].code, "method-export-redundant");
+    }
+
+    #[test]
+    fn 実例相当_mathutil_point_meshのレシーバメソッド() {
+        let program = parse(
+            "export struct Point {\n\tx: int\n\ty: int\n}\n\n\
+             fn (p: Point) magnitudeSq() int {\n\treturn p.x * p.x + p.y * p.y\n}\n\n\
+             export fn origin() Point {\n\treturn Point{x: 0, y: 0}\n}",
+        )
+        .unwrap();
+        let method = program.fns.iter().find(|f| f.name == "magnitudeSq").unwrap();
+        assert_eq!(method.receiver.as_ref().unwrap().name, "p");
     }
 }

@@ -267,6 +267,27 @@
         byte-identicalに同じ2重エラーが出ることを確認**(`syncToTopLevel`の停止トークン集合・
         前進保証ロジックが完全に同一設計のため)。移植固有の退行ではなくTS版由来の忠実な挙動と
         判断し、修正は見送った(直すならTS版側から意図的に変える設計判断が別途必要)
+  - [x] **parser移植(第八弾・ジェネリクス+レシーバ)** ✅ 2026-07-22実装(kanayamaと討議のうえ、
+        最後に残っていた候補〈ジェネリクス+レシーバ〉を採用。これで4候補すべて実装完了)。
+        `fn first<T>(...)`(型パラメータ。トップレベル関数限定、`FnDecl.type_params`)・
+        `fn (u: User) describe() ...`(Goスタイルのメソッドレシーバ。`FnDecl.receiver`+新規
+        `Receiver`構造体)を追加。`export fn (u: User) ...`は`method-export-redundant`エラーに
+        誘導(メソッドの可視性はstructに従うため個別exportは無意味)。レシーバとgenericsは
+        併用不可(v1はfn限定。レシーバがあるとtype_paramsのパース自体をスキップする)。
+        型パラメータ(`T`)を型位置で使う場合も通常の型名(`TypeNode::Name`)と構文上見分かず、
+        レシーバのメソッド呼び出し(`obj.method(args)`)も通常のメンバーアクセス+呼び出しと
+        構文上見分かないため、どちらも追加の式構文なしで既に表現できていた——TS版
+        (`parser.ts`)の該当箇所をほぼ1:1移植するだけで、新しい設計判断は不要だった。
+        `tests/parser.test.ts`相当のテスト(TS版は配列型/map型/fn型を使っていたが未実装の
+        ためNameとunion型のみの簡略版に変更)+自作テスト(レシーバ・export誘導エラー・
+        実例テスト)を新規作成(72→76件、全件パス)。`cargo clippy`クリーン。
+        `examples/mathutil/point.mesh`(レシーバメソッド`fn (p: Point) magnitudeSq() int`を含む。
+        `examples/*.mesh`11本のカウントには入らないmathutil系ファイル)が完全パース成功したことを
+        確認。`examples/*.mesh`11本の集計自体は変化なし(残る`maps.mesh`はmapリテラルが原因で
+        ジェネリクスとは無関係)。**これでRust移植着手時に挙がった4候補
+        (並行処理/error・json構造化エラー/import・export/ジェネリクス+レシーバ)が全て完了**。
+        残るギャップは配列/mapリテラル・defer・添字アクセス・範囲for・error/jsonマーカーと、
+        checker/codegen自体の移植(現状はパーサのみ)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

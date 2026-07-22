@@ -1,19 +1,23 @@
 // AST(抽象構文木)= パースした結果の木構造。TS版(src/ast.ts、403行)からの移植だが、
 // 今回のPRではparser.ts全体(1217行)は移さず、意味のある実用サブセットだけに絞っている。
 //
-// **今回までのスコープ**: fn宣言(ジェネリクス・レシーバは次回)、トップレベル定数、
-// if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・複合代入・
-// インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
+// **今回までのスコープ**: fn宣言・**ジェネリクス(`fn first<T>(...)`。トップレベル関数限定)・
+// レシーバ(`fn (u: User) describe() ...`。Goスタイルのメソッド構文。generics併用は不可)**、
+// トップレベル定数、if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・
+// 複合代入・インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
 // struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
 // 文字列補間・並行処理(spawn/detach/wait/chan/select/send/recv)・
 // `or`束縛形・`?`伝播・型注釈つき変数宣言(`x: T = v`)・
-// **import(単一セグメントのみ)+パッケージ修飾structリテラル(`math.Point{...}`)**。
+// import(単一セグメントのみ)+パッケージ修飾structリテラル(`math.Point{...}`)。
 // パッケージ修飾型名(`math.User`)・パッケージ修飾呼び出し(`math.add(1, 2)`)は
 // メンバーアクセス/呼び出しの通常構文で既に表現できていたため、import自体を移植する前から
-// パースできていた(意味解決はchecker側の仕事)
-// **対象外(次回以降のPRで追加)**: ジェネリクス、
-// 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、defer、
-// 添字アクセス、範囲for、error/jsonマーカー(`error struct X {...}`等。
+// パースできていた(意味解決はchecker側の仕事)。型パラメータ(`T`)を型位置で使う場合も、
+// 通常の型名(`TypeNode::Name`)と構文上見分かず、レシーバのメソッド呼び出し
+// (`obj.method(args)`)も通常のメンバーアクセス+呼び出しと構文上見分かないため、
+// どちらも追加の構文なしで既に表現できる——意味解決(型パラメータかどうか・レシーバ経由の
+// メソッドかどうか)はchecker側の仕事
+// **対象外(次回以降のPRで追加)**: 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも
+// 含む)、defer、添字アクセス、範囲for、error/jsonマーカー(`error struct X {...}`等。
 // checkerが無いと`isError`フラグの使い道が無いためまだ意味がない)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
 // 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
@@ -103,10 +107,19 @@ pub struct TypeDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    pub receiver: Option<Receiver>, // fn (u: User) describe() ... — Goスタイルのメソッドレシーバ
+    pub type_params: Vec<String>, // fn first<T>(...) — トップレベル関数限定。無ければ空配列
     pub params: Vec<Param>,
     pub ret: Option<TypeNode>, // 戻り値なし = None
     pub body: Block,
     pub exported: bool,
+    pub pos: Pos,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Receiver {
+    pub name: String,
+    pub type_node: TypeNode, // v1はstruct型のみ(checkerが検証)
     pub pos: Pos,
 }
 
