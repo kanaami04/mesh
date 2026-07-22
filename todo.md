@@ -355,6 +355,58 @@
         `examples/*.mesh`11本+mathutil系2本は変化なく全て完全パース成功(どの例も無名関数を
         使っていないため)。**これでRust版パーサはTS版parser.ts(1217行)の全機能を
         カバーした**(対象外の構文が無い状態)。残るのはchecker/codegen自体の移植のみ
+  - [x] **checker(最小リゾルバ)+codegen移植(milestone 1・スカラーのMesh)** ✅ 2026-07-22実装
+        (kanayamaと討議のうえ、フルchecker〈約2900行〉を先に移植するのではなく、codegenが
+        必要とする最小限の型情報だけを解決する「最小リゾルバ」を先に作り、そのうえでcodegenに
+        進む方針を採用。方針決定の経緯・アーキテクチャ全体は承認済みの計画書を参照——概要は
+        本項目末尾に転記)。**目標達成**: `examples/hello.mesh`と`examples/fizzbuzz.mesh`を
+        Rust版で最後まで実行し、生成JSを`bun`で走らせてTS版(`bun run mesh run`)の標準出力と
+        完全一致することを確認した。
+        - `rust/src/types.rs`(新規): `src/types.ts`(246行)の型システム移植。自己参照型
+          (`struct Node { left: Node, ... }`・`json.Value`)は`Box<Type>`の所有権モデルでは
+          表現できないため、struct milestone(2以降)まで意図的に先送り(型ファイル冒頭に
+          理由を明記。伴ってTS版`typeEquals`の循環ガード`seen`も今回は不要)
+        - `rust/src/checker.rs`(新規): TS版`src/checker/`のフェーズ1〜2相当(宣言収集)+
+          フェーズ5の必要最小限(式推論)を移植した「最小リゾルバ」。**診断は一切出さない**
+          (パーサを通った時点で構文的に正しい前提。未解決の型は`Type::Any`へ最善努力で
+          フォールバックし、コンパイラ自体をpanicさせない)。
+        - `rust/src/codegen.rs`(新規): TS版`src/codegen.ts`(762行)のmilestone 1部分
+          (struct/map/channel/並行処理/エラー伝播/パッケージ抜きの「スカラーのMesh」)を移植。
+          対象外の構文(struct/map/channel/spawn/`?`/`or`/import等)は明確な
+          `Err("codegen: ... is not yet supported")`を返す——構文はパーサで既にパースできるが
+          コンパイラをクラッシュさせない、これまでと同じ設計哲学を踏襲。
+        - **Rust固有の設計判断(TS版からの意図的な逸脱)**: TS版は`expr.resolvedType = t`の
+          ようにASTノードへ直接書き込み、codegenが後から読む「checker→codegen 2パス+
+          共有ミュータブルAST」設計だが、Rustの`Expr`は不変構造体でこのパターンに向かない。
+          代わりに**resolverとcodegenを1回のトラバーサルに融合**した——codegenが式を生成する
+          直前に、その場で`checker::infer_expr`/`infer_binary`を呼んで必要な型情報だけを
+          得る。TS側が2パスに分けていたのは主に「型エラーを1回で全部集めて報告する」ため
+          (診断目的)だが、このリゾルバは診断を出さない設計なのでこの制約自体が無く、
+          融合して問題なかった。
+        - **PRELUDE(ランタイム)の扱いで見つかった実装上の落とし穴**: `src/runtime.ts`は
+          TSファイルであり、ランタイムJS本体を`export const PRELUDE = \`...\`;`という
+          テンプレートリテラルで包んでいる。`include_str!`で素朴にファイル全体を埋め込むと、
+          このTSの宣言構文(`export const PRELUDE = `や末尾の`;`)まで生成JSに混ざって
+          構文エラーになる実バグを実装中に発見——ファイル内でバッククォートが
+          開始・終了の2箇所にしか現れないこと(ランタイム本体は文字列連結のみで書かれ
+          テンプレートリテラルを使っていない)を確認したうえで、その2箇所の間だけを
+          `find`/`rfind`で切り出す方式で解決した。二重管理・意味のズレを避けるため、
+          今後もランタイム本体は`src/runtime.ts`側でのみ編集する
+        - **その他の設計判断**: 複合代入(`x += 1`)は代入先を`infer_binary`の左辺式として
+          そのまま渡し、int/float分類ロジック(`__idiv`/`__imod`/`__iarith`)をBinary式と
+          共有。トップレベル定数の型は「型注釈があればそちら、無ければ値から推論」
+          (TS版`checker/modules.ts`の`declared ?? valueType`と同じ優先順位)。
+          Cスタイルforのヘッダ変数(init/post)は`mutable`フラグを見ず常に`let`で出す
+          (TS版`genSimpleStmt`が`stmt.mutable`を無視して常に`let`を出すのと同じ挙動)。
+        - CLI: `cargo run -- file.mesh --emit-js`で生成JSを標準出力へ書き出すモードを追加
+          (`--emit-js`が無ければ従来通りASTダンプ)。
+        - テスト: types.rs 11件・checker.rs 11件・codegen.rs 16件を新規作成
+          (92→130件、全件パス)。`cargo clippy --all-targets -- -D warnings`クリーン。
+        - **milestone 1のスコープ外(意図的)**: struct/メソッド・map/配列・channel/並行処理・
+          `?`/`or`エラー伝播・import/export・パッケージ・ジェネリクス。パーサは全て
+          パースできるが、codegenはこれらに出会うと明確なエラーを返す。次のmilestone以降で
+          順に対応していく想定(struct/メソッド → error/json → 配列/map → 並行処理 →
+          モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
