@@ -6,10 +6,14 @@
 // インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
 // struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
 // 文字列補間・並行処理(spawn/detach/wait/chan/select/send/recv)・
-// **`or`束縛形・`?`伝播**。
+// `or`束縛形・`?`伝播・型注釈つき変数宣言(`x: T = v`)・
+// **import(単一セグメントのみ)+パッケージ修飾structリテラル(`math.Point{...}`)**。
+// パッケージ修飾型名(`math.User`)・パッケージ修飾呼び出し(`math.add(1, 2)`)は
+// メンバーアクセス/呼び出しの通常構文で既に表現できていたため、import自体を移植する前から
+// パースできていた(意味解決はchecker側の仕事)
 // **対象外(次回以降のPRで追加)**: ジェネリクス、
-// 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、import/export、defer、
-// 添字アクセス、範囲for、型注釈つき変数宣言、error/jsonマーカー(`error struct X {...}`等。
+// 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、defer、
+// 添字アクセス、範囲for、error/jsonマーカー(`error struct X {...}`等。
 // checkerが無いと`isError`フラグの使い道が無いためまだ意味がない)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
 // 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
@@ -63,9 +67,18 @@ pub struct Param {
 // ---- 宣言 ----
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub imports: Vec<ImportDecl>,
     pub fns: Vec<FnDecl>,
     pub consts: Vec<ConstDecl>,
     pub types: Vec<TypeDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    // import "math" — プロジェクトルート直下のディレクトリをパッケージとして取り込む
+    pub path: String,
+    pub alias: String, // 修飾に使う名前(= パスの最終セグメント。v1は単一セグメントのみ)
+    pub pos: Pos,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +119,8 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     ShortVarDecl { names: Vec<String>, values: Vec<Expr>, mutable: bool, pos: Pos },
+    // x: T = v  /  mut best: string | none = none
+    TypedVarDecl { name: String, type_node: TypeNode, value: Expr, mutable: bool, pos: Pos },
     Assign { targets: Vec<Expr>, values: Vec<Expr>, compound_op: Option<crate::token::TokenType>, pos: Pos },
     ExprStmt { expr: Expr, pos: Pos },
     Return { value: Option<Expr>, pos: Pos },
@@ -166,7 +181,7 @@ pub enum Expr {
     Unary { op: crate::token::TokenType, operand: Box<Expr>, pos: Pos }, // ! または -
     Call { callee: Box<Expr>, args: Vec<Expr>, pos: Pos },
     Member { target: Box<Expr>, name: String, pos: Pos }, // obj.name
-    StructLit { name: String, fields: Vec<StructLitField>, pos: Pos }, // User{name: "a"}(pkg修飾は次回)
+    StructLit { name: String, pkg: Option<String>, fields: Vec<StructLitField>, pos: Pos }, // User{name: "a"} / math.Point{x: 1, y: 2}(パッケージ修飾)
     Is { operand: Box<Expr>, target: TypeNode, pos: Pos }, // x is none / x is { kind: "ok" }
     Match { subject: Box<Expr>, arms: Vec<MatchArm>, pos: Pos },
     Recv { channel: Box<Expr>, pos: Pos }, // <-ch
