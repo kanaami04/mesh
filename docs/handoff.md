@@ -1,4 +1,4 @@
-# 引き継ぎ文書(2026-07-21時点)
+# 引き継ぎ文書(2026-07-22時点)
 
 > 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
 > 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
@@ -99,9 +99,9 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
 進め方はTS実装と同じくClaudeが実装+日本語で解説するスタイル(kanayamaと確認済み)。
 
 - **アーキテクチャ**: `rust/src/token.rs`(Pos/TokenType/Token/CompileError)・
-  `lexer.rs`・`ast.rs`・`parser.rs`。lib+binハイブリッドのCargoプロジェクト
-  (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
-  checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
+  `lexer.rs`・`ast.rs`・`parser.rs`・`types.rs`・`checker.rs`・`codegen.rs`。
+  lib+binハイブリッドのCargoプロジェクト(`cargo run -- file.mesh`でASTを表示、
+  `cargo run -- file.mesh --emit-js`で生成JSを標準出力へ書き出す)
 - **`parser.ts`(1217行)を全面移植完了(2026-07-22)**。詳細は todo.md の各マイルストーン
   項目が一次情報源(ここは要約のみ): lexer全体(`fffd0d9`)→ parser核サブセット→
   struct/type宣言+判別可能union+match/is式・文字列補間(+スタックオーバーフロー対策の
@@ -113,11 +113,28 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   milestone 10のスコープ調査で発覚した最後の1件。milestone 9の教訓を踏まえ実装直後に
   スタックオーバーフロー回帰テストを5回実行して安全マージンを確認済み)。
   いずれもTS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。
-  **対象外の構文は無い状態**。現在テスト92件、`cargo clippy --all-targets -- -D warnings` クリーン
-- **examples/\*.meshでの進捗確認**: **全13本(examples/*.mesh 11本 + mathutil系2本)が
+  **対象外の構文は無い状態**。parser自体のテストは92件
+- **examples/\*.meshでの進捗確認(パース)**: **全13本(examples/*.mesh 11本 + mathutil系2本)が
   完全にパース成功**(2026-07-22時点)
-- **次にやるなら**: parserは完了したので、**checker/codegenの移植**(`mesh run`相当を
-  目指す次の大きな段階)
+- **checker(最小リゾルバ)+codegen milestone 1 完了(2026-07-22、PR #16)**。フルchecker
+  (約2900行)ではなく、codegenが必要とする最小限の型情報だけを解決する「最小リゾルバ」
+  (`checker.rs`。診断は出さない)を先に作り、`types.rs`(型システム)+`codegen.rs`
+  (struct/map/channel/エラー伝播/パッケージ抜きの「スカラーのMesh」)とセットで移植した。
+  **`examples/hello.mesh`/`examples/fizzbuzz.mesh`をRust版で実行し、生成JSを`bun`で走らせて
+  TS版と標準出力が完全一致することを確認済み**——パーサのみだった今までと違い、
+  初めて「本当に動く」ところまで検証できた。設計判断の詳細はtodo.mdの当該項目が一次情報源
+  (ここは要約): (1) resolverとcodegenを1回のトラバーサルに融合(TS版の
+  ASTミュータブル書き込み方式はRustの不変`Expr`に向かないため)。(2) `src/runtime.ts`は
+  TSファイル(`export const PRELUDE = \`...\`;`というテンプレートリテラルでランタイムJSを
+  包んでいる)なので、`include_str!`でファイル全体を素朴に埋め込むとTSの宣言構文まで
+  生成JSに混入する実バグを発見・修正(バッククォート2箇所の間だけを切り出す方式)。
+  現在テスト130件(92 + types 11 + checker 11 + codegen 16)、
+  `cargo clippy --all-targets -- -D warnings` クリーン。
+  **スコープ外(milestone 2以降)**: struct/メソッド・配列/map・並行処理・`?`/`or`・
+  import/export・ジェネリクス——パーサは既にパースできるが、codegenは明確な
+  「まだ対応していません」エラーを返す
+- **次にやるなら**: milestone 2(struct/メソッド → error/json → 配列/map → 並行処理 →
+  モジュール、の順で`examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
@@ -143,6 +160,14 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   **milestone 11で実践**: 関数型注釈+無名関数式の追加時にこの教訓通り実装直後に同テストを
   5回連続実行し、クラッシュしないことを確認してから次に進んだ(今回は既存ヘルパーへの
   委譲のみで局所変数が少なく、別関数への切り出しは不要と判断)
+- **教訓(checker/codegen milestone 1で発覚)**: 他言語で書かれたファイルを`include_str!`で
+  「そのまま埋め込めば済む」と考えるのは危険——`src/runtime.ts`はTSファイルであり、
+  中身のランタイムJSはテンプレートリテラル文字列として包まれている。ファイル全体を
+  素朴に埋め込むとTSの宣言構文(`export const PRELUDE = \`...\`;`)まで生成JSに混ざり、
+  実行時に構文エラーになる。実装直後に実際に`bun`で生成JSを走らせて確認したことで
+  この場で発覚した——「コンパイルが通った」だけでは検知できないクラスの不具合なので、
+  今後もcodegen関連の変更は必ず生成JSを実行して確認すること(このmilestoneから
+  「本当に動く」ことの確認が可能になったので、以後のmilestoneでも同様に徹底する)
 - **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 
@@ -207,7 +232,10 @@ bun run mesh card                       # 言語カードを出力
 # Rust移植版(rust/) — 動かない場合はセットアップを docs/setup.md で確認
 mise run rust-test      # = cd rust && cargo test
 mise run rust-check     # = cd rust && cargo clippy --all-targets
-(cd rust && cargo run -- ../examples/hello.mesh)   # トークン/AST疎通確認CLI
+(cd rust && cargo run -- ../examples/hello.mesh)              # AST疎通確認CLI
+(cd rust && cargo run -- ../examples/hello.mesh --emit-js)    # 生成JSを標準出力へ(milestone 1の
+                                                               # スカラーサブセットのみ。struct/map/
+                                                               # channel等は「未対応」エラーになる)
 ```
 
 ## 用語集(初見だと分かりにくい決定)

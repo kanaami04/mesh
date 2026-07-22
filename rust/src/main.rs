@@ -1,6 +1,7 @@
-// v1マイルストーン: lexer+parser(実用サブセット)の疎通確認CLI。
-// checker/codegenを移植したら`mesh run`/`build`/`check`相当に育てていく
-// (今はパース結果のASTを整形表示するだけ)。
+// v1マイルストーン: lexer+parser+codegen(milestone 1のスカラーサブセット)の疎通確認CLI。
+// checker/codegenがさらに育ったら`mesh run`/`build`/`check`相当に育てていく
+// (`--emit-js`が無ければ、今まで通りパース結果のASTを整形表示するだけ)。
+use mesh::codegen;
 use mesh::parser::parse;
 use std::env;
 use std::fs;
@@ -9,9 +10,10 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let Some(path) = args.get(1) else {
-        eprintln!("usage: mesh <file.mesh>");
+        eprintln!("usage: mesh <file.mesh> [--emit-js]");
         return ExitCode::FAILURE;
     };
+    let emit_js = args.get(2).map(|a| a == "--emit-js").unwrap_or(false);
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -21,8 +23,21 @@ fn main() -> ExitCode {
     };
     match parse(&source) {
         Ok(program) => {
-            println!("{program:#?}");
-            ExitCode::SUCCESS
+            if emit_js {
+                match codegen::generate(&program, path) {
+                    Ok(js) => {
+                        print!("{js}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                println!("{program:#?}");
+                ExitCode::SUCCESS
+            }
         }
         Err(errors) => {
             for e in &errors {
