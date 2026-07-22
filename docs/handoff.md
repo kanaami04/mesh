@@ -102,47 +102,34 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `lexer.rs`・`ast.rs`・`parser.rs`。lib+binハイブリッドのCargoプロジェクト
   (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
   checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
-- **進捗(古い順。番号ではなくSHAで示す — 下記「PR番号について」参照)**:
-  `fffd0d9` lexer全体(TS 393行→Rust、テスト15件)・
-  `3ac059a` parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
-  エラー復帰の枠組みをフル移植)・`207802e` struct/type宣言+判別可能union+match/is式・
-  文字列補間(`Expr::Interp`/`InterpSegment`。lexer側の分解は既に済んでいたので
-  parser側の組み込みのみ)・`f91b49c` 深いネスト補間による本物のスタックオーバーフロー
-  (プロセスクラッシュ)を`interp_depth`カウンタ(上限64)で防ぐ(code reviewの指摘対応。
-  TS版は同じ再帰設計だがJSのスタック超過は捕捉可能な例外なのに対し、Rustのそれは
-  捕捉不能なプロセス強制終了なので、移植によって深刻度が格上げされていた)・
-  補間式の余った1トークンが「補間つき文字列自身」だと`unexpected ''`という空の
-  エラーになっていたのを`describe_token`ヘルパー(EOFは"end of file"・`value`が
-  空のトークンは種別名にフォールバック)に統一して修正(同じくcode reviewの指摘対応)・
-  そのPR(#6)のcode reviewで残っていた2点(値に`'`を含むと表示が壊れる/空文字列リテラルが
-  種別名にフォールバックしてしまう)も追って修正、`describe_token`の判定を`value.is_empty()`
-  から`parts.is_some()`に変更。テスト51件・`cargo clippy --all-targets -- -D warnings` クリーン・
-  並行処理(`chan<T>`型・`spawn`/`detach`/`wait`/`send`/`recv`/`select`式)を追加
-  (4候補〈並行処理/import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から、
-  READMEの一番最初のサンプルがこの機能であることを理由にkanayamaと討議のうえ採用)。
-  TS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。テスト63件・
-  `cargo clippy --all-targets -- -D warnings` クリーン・`?`伝播式・`or`束縛形を追加
-  (残り3候補〈import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から採用。
-  優先順位表に`Or => 1`を追加——全演算子中最弱結合はTS版の`PRECEDENCE`表と同じ)。
-  これもTS版をほぼ1:1移植するだけで新しい設計判断は不要だった。テスト67件・
-  `cargo clippy --all-targets -- -D warnings` クリーン・`import "path"`宣言を追加
-  (残り2候補〈import・export/ジェネリクス+レシーバ〉の中から採用。`export`修飾自体は
-  fn/struct/type/トップレベル定数の`exported`フィールドとして以前のマイルストーンから
-  既に実装済みだったと判明——`import/export`という名前だが実質importのみが新規)。
-  実例(`modules_demo.mesh`)を最後まで組んでみて判明した2つの小さな見落としも同じPRで追加:
-  パッケージ修飾structリテラル(`math.Point{x: 1, y: 2}`)と型注釈つき変数宣言
-  (`x: T = v`)。現在テスト73件、`cargo clippy --all-targets -- -D warnings` クリーン
-- **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・`error struct`/`json struct`宣言
-  マーカー(checkerが無いと`isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・
-  配列/mapリテラル(型位置の配列サフィックス`chan<int>[]`等も含む)。
+- **進捗概要(詳細は todo.md の各マイルストーン項目が一次情報源。ここは要約のみ)**:
+  lexer全体(`fffd0d9`、テスト15件)→ parser核サブセット(fn宣言・if/for・変数宣言・
+  二項演算子・関数呼び出し、エラー復帰の枠組み)→ struct/type宣言+判別可能union+match/is式・
+  文字列補間 → 文字列補間まわりのcode review指摘3件(スタックオーバーフロー対策の
+  `interp_depth`カウンタ・エラーメッセージの`describe_token`統一・引用符エスケープ等。
+  PR #5〜#7)。ここまでで**着手当初に挙がった4候補が全て完了**:
+  並行処理(`chan<T>`型・`spawn`/`detach`/`wait`/`send`/`recv`/`select`式。PR #8)→
+  error/json構造化エラー(`?`伝播式・`or`束縛形。PR #9)→
+  import/export(`import "path"`宣言。`export`修飾自体は以前から実装済みと判明。実例を
+  最後まで組んで見つかったパッケージ修飾structリテラル・型注釈つき変数宣言も同PRで追加。
+  PR #10)→ ジェネリクス+レシーバ(`fn first<T>(...)`型パラメータ・
+  `fn (u: User) describe() ...`Goスタイルレシーバ。`export fn (u: T) ...`は
+  `method-export-redundant`エラーに誘導。レシーバとgenericsは併用不可)。
+  いずれもTS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。
+  現在テスト76件、`cargo clippy --all-targets -- -D warnings` クリーン
+- **対象外(未着手)**: `error struct`/`json struct`宣言マーカー(checkerが無いと
+  `isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・配列/mapリテラル
+  (型位置の配列サフィックス`chan<int>[]`等も含む)・defer・添字アクセス・範囲for。
   対象外の構文は誠実に構文エラーで失敗する(クラッシュしない)よう作ってある
 - **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち10本
   (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`・`discriminated_union.mesh`・
   `users.mesh`・`channel_spec.mesh`・`channels.mesh`・`errors.mesh`・`modules_demo.mesh`)が
-  完全にパース成功。残る1本(`maps.mesh`)はmapリテラルが未実装のため構文エラーになる
-- **次にやるなら**: ジェネリクス+レシーバ(残っている非対応候補はこれのみ。他はmapリテラル等
-  細部を残すのみで、todo.mdに書いていないだけでまだ相当量残っている——parser.ts全体は1217行、
-  現状のRust版はその7割強程度)
+  完全にパース成功。残る1本(`maps.mesh`)はmapリテラルが未実装のため構文エラーになる。
+  mathutil系2本(`ops.mesh`・`point.mesh`。レシーバメソッド`fn (p: Point) magnitudeSq() int`
+  を含む)も完全パース成功
+- **次にやるなら**: 着手当初の4候補は全て完了したので、残るのは細部(配列/mapリテラル・
+  defer・添字アクセス・範囲for・error/jsonマーカー)を埋めるか、**checker/codegenの移植に
+  進むか**の判断(パーサはparser.ts全体1217行の8割弱程度まで到達)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
