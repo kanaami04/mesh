@@ -116,19 +116,24 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   空のトークンは種別名にフォールバック)に統一して修正(同じくcode reviewの指摘対応)・
   そのPR(#6)のcode reviewで残っていた2点(値に`'`を含むと表示が壊れる/空文字列リテラルが
   種別名にフォールバックしてしまう)も追って修正、`describe_token`の判定を`value.is_empty()`
-  から`parts.is_some()`に変更。現在テスト51件、`cargo clippy --all-targets -- -D warnings` クリーン
+  から`parts.is_some()`に変更。テスト51件・`cargo clippy --all-targets -- -D warnings` クリーン・
+  並行処理(`chan<T>`型・`spawn`/`detach`/`wait`/`send`/`recv`/`select`式)を追加
+  (4候補〈並行処理/import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から、
+  READMEの一番最初のサンプルがこの機能であることを理由にkanayamaと討議のうえ採用)。
+  TS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。現在テスト63件、
+  `cargo clippy --all-targets -- -D warnings` クリーン
 - **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
-  無いと構造化エラーの旨みが薄いためセット予定)・spawn/wait/chan/select・
-  配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
+  無いと構造化エラーの旨みが薄いためセット予定)・配列/mapリテラル(型位置の配列サフィックス
+  `chan<int>[]`等も含む)・import/export。対象外の構文は誠実に構文エラーで
   失敗する(クラッシュしない)よう作ってある
-- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち6本
+- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち8本
   (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`・`discriminated_union.mesh`・
-  `users.mesh`)が完全にパース成功。残る5本はスコープ外の構文で構文エラーになる
-  (`channel_spec.mesh`/`channels.mesh`はchan型、`errors.mesh`は`or`束縛形、
-  `maps.mesh`はmapリテラル、`modules_demo.mesh`はimport/export)
-- **次にやるなら**: spawn/wait/chan/select、import/export、ジェネリクス、
-  error/json構造化エラー(`?`/`or`)のどれか(todo.mdに書いていないだけでまだ
-  相当量残っている——parser.ts全体は1217行、現状のRust版はその半分強程度)
+  `users.mesh`・`channel_spec.mesh`・`channels.mesh`)が完全にパース成功。残る3本は
+  スコープ外の構文で構文エラーになる(`errors.mesh`は`or`束縛形、`maps.mesh`はmapリテラル、
+  `modules_demo.mesh`はimport/export)
+- **次にやるなら**: import/export、ジェネリクス+レシーバ、error/json構造化エラー(`?`/`or`)の
+  どれか(todo.mdに書いていないだけでまだ相当量残っている——parser.ts全体は1217行、
+  現状のRust版はその6割強程度)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

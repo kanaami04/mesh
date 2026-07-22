@@ -205,6 +205,22 @@
         `'eof'`)から外れて両方"end of file"に統一された点も指摘されたが、動作影響なしかつ
         新しい統一挙動を前提にテストが書かれているため、意図的な簡略化として現状維持を選択
         (直さなかった)。テストは49→51件
+  - [x] **parser移植(第四弾・並行処理)** ✅ 2026-07-22実装(kanayamaと討議のうえ、
+        4候補〈並行処理/import・export/ジェネリクス+レシーバ/error・json構造化エラー〉の中から
+        並行処理を採用——READMEの一番最初のサンプルがこの機能で、Meshの看板そのものなため)。
+        `chan<T>`型(`parse_type_atom`)・`spawn`/`detach`式(`parse_unary`。2段スコープ設計は
+        TS版のコメントをそのまま踏襲)・`wait`文(`parse_statement`)・`send`文`ch <- v`
+        (`parse_simple_stmt`)・`recv`式`<-ch`(`parse_unary`)・`select`式(`parse_primary`。
+        アーム`name := <-ch => body`+ default `_ => body`は最大1つ)・`chan<T>(capacity)`生成式
+        (`parse_primary`。F-11: 容量は`none`か整数式で常に明示必須、省略はエラー)を追加。
+        TS版(`parser.ts`)の該当箇所をほぼ1:1移植するだけで、新しい設計判断は不要だった。
+        `tests/parser.test.ts`相当のテスト10件+実例テスト2件(chan型のfnシグネチャ利用・
+        `examples/channels.mesh`簡略版)を新規作成(51→63件、全件パス)。`cargo clippy`クリーン。
+        `examples/*.mesh`は8/11本が完全パース成功(前弾の6本から+2、`channel_spec.mesh`/
+        `channels.mesh`が想定通り通った)。残る3本(`errors`は`or`束縛形、`maps`はmapリテラル、
+        `modules_demo`はimport/export)は引き続きスコープ外の構文で構文エラーになることを確認。
+        配列型サフィックス(`chan<int>[]`)はarray型自体が未実装のためスコープ外のまま
+        (TS版の対応するテストも見送った)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

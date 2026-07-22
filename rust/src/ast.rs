@@ -4,11 +4,11 @@
 // **今回までのスコープ**: fn宣言(ジェネリクス・レシーバは次回)、トップレベル定数、
 // if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・複合代入・
 // インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
-// **struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
-// 文字列補間**。
+// struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
+// 文字列補間・**並行処理(spawn/detach/wait/chan/select/send/recv)**。
 // **対象外(次回以降のPRで追加)**: ジェネリクス、`or`束縛形・`?`伝播、
-// spawn/wait/chan/select、配列/mapリテラル、import/export、defer、
-// 添字アクセス、範囲for、send文、型注釈つき変数宣言、error/jsonマーカー
+// 配列/mapリテラル(型位置のchan<T>[]等の配列サフィックスも含む)、import/export、defer、
+// 添字アクセス、範囲for、型注釈つき変数宣言、error/jsonマーカー
 // (`?`/`or`が無いと構造化エラーの旨みが薄いため、それらとセットで後回し)。
 // これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
 // 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
@@ -20,7 +20,7 @@
 use crate::token::Pos;
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
-// TS版の8種のうち、今回はname/union/structType/literalの4つ(array/chan/mapType/fnTypeは
+// TS版の8種のうち、今回はname/union/structType/literal/chanの5つ(array/mapType/fnTypeは
 // 次回以降)。inline structType(判別可能unionのメンバー)もこの一種として表す。
 // literalは判別可能unionのタグ(`{ kind: "ok" }`の"ok"部分)に必須なため、
 // struct/union対応と同時に追加した(当初の見積もりで見落としていた)
@@ -30,6 +30,7 @@ pub enum TypeNode {
     Literal { value: String, pos: Pos },                  // "active" — 文字列リテラル型
     Union { members: Vec<TypeNode>, pos: Pos },           // int | error
     StructType { fields: Vec<StructFieldNode>, pos: Pos }, // struct宣言の中身 / union内の無名{...}
+    Chan { elem: Box<TypeNode>, pos: Pos },               // chan<int>
 }
 
 impl TypeNode {
@@ -38,7 +39,8 @@ impl TypeNode {
             TypeNode::Name { pos, .. }
             | TypeNode::Literal { pos, .. }
             | TypeNode::Union { pos, .. }
-            | TypeNode::StructType { pos, .. } => *pos,
+            | TypeNode::StructType { pos, .. }
+            | TypeNode::Chan { pos, .. } => *pos,
         }
     }
 }
@@ -111,6 +113,8 @@ pub enum Stmt {
     IncDec { target: Expr, op: crate::token::TokenType, pos: Pos }, // PlusPlus / MinusMinus
     Break { pos: Pos },
     Continue { pos: Pos },
+    Wait { body: Block, pos: Pos }, // wait { spawn f()  spawn g() } — 中で起動したタスクを全部待つ
+    Send { channel: Expr, value: Expr, pos: Pos }, // ch <- v
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +168,20 @@ pub enum Expr {
     StructLit { name: String, fields: Vec<StructLitField>, pos: Pos }, // User{name: "a"}(pkg修飾は次回)
     Is { operand: Box<Expr>, target: TypeNode, pos: Pos }, // x is none / x is { kind: "ok" }
     Match { subject: Box<Expr>, arms: Vec<MatchArm>, pos: Pos },
+    Recv { channel: Box<Expr>, pos: Pos }, // <-ch
+    Chan { elem: TypeNode, capacity: Box<Expr>, pos: Pos }, // chan<int>(none) / chan<int>(n)
+    // task := spawn f(x) — 並行起動して結果の受取口(chan<T>)を返す。2段スコープ設計:
+    // spawn=今の関数が所有(関数を抜けるとき暗黙に待たれる)/ detach=プログラムが所有(待たずに戻れる)
+    Spawn { call: Box<Expr>, detached: bool, pos: Pos },
+    Select { arms: Vec<SelectArm>, default_arm: Option<Box<Expr>>, pos: Pos }, // select { v := <-ch => ...  _ => ... }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectArm {
+    pub name: String, // 受信した値(T | closed)を束縛する名前。アームのbodyスコープ内だけで有効
+    pub channel: Expr,
+    pub body: Expr,
+    pub pos: Pos,
 }
 
 // 文字列補間の部品。TS版のInterpSegmentと同じ形(text部品はそのまま、expr部品は
@@ -191,7 +209,11 @@ impl Expr {
             | Expr::Member { pos, .. }
             | Expr::StructLit { pos, .. }
             | Expr::Is { pos, .. }
-            | Expr::Match { pos, .. } => *pos,
+            | Expr::Match { pos, .. }
+            | Expr::Recv { pos, .. }
+            | Expr::Chan { pos, .. }
+            | Expr::Spawn { pos, .. }
+            | Expr::Select { pos, .. } => *pos,
         }
     }
 }
