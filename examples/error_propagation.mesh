@@ -1,0 +1,70 @@
+// `?`・`or`・error struct — union路線のエラーハンドリングをmilestone 3のスコープ内で
+// 一巡する。判別可能union/`match`/`is`はまだ対象外のため使わない
+
+error struct NotFound {
+	message: string
+}
+
+fn divide(a: int, b: int) int | error {
+	if b == 0 {
+		return error("division by zero")
+	}
+	return a / b
+}
+
+fn lookup(id: int) int | none {
+	if id == 1 {
+		return 42
+	}
+	return none
+}
+
+fn find(id: int) int | NotFound {
+	if id == 1 {
+		return 100
+	}
+	return NotFound{message: "no user with id ${id}"}
+}
+
+// bareの`?`(int | errorへ)
+fn compute(a: int, b: int) int | error {
+	x := divide(a, b)?
+	return x + 1
+}
+
+// context付きの`?`(int | errorへ。構造化errorではないので使える)
+fn computeWithContext(a: int, b: int) int | error {
+	x := divide(a, b) ? "compute failed"
+	return x + 1
+}
+
+// error structへのbareな`?`
+fn useIt(id: int) string | NotFound {
+	v := find(id)?
+	return "found user ${v}"
+}
+
+fn main() {
+	// or: 裸形式は T | none にだけ許される
+	a := lookup(1) or 0
+	print(a)
+	b := lookup(2) or 0
+	print(b)
+
+	// or _ => ...: 失敗値を捨てる
+	c := compute(10, 2) or _ => -1
+	print(c)
+	d := compute(10, 0) or _ => -1
+	print(d)
+
+	e1 := computeWithContext(10, 2) or e => -1
+	print(e1)
+	e2 := computeWithContext(10, 0) or e => -1
+	print(e2)
+
+	// error structへの束縛は宣言済みフィールドを読める
+	f1 := useIt(1) or e => e.message
+	print(f1)
+	f2 := useIt(2) or e => e.message
+	print(f2)
+}

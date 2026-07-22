@@ -153,7 +153,12 @@ pub fn resolve_return_type(ctx: &CheckerCtx, ret: &Option<TypeNode>) -> Type {
 // DFSサイクル検出を挟み、循環があれば明確なErrを返す(codegenの「まだ対応していません」と
 // 同じ精神——診断ではなく、対応していない構造を正直に伝える)
 pub fn resolve_struct_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<(), String> {
-    let struct_decls: Vec<&TypeDecl> = types.iter().filter(|t| !t.is_error && !t.is_json && matches!(t.node, TypeNode::StructType { .. })).collect();
+    // code review(milestone 3で発覚): 以前は`!t.is_error`も条件に含めていたため、
+    // `error struct X {...}`宣言がここで丸ごと無視され、is_error_typeタグが一切効かない
+    // バグになっていた。error structもここで解決し(下のstruct構築コードが既に
+    // `is_error_type: decl.is_error`を渡しているので、それ以外の変更は不要)、
+    // json structだけを引き続き対象外にする(decode<X>自動生成はモジュールmilestoneまで先送り)
+    let struct_decls: Vec<&TypeDecl> = types.iter().filter(|t| !t.is_json && matches!(t.node, TypeNode::StructType { .. })).collect();
     let names: HashSet<&str> = struct_decls.iter().map(|t| t.name.as_str()).collect();
 
     if let Some(cycle_name) = find_struct_cycle(&struct_decls, &names) {
@@ -268,10 +273,51 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
             Type::Struct { fields, .. } => fields.into_iter().find(|f| &f.name == name).map(|f| f.type_).unwrap_or(ANY),
             _ => ANY,
         },
-        // M2未対応の式(map/channel/error伝播等)はANYへ最善努力でフォールバックする。
+        // `?`/`or`はどちらも「失敗メンバーを取り除いた残り」が結果の型になる(TS版と同じ式。
+        // contextやright/bindingの中身は結果型に影響しない)
+        Expr::Prop { operand, .. } => types::union_without(infer_expr(ctx, operand), is_failure_type),
+        Expr::OrElse { left, .. } => types::union_without(infer_expr(ctx, left), is_failure_type),
+        // M3未対応の式(map/channel/並行処理等)はANYへ最善努力でフォールバックする。
         // codegen側がこれらの構文自体を「まだ対応していません」と明確なエラーにするので、
         // ここで型を誤魔化しても実害は無い
         _ => ANY,
+    }
+}
+
+// 「失敗」メンバーか(none/errorに加えて、error type/error structでタグ付けされたstructも
+// 含める)。TS版`checker/types-resolve.ts`のisFailureTypeを移植——types.rsのis_failureは
+// none/errorのみを見るプリミティブな判定なので、structのタグまで見る拡張はここに置く
+pub fn is_failure_type(t: &Type) -> bool {
+    types::is_failure(t) || matches!(t, Type::Struct { is_error_type: true, .. })
+}
+
+// `f() or e => fallback`のeの型。TS版expressions.tsのorElse検査を忠実に移植:
+// **unionでない被演算子は無条件でANYになる**(TS版の実際の挙動——bareの失敗型はそもそも
+// 「or-never-fails」等の診断で弾かれる想定のため、union以外のケースをわざわざ賢く
+// 扱う実装にはなっていない。診断を出さないRust版でこの経路に来た場合も同じ挙動にする)
+pub fn or_binding_type(t: &Type) -> Type {
+    match t {
+        Type::Union { members, .. } => {
+            let failures: Vec<Type> = members.iter().filter(|m| is_failure_type(m)).cloned().collect();
+            if failures.is_empty() { ANY } else { types::union_of(failures) }
+        }
+        _ => ANY,
+    }
+}
+
+// codegen側だけで使う安全ガード用: 構造化error(error type/error structでタグ付けされた
+// struct)がtの中に(unionの中も含めて再帰的に)含まれるか。TS版の対応する診断
+// (prop-context-structured-error)はunion内のケースしか見ないが、こちらは意図的に
+// それより広く——bare(union化されていない)構造化errorも拾う。理由: ランタイムの
+// `__propCtx`は`null`/`instanceof Error`しか特別扱いせず、`__ERR`タグ付きの構造化errorは
+// 素通りして「成功扱い」になってしまう(runtime.ts参照)。TS版はこの組み合わせ自体を
+// 型検査の時点で弾くので実害が無いが、診断を出さないこのリゾルバではここで拾わないと
+// 実行時に静かに壊れた挙動になる
+pub fn has_structured_failure(t: &Type) -> bool {
+    match t {
+        Type::Union { members, .. } => members.iter().any(has_structured_failure),
+        Type::Struct { is_error_type: true, .. } => true,
+        _ => false,
     }
 }
 
@@ -558,5 +604,81 @@ mod tests {
         let recv = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
         let call = Expr::Member { target: Box::new(recv), name: "describe".into(), pos: pos() };
         assert!(types::type_equals(&infer_call(&ctx, &call), &STRING));
+    }
+
+    fn error_struct_decl(name: &str, fields: &[(&str, TypeNode)]) -> TypeDecl {
+        let mut decl = struct_decl(name, fields);
+        decl.is_error = true;
+        decl
+    }
+
+    #[test]
+    fn is_failure_typeはnone_error_タグ付きstructでtrue() {
+        let tagged = Type::Struct { name: "NotFound".into(), fields: vec![], is_error_type: true };
+        let plain = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        assert!(is_failure_type(&NONE));
+        assert!(is_failure_type(&ERROR));
+        assert!(is_failure_type(&tagged));
+        assert!(!is_failure_type(&plain));
+        assert!(!is_failure_type(&INT));
+    }
+
+    #[test]
+    fn resolve_struct_declsはerror_structをis_error_typeとして解決する() {
+        // code review(milestone 3で発覚): 以前はerror struct宣言自体が無視されていたバグ
+        let types = vec![error_struct_decl("NotFound", &[("message", name_type("string"))])];
+        let mut ctx = CheckerCtx::new();
+        resolve_struct_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Struct { is_error_type, .. }) = ctx.lookup_struct("NotFound") else { panic!("expected struct") };
+        assert!(*is_error_type);
+    }
+
+    #[test]
+    fn infer_exprのprop_orelseはerror_struct込みのunionでも成功メンバーだけを返す() {
+        let types = vec![error_struct_decl("NotFound", &[])];
+        let mut ctx = CheckerCtx::new();
+        resolve_struct_decls(&mut ctx, &types).unwrap();
+        let not_found = ctx.lookup_struct("NotFound").unwrap().clone();
+
+        let plain_union = types::union_of(vec![INT, ERROR]);
+        let struct_union = types::union_of(vec![INT, not_found.clone()]);
+        let make_ident = |ty: Type| {
+            let mut c = CheckerCtx::new();
+            c.declare("x", ty);
+            (c, Expr::Ident { name: "x".into(), pos: pos() })
+        };
+
+        let (c1, x1) = make_ident(plain_union);
+        let prop = Expr::Prop { operand: Box::new(x1.clone()), context: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&c1, &prop), &INT));
+        let or_else = Expr::OrElse { left: Box::new(x1), right: Box::new(int_lit("0")), binding: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&c1, &or_else), &INT));
+
+        let (c2, x2) = make_ident(struct_union);
+        let prop2 = Expr::Prop { operand: Box::new(x2), context: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&c2, &prop2), &INT));
+    }
+
+    #[test]
+    fn or_binding_typeはunion内の失敗メンバーを返しunion以外は常にany() {
+        let with_error = types::union_of(vec![INT, ERROR]);
+        assert!(types::type_equals(&or_binding_type(&with_error), &ERROR));
+        let no_failure = types::union_of(vec![INT, STRING]);
+        assert!(matches!(or_binding_type(&no_failure), Type::Any));
+        // TS版の実際の挙動を忠実に踏襲: unionでない被演算子は常にANY(bareのERRORでも)
+        assert!(matches!(or_binding_type(&ERROR), Type::Any));
+    }
+
+    #[test]
+    fn has_structured_failureはstructのerrorタグを再帰的に検出する() {
+        let tagged = Type::Struct { name: "NotFound".into(), fields: vec![], is_error_type: true };
+        assert!(has_structured_failure(&tagged));
+        assert!(has_structured_failure(&types::union_of(vec![INT, tagged.clone()])));
+        // union_ofは平坦化するため、genuinely入れ子のUnionを直接組んで再帰を検証する
+        let inner = Type::Union { members: vec![INT, tagged], discriminant_tag: None };
+        let nested = Type::Union { members: vec![STRING, inner], discriminant_tag: None };
+        assert!(has_structured_failure(&nested));
+        assert!(!has_structured_failure(&types::union_of(vec![INT, ERROR])));
+        assert!(!has_structured_failure(&types::union_of(vec![INT, NONE])));
     }
 }

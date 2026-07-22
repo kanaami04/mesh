@@ -43,11 +43,15 @@ struct Codegen {
     indent: usize,
     file: String,
     ctx: CheckerCtx,
+    // 今生成中の関数本体のどこかで`?`が使われたか(関数ごとにgen_fn_declでリセットする。
+    // TS版のpropStackに相当——Expr::FnExprは未対応なので関数本体生成はネストせず、
+    // スタックではなく単一のフラグで足りる)
+    prop_used: bool,
 }
 
 impl Codegen {
     fn new(file: &str) -> Self {
-        Codegen { out: Vec::new(), indent: 0, file: file.to_string(), ctx: CheckerCtx::new() }
+        Codegen { out: Vec::new(), indent: 0, file: file.to_string(), ctx: CheckerCtx::new(), prop_used: false }
     }
 
     fn emit(&mut self, line: impl Into<String>) {
@@ -63,11 +67,12 @@ impl Codegen {
         if !program.imports.is_empty() {
             return Err("codegen: import/export are not yet supported (milestone 1 is single-file only)".to_string());
         }
-        // struct宣言のみ対応。error/jsonマーカー付き・判別可能union等の非struct型宣言は
-        // まだ対象外(次のmilestone以降)
+        // plain struct宣言 + error struct宣言(milestone 3で対応)まで。json struct
+        // (decode<X>自動生成はモジュールmilestoneまで先送り)・判別可能union/`type X = A | B`
+        // (nodeがUnionなのでこの下のStructTypeチェックに自動的に引っかかる)はまだ対象外
         for t in &program.types {
-            if t.is_error || t.is_json {
-                return Err(format!("codegen: error/json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+            if t.is_json {
+                return Err(format!("codegen: json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
             }
             if !matches!(t.node, TypeNode::StructType { .. }) {
                 return Err(format!("codegen: only plain struct declarations are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
@@ -144,22 +149,53 @@ impl Codegen {
         for p in &fn_decl.params {
             self.ctx.declare(&p.name, checker::resolve_type_node(&self.ctx, &p.type_node));
         }
+
+        // `?`が本体のどこかに現れたかどうかは生成してみるまで分からない(if/forの中に
+        // ネストしていてもよい)ので、本体をいったん別バッファに生成してから、
+        // try/catchで包むかどうかを事後に決める(TS版genFnBodyのpropStackと同じ設計。
+        // Rustでは所有権の都合上mem::take/replaceで代用する)。Expr::FnExprはcodegenが
+        // まだ対応していないため関数本体の生成がネストすることは無く、
+        // このフラグは関数1つぶんで使い切り(TS版のようなスタックは不要)
+        self.prop_used = false;
+        let saved_out = std::mem::take(&mut self.out);
         self.indent += 1;
-        for stmt in &fn_decl.body.stmts {
-            self.gen_stmt(stmt)?;
+        let body_result = self.gen_stmts(&fn_decl.body.stmts);
+        // indentはまだ+1のまま——try/catchの枠自体もこの深さ(関数の中、本体と同じ階層)に出す
+        let body_lines = std::mem::replace(&mut self.out, saved_out);
+        let used_prop = self.prop_used;
+        self.ctx.pop_scope();
+
+        if used_prop {
+            self.emit("try {");
+            for line in &body_lines {
+                self.out.push(format!("  {line}")); // 本体行(indent+1で生成済み)をさらに1段深くする
+            }
+            self.emit("} catch (e) {");
+            self.indent += 1;
+            self.emit("if (e instanceof __Propagate) return e.value;");
+            self.emit("throw e;");
+            self.indent -= 1;
+            self.emit("}");
+        } else {
+            self.out.extend(body_lines);
         }
         self.indent -= 1;
-        self.ctx.pop_scope();
+        body_result?;
         self.emit("}");
+        Ok(())
+    }
+
+    fn gen_stmts(&mut self, stmts: &[Stmt]) -> CodegenResult<()> {
+        for stmt in stmts {
+            self.gen_stmt(stmt)?;
+        }
         Ok(())
     }
 
     fn gen_block(&mut self, block: &Block) -> CodegenResult<()> {
         self.ctx.push_scope();
         self.indent += 1;
-        for stmt in &block.stmts {
-            self.gen_stmt(stmt)?;
-        }
+        self.gen_stmts(&block.stmts)?;
         self.indent -= 1;
         self.ctx.pop_scope();
         Ok(())
@@ -420,9 +456,10 @@ impl Codegen {
                 Ok(format!("{}.{name}", self.gen_expr(target)?))
             }
             // 生成JSにはstruct名自体は現れない(TS版と同じ、プレーンなobject literal)。
-            // error/jsonマーカー付きstructはgenerate_allで弾いてあるので、__errTagは
-            // 次のmilestone(error/json)まで出番が無い
-            Expr::StructLit { pkg, fields, pos, .. } => {
+            // error struct(error type X = ...で宣言されたstruct)のインスタンスだけ
+            // __errTagで実行時マーカーを付ける(TS版のexpr.isErrorInstanceと同じ判定を
+            // ctx.lookup_structの結果から行う)
+            Expr::StructLit { name, pkg, fields, pos } => {
                 if pkg.is_some() {
                     return Err(format!("codegen: package-qualified struct literals are not yet supported ({}:{})", pos.line, pos.col));
                 }
@@ -433,14 +470,52 @@ impl Codegen {
                     }
                     js_fields.push(format!("{}: {}", f.name, self.gen_expr(&f.value)?));
                 }
-                Ok(format!("({{ {} }})", js_fields.join(", ")))
+                let obj = format!("{{ {} }}", js_fields.join(", "));
+                let is_error_instance = matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. }));
+                Ok(if is_error_instance { format!("__errTag({obj})") } else { format!("({obj})") })
             }
             Expr::Recv { pos, .. } => Err(format!("codegen: channel receive is not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Chan { pos, .. } => Err(format!("codegen: channels are not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Spawn { pos, .. } => Err(format!("codegen: spawn/detach are not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Select { pos, .. } => Err(format!("codegen: 'select' is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Prop { pos, .. } => Err(format!("codegen: '?' propagation is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::OrElse { pos, .. } => Err(format!("codegen: 'or' is not yet supported ({}:{})", pos.line, pos.col)),
+            // f()? / f() ? "context" — 失敗(none/error/構造化error)なら呼び出し元へ即座に
+            // 伝播する。関数本体側の対応(try/catchで包むか)はgen_fn_declが本体生成後に決める
+            Expr::Prop { operand, context, pos } => {
+                let operand_ty = checker::infer_expr(&self.ctx, operand);
+                if context.is_some() && checker::has_structured_failure(&operand_ty) {
+                    // ランタイムの__propCtxはnull/instanceof Errorしか特別扱いせず、構造化error
+                    // (__ERRタグ付きのstruct)は素通りして「成功扱い」になってしまう
+                    // (checker.rsのhas_structured_failureのコメント参照)——診断を出さない
+                    // このリゾルバでは、ここで明確なErrにしないと実行時に静かに壊れる
+                    return Err(format!(
+                        "codegen: '?' with a context message cannot propagate a structured error (error struct) — use plain '?' instead ({}:{})",
+                        pos.line, pos.col
+                    ));
+                }
+                let operand_js = self.gen_expr(operand)?;
+                self.prop_used = true;
+                match context {
+                    Some(ctx_expr) => {
+                        let ctx_js = self.gen_expr(ctx_expr)?;
+                        Ok(format!("(await __propCtx({operand_js}, async () => {ctx_js}))"))
+                    }
+                    None => Ok(format!("__prop({operand_js})")),
+                }
+            }
+            // f() or fallback / f() or e => fallback — 失敗なら(遅延評価の)fallbackの値。
+            // 束縛形はfallback式のスコープ内だけ`e`を失敗メンバーの型で見えるようにする
+            Expr::OrElse { left, right, binding, .. } => {
+                let left_ty = checker::infer_expr(&self.ctx, left);
+                let left_js = self.gen_expr(left)?;
+                let bind_name = binding.as_deref().filter(|n| *n != "_");
+                self.ctx.push_scope();
+                if let Some(name) = bind_name {
+                    self.ctx.declare(name, checker::or_binding_type(&left_ty));
+                }
+                let right_js = self.gen_expr(right)?;
+                self.ctx.pop_scope();
+                Ok(format!("(await __or({left_js}, async ({}) => {right_js}))", bind_name.unwrap_or("")))
+            }
             Expr::ArrayLit { pos, .. } => Err(format!("codegen: array literals are not yet supported ({}:{})", pos.line, pos.col)),
             Expr::Index { pos, .. } => Err(format!("codegen: index access is not yet supported ({}:{})", pos.line, pos.col)),
             Expr::MapLit { pos, .. } => Err(format!("codegen: map literals are not yet supported ({}:{})", pos.line, pos.col)),
@@ -776,8 +851,27 @@ mod tests {
     }
 
     #[test]
-    fn error_structはまだ未対応として明確なエラーになる() {
-        let err = gen_js("error struct Oops {\n  message: string\n}\nfn main() {}").unwrap_err();
+    fn error_structのリテラルはerrtagで包まれる() {
+        let js = gen_body("error struct Oops {\n  message: string\n}\nfn main() {\n  o := Oops{message: \"x\"}\n}");
+        assert!(js.contains("const o = __errTag({ message: \"x\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn 通常structのリテラルはerrtagで包まれない() {
+        let js = gen_body("struct Point {\n  x: int\n}\nfn main() {\n  p := Point{x: 1}\n}");
+        assert!(js.contains("const p = ({ x: 1 });"), "got: {js}");
+        assert!(!js.contains("__errTag"));
+    }
+
+    #[test]
+    fn error_type_union形式はまだ未対応として明確なエラーになる() {
+        let err = gen_js("error type Oops = { kind: \"a\" } | { kind: \"b\" }\nfn main() {}").unwrap_err();
+        assert!(err.contains("only plain struct declarations"), "got: {err}");
+    }
+
+    #[test]
+    fn json_structはまだ未対応として明確なエラーになる() {
+        let err = gen_js("json struct Data {\n  n: int\n}\nfn main() {}").unwrap_err();
         assert!(err.contains("not yet supported"), "got: {err}");
     }
 
@@ -785,6 +879,71 @@ mod tests {
     fn パッケージ修飾structリテラルはまだ未対応として明確なエラーになる() {
         let err = gen_js("fn main() {\n  x := math.Point{x: 1, y: 2}\n}").unwrap_err();
         assert!(err.contains("not yet supported"), "got: {err}");
+    }
+
+    #[test]
+    fn bareのpropはpropヘルパを生成し関数をtry_catchで包む() {
+        let js = gen_body("fn f() int | error {\n  return 1\n}\nfn main() {\n  x := f()?\n  print(x)\n}");
+        assert!(js.contains("const x = __prop((await f()));"), "got: {js}");
+        assert!(js.contains("try {"), "got: {js}");
+        assert!(js.contains("} catch (e) {"), "got: {js}");
+        assert!(js.contains("if (e instanceof __Propagate) return e.value;"), "got: {js}");
+    }
+
+    #[test]
+    fn context付きpropはpropctxヘルパを生成する() {
+        let js = gen_body("fn f() int | error {\n  return 1\n}\nfn main() {\n  x := f() ? \"failed\"\n  print(x)\n}");
+        assert!(js.contains("__propCtx((await f()), async () => \"failed\")"), "got: {js}");
+    }
+
+    #[test]
+    fn 構造化errorへのcontext付きpropは明確なエラーになる() {
+        let err = gen_js(
+            "error struct Oops {\n  message: string\n}\nfn f() int | Oops {\n  return 1\n}\nfn main() {\n  x := f() ? \"failed\"\n  print(x)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("structured error"), "got: {err}");
+        // 同じoperandへのbare `?`(contextなし)は成功する
+        let js = gen_body(
+            "error struct Oops {\n  message: string\n}\nfn f() int | Oops {\n  return 1\n}\nfn main() {\n  x := f()?\n  print(x)\n}",
+        );
+        assert!(js.contains("__prop((await f()))"), "got: {js}");
+    }
+
+    #[test]
+    fn propを使わない関数は従来通りtry_catchで包まれない() {
+        let js = gen_body("fn main() {\n  x := 1\n  print(x)\n}");
+        assert!(!js.contains("try {"), "got: {js}");
+        assert!(!js.contains("__Propagate"), "got: {js}");
+    }
+
+    #[test]
+    fn if文の中にネストしたpropでも囲む関数レベルでtry_catchが付く() {
+        let js = gen_body("fn f() int | error {\n  return 1\n}\nfn main() {\n  if true {\n    x := f()?\n    print(x)\n  }\n}");
+        assert!(js.contains("try {"), "got: {js}");
+        assert!(js.contains("} catch (e) {"), "got: {js}");
+    }
+
+    #[test]
+    fn orの裸形式は空引数のラムダになる() {
+        let js = gen_body("fn f() int | none {\n  return 1\n}\nfn main() {\n  x := f() or 0\n}");
+        assert!(js.contains("__or((await f()), async () => 0)"), "got: {js}");
+    }
+
+    #[test]
+    fn or_の捨てる形も空引数のラムダになる() {
+        let js = gen_body("fn f() int | error {\n  return 1\n}\nfn main() {\n  x := f() or _ => 0\n}");
+        assert!(js.contains("__or((await f()), async () => 0)"), "got: {js}");
+    }
+
+    #[test]
+    fn or束縛形は束縛名がラムダの引数になりフィールドアクセスも通る() {
+        let js = gen_body(
+            "error struct Oops {\n  message: string\n}\nfn f() int | Oops {\n  return 1\n}\nfn main() {\n  x := f() or e => e.message\n  print(x)\n}",
+        );
+        // eがOopsのフィールド型として束縛され(=Oopsのstruct型として解決され)、
+        // e.messageがフィールドアクセスとして生成できている(未対応エラーにならない)ことを確認する
+        assert!(js.contains("__or((await f()), async (e) => e.message)"), "got: {js}");
     }
 
     #[test]
