@@ -335,6 +335,26 @@
         無名関数式(`fn(x: int) int { return x * 2 }`。`Expr::FnExpr`/`TypeNode::FnType`)が
         まだ移植されていないと判明——今回のマイルストーンの対象ではなかったため次回以降に
         持ち越し(`examples/*.mesh`のどれも無名関数を使っていないため、これまで見落とされていた)
+  - [x] **parser移植(第十一弾・関数型注釈+無名関数式)** ✅ 2026-07-22実装(kanayamaと討議のうえ、
+        milestone 10のスコープ調査で発覚した最後の1件を採用——**これでparser.tsを全面移植完了**)。
+        関数型注釈`fn(int, string) bool`(`parse_type_atom`。宣言と同じ読みで戻り値のunionは
+        戻り値側に束縛。パラメータ名を書くと`fn-type-with-param-names`エラーに誘導)・
+        `(T)`型グループ化(同じく`parse_type_atom`。`(fn(int) int) | none`のように関数型自体を
+        unionに入れるときの曖昧さ解消——地味だがfn型と対にして移植が必要だった見落としがちな部品)・
+        無名関数式`fn(x: int) int { return x * 2 }`(`parse_primary`の新規`Fn`ケース。
+        パラメータ・戻り値・本体は既存の`parse_params`/`parse_return_type`/`parse_block`を
+        そのまま再利用——`fn`宣言と共通のヘルパーなので実装量はごく小さい)を追加。
+        戻り値の有無判定用に`can_start_type`ヘルパーも新設(TS版の`canStartType()`を移植)。
+        TS版(`parser.ts`)の該当箇所をほぼ1:1移植するだけで、新しい設計判断は不要だった。
+        **milestone 9の教訓(スタックフレームサイズ)を踏まえ、実装直後に`cargo test`で
+        文字列補間の深さ回帰テストを5回連続実行して安全マージンを確認**——今回は
+        `parse_primary`の新規ケースが既存ヘルパー呼び出しへの委譲のみで局所変数が少なく、
+        別関数への切り出しは不要と判断(実測でクラッシュしないことを確認済み)。
+        `tests/parser.test.ts`相当のテスト2件+自作テスト2件(無名関数式・型注釈つき無名関数の
+        代入の実例テスト)を新規作成(88→92件、全件パス)。`cargo clippy`クリーン。
+        `examples/*.mesh`11本+mathutil系2本は変化なく全て完全パース成功(どの例も無名関数を
+        使っていないため)。**これでRust版パーサはTS版parser.ts(1217行)の全機能を
+        カバーした**(対象外の構文が無い状態)。残るのはchecker/codegen自体の移植のみ
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

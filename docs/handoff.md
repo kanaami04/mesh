@@ -102,27 +102,22 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `lexer.rs`・`ast.rs`・`parser.rs`。lib+binハイブリッドのCargoプロジェクト
   (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
   checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
-- **進捗概要(詳細は todo.md の各マイルストーン項目が一次情報源。ここは要約のみ)**:
-  lexer全体(`fffd0d9`)→ parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・
-  関数呼び出し、エラー復帰の枠組み)→ struct/type宣言+判別可能union+match/is式・文字列補間
-  (+スタックオーバーフロー対策の`interp_depth`カウンタ等、code review指摘3件。PR #5〜#7)→
-  並行処理(`chan<T>`・`spawn`/`detach`/`wait`/`select`等。PR #8)→
-  error/json構造化エラー(`?`/`or`。PR #9)→ import/export(+パッケージ修飾structリテラル・
-  型注釈つき変数宣言。PR #10)→ ジェネリクス+レシーバ(PR #12)→
-  配列/mapリテラル+添字アクセス+範囲for(`maps.mesh`を最後まで通す一括り。実装中に
-  **本物のスタックオーバーフロー回帰を自己検証で発見・修正**——詳細は下記「教訓」。PR #13)→
-  defer文+error/jsonマーカー(`error type`/`error struct`/`json struct`。PR #14)。
+- **`parser.ts`(1217行)を全面移植完了(2026-07-22)**。詳細は todo.md の各マイルストーン
+  項目が一次情報源(ここは要約のみ): lexer全体(`fffd0d9`)→ parser核サブセット→
+  struct/type宣言+判別可能union+match/is式・文字列補間(+スタックオーバーフロー対策の
+  `interp_depth`カウンタ等、code review指摘3件。PR #5〜#7)→ 並行処理(PR #8)→
+  error/json構造化エラー`?`/`or`(PR #9)→ import/export(PR #10)→ ジェネリクス+レシーバ
+  (PR #12)→ 配列/mapリテラル+添字アクセス+範囲for(実装中に**本物のスタックオーバーフロー
+  回帰を自己検証で発見・修正**——詳細は下記「教訓」。PR #13)→ defer文+error/jsonマーカー
+  (PR #14)→ 関数型注釈`fn(int,string) bool`+無名関数式`fn(x: int) int {...}`(PR #15。
+  milestone 10のスコープ調査で発覚した最後の1件。milestone 9の教訓を踏まえ実装直後に
+  スタックオーバーフロー回帰テストを5回実行して安全マージンを確認済み)。
   いずれもTS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。
-  **これでparser.ts(1217行)はほぼ全体を移植済み**。現在テスト88件、
-  `cargo clippy --all-targets -- -D warnings` クリーン
-- **対象外(未着手)**: 関数型注釈(`fn(int, string) bool`)・無名関数式
-  (`fn(x: int) int { return x * 2 }`)のみ(2026-07-22のスコープ調査で発覚——それまで
-  見落とされていた。`examples/*.mesh`のどれも無名関数を使っていないため気づかれなかった)。
-  対象外の構文は誠実に構文エラーで失敗する(クラッシュしない)よう作ってある
+  **対象外の構文は無い状態**。現在テスト92件、`cargo clippy --all-targets -- -D warnings` クリーン
 - **examples/\*.meshでの進捗確認**: **全13本(examples/*.mesh 11本 + mathutil系2本)が
   完全にパース成功**(2026-07-22時点)
-- **次にやるなら**: 残るのは関数型注釈+無名関数式という最後の1件を埋めるか、
-  **checker/codegenの移植に進むか**の判断(パーサはparser.ts全体1217行のほぼ全体まで到達)
+- **次にやるなら**: parserは完了したので、**checker/codegenの移植**(`mesh run`相当を
+  目指す次の大きな段階)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
@@ -144,7 +139,10 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   **今後、この2関数(および`parse_unary`)に新しい分岐を足すときは、局所変数が数個を超える
   ロジックは必ず別関数に切り出すこと**。テストで検知できることは確認済みだが、
   安全マージンそのものは今回で使い切った可能性があるため、次に何か追加する際は
-  `cargo test`(特に`文字列補間_上限を超えるネストは...`)を必ず確認すること
+  `cargo test`(特に`文字列補間_上限を超えるネストは...`)を必ず確認すること。
+  **milestone 11で実践**: 関数型注釈+無名関数式の追加時にこの教訓通り実装直後に同テストを
+  5回連続実行し、クラッシュしないことを確認してから次に進んだ(今回は既存ヘルパーへの
+  委譲のみで局所変数が少なく、別関数への切り出しは不要と判断)
 - **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 

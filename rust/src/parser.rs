@@ -568,9 +568,45 @@ impl Parser {
         type_node
     }
 
-    // 今回のスコープはname型(int, string, math.User)・文字列リテラル型・none・chan<T>・
-    // 配列サフィックス(T[])・map<K,V>のみ。fnTypeは次回以降のPRで追加する
+    // このトークンから型が始まりうるか(fn型の「戻り値があるか」の判定に使う)
+    fn can_start_type(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenType::Ident | TokenType::Str | TokenType::Chan | TokenType::Map | TokenType::NoneKw | TokenType::Fn | TokenType::LParen
+        )
+    }
+
     fn parse_type_atom(&mut self) -> Result<TypeNode, Box<CompileError>> {
+        // (T) — グループ化。fn型をunionに入れる時などの曖昧さ解消用: (fn(int) int) | none
+        if self.check(TokenType::LParen) {
+            self.next();
+            let inner = self.parse_type()?;
+            self.expect(TokenType::RParen, "after type")?;
+            return Ok(inner);
+        }
+        // fn(int, string) bool — 関数型。関数宣言と同じ読みで、戻り値のunionは戻り値側に束縛される
+        // (fn(int) int | error の戻り値はint | error。関数自体をunionに入れるなら括弧で包む)
+        if self.check(TokenType::Fn) {
+            let start = self.next();
+            self.expect(TokenType::LParen, "after 'fn' in a function type")?;
+            let mut params = Vec::new();
+            while !self.check(TokenType::RParen) {
+                // パラメータ名は書かない(型のみ)。書いたら書き方1通りへ誘導する
+                if self.check(TokenType::Ident) && self.peek_at(1).kind == TokenType::Colon {
+                    return Err(self.error_here(
+                        "parameter names are not used in function types — write the types only, like fn(int, string) bool",
+                        "fn-type-with-param-names",
+                    ));
+                }
+                params.push(self.parse_type()?);
+                if !self.check(TokenType::RParen) {
+                    self.expect(TokenType::Comma, "between parameter types")?;
+                }
+            }
+            self.expect(TokenType::RParen, "after parameter types")?;
+            let ret = if self.can_start_type() { Some(Box::new(self.parse_type()?)) } else { None };
+            return Ok(TypeNode::FnType { params, ret, pos: start.pos });
+        }
         if self.check(TokenType::NoneKw) {
             let t = self.next();
             return Ok(TypeNode::Name { name: "none".into(), pkg: None, pos: t.pos });
@@ -1213,6 +1249,14 @@ impl Parser {
             }
             TokenType::LBracket => self.parse_array_literal(t.pos),
             TokenType::Map => self.parse_map_literal_or_ident(t.pos),
+            TokenType::Fn => {
+                // 無名関数: fn(x: int) int { return x * 2 }
+                self.next();
+                let params = self.parse_params()?;
+                let ret = self.parse_return_type()?;
+                let body = self.parse_block()?;
+                Ok(Expr::FnExpr { params, ret, body, pos: t.pos })
+            }
             _ => Err(self.error_at(t.pos, format!("unexpected {}", Self::describe_token(&t)), "syntax-error")),
         }
     }
@@ -2094,5 +2138,56 @@ mod tests {
         let err = parse("error type DbError = { table: string }").unwrap_err();
         assert_eq!(err[0].code, "bare-struct-shape");
         assert!(err[0].fix.is_none());
+    }
+
+    // ---- 関数型注釈・無名関数式 ----
+
+    #[test]
+    fn 関数型注釈_fn_int_string_bool_をパースできる() {
+        let p1 = &parse("fn f(g: fn(int, string) bool) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::FnType { params, ret, .. } = p1 else { panic!("expected fnType, got {p1:?}") };
+        assert!(matches!(&params[0], TypeNode::Name { name, .. } if name == "int"));
+        assert!(matches!(&params[1], TypeNode::Name { name, .. } if name == "string"));
+        assert!(matches!(ret.as_deref(), Some(TypeNode::Name { name, .. }) if name == "bool"));
+
+        // 戻り値なし
+        let p2 = &parse("fn f(g: fn(int)) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::FnType { ret, .. } = p2 else { panic!("expected fnType, got {p2:?}") };
+        assert!(ret.is_none());
+
+        // 宣言と同じ読み: fn(int) int | error のunionは戻り値側に束縛
+        let p3 = &parse("fn f(g: fn(int) int | error) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::FnType { ret, .. } = p3 else { panic!("expected fnType, got {p3:?}") };
+        assert!(matches!(ret.as_deref(), Some(TypeNode::Union { .. })));
+
+        // 関数自体をunionに入れるなら括弧: (fn(int) int) | none
+        let p4 = &parse("fn f(g: (fn(int) int) | none) {}").unwrap().fns[0].params[0].type_node;
+        let TypeNode::Union { members, .. } = p4 else { panic!("expected union, got {p4:?}") };
+        assert!(matches!(&members[0], TypeNode::FnType { .. }));
+        assert!(matches!(&members[1], TypeNode::Name { name, .. } if name == "none"));
+    }
+
+    #[test]
+    fn 関数型注釈_パラメータ名を書くと型のみへ誘導エラー() {
+        let err = parse("fn f(g: fn(x: int) int) {}").unwrap_err();
+        assert_eq!(err[0].code, "fn-type-with-param-names");
+    }
+
+    #[test]
+    fn 無名関数式をパースできる() {
+        let stmts = parse_body("double := fn(x: int) int { return x * 2 }");
+        let Stmt::ShortVarDecl { values, .. } = &stmts[0] else { panic!("expected shortVarDecl") };
+        let Expr::FnExpr { params, ret, .. } = &values[0] else { panic!("expected fnExpr, got {:?}", values[0]) };
+        assert_eq!(params[0].name, "x");
+        assert!(matches!(ret, Some(TypeNode::Name { name, .. }) if name == "int"));
+    }
+
+    #[test]
+    fn 実例相当_型注釈つき無名関数の代入() {
+        // tests/e2e.test.tsの実例: double: fn(int) int = fn(x: int) int { return x * 2 }
+        let stmts = parse_body("double: fn(int) int = fn(x: int) int { return x * 2 }");
+        let Stmt::TypedVarDecl { type_node, value, .. } = &stmts[0] else { panic!("expected typedVarDecl, got {:?}", stmts[0]) };
+        assert!(matches!(type_node, TypeNode::FnType { .. }));
+        assert!(matches!(value, Expr::FnExpr { .. }));
     }
 }
