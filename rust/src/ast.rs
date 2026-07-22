@@ -1,27 +1,15 @@
-// AST(抽象構文木)= パースした結果の木構造。TS版(src/ast.ts、403行)からの移植だが、
-// 今回のPRではparser.ts全体(1217行)は移さず、意味のある実用サブセットだけに絞っている。
+// AST(抽象構文木)= パースした結果の木構造。TS版(src/ast.ts、403行)の移植。
 //
-// **今回までのスコープ**: fn宣言・**ジェネリクス(`fn first<T>(...)`。トップレベル関数限定)・
-// レシーバ(`fn (u: User) describe() ...`。Goスタイルのメソッド構文。generics併用は不可)**、
-// トップレベル定数、if/else-ifチェーン、for(3形態)、break/continue、変数宣言・代入・
-// 複合代入・インクリメント、二項演算子(優先順位込み)、単項演算子、関数呼び出し、
-// struct/type宣言(判別可能union込み)・構造体リテラル・メンバーアクセス・is式・match式・
-// 文字列補間・並行処理(spawn/detach/wait/chan/select/send/recv)・
-// `or`束縛形・`?`伝播・型注釈つき変数宣言(`x: T = v`)・
-// import(単一セグメントのみ)+パッケージ修飾structリテラル(`math.Point{...}`)。
-// パッケージ修飾型名(`math.User`)・パッケージ修飾呼び出し(`math.add(1, 2)`)は
-// メンバーアクセス/呼び出しの通常構文で既に表現できていたため、import自体を移植する前から
-// パースできていた(意味解決はchecker側の仕事)。型パラメータ(`T`)を型位置で使う場合も、
-// 通常の型名(`TypeNode::Name`)と構文上見分かず、レシーバのメソッド呼び出し
-// (`obj.method(args)`)も通常のメンバーアクセス+呼び出しと構文上見分かないため、
-// どちらも追加の構文なしで既に表現できる——意味解決(型パラメータかどうか・レシーバ経由の
-// メソッドかどうか)はchecker側の仕事。**配列型(`T[]`)・配列リテラル(`[1, 2, 3]` /
-// `Todo[]{}` / `int[]{1, 2}`)・map型(`map<K, V>`)・mapリテラル(`map<K, V>{"a": 1}`)・
-// 添字アクセス(`a[i]`。代入先としても可)・範囲for(`for i, v := range arr`等)**。
-// **対象外(次回以降のPRで追加)**: defer、error/jsonマーカー(`error struct X {...}`等。
-// checkerが無いと`isError`フラグの使い道が無いためまだ意味がない)。
-// これらを含む式・文に出会うと(対応するトークンを認識しないので)構文エラーとして
-// 検出される — クラッシュはしない、「まだ対応していません」という誠実な失敗の仕方になる。
+// parser.ts(1217行)のほぼ全体を移植済み(fn宣言・ジェネリクス・レシーバ・トップレベル定数・
+// if/for/break/continue・変数宣言/代入/複合代入/インクリメント・二項/単項演算子・
+// struct/type宣言〈判別可能union・error/jsonマーカー込み〉・構造体リテラル・
+// メンバーアクセス/添字・is/match式・文字列補間・並行処理・`or`/`?`・型注釈つき変数宣言・
+// import・配列/mapリテラル・範囲for・defer)。
+// **対象外(未着手と判明——2026-07-22のスコープ調査で発覚。今回のマイルストーンの対象では
+// なかったため次回以降)**: 関数型注釈(`fn(int, string) bool`)・無名関数式
+// (`fn(x: int) int { return x * 2 }`)。これらを含む式・文に出会うと(対応するトークンを
+// 認識しないので)構文エラーとして検出される — クラッシュはしない、
+// 「まだ対応していません」という誠実な失敗の仕方になる。
 //
 // 演算子(二項・単項・複合代入・インクリメント)は専用のenumを作らず`TokenType`を
 // そのまま使っている。Plus/Minus/EqEq等は既にlexer側で列挙済みなので、
@@ -99,13 +87,16 @@ pub struct ConstDecl {
     pub pos: Pos,
 }
 
-// struct X { ... } / type X = ...。error/jsonマーカー(isError/isJson)は次回以降
-// (checkerが無いとフラグの使い道が無いため、checker移植までまだ意味がない)
+// struct X { ... } / type X = ...
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub name: String,
     pub node: TypeNode,
     pub exported: bool,
+    pub is_error: bool, // error type X = ... / error struct X { ... }: '?'/'or'の伝播対象にする
+    // json struct X { ... }: decode<X>(v: json.Value) X | error を自動生成する。
+    // checkerが無いとまだ使い道が無い(自動生成ロジックはchecker移植後)が、パースはできる
+    pub is_json: bool,
     pub pos: Pos,
 }
 
@@ -152,6 +143,9 @@ pub enum Stmt {
     // for i, v := range arr / for k, v := range m / for i := range 10。
     // namesは1個(int range)または2個。"_"で捨てられる(捨てる指定自体はcheckerの仕事)
     RangeFor { names: Vec<String>, subject: Expr, body: Block, pos: Pos },
+    // defer f(x) — 関数を抜けるとき(panicによる巻き戻りも含む)に呼び出す。
+    // checkerがcall.kind===Callであることを検証する(パーサは任意の式を許して渡すだけ)
+    DeferStmt { call: Expr, pos: Pos },
 }
 
 #[derive(Debug, Clone, PartialEq)]
