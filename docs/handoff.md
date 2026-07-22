@@ -113,8 +113,10 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   捕捉不能なプロセス強制終了なので、移植によって深刻度が格上げされていた)・
   補間式の余った1トークンが「補間つき文字列自身」だと`unexpected ''`という空の
   エラーになっていたのを`describe_token`ヘルパー(EOFは"end of file"・`value`が
-  空のトークンは種別名にフォールバック)に統一して修正(同じくcode reviewの指摘対応)。
-  現在テスト49件、`cargo clippy --all-targets -- -D warnings` クリーン
+  空のトークンは種別名にフォールバック)に統一して修正(同じくcode reviewの指摘対応)・
+  そのPR(#6)のcode reviewで残っていた2点(値に`'`を含むと表示が壊れる/空文字列リテラルが
+  種別名にフォールバックしてしまう)も追って修正、`describe_token`の判定を`value.is_empty()`
+  から`parts.is_some()`に変更。現在テスト51件、`cargo clippy --all-targets -- -D warnings` クリーン
 - **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
   無いと構造化エラーの旨みが薄いためセット予定)・spawn/wait/chan/select・
   配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
