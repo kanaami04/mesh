@@ -78,7 +78,7 @@ pub struct ConstDecl {
 }
 
 // struct X { ... } / type X = ...。error/jsonマーカー(isError/isJson)は次回以降
-// (`?`/`or`が実装されてから意味を持つため)
+// (checkerが無いとフラグの使い道が無いため、checker移植までまだ意味がない)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub name: String,
