@@ -210,8 +210,18 @@ impl Parser {
             return Ok(self.next());
         }
         let t = self.peek().clone();
-        let got = if t.kind == TokenType::Eof { "end of file".to_string() } else { format!("'{}'", t.value) };
-        Err(self.error_at(t.pos, format!("expected '{kind}' {context}, but got {got}"), "syntax-error"))
+        Err(self.error_at(t.pos, format!("expected '{kind}' {context}, but got {}", Self::describe_token(&t)), "syntax-error"))
+    }
+    // トークンをエラーメッセージ用に人が読める形にする。EOFは"end of file"(引用符なし)。
+    // 補間つき文字列トークンは`value`が空文字列のまま(lexer.rs参照)なので、それを
+    // そのまま引用符で囲むと`unexpected ''`のような空の表示になってしまう —
+    // その場合は種別名(例: "string")にフォールバックする
+    fn describe_token(t: &Token) -> String {
+        if t.kind == TokenType::Eof {
+            return "end of file".to_string();
+        }
+        let text = if t.value.is_empty() { t.kind.to_string() } else { t.value.clone() };
+        format!("'{text}'")
     }
     fn skip_semis(&mut self) {
         while self.eat(TokenType::Semi) {}
@@ -661,7 +671,7 @@ impl Parser {
         self.skip_semis();
         if !self.check(TokenType::Eof) {
             let t = self.peek().clone();
-            return Err(self.error_at(t.pos, format!("unexpected '{}' in string interpolation", t.value), "syntax-error"));
+            return Err(self.error_at(t.pos, format!("unexpected {} in string interpolation", Self::describe_token(&t)), "syntax-error"));
         }
         Ok(expr)
     }
@@ -862,10 +872,7 @@ impl Parser {
                 self.expect(TokenType::RBrace, "at end of match")?;
                 Ok(Expr::Match { subject: Box::new(subject), arms, pos: t.pos })
             }
-            _ => {
-                let text = if t.value.is_empty() { t.kind.to_string() } else { t.value.clone() };
-                Err(self.error_at(t.pos, format!("unexpected '{text}'"), "syntax-error"))
-            }
+            _ => Err(self.error_at(t.pos, format!("unexpected {}", Self::describe_token(&t)), "syntax-error")),
         }
     }
 
@@ -1174,7 +1181,7 @@ mod tests {
         // parse_standalone_expr内部のエラー(TSのthrow相当)がそのまま外側に伝わることを確認する
         let err = parse(r#"fn main() { msg := "${1 +}" }"#).unwrap_err();
         assert_eq!(err.len(), 1);
-        assert!(err[0].message.contains("eof"), "got: {}", err[0].message);
+        assert!(err[0].message.contains("end of file"), "got: {}", err[0].message);
     }
 
     #[test]
@@ -1182,6 +1189,16 @@ mod tests {
         // "${1 2}" のように式の後にトークンが余る場合はparse_standalone_expr内でエラーになる
         let err = parse(r#"fn main() { msg := "${1 2}" }"#).unwrap_err();
         assert!(err[0].message.contains("unexpected '2' in string interpolation"), "got: {}", err[0].message);
+    }
+
+    #[test]
+    fn 文字列補間_式部分に補間文字列自体が来ても空のエラーにならない() {
+        // "${1 "${2}"}" — 式の後に余るトークンが「補間つき文字列」自身だと、その
+        // トークンのvalueは空文字列(lexer.rs参照)のため、そのまま引用符で囲むと
+        // `unexpected ''`という中身の分からないエラーになっていた(code reviewでの指摘)。
+        // describe_tokenが種別名にフォールバックし、'string'と表示されることを確認する
+        let err = parse(r#"fn main() { msg := "${1 "${2}"}" }"#).unwrap_err();
+        assert!(err[0].message.contains("unexpected 'string' in string interpolation"), "got: {}", err[0].message);
     }
 
     // "${...}"の中に同じ形をもう1つ入れ子にして深さdepth段のネスト補間ソースを作る。

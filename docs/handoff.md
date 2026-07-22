@@ -107,8 +107,14 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `3ac059a` parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・関数呼び出し、
   エラー復帰の枠組みをフル移植)・`207802e` struct/type宣言+判別可能union+match/is式・
   文字列補間(`Expr::Interp`/`InterpSegment`。lexer側の分解は既に済んでいたので
-  parser側の組み込みのみ)。現在テスト46件、
-  `cargo clippy --all-targets -- -D warnings` クリーン
+  parser側の組み込みのみ)・`f91b49c` 深いネスト補間による本物のスタックオーバーフロー
+  (プロセスクラッシュ)を`interp_depth`カウンタ(上限64)で防ぐ(code reviewの指摘対応。
+  TS版は同じ再帰設計だがJSのスタック超過は捕捉可能な例外なのに対し、Rustのそれは
+  捕捉不能なプロセス強制終了なので、移植によって深刻度が格上げされていた)・
+  補間式の余った1トークンが「補間つき文字列自身」だと`unexpected ''`という空の
+  エラーになっていたのを`describe_token`ヘルパー(EOFは"end of file"・`value`が
+  空のトークンは種別名にフォールバック)に統一して修正(同じくcode reviewの指摘対応)。
+  現在テスト49件、`cargo clippy --all-targets -- -D warnings` クリーン
 - **対象外(未着手)**: ジェネリクス・レシーバ(メソッド)・error/jsonマーカー(`?`/`or`が
   無いと構造化エラーの旨みが薄いためセット予定)・spawn/wait/chan/select・
   配列/mapリテラル・import/export。対象外の構文は誠実に構文エラーで
