@@ -198,16 +198,40 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type) -> BinaryInfo {
     no_flags(ANY)
 }
 
-// 呼び出し式の型推論。M1では自由関数(fn_decls)の戻り値型を引くだけ——パッケージ修飾・
-// structメソッドの解決は次のマイルストーン以降(structが無いのでtargetの型がstructになる
-// ことも無く、自然にこの経路には来ない)
+// 呼び出し式の型推論。自由関数(fn_decls)の戻り値型 → 組み込みの戻り値型の順で引く
+// (code review指摘: 組み込みを素通ししてANYへ落としていたため、例えば`round(x) / round(y)`が
+// int同士の演算と分からず__idivが呼ばれず浮動小数点演算になっていた——組み込みの戻り値型を
+// 引けるようにして修正)。パッケージ修飾・structメソッドの解決は次のマイルストーン以降
+// (structが無いのでtargetの型がstructになることも無く、自然にこの経路には来ない)
 fn infer_call(ctx: &CheckerCtx, callee: &Expr) -> Type {
-    if let Expr::Ident { name, .. } = callee
-        && let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name)
-    {
-        return (**ret).clone();
+    if let Expr::Ident { name, .. } = callee {
+        if let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name) {
+            return (**ret).clone();
+        }
+        if let Some(t) = infer_builtin_call(name) {
+            return t;
+        }
     }
     ANY
+}
+
+// M1のcodegenが実際に生成できる組み込みのうち、引数の型によらず戻り値型が決まるものだけを
+// 解決する(TS版`checker/builtins.ts`の`inferBuiltinCall`のうち、引数非依存の部分を移植)。
+// get/sort等(引数の配列要素型に依存)はこのリゾルバでは追わずANYのままにする——M1のcodegenは
+// 配列そのものをまだ生成できないため、その2つがここに来ることは無く実害が無い
+fn infer_builtin_call(name: &str) -> Option<Type> {
+    Some(match name {
+        "print" | "sleep" | "push" | "close" => VOID,
+        "str" | "join" | "trim" | "upper" | "lower" => STRING,
+        "toInt" => types::union_of(vec![INT, ERROR]),
+        "toFloat" => FLOAT,
+        "round" | "floor" | "ceil" => INT,
+        "error" => ERROR,
+        "contains" => BOOL,
+        "indexOf" => types::union_of(vec![INT, NONE]),
+        "split" => Type::Array(Box::new(STRING)),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -311,5 +335,14 @@ mod tests {
         ctx.declare_fn("add", Type::Fn { params: vec![INT, INT], ret: Box::new(INT) });
         let call_ret = infer_call(&ctx, &Expr::Ident { name: "add".into(), pos: pos() });
         assert!(types::type_equals(&call_ret, &INT));
+    }
+
+    #[test]
+    fn infer_callは組み込みの戻り値型も引く() {
+        let ctx = CheckerCtx::new();
+        let round_call = infer_call(&ctx, &Expr::Ident { name: "round".into(), pos: pos() });
+        assert!(types::type_equals(&round_call, &INT), "round() should infer as int, got {round_call:?}");
+        let to_int_call = infer_call(&ctx, &Expr::Ident { name: "toInt".into(), pos: pos() });
+        assert!(types::type_equals(&to_int_call, &types::union_of(vec![INT, ERROR])));
     }
 }

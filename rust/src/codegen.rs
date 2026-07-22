@@ -386,6 +386,24 @@ impl Codegen {
     }
 
     fn gen_builtin_call(&self, name: &str, args: &[String], pos: Pos) -> CodegenResult<String> {
+        // code review指摘: パーサ/checkerのどちらも組み込みの引数個数を検査しないため、
+        // 以前は`args[0]`/`args[1]`への直接インデックスが足りない引数でパニックしていた
+        // (例: `round()`)。「まだ対応していない構文はErrで返す、パニックさせない」という
+        // 設計原則(ast.rsコメント参照)に反するため、個数を先に検査してから分岐する
+        let required = match name {
+            "print" => 0,
+            "str" | "sleep" | "toInt" | "toFloat" | "round" | "floor" | "ceil" | "error" | "trim" | "upper" | "lower" | "sort" | "close" => 1,
+            "contains" | "indexOf" | "get" | "split" | "join" | "push" => 2,
+            _ => 0, // 未対応の組み込みはこの後のmatchのdefaultアームでエラーになる
+        };
+        if args.len() < required {
+            return Err(format!(
+                "codegen: builtin '{name}' expects at least {required} argument(s), got {} ({}:{})",
+                args.len(),
+                pos.line,
+                pos.col
+            ));
+        }
         let at = self.at(pos);
         match name {
             "print" => Ok(format!("__print({})", args.join(", "))),
@@ -544,6 +562,24 @@ mod tests {
     fn 自由関数呼び出しはawaitされる() {
         let js = gen_body("fn add(a: int, b: int) int {\n  return a + b\n}\nfn main() {\n  x := add(1, 2)\n}");
         assert!(js.contains("(await add(1, 2))"), "got: {js}");
+    }
+
+    #[test]
+    fn round等の組み込みの戻り値はint扱いされ演算がidivになる() {
+        // code review(PR #16)で発覚: infer_callが組み込みを素通ししてANYへ落としていたため、
+        // round()の結果同士の割り算がint演算と分からずJSの素の/になっていた(2.5になる実バグ)
+        let js = gen_body("fn main() {\n  a := round(5.0)\n  b := round(2.0)\n  x := a / b\n}");
+        assert!(js.contains("__idiv(a, b, "), "got: {js}");
+    }
+
+    #[test]
+    fn toint等の組み込みは引数が足りないとパニックせず明確なエラーになる() {
+        // code review(PR #16)で発覚: gen_builtin_callがargs[0]/args[1]へ直接インデックスして
+        // いたため、引数不足の組み込み呼び出し(例: round())がコンパイラをパニックさせていた
+        let err = gen_js("fn main() {\n  x := round()\n}").unwrap_err();
+        assert!(err.contains("expects at least 1 argument"), "got: {err}");
+        let err2 = gen_js("fn main() {\n  x := contains(\"a\")\n}").unwrap_err();
+        assert!(err2.contains("expects at least 2 argument"), "got: {err2}");
     }
 
     #[test]
