@@ -215,13 +215,17 @@ impl Parser {
     // トークンをエラーメッセージ用に人が読める形にする。EOFは"end of file"(引用符なし)。
     // 補間つき文字列トークンは`value`が空文字列のまま(lexer.rs参照)なので、それを
     // そのまま引用符で囲むと`unexpected ''`のような空の表示になってしまう —
-    // その場合は種別名(例: "string")にフォールバックする
+    // その場合は種別名(例: "string")にフォールバックする。判定は`value.is_empty()`ではなく
+    // `parts.is_some()`で行う(素の空文字列リテラル`""`もvalueが空文字列になるため、
+    // value基準だと誤って種別名にフォールバックしてしまう — code reviewでの指摘)
     fn describe_token(t: &Token) -> String {
         if t.kind == TokenType::Eof {
             return "end of file".to_string();
         }
-        let text = if t.value.is_empty() { t.kind.to_string() } else { t.value.clone() };
-        format!("'{text}'")
+        let text = if t.parts.is_some() { t.kind.to_string() } else { t.value.clone() };
+        // 値に`'`が含まれると引用符の対応が崩れて表示が壊れるため(例: `unexpected 'it's a test'`)、
+        // エスケープしてから引用符で囲む(code reviewでの指摘)
+        format!("'{}'", text.replace('\'', "\\'"))
     }
     fn skip_semis(&mut self) {
         while self.eat(TokenType::Semi) {}
@@ -1036,6 +1040,23 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert!(errors[0].message.contains("unexpected '*'"));
         assert!(errors[1].message.contains("unexpected '*'"));
+    }
+
+    #[test]
+    fn トークン表示_値に引用符を含む場合はエスケープする() {
+        // 修正前は`text`をエスケープせずそのまま引用符で囲んでいたため、値に`'`が
+        // 含まれると`unexpected 'it's a test'`のように引用符の対応が崩れて表示が壊れていた
+        let errors = parse("struct \"it's a test\" {}").unwrap_err();
+        assert!(errors[0].message.contains("'it\\'s a test'"), "got: {}", errors[0].message);
+    }
+
+    #[test]
+    fn トークン表示_空文字列リテラルは種別名にフォールバックしない() {
+        // 修正前は`value.is_empty()`を「補間つき文字列トークンか」の代理指標にしていたため、
+        // 素の空文字列リテラル`""`(value=""・parts=None)も種別名(例: "string")に
+        // フォールバックしてしまっていた。`parts.is_some()`で判定すればこの衝突は起きない
+        let errors = parse("struct \"\" {}").unwrap_err();
+        assert!(errors[0].message.contains("''"), "got: {}", errors[0].message);
     }
 
     #[test]
