@@ -298,12 +298,36 @@ impl Parser {
                 "top-level-mut-not-allowed",
             ));
         }
+        // error type X = ... / error struct X { ... }(F-2後半): "error"は予約語ではなく
+        // ("error"は組み込み型名としてchecker側で守られている)、直後がtype/structのときだけ
+        // マーカーとして読む文脈依存キーワード。1トークン先読みで曖昧さなく判定できる
+        let is_error = self.check(TokenType::Ident)
+            && self.peek().value == "error"
+            && matches!(self.peek_at(1).kind, TokenType::Type | TokenType::Struct);
+        if is_error {
+            self.next();
+        }
+        // json struct X { ... }(H-2): 同じ文脈依存キーワードのパターン。structのみ対応
+        // (unionの自動デコードはメンバー選択のロジックが要り複雑なので対象外 — 手書きの
+        // デコーダ関数を書く)。"json type"は意図的に弾いて誘導する
+        let is_json = self.check(TokenType::Ident) && self.peek().value == "json" && self.peek_at(1).kind == TokenType::Struct;
+        if is_json {
+            self.next();
+        }
+        if self.check(TokenType::Ident) && self.peek().value == "json" && self.peek_at(1).kind == TokenType::Type {
+            return Err(self.error_here(
+                "'json type' isn't supported — automatic JSON decoding only works for 'json struct' \
+                 (a union needs custom logic to pick a member; write a hand-written decoder using \
+                 json.field/json.asString/etc. instead)",
+                "json-type-not-supported",
+            ));
+        }
         if self.check(TokenType::Fn) {
             Ok(TopLevelItem::Fn(self.parse_fn_decl(exported)?))
         } else if self.check(TokenType::Struct) {
-            Ok(TopLevelItem::Type(self.parse_struct_decl(exported)?))
+            Ok(TopLevelItem::Type(self.parse_struct_decl(exported, is_error, is_json)?))
         } else if self.check(TokenType::Type) {
-            Ok(TopLevelItem::Type(self.parse_type_decl(exported)?))
+            Ok(TopLevelItem::Type(self.parse_type_decl(exported, is_error)?))
         } else if self.check(TokenType::Ident) && matches!(self.peek_at(1).kind, TokenType::ColonEq | TokenType::Colon) {
             Ok(TopLevelItem::Const(self.parse_const_decl(exported)?))
         } else {
@@ -317,8 +341,8 @@ impl Parser {
     }
 
     // struct User { name: string  age: int } — 意味的には型への名付け(typeと同じ)なので
-    // TypeDecl として登録する。フィールドは改行区切り。error/jsonマーカーは次回以降
-    fn parse_struct_decl(&mut self, exported: bool) -> Result<TypeDecl, Box<CompileError>> {
+    // TypeDecl として登録する。フィールドは改行区切り
+    fn parse_struct_decl(&mut self, exported: bool, is_error: bool, is_json: bool) -> Result<TypeDecl, Box<CompileError>> {
         let start = self.expect(TokenType::Struct, "at start of struct declaration")?;
         let name = self.expect(TokenType::Ident, "as struct name")?.value;
         self.expect(TokenType::LBrace, "after struct name")?;
@@ -332,12 +356,12 @@ impl Parser {
             self.skip_semis();
         }
         self.expect(TokenType::RBrace, "at end of struct declaration")?;
-        Ok(TypeDecl { name, node: TypeNode::StructType { fields, pos: start.pos }, exported, pos: start.pos })
+        Ok(TypeDecl { name, node: TypeNode::StructType { fields, pos: start.pos }, exported, is_error, is_json, pos: start.pos })
     }
 
     // type Status = "active" | "banned" / type X = { kind: "ok" } | { kind: "notFound" }(判別可能union)。
     // 長いunionは複数行に折れる — 行末`|`と行頭`|`(複数行の`;`越しの継続)の両方を許す
-    fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, Box<CompileError>> {
+    fn parse_type_decl(&mut self, exported: bool, is_error: bool) -> Result<TypeDecl, Box<CompileError>> {
         let start = self.expect(TokenType::Type, "at start of type declaration")?;
         let name = self.expect(TokenType::Ident, "as type name")?.value;
         let eq = self.expect(TokenType::Eq, "after type name")?;
@@ -350,17 +374,18 @@ impl Parser {
             let first = members.into_iter().next().unwrap();
             if let TypeNode::StructType { ref fields, pos } = first {
                 // fix: `type Name =`を`struct Name`に置き換えれば、続く`{ ... }`はそのまま使える —
-                // ただしこれが安全なのはフィールドが1行1つ(改行区切り)のときだけ
+                // ただしこれが安全なのはフィールドが1行1つ(改行区切り)のときだけ。isError付き
+                // (見た目が紛らわしい——置き換えるとerrorマーカーが消えてしまう)は自動fixを付けない
                 let one_field_per_line =
                     fields.iter().enumerate().all(|(i, f)| i == 0 || f.pos.line != fields[i - 1].pos.line);
-                let fix = if one_field_per_line {
+                let fix = if is_error || !one_field_per_line {
+                    None
+                } else {
                     Some(Fix {
                         description: format!("replace 'type {name} =' with 'struct {name}'"),
                         range: Range { start: start.pos, end: Pos { line: eq.pos.line, col: eq.pos.col + 1 } },
                         replacement: format!("struct {name}"),
                     })
-                } else {
-                    None
                 };
                 return Err(Box::new(CompileError {
                     message: format!("use 'struct {name} {{ ... }}' to define a data shape ('{{...}}' alone is only allowed inside a union)"),
@@ -369,10 +394,10 @@ impl Parser {
                     fix,
                 }));
             }
-            return Ok(TypeDecl { name, node: first, exported, pos: start.pos });
+            return Ok(TypeDecl { name, node: first, exported, is_error, is_json: false, pos: start.pos });
         }
         let pos = members[0].pos();
-        Ok(TypeDecl { name, node: TypeNode::Union { members, pos }, exported, pos: start.pos })
+        Ok(TypeDecl { name, node: TypeNode::Union { members, pos }, exported, is_error, is_json: false, pos: start.pos })
     }
 
     // unionの継続`|`を読む。行頭`|`スタイルでは直前の改行がASIで';'になっているので、
@@ -633,6 +658,13 @@ impl Parser {
             TokenType::Continue => {
                 self.next();
                 Ok(Stmt::Continue { pos: t.pos })
+            }
+            TokenType::Defer => {
+                // checkerがcall.kind===Callであることを検証する(defer-requires-call)。
+                // パーサはどんな式でも受け取っておき、意味的な制約はcheckerに一本化する
+                self.next();
+                let call = self.parse_expr()?;
+                Ok(Stmt::DeferStmt { call, pos: t.pos })
             }
             _ => self.parse_simple_stmt(),
         }
@@ -2009,5 +2041,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(program.fns.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
+    }
+
+    // ---- defer文・error/jsonマーカー ----
+
+    #[test]
+    fn defer文をパースできる() {
+        let stmts = parse_body("defer f(x)");
+        let Stmt::DeferStmt { call, .. } = &stmts[0] else { panic!("expected deferStmt, got {:?}", stmts[0]) };
+        assert!(matches!(call, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn 構造化エラー_error_type_error_structのis_errorフラグ() {
+        let t1 = &parse("error type DbError = { kind: \"notFound\" } | { kind: \"timeout\" }").unwrap().types[0];
+        assert!(t1.is_error);
+        assert_eq!(t1.name, "DbError");
+
+        let t2 = &parse("error struct DbError { table: string }").unwrap().types[0];
+        assert!(t2.is_error);
+        assert!(matches!(t2.node, TypeNode::StructType { .. }));
+
+        // "error"マーカー無しは今まで通りfalse
+        let t3 = &parse("type Status = \"active\" | \"banned\"").unwrap().types[0];
+        assert!(!t3.is_error);
+        let t4 = &parse("struct User { name: string }").unwrap().types[0];
+        assert!(!t4.is_error);
+
+        // exportと組み合わせても読める(exportが先)
+        let t5 = &parse("export error type DbError = { kind: \"notFound\" } | { kind: \"timeout\" }").unwrap().types[0];
+        assert!(t5.is_error);
+        assert!(t5.exported);
+    }
+
+    #[test]
+    fn json_struct_のis_jsonフラグ_json_typeは非対応() {
+        let t1 = &parse("json struct User { name: string }").unwrap().types[0];
+        assert!(t1.is_json);
+        assert!(!t1.is_error);
+
+        let t2 = &parse("struct User { name: string }").unwrap().types[0];
+        assert!(!t2.is_json);
+
+        let err = parse("json type X = \"a\" | \"b\"").unwrap_err();
+        assert_eq!(err[0].code, "json-type-not-supported");
+    }
+
+    #[test]
+    fn error付きのbare_struct_shapeは自動fixを付けない() {
+        // 通常はfixが付くが、isError付きだと'struct'化でerrorマーカーが消えてしまうため
+        // fixを出さない(見た目が紛らわしいことの誘導)
+        let err = parse("error type DbError = { table: string }").unwrap_err();
+        assert_eq!(err[0].code, "bare-struct-shape");
+        assert!(err[0].fix.is_none());
     }
 }

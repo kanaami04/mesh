@@ -316,6 +316,25 @@
         `cargo clippy`クリーン。**`examples/*.mesh`11本 + mathutil系2本が全て完全パース成功**
         (`maps.mesh`が最後の1本として想定通り通った)。
         **対象外のまま**: defer・`error struct`/`json struct`宣言マーカー
+  - [x] **parser移植(第十弾・defer文+error/jsonマーカー)** ✅ 2026-07-22実装(kanayamaと討議の
+        うえ、残っていた最後の2件をまとめて採用)。`defer f(x)`(`parse_statement`。呼び出しか
+        どうかの検証はcheckerに一本化——パーサは任意の式を受け取るだけ、TS版と同じ設計)・
+        `error type X = ...`/`error struct X {...}`(`TypeDecl.is_error`。`?`/`or`の伝播対象と
+        する意味論はchecker側)・`json struct X {...}`(`TypeDecl.is_json`。`decode<X>`自動生成も
+        checker側)・`json type`は`json-type-not-supported`エラーに誘導(union の自動デコードは
+        メンバー選択ロジックが要り複雑なため対象外、手書きデコーダへ誘導)を追加。
+        `error`/`json`はどちらも予約語ではなく、直後が`type`/`struct`のときだけマーカーとして
+        読む文脈依存キーワード(1トークン先読みで曖昧さなく判定)。`bare-struct-shape`エラーの
+        自動fix提案は`is_error`付きだと出さない(struct化でerrorマーカーが消えて紛らわしいため。
+        TS版から踏襲)。TS版(`parser.ts`)の該当箇所をほぼ1:1移植するだけで、新しい設計判断は
+        不要だった。`tests/parser.test.ts`相当のテスト1件+自作テスト3件(defer・json struct/
+        json type・error付きbare-struct-shapeのfix抑制)を新規作成(84→88件、全件パス)。
+        `cargo clippy`クリーン。`examples/*.mesh`11本+mathutil系2本は変化なく全て完全パース成功
+        (どの例もdefer/error-json構文を使っていないため)。
+        **スコープ調査中に発見した新しい未着手項目**: 関数型注釈(`fn(int, string) bool`)と
+        無名関数式(`fn(x: int) int { return x * 2 }`。`Expr::FnExpr`/`TypeNode::FnType`)が
+        まだ移植されていないと判明——今回のマイルストーンの対象ではなかったため次回以降に
+        持ち越し(`examples/*.mesh`のどれも無名関数を使っていないため、これまで見落とされていた)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

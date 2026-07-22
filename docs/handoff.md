@@ -103,33 +103,26 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (`cargo run -- file.mesh`でトークン列/ASTを表示するだけの疎通確認CLI。
   checker/codegenが無いのでまだ`mesh run`相当にはなっていない)
 - **進捗概要(詳細は todo.md の各マイルストーン項目が一次情報源。ここは要約のみ)**:
-  lexer全体(`fffd0d9`、テスト15件)→ parser核サブセット(fn宣言・if/for・変数宣言・
-  二項演算子・関数呼び出し、エラー復帰の枠組み)→ struct/type宣言+判別可能union+match/is式・
-  文字列補間 → 文字列補間まわりのcode review指摘3件(スタックオーバーフロー対策の
-  `interp_depth`カウンタ・エラーメッセージの`describe_token`統一・引用符エスケープ等。
-  PR #5〜#7)。ここまでで**着手当初に挙がった4候補が全て完了**:
-  並行処理(`chan<T>`型・`spawn`/`detach`/`wait`/`send`/`recv`/`select`式。PR #8)→
-  error/json構造化エラー(`?`伝播式・`or`束縛形。PR #9)→
-  import/export(`import "path"`宣言。`export`修飾自体は以前から実装済みと判明。実例を
-  最後まで組んで見つかったパッケージ修飾structリテラル・型注釈つき変数宣言も同PRで追加。
-  PR #10)→ ジェネリクス+レシーバ(`fn first<T>(...)`型パラメータ・
-  `fn (u: User) describe() ...`Goスタイルレシーバ。`export fn (u: T) ...`は
-  `method-export-redundant`エラーに誘導。レシーバとgenericsは併用不可)。
+  lexer全体(`fffd0d9`)→ parser核サブセット(fn宣言・if/for・変数宣言・二項演算子・
+  関数呼び出し、エラー復帰の枠組み)→ struct/type宣言+判別可能union+match/is式・文字列補間
+  (+スタックオーバーフロー対策の`interp_depth`カウンタ等、code review指摘3件。PR #5〜#7)→
+  並行処理(`chan<T>`・`spawn`/`detach`/`wait`/`select`等。PR #8)→
+  error/json構造化エラー(`?`/`or`。PR #9)→ import/export(+パッケージ修飾structリテラル・
+  型注釈つき変数宣言。PR #10)→ ジェネリクス+レシーバ(PR #12)→
+  配列/mapリテラル+添字アクセス+範囲for(`maps.mesh`を最後まで通す一括り。実装中に
+  **本物のスタックオーバーフロー回帰を自己検証で発見・修正**——詳細は下記「教訓」。PR #13)→
+  defer文+error/jsonマーカー(`error type`/`error struct`/`json struct`。PR #14)。
   いずれもTS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。
-  テスト76件・`cargo clippy --all-targets -- -D warnings` クリーン・
-  配列型`T[]`+配列リテラル+型付き配列リテラル(`Todo[]{}`等)+map型`map<K,V>`+mapリテラル+
-  添字アクセス`a[i]`(代入先としても可)+範囲for(`for i, v := range arr`等)を追加
-  (`maps.mesh`——examples/*.mesh 11本のうち唯一未対応だった1本——を最後まで通す一括りとして
-  採用)。**実装中にスタックオーバーフローの実バグ1件を自己検証で発見・修正**(下記「教訓」参照)。
-  現在テスト84件、`cargo clippy --all-targets -- -D warnings` クリーン
-- **対象外(未着手)**: `error struct`/`json struct`宣言マーカー(checkerが無いと
-  `isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・defer。
+  **これでparser.ts(1217行)はほぼ全体を移植済み**。現在テスト88件、
+  `cargo clippy --all-targets -- -D warnings` クリーン
+- **対象外(未着手)**: 関数型注釈(`fn(int, string) bool`)・無名関数式
+  (`fn(x: int) int { return x * 2 }`)のみ(2026-07-22のスコープ調査で発覚——それまで
+  見落とされていた。`examples/*.mesh`のどれも無名関数を使っていないため気づかれなかった)。
   対象外の構文は誠実に構文エラーで失敗する(クラッシュしない)よう作ってある
 - **examples/\*.meshでの進捗確認**: **全13本(examples/*.mesh 11本 + mathutil系2本)が
   完全にパース成功**(2026-07-22時点)
-- **次にやるなら**: 着手当初の4候補+配列/mapリテラル等も全て完了したので、残るのは
-  defer・error/jsonマーカーという小さな2件を埋めるか、**checker/codegenの移植に進むか**の
-  判断(パーサはparser.ts全体1217行の8割強まで到達)
+- **次にやるなら**: 残るのは関数型注釈+無名関数式という最後の1件を埋めるか、
+  **checker/codegenの移植に進むか**の判断(パーサはparser.ts全体1217行のほぼ全体まで到達)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
