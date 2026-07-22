@@ -116,20 +116,20 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `fn (u: User) describe() ...`Goスタイルレシーバ。`export fn (u: T) ...`は
   `method-export-redundant`エラーに誘導。レシーバとgenericsは併用不可)。
   いずれもTS版(`parser.ts`)をほぼ1:1移植するだけで新しい設計判断は不要だった。
-  現在テスト76件、`cargo clippy --all-targets -- -D warnings` クリーン
+  テスト76件・`cargo clippy --all-targets -- -D warnings` クリーン・
+  配列型`T[]`+配列リテラル+型付き配列リテラル(`Todo[]{}`等)+map型`map<K,V>`+mapリテラル+
+  添字アクセス`a[i]`(代入先としても可)+範囲for(`for i, v := range arr`等)を追加
+  (`maps.mesh`——examples/*.mesh 11本のうち唯一未対応だった1本——を最後まで通す一括りとして
+  採用)。**実装中にスタックオーバーフローの実バグ1件を自己検証で発見・修正**(下記「教訓」参照)。
+  現在テスト84件、`cargo clippy --all-targets -- -D warnings` クリーン
 - **対象外(未着手)**: `error struct`/`json struct`宣言マーカー(checkerが無いと
-  `isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・配列/mapリテラル
-  (型位置の配列サフィックス`chan<int>[]`等も含む)・defer・添字アクセス・範囲for。
+  `isError`/`isJson`フラグの使い道が無いため、checker移植まで後回し)・defer。
   対象外の構文は誠実に構文エラーで失敗する(クラッシュしない)よう作ってある
-- **examples/\*.meshでの進捗確認**: 全13本中mathutil系2本を除いた11本のうち10本
-  (`hello.mesh`・`fizzbuzz.mesh`・`status.mesh`・`tree.mesh`・`discriminated_union.mesh`・
-  `users.mesh`・`channel_spec.mesh`・`channels.mesh`・`errors.mesh`・`modules_demo.mesh`)が
-  完全にパース成功。残る1本(`maps.mesh`)はmapリテラルが未実装のため構文エラーになる。
-  mathutil系2本(`ops.mesh`・`point.mesh`。レシーバメソッド`fn (p: Point) magnitudeSq() int`
-  を含む)も完全パース成功
-- **次にやるなら**: 着手当初の4候補は全て完了したので、残るのは細部(配列/mapリテラル・
-  defer・添字アクセス・範囲for・error/jsonマーカー)を埋めるか、**checker/codegenの移植に
-  進むか**の判断(パーサはparser.ts全体1217行の8割弱程度まで到達)
+- **examples/\*.meshでの進捗確認**: **全13本(examples/*.mesh 11本 + mathutil系2本)が
+  完全にパース成功**(2026-07-22時点)
+- **次にやるなら**: 着手当初の4候補+配列/mapリテラル等も全て完了したので、残るのは
+  defer・error/jsonマーカーという小さな2件を埋めるか、**checker/codegenの移植に進むか**の
+  判断(パーサはparser.ts全体1217行の8割強まで到達)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
@@ -140,6 +140,18 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `none`(`Expr::None`)を最初のスコープ見積もりで見落としていた——「実際に典型的な
   コード片を1つ最後まで組んでみる」まで気づけなかった。次のマイルストーンでも
   スコープを決めたら早めに実例(discriminated_union.mesh相当)で組んでみること
+- **教訓(milestone 9で発覚)**: `parse_primary`/`parse_postfix`は文字列補間の再帰パース
+  (`interp_depth`で深さ制限)と同じ呼び出し経路に乗るため、これらの関数(および間接に
+  呼ばれる`parse_unary`/`parse_binary`等)のスタックフレームサイズが`MAX_INTERP_DEPTH`
+  (上限64)の安全マージンに直結する。新しい構文の局所変数(配列/mapリテラルの
+  `elems`/`entries`等)をそのまま関数本体にインライン展開したところ、この安全マージンを
+  食い潰して**回帰テストが本物のスタックオーバーフローで実際にクラッシュした**
+  (code reviewではなく`cargo test`の自己検証で発見)。対応: 該当ロジックを専用の関数に
+  切り出し、その分岐が実際に呼ばれたときだけ専用フレームが積まれる形にして解消。
+  **今後、この2関数(および`parse_unary`)に新しい分岐を足すときは、局所変数が数個を超える
+  ロジックは必ず別関数に切り出すこと**。テストで検知できることは確認済みだが、
+  安全マージンそのものは今回で使い切った可能性があるため、次に何か追加する際は
+  `cargo test`(特に`文字列補間_上限を超えるネストは...`)を必ず確認すること
 - **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 

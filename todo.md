@@ -288,6 +288,34 @@
         (並行処理/error・json構造化エラー/import・export/ジェネリクス+レシーバ)が全て完了**。
         残るギャップは配列/mapリテラル・defer・添字アクセス・範囲for・error/jsonマーカーと、
         checker/codegen自体の移植(現状はパーサのみ)
+  - [x] **parser移植(第九弾・配列/mapリテラル+添字アクセス+範囲for)** ✅ 2026-07-22実装
+        (kanayamaと討議のうえ、残る候補群の中から`maps.mesh`(examples/*.mesh 11本のうち
+        唯一未対応だった1本)を最後まで通す一括りとして採用)。追加した構文:
+        配列型`T[]`(`parse_array_suffix`。要素型が`chan<T>`/`map<K,V>`でも効く)・
+        配列リテラル`[1, 2, 3]`(空は`[]`)・型付き配列リテラル`Todo[]{}`/`int[]{1, 2}`/
+        `int[][]{...}`(F-9a: 空の型付き配列`T[]{}`は廃止済みで`empty-typed-array-literal-removed`
+        エラーに誘導)・map型`map<K, V>`・mapリテラル`map<K, V>{"a": 1}`(`map`は文脈依存
+        キーワード——`<`が続けば型/リテラル、それ以外は素の識別子に読み替えて`map(arr, f)`
+        のような組み込み高階関数呼び出しと衝突しない)・添字アクセス`a[i]`(代入先としても可、
+        `invalid-assignment-target`検査に`Index`/`Member`を追加)・範囲for`for i, v := range arr`/
+        `for k, v := range m`/`for i := range 10`。TS版(`parser.ts`)の該当箇所をほぼ1:1移植
+        するだけで、新しい設計判断は不要だった。
+        **実装中に発見・修正した実バグ1件**: 型付き配列リテラル(`parse_postfix`)とmap
+        リテラル/配列リテラル(`parse_primary`)の処理をそのまま関数本体にインライン展開したところ、
+        既存の`文字列補間_上限を超えるネストはクラッシュせず構文エラーになる`回帰テストが
+        **本物のスタックオーバーフローで実際にクラッシュするようになった**——文字列補間の
+        再帰パースは`parse_primary`/`parse_postfix`を経由するため、これらの関数のスタック
+        フレームサイズが`MAX_INTERP_DEPTH`(上限64)の安全マージンに直結しており、新規追加分の
+        局所変数(dims/elem_type/elems/key/value/entries等)がフレームを肥大化させて安全マージンを
+        食い潰していた。3箇所とも局所変数を専用の関数(`try_parse_typed_array_literal`/
+        `parse_array_literal`/`parse_map_literal_or_ident`)に追い出し、それらの関数を実際に
+        呼び出したときだけ専用スタックフレームが積まれる形に変更して解消(該当分岐が呼ばれない
+        限りフレームサイズに影響しない)。code reviewではなく自己検証(`cargo test`)で発見。
+        `tests/parser.test.ts`相当のテスト2件+自作テスト6件(型付き配列リテラル・map式位置での
+        裸識別子扱い・添字読み書き・範囲for3形態・実例テスト)を新規作成(76→84件、全件パス)。
+        `cargo clippy`クリーン。**`examples/*.mesh`11本 + mathutil系2本が全て完全パース成功**
+        (`maps.mesh`が最後の1本として想定通り通った)。
+        **対象外のまま**: defer・`error struct`/`json struct`宣言マーカー
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
