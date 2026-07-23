@@ -599,9 +599,12 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
                 }
             }
         }
-        // M7未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
-        // 「まだ対応していません」と明確なエラーにするので、ここで型を誤魔化しても実害は無い
-        _ => ANY,
+        // 無名関数式(milestone 10): TS版のfnExprケースと同じ(fnType(ctx, params, ret)相当)。
+        // 本体は検査しない(診断を出さない設計、TS版のcheckFnに相当する処理は不要——
+        // codegenが必要になった時点でinfer_expr/gen_exprを都度呼ぶだけで足りる)
+        Expr::FnExpr { params, ret, .. } => {
+            Type::Fn { params: params.iter().map(|p| resolve_type_node(ctx, &p.type_node)).collect(), ret: Box::new(resolve_return_type(ctx, ret)) }
+        }
     }
 }
 
@@ -856,8 +859,6 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
 
 // codegenが実際に生成できる組み込みの戻り値型を解決する(TS版`checker/builtins.ts`の
 // `inferBuiltinCall`を移植。診断は出さないので検査ロジックは持たず、型の解決だけ行う)。
-// `filter`/`map`/`reduce`は無名関数(Expr::FnExpr)のcodegenが無くまだ呼び出せないため、
-// ここでも対象外のまま(ANYへのフォールバックで実害は無い)
 fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Type> {
     Some(match name {
         "print" | "sleep" | "push" | "close" | "delete" => VOID,
@@ -887,6 +888,22 @@ fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Typ
         "values" => match args.first().map(|a| infer_expr(ctx, a)) {
             Some(Type::Map { value, .. }) => Type::Array(value),
             _ => Type::Array(Box::new(ANY)),
+        },
+        // 高階関数(milestone 10、F-8旧transform)。無名関数(Expr::FnExpr)を第2引数に
+        // 取る——filterは対象配列と同じ型をそのまま返す、mapはコールバックの戻り値型の
+        // 配列、reduceはコールバックの第1引数(累積値)の型(コールバックの型が確実に
+        // 分からなければ初期値の型、それも無ければANY)
+        "filter" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(t @ Type::Array(_)) => t,
+            _ => ANY,
+        },
+        "map" => match args.get(1).map(|a| infer_expr(ctx, a)) {
+            Some(Type::Fn { ret, .. }) => Type::Array(ret),
+            _ => Type::Array(Box::new(ANY)),
+        },
+        "reduce" => match args.get(1).map(|a| infer_expr(ctx, a)) {
+            Some(Type::Fn { params, .. }) if params.len() == 2 => params.into_iter().next().expect("checked len == 2 above"),
+            _ => args.get(2).map(|a| infer_expr(ctx, a)).unwrap_or(ANY),
         },
         _ => return None,
     })
@@ -1006,7 +1023,49 @@ mod tests {
         assert!(types::type_equals(&to_int_call, &types::union_of(vec![INT, ERROR])));
     }
 
-    use crate::ast::StructFieldNode;
+    use crate::ast::{Param, StructFieldNode};
+
+    fn fn_expr(params: &[(&str, TypeNode)], ret: Option<TypeNode>) -> Expr {
+        Expr::FnExpr {
+            params: params.iter().map(|(n, t)| Param { name: n.to_string(), type_node: t.clone(), pos: pos() }).collect(),
+            ret,
+            body: crate::ast::Block { stmts: vec![] },
+            pos: pos(),
+        }
+    }
+
+    #[test]
+    fn infer_exprのfnexprはパラメータ_戻り値型からfn型を作る() {
+        let ctx = CheckerCtx::new();
+        let f = fn_expr(&[("n", name_type("int"))], Some(name_type("bool")));
+        let Type::Fn { params, ret } = infer_expr(&ctx, &f) else { panic!("expected Fn type") };
+        assert_eq!(params.len(), 1);
+        assert!(types::type_equals(&params[0], &INT));
+        assert!(types::type_equals(&ret, &BOOL));
+
+        // 戻り値注釈が無ければvoid(TS版fnTypeと同じ)
+        let void_f = fn_expr(&[], None);
+        let Type::Fn { ret: void_ret, .. } = infer_expr(&ctx, &void_f) else { panic!("expected Fn type") };
+        assert!(types::type_equals(&void_ret, &VOID));
+    }
+
+    #[test]
+    fn infer_callはfilter_map_reduceの戻り値型をコールバックから引く() {
+        let ctx = CheckerCtx::new();
+        let arr = Expr::ArrayLit { elems: vec![int_lit("1")], elem_type: None, pos: pos() };
+
+        let filter_pred = fn_expr(&[("n", name_type("int"))], Some(name_type("bool")));
+        let filter_ty = infer_call(&ctx, &Expr::Ident { name: "filter".into(), pos: pos() }, &[arr.clone(), filter_pred]);
+        assert!(matches!(&filter_ty, Type::Array(elem) if types::type_equals(elem, &INT)), "got {filter_ty:?}");
+
+        let mapper = fn_expr(&[("n", name_type("int"))], Some(name_type("string")));
+        let map_ty = infer_call(&ctx, &Expr::Ident { name: "map".into(), pos: pos() }, &[arr.clone(), mapper]);
+        assert!(matches!(&map_ty, Type::Array(elem) if types::type_equals(elem, &STRING)), "got {map_ty:?}");
+
+        let reducer = fn_expr(&[("acc", name_type("int")), ("n", name_type("int"))], Some(name_type("int")));
+        let reduce_ty = infer_call(&ctx, &Expr::Ident { name: "reduce".into(), pos: pos() }, &[arr, reducer, int_lit("0")]);
+        assert!(types::type_equals(&reduce_ty, &INT), "got {reduce_ty:?}");
+    }
 
     fn name_type(n: &str) -> TypeNode {
         TypeNode::Name { name: n.to_string(), pkg: None, pos: pos() }

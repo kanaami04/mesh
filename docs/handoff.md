@@ -378,11 +378,30 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   副産物としてTS版自体のフォーマッタのバグ(`json struct`の`json`キーワードが
   再整形で消える)も発見・修正。テスト253→266件(+13)、TS版テストスイート484→485件。
   詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの9マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 10(filter/map/reduce)完了(2026-07-23)**。
+  `filter`/`map`/`reduce`自体のcodegen(`(await __filter(...))`等、ランタイム
+  ヘルパーはH-2実装時に移植済みで既に揃っていた)は3行で済んだが、その引数となる
+  **無名関数式(`Expr::FnExpr`)のcodegenがmilestone 4以来ずっと明確なErrスタブの
+  ままだった**ため、これを実装するのが今回の本題だった。無名関数は他の関数の
+  中にネストしうる(`g := fn() int { return f()? }`)ため、`prop_used`/
+  `spawn_used`を単一フラグからスタック(`Vec<bool>`)へ変更(TS版の
+  `propStack`/`spawnStack`と同じ設計)、FnDecl/Expr::FnExpr共通の「本体を
+  いったん別バッファに生成し`?`/`spawn`の使用有無で事後にtry/catch/finally包みを
+  決める」ロジックを`gen_fn_body`という共有ヘルパーへ切り出した。checker.rs側は
+  `Expr::FnExpr`の型推論(`Type::Fn{params, ret}`、本体は検査しない)を追加した
+  ことで`infer_expr`の`match`が全`Expr`variantを尽くす形になり、既存の
+  `_ => ANY`最終フォールバックが到達不能になったため削除(意図せぬ副産物——
+  これでinfer_exprは全構文を明示的に扱うようになった)。新規
+  `examples/filter_map_reduce.mesh`(名前付き関数を値として渡す・インライン
+  クロージャで外側のmut変数を捕捉・mapで要素の型を変える・reduceの2用途・
+  filter→map→reduceのパイプライン合成)でTS版とbyte-for-byte一致を確認、
+  既存の全exampleも回帰無し。テスト266→272件(+6)。`defer`は独立した別機能
+  なので今回のスコープ外(次のmilestone候補)。詳細はtodo.mdの当該項目が
+  一次情報源
+- **次にやるなら**: 確認済みの10マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
-  〈union形式〉→ json struct)が全て完了。次の対象はkanayamaと相談して決める
-  (`filter`/`map`/`reduce`・
-  `defer`が主な既知の未対応機能。todo.md参照)
+  〈union形式〉→ json struct → filter/map/reduce)が全て完了。次の対象は
+  kanayamaと相談して決める(`defer`が主な既知の未対応機能。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

@@ -60,14 +60,14 @@ struct Codegen {
     indent: usize,
     file: String,
     ctx: CheckerCtx,
-    // 今生成中の関数本体のどこかで`?`が使われたか(関数ごとにgen_fn_declでリセットする。
-    // TS版のpropStackに相当——Expr::FnExprは未対応なので関数本体生成はネストせず、
-    // スタックではなく単一のフラグで足りる)
-    prop_used: bool,
+    // 今生成中の関数本体のどこかで`?`が使われたか。TS版のpropStackに相当——milestone 10で
+    // Expr::FnExprに対応し関数本体生成がネストしうるようになったため、単一フラグではなく
+    // スタックにしてgen_fn_body呼び出し単位でpush/popする(外側の関数の使用状況を
+    // 内側のFnExprが汚さない、逆も同様)
+    prop_used: Vec<bool>,
     // 今生成中の関数本体のどこかで(detachではない)spawnが使われたか。TS版のspawnStackに
-    // 相当——prop_usedと同じ理由で単一のフラグで足りる。関数ごとのリセットを忘れると
-    // 前の関数のspawn使用が次の関数に漏れて無駄なwait枠を生成してしまうので要注意
-    spawn_used: bool,
+    // 相当——prop_usedと同じ理由でスタックにする
+    spawn_used: Vec<bool>,
     // これまでに生成したトップレベルconstの名前(全パッケージ分、リセットしない)。
     // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_nameで
     // pkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
@@ -86,8 +86,8 @@ impl Codegen {
             indent: 0,
             file: String::new(),
             ctx: CheckerCtx::new(),
-            prop_used: false,
-            spawn_used: false,
+            prop_used: Vec::new(),
+            spawn_used: Vec::new(),
             declared_consts: HashSet::new(),
         }
     }
@@ -290,24 +290,34 @@ impl Codegen {
             self.ctx.declare(&p.name, checker::resolve_type_node(&self.ctx, &p.type_node));
         }
 
-        // `?`/(detachでない)spawnが本体のどこかに現れたかどうかは生成してみるまで
-        // 分からない(if/forの中にネストしていてもよい)ので、本体をいったん別バッファに
-        // 生成してから、try/catch(?用)・finally(spawn用)で包むかどうかを事後に決める
-        // (TS版genFnBodyのpropStack/spawnStackと同じ設計。Rustでは所有権の都合上
-        // mem::take/replaceで代用する)。Expr::FnExprはcodegenがまだ対応していないため
-        // 関数本体の生成がネストすることは無く、このフラグは関数1つぶんで使い切り
-        // (TS版のようなスタックは不要)。`defer`(TS版usesDefer相当)は`Stmt::DeferStmt`が
-        // 常にErrを返すため絶対に発生せず、今回は対象外のままでよい
-        self.prop_used = false;
-        self.spawn_used = false;
+        let body_result = self.gen_fn_body(&fn_decl.body.stmts);
+        self.ctx.pop_scope();
+        body_result?;
+        self.emit("}");
+        Ok(())
+    }
+
+    // 関数本体(FnDecl・Expr::FnExpr共通)を生成する: `?`/(detachでない)spawnが本体の
+    // どこかに現れたかどうかは生成してみるまで分からない(if/forの中にネストしていても
+    // よい)ので、本体をいったん別バッファに生成してから、try/catch(?用)・finally(spawn用)
+    // で包むかどうかを事後に決める(TS版genFnBodyのpropStack/spawnStackと同じ設計)。
+    // milestone 10でExpr::FnExprに対応し関数本体生成がネストしうるようになったため、
+    // prop_used/spawn_usedはスタックにしてこの呼び出し単位でpush/popする(外側の関数の
+    // 使用状況を内側のFnExprが汚さない、逆も同様)。`self.out`/`self.indent`の意味
+    // (トップレベル関数なら直接追記、Expr::FnExprなら隔離済みバッファ)は呼び出し元が
+    // 管理する——この関数は現在の`self.out`/`self.indent`をそのまま使う。
+    // `defer`(TS版usesDefer相当)は`Stmt::DeferStmt`が常にErrを返すため絶対に発生せず、
+    // 対象外のままでよい
+    fn gen_fn_body(&mut self, stmts: &[Stmt]) -> CodegenResult<()> {
+        self.prop_used.push(false);
+        self.spawn_used.push(false);
         let saved_out = std::mem::take(&mut self.out);
         self.indent += 1;
-        let body_result = self.gen_stmts(&fn_decl.body.stmts);
+        let body_result = self.gen_stmts(stmts);
         // indentはまだ+1のまま——try/catch/finallyの枠自体もこの深さ(関数の中、本体と同じ階層)に出す
         let body_lines = std::mem::replace(&mut self.out, saved_out);
-        let used_prop = self.prop_used;
-        let used_spawn = self.spawn_used;
-        self.ctx.pop_scope();
+        let used_prop = self.prop_used.pop().expect("pushed at the start of gen_fn_body");
+        let used_spawn = self.spawn_used.pop().expect("pushed at the start of gen_fn_body");
 
         if used_prop || used_spawn {
             if used_spawn {
@@ -335,9 +345,7 @@ impl Codegen {
             self.out.extend(body_lines);
         }
         self.indent -= 1;
-        body_result?;
-        self.emit("}");
-        Ok(())
+        body_result
     }
 
     fn gen_stmts(&mut self, stmts: &[Stmt]) -> CodegenResult<()> {
@@ -949,7 +957,7 @@ impl Codegen {
                     ));
                 }
                 let operand_js = self.gen_expr(operand)?;
-                self.prop_used = true;
+                *self.prop_used.last_mut().expect("inside a function body") = true;
                 match context {
                     Some(ctx_expr) => {
                         let ctx_js = self.gen_expr(ctx_expr)?;
@@ -1010,7 +1018,33 @@ impl Codegen {
                     Ok(format!("__idx({target_js}, {index_js}, {})", self.at(*pos)))
                 }
             }
-            Expr::FnExpr { pos, .. } => Err(format!("codegen: anonymous functions are not yet supported ({}:{})", pos.line, pos.col)),
+            // 無名関数式: fn(x: int) int { return x * 2 }。値として使われる式なので、
+            // gen_stmtのように`self.out`へ直接追記せず、隔離したバッファへ生成してから
+            // 呼び出し元の式の一部として埋め込む文字列にする(TS版codegen.tsのfnExpr
+            // ケースと同じトリック——一旦indent=0にリセットして生成し、出来上がった
+            // 各行の先頭に呼び出し元の実際のindentを後付けで足す)。本体の生成
+            // (?/spawnの使用有無に応じたtry/catch/finally包み)自体はgen_fn_body
+            // (FnDeclと共通)を再利用する
+            Expr::FnExpr { params, body, .. } => {
+                let params_js = params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
+                self.ctx.push_scope();
+                for p in params {
+                    let ty = checker::resolve_type_node(&self.ctx, &p.type_node);
+                    self.ctx.declare(&p.name, ty);
+                }
+                let saved_out = std::mem::take(&mut self.out);
+                let saved_indent = self.indent;
+                self.indent = 0;
+                let body_result = self.gen_fn_body(&body.stmts);
+                let body_lines = std::mem::replace(&mut self.out, saved_out);
+                self.indent = saved_indent;
+                self.ctx.pop_scope();
+                body_result?;
+                let pad = "  ".repeat(self.indent);
+                let indented =
+                    body_lines.iter().map(|l| if l.is_empty() { l.clone() } else { format!("{pad}{l}") }).collect::<Vec<_>>().join("\n");
+                Ok(format!("(async ({params_js}) => {{\n{indented}\n{pad}}})"))
+            }
         }
     }
 
@@ -1132,7 +1166,8 @@ impl Codegen {
         if detached {
             Ok(format!("__detach({callee_js}, {args_array})"))
         } else {
-            self.spawn_used = true; // TS版spawnStack[..] = trueに相当。gen_fn_declが関数丸ごとのwait枠を付けるかの判定に使う
+            // TS版spawnStack[..] = trueに相当。gen_fn_bodyが関数丸ごとのwait枠を付けるかの判定に使う
+            *self.spawn_used.last_mut().expect("inside a function body") = true;
             Ok(format!("__spawn({callee_js}, {args_array})"))
         }
     }
@@ -1186,7 +1221,8 @@ impl Codegen {
             "print" => 0,
             "str" | "sleep" | "toInt" | "toFloat" | "round" | "floor" | "ceil" | "error" | "trim" | "upper" | "lower" | "sort" | "close" | "len"
             | "keys" | "values" => 1,
-            "contains" | "indexOf" | "get" | "split" | "join" | "push" | "delete" => 2,
+            "contains" | "indexOf" | "get" | "split" | "join" | "push" | "delete" | "filter" | "map" => 2,
+            "reduce" => 3,
             _ => 0, // 未対応の組み込みはこの後のmatchのdefaultアームでエラーになる
         };
         if args.len() < required {
@@ -1246,8 +1282,11 @@ impl Codegen {
             }
             "keys" => Ok(format!("Array.from({}.keys())", args[0])),
             "values" => Ok(format!("Array.from({}.values())", args[0])),
-            // filter/map/reduceは無名関数(Expr::FnExpr)のcodegenがまだ無く引数を生成できない
-            // ため対象外のまま——次のマイルストーン以降で対応する
+            // 高階関数(milestone 10、F-8旧transform)。ランタイムヘルパ(__filter/__map/__reduce)
+            // はH-2実装時にruntime.ts全体を移植済みで既に揃っている——ここでは呼び出すだけでよい
+            "filter" => Ok(format!("(await __filter({}, {}))", args[0], args[1])),
+            "map" => Ok(format!("(await __map({}, {}))", args[0], args[1])),
+            "reduce" => Ok(format!("(await __reduce({}, {}, {}))", args[0], args[1], args[2])),
             _ => Err(format!("codegen: builtin '{name}' is not yet supported ({}:{})", pos.line, pos.col)),
         }
     }
@@ -2407,5 +2446,46 @@ mod tests {
             "fn g(x: int | error) int {\n  if x is error {\n    return 0\n  } else {\n    print(\"ok\")\n  }\n  return x / 2\n}\nfn main() {\n  print(1)\n}",
         );
         assert!(js.contains("__idiv(x, 2,"), "got: {js}");
+    }
+
+    #[test]
+    fn 無名関数式は即時評価可能な非同期アロー関数として生成される() {
+        let js = gen_body("fn main() {\n  double := fn(n: int) int { return n * 2 }\n  print(double(3))\n}");
+        assert!(js.contains("const double = (async (n) => {"), "got: {js}");
+        assert!(js.contains("__iarith(n, \"*\", 2,"), "got: {js}"); // 無名関数の中でも型推論が効きintの乗算にiarithが選ばれる
+        assert!(js.contains("(await double(3))"), "got: {js}"); // ユーザー定義関数(無名関数含む)呼び出しは常にawait
+    }
+
+    #[test]
+    fn filter_map_reduceはランタイムヘルパ呼び出しに変換され無名関数を引数に取れる() {
+        let js = gen_body(
+            "fn main() {\n  nums := [1, 2, 3]\n  evens := filter(nums, fn(n: int) bool { return n % 2 == 0 })\n  doubled := map(nums, fn(n: int) int { return n * 2 })\n  total := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)\n  print(evens, doubled, total)\n}",
+        );
+        assert!(js.contains("(await __filter(nums, (async (n) => {"), "got: {js}");
+        assert!(js.contains("(await __map(nums, (async (n) => {"), "got: {js}");
+        assert!(js.contains("(await __reduce(nums, (async (acc, n) => {"), "got: {js}");
+    }
+
+    #[test]
+    fn 無名関数式の本体のprop_spawn使用は外側の関数を汚さずネストで独立に扱われる() {
+        // 回帰テスト観点: milestone 10でprop_used/spawn_usedを単一フラグからスタックに
+        // 変えたのは、まさにこの「無名関数の中の?/spawnが外側の関数のtry/catch/finally
+        // 判定に漏れてはいけない(逆も同様)」を保証するため
+        let js = gen_body(
+            "fn f() int | error {\n  return 1\n}\nfn main() {\n  g := fn() int {\n    return f()?\n  }\n  print(g())\n}",
+        );
+        // 無名関数の内側だけがtry/catchで包まれる(?を使っているため)
+        assert!(js.contains("const g = (async () => {"), "got: {js}");
+        assert!(js.contains("try {\n      return __prop((await f()));"), "got: {js}");
+        assert!(js.contains("if (e instanceof __Propagate) return e.value;"), "got: {js}");
+        // 外側のmainは?を使っていないのでtry/catchで包まれない(const g = ...の直後にprintが続く)
+        assert!(js.contains("});\n  __print((await g()));"), "got: {js}");
+    }
+
+    #[test]
+    fn 無名関数式の中のspawnは無名関数自身のwait枠だけを付け外側へ漏れない() {
+        let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  g := fn() {\n    spawn f()\n  }\n  g()\n}");
+        let push_count = js.matches("__waitStack.push([]);").count();
+        assert_eq!(push_count, 1, "got: {js}"); // 無名関数の中の1回だけ(外側のmainはspawnを使っていない)
     }
 }
