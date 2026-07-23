@@ -1007,12 +1007,24 @@ impl Codegen {
                     Some(alias) => {
                         return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                     }
-                    // `error type X = A | B`(union形式、milestone 8)で構築されたstruct
-                    // literalも同じく__errTagが要る——lookup_structで見つからなければ
-                    // lookup_unionも試す(type_is_error_instanceが"all"判定で、通常struct
-                    // とerror type unionを混ぜたさらに外側のunionを誤って全部error扱い
-                    // しないようにする、code reviewで確定)
-                    None => self.ctx.lookup_struct(name).or_else(|| self.ctx.lookup_union(name)).map(type_is_error_instance).unwrap_or(false),
+                    // pkg無し(milestone 12): フィールド名/型/判別可能unionのdisambiguationを
+                    // 実際に検証する(§計画参照——unknown-field/missing-fields/type-mismatch/
+                    // duplicate-fieldの各タイプミスをここで明確なErrにする、PR #17以来の穴)。
+                    // 未宣言の型名は既存のresolve_type_node/infer_exprと同じ「空フィールドの
+                    // 殻structへフォールバック」——それ自体は落とさず、フィールド検証の方で
+                    // 自然にunknown-field/missing-fieldsとして顕在化させる
+                    None => {
+                        let base = self
+                            .ctx
+                            .lookup_struct(name)
+                            .or_else(|| self.ctx.lookup_union(name))
+                            .cloned()
+                            .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false });
+                        let field_types: Vec<Type> = fields.iter().map(|f| checker::infer_expr(&self.ctx, &f.value)).collect();
+                        let member = checker::resolve_struct_lit_member(&base, name, fields, &field_types, *pos)?;
+                        checker::validate_struct_lit_fields(&member, name, fields, &field_types, *pos)?;
+                        matches!(member, Type::Struct { is_error_type: true, .. })
+                    }
                 };
                 let mut js_fields = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -1465,7 +1477,13 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
                 field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(hollow_value) }),
             ]),
         ],
-        discriminant_tag: None, // milestone 7以来の設計判断: discriminant_tagはcodegenが一切参照しないため計算しない
+        // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
+        // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
+        // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
+        // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
+        // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
+        // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
+        discriminant_tag: Some("kind".to_string()),
     };
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
@@ -2482,10 +2500,15 @@ mod tests {
     #[test]
     fn error_type_unionと通常structを混ぜたさらに外側のunionでは成功値をerrtagで包まない() {
         // code review発覚・実行確認済みの回帰: "any"判定だと、DbError由来のタグ付き
-        // メンバーが1つでも混じっているだけでResult{value:...}という普通の成功値まで
-        // errTagで包んでしまい、?/orが成功値を誤って失敗として握り潰していた
+        // メンバーが1つでも混じっているだけでSuccess{value:...}という普通の成功値まで
+        // errTagで包んでしまい、?/orが成功値を誤って失敗として握り潰していた。
+        // milestone 12で判明: `Result{value: 42}`(union自身の名前での構築)はTS版でも
+        // 実際にdiscriminated-union-tag-missingで拒否される——DbErrorの2つの無名メンバーが
+        // Resultにもタグ("kind")を要求し、無名メンバー以外(Successのような名前付きメンバー)は
+        // タグ経由のdisambiguationの対象外になるため。有効な構築方法は具体的なstructの
+        // 名前(`Success{...}`)を使うことで、TS版で実行確認済み(§計画参照)
         let js = gen_body(
-            "error type DbError = { kind: \"notFound\" } | { kind: \"timeout\" }\nstruct Success { value: int }\ntype Result = Success | DbError\nfn getIt() Result {\n  return Result{value: 42}\n}\nfn main() {\n  print(getIt())\n}",
+            "error type DbError = { kind: \"notFound\" } | { kind: \"timeout\" }\nstruct Success { value: int }\ntype Result = Success | DbError\nfn getIt() Result {\n  return Success{value: 42}\n}\nfn main() {\n  print(getIt())\n}",
         );
         assert!(js.contains("return ({ value: 42 });"), "got: {js}");
         assert!(!js.contains("__errTag"), "got: {js}");
@@ -2698,5 +2721,70 @@ mod tests {
         let wait_pos = js.find("await Promise.all(__waitStack.pop());").unwrap();
         let defer_pos = js.find("for (let __i = __defers.length - 1;").unwrap();
         assert!(wait_pos < defer_pos, "spawn待ちがdefer実行より先のはず, got: {js}");
+    }
+
+    // ---- milestone 12: struct literalのフィールド検証 ----
+
+    #[test]
+    fn struct_litのtypoしたフィールド名は明確なerrになる() {
+        // PR #17以来の既知の穴: 以前はフィールド名が一切照合されず、typoが黙って
+        // 素通りしていた(`nmae`のようなtypoが実行時までエラーにならなかった)
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{nmae: \"a\"}\n  print(u)\n}").unwrap_err();
+        assert!(err.contains("no field 'nmae'"), "got: {err}");
+    }
+
+    #[test]
+    fn struct_litの欠落フィールドは明確なerrになる() {
+        let err = gen_js("struct User {\n  name: string\n  age: int\n}\nfn main() {\n  u := User{name: \"a\"}\n  print(u)\n}").unwrap_err();
+        assert!(err.contains("missing field(s) in User: age"), "got: {err}");
+    }
+
+    #[test]
+    fn struct_litの型不一致は明確なerrになる() {
+        let err = gen_js("struct User {\n  age: int\n}\nfn main() {\n  u := User{age: \"old\"}\n  print(u)\n}").unwrap_err();
+        assert!(err.contains("cannot use"), "got: {err}");
+    }
+
+    #[test]
+    fn struct_litの重複フィールドは明確なerrになる() {
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\", name: \"b\"}\n  print(u)\n}").unwrap_err();
+        assert!(err.contains("duplicate field 'name'"), "got: {err}");
+    }
+
+    #[test]
+    fn struct_litはint型フィールドにfloatリテラルを渡すとerrになるがintはfloatフィールドへ渡せる() {
+        assert!(gen_js("struct P {\n  x: int\n}\nfn main() {\n  p := P{x: 1.5}\n  print(p)\n}").is_err());
+        let js = gen_body("struct P {\n  x: float\n}\nfn main() {\n  p := P{x: 1}\n  print(p)\n}");
+        assert!(js.contains("({ x: 1 })"), "got: {js}");
+    }
+
+    #[test]
+    fn 判別可能unionは正しいタグ値で構築でき間違ったタグ値はerrになる() {
+        let src_ok = "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\", value: 1}\n  print(r)\n}";
+        let js = gen_body(src_ok);
+        assert!(js.contains("({ kind: \"ok\", value: 1 })"), "got: {js}");
+
+        // 以前(milestone 11以前)は静かに素通りしていた穴: タグ値がどのメンバーとも
+        // 一致しないstruct literalが黙って構築できてしまっていた
+        let err = gen_js(
+            "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"unknown\"}\n  print(r)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("no member of 'Resp' has kind"), "got: {err}");
+
+        let err_missing_tag = gen_js(
+            "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn main() {\n  r := Resp{value: 1}\n  print(r)\n}",
+        )
+        .unwrap_err();
+        assert!(err_missing_tag.contains("needs its tag field 'kind'"), "got: {err_missing_tag}");
+    }
+
+    #[test]
+    fn error_type_unionの各メンバーは判別可能unionのdisambiguation経由で正しくerrtagされる() {
+        // milestone 8の"all"ヒューリスティックに代わり、milestone 12はタグdisambiguationで
+        // 特定した具体的なメンバー自身のis_error_typeを見る、より正確な経路を通る
+        let src = "error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\" }\nfn main() {\n  e := DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}";
+        let js = gen_body(src);
+        assert!(js.contains("__errTag({ kind: \"notFound\", table: \"users\" })"), "got: {js}");
     }
 }

@@ -491,6 +491,9 @@
           間違っている」バグとは性質が異なる)。**修正はせず既知の限界として記録**
           (kanayama確認済み、2026-07-22)。将来、error/json以降のmilestoneで診断機構を
           本格的に入れる際にまとめて対応する候補
+          **→ (1)はchecker+codegen milestone 12(struct literalのフィールド検証、
+          2026-07-24)で解消。(2)(gen_lvalueの代入先フィールド名検証)・(3)(struct宣言
+          時点の`__proto__`ガード)は milestone 12のスコープ外のまま未対応で残る**
   - [x] **checker+codegen milestone 3(`?`/`or`/`error struct`)** ✅ 2026-07-22実装
         (kanayamaと確認済みの順序——struct/メソッド → error/json → 配列/map → 並行処理 →
         モジュール——の3番目)。`error type X = A | B`(union形式)・`json struct`/`json type`・
@@ -566,6 +569,7 @@
           `?`/`or`の安全性そのものに直結するため既知の限界として明記しておく
           (2026-07-22)。PR #17の3件と合わせて、将来struct literalの検証を
           入れる際にまとめて対応する候補
+          **→ milestone 12(struct literalのフィールド検証、2026-07-24)で解消**
   - [x] **checker+codegen milestone 4(配列/map)** ✅ 2026-07-22実装(kanayamaと確認済みの
         順序——struct/メソッド → error/json → 配列/map → 並行処理 → モジュール——の
         4番目)。配列リテラル・mapリテラル・添字アクセス(読み書き)・範囲for(3形態)・
@@ -1048,12 +1052,18 @@
             (`undefined`より発見しづらい)形に変わる。struct literalのfield検証は
             それ自体大きな別スコープなので、今回は「帰結が悪化した」という事実を
             記録するに留める。
-          - union alias名でのstruct literal構築(`Resp{kind:"ok", value:5}`)は
-            union全体を近似型として返す設計(discriminant厳密disambiguationは
-            意図的にスコープ外、上記参照)のため、構築直後のフィールドアクセスは
-            `ANY`型になり算術演算が`__iarith`ではなく素の演算子になる
-            (PR #20で既にscore 25/100・非ブロッキングとされた「union/ANY型への
-            算術演算」ギャップの、今回の新しい到達経路)。
+            **→ milestone 12(struct literalのフィールド検証、2026-07-24)で解消**
+          - **(訂正、2026-07-24)** 当時「union alias名でのstruct literal構築
+            (`Resp{kind:"ok", value:5}`)は構築直後のフィールドアクセスがANY型になる
+            (Rust版だけの穴)」と記録していたが、milestone 12でTS版
+            `src/checker/expressions.ts`の`structLit`ケースを読み直した結果、これは
+            Rust側の欠陥ではなく**TS版自身の意図的な設計**だったと判明した——TS版も
+            struct literal式全体の型は(disambiguationで絞り込んだ具体的なメンバー
+            型ではなく)常にunion自身を返す(「match/isで絞り込むまでは常にunionとして
+            扱う」という一貫したポリシー)。したがって構築直後のフィールドアクセスが
+            ANYになる(算術演算が`__iarith`ではなく素の演算子になる)のはTS版と
+            完全に一致した挙動であり、修正対象ではない(PR #20のunion/ANY型算術演算
+            ギャップとは無関係の、単なる正しい仕様)。
           - 裸のstruct名パターン(`match shape { Circle => ..., Square => ... }`、
             構文的にはパース可能)は、checker側の`pattern_matches_member`は名前で
             厳密に判別できるが、codegen側の`gen_type_test`(TS版`genTypeTest`を
@@ -1525,6 +1535,104 @@
           このtodo.mdに記録済みの通り残る: 自己参照型・`json.Value`の2階層以上の
           destructure・ジェネリック関数・`mesh/io`/`mesh/http`・
           cross-file/cross-packageのjson struct参照 等)。
+  - [x] **checker+codegen milestone 12(struct literalのフィールド検証)**
+        ✅ 2026-07-24実装。milestone 11(defer)完了後、kanayamaとこれまでの既知の限界を
+        整理し、最も古く(PR #17以来)・影響範囲が広い(match/is・`?`/`or`・一般的な
+        構築の正しさ全てに関わる)「struct literalのフィールドが宣言済みの形と一切
+        照合されない」穴を本気で直すことに決定(`is_numeric`のUnion/ANY対応と2択で
+        提示し、こちらを先に選択)。
+        - **TS版の挙動**(`src/checker/expressions.ts`の`structLit`ケース、約140行、
+          直接読んで調査): 単純な「フィールド名の照合」だけでなく、**判別可能unionの
+          構築時disambiguation**(どのメンバーを構築しているかの特定)も含む、想定より
+          大きい機能だった。(1)無名`{...}`メンバーが2個以上の判別可能unionは、宣言時に
+          確定済みの`discriminantTag`の値だけを見てメンバーを特定する(フィールド集合は
+          見ない)。(2)無名メンバー1個以下ならその1個。(3)それ以外(名前付きstruct同士の
+          union)はフィールド名の集合で候補を絞り、複数残れば値のassignableでタイブレーク。
+          特定した具体的なstruct型に対し重複/未知/型不一致/欠落フィールドを検証する。
+          **式全体の推論型は絞り込んだ具体的なメンバーではなく常にunion自身**
+          (match/isで絞り込むまでは常にunionとして扱うという一貫した設計)。
+        - `checker.rs`: F-7判別可能unionのタグ計算が必要になったため(milestone 7時点では
+          「codegenが参照しないため計算しない」という意図的な決定だったが、struct literal
+          の正しいdisambiguationにはタグ名が要る)、新設`find_discriminant_tag`(TS版
+          `findDiscriminantTag`の移植)を`resolve_type_decls`のUnion分岐から呼び、
+          `Type::Union.discriminant_tag`に実際の値を持たせるようにした。無名メンバー
+          2個以上なのに有効な共有タグが無ければ、TS版`discriminated-union-tag-required`
+          相当の明確なErrにする(milestone 2以来の「TS本体は診断で弾くが、この
+          リゾルバではErrにする」パターン)。新設`resolve_struct_lit_member`(3分岐の
+          disambiguation)・`validate_struct_lit_fields`(重複/未知/型不一致/欠落の検証、
+          型互換性は既存の`types::assignable`をそのまま再利用)。`infer_expr`の
+          `Expr::StructLit`分岐自体は不変(「式全体はunion自体」という既存動作を維持)。
+        - `codegen.rs`: `Expr::StructLit`のpkg無し分岐で上記2関数を呼び、Errなら伝播する。
+          milestone 8の`type_is_error_instance`(pkg無し時の"all"判定ヒューリスティック)は
+          disambiguationで特定した具体的なメンバー自身の`is_error_type`を直接見るように
+          置き換え、より正確になった(pkg修飾側は現状の"all"ヒューリスティックを維持、
+          スコープを広げすぎないための意図的な決定——**訂正(2026-07-24、git historyレビュー
+          エージェント指摘)**: 当初「他パッケージの構造をここでは持たない制約のため」と
+          説明していたが、これは不正確——`lookup_package_type`は解決済みの完全な`Type`
+          〈fields/discriminant_tag/is_error_type込み〉を返すため、技術的にはpkg修飾側でも
+          同じdisambiguation/検証ができる。単にスコープを広げすぎないための意図的な選択
+          であり、技術的制約ではない。**結果、`mathutil.Point{x: 1, typo: 2}`のような
+          pkg修飾struct literalのフィールドtypo/欠落/型不一致は今回も無検証のまま
+          (`json.Value{kind: "bogus", extra: 1}`のような組み込みパッケージ経由の構築も
+          同様、実行確認済み)——次にpkg修飾側を厳密化する際にまとめて対応する候補**)。
+        - **検証中に発覚**: milestone 8の既存回帰テスト
+          (`error_type_unionと通常structを混ぜたさらに外側のunionでは成功値をerrtagで
+          包まない`)のmeshソースが`Result{value: 42}`(union自身の名前で名前付きメンバー
+          Successを構築しようとしていた)だったが、実際にTS版へ通したところ
+          `discriminated-union-tag-missing`で**TS版自身が拒否する**ことが判明した——
+          `DbError`由来の無名メンバー2個がResultユニオン自身にもタグ("kind")を要求し、
+          無名メンバー以外(名前付きのSuccess)はタグ経由のdisambiguationの対象外になる
+          ため。有効な構築方法は具体的なstruct名(`Success{value: 42}`)を使うことだと
+          TS版で実行確認し、テストのソースをそちらに修正(退行ではなく、milestone 12の
+          検証がTS非互換だった既存テストを正しく検出した、という位置付け)。
+        - 新規ユニットテスト`checker.rs`14件(`find_discriminant_tag`3件・
+          `resolve_type_decls`のタグ必須化2件・`resolve_struct_lit_member`6件・
+          `validate_struct_lit_fields`1件〈重複/未知/型不一致/欠落を1件にまとめて検証〉)+
+          `codegen.rs`7件(typo/欠落/型不一致/重複フィールドが明確なErrになること・
+          int↔floatの非対称assignable・判別可能unionの正しい構築とタグ不一致のErr・
+          error type unionの新経路での`__errTag`付与)。284→304件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example(21本、
+          自己参照型で対象外の`tree.mesh`を除く)を再実行しbyte-for-byte一致で回帰
+          無しを確認。加えて`discriminated_union.mesh`のフィールド名を意図的に
+          typoさせた変種を実際にRust版・TS版両方でコンパイルし、両者とも
+          `unknown-field`相当のエラーで拒否することを確認(以前のRust版はここを
+          静かに素通ししていた)。
+        - **5エージェントのcode reviewで発見・即修正した2件**(いずれもこのPR自身の
+          新規コードに対する指摘で、実行確認済み):
+          1. `compute_discriminant_tag`のErrに位置情報`(line:col)`が一切付いていなかった
+             ——同じPRの兄弟関数(`resolve_struct_lit_member`/`validate_struct_lit_fields`)
+             は位置情報を付けているのに、この関数だけこのコードベース全体の慣習
+             (ほぼ全エラーに`(line:col)`が付く)から外れていた。呼び出し元で既に
+             手元にある`decl.pos`をそのまま渡すだけで解消(回帰テストに位置情報の
+             アサーションを追加)。
+          2. 組み込み`mesh/json`パッケージの`json.Value`(milestone 9、コード直組みの
+             union、`.mesh`の型宣言を経由しないため`resolve_type_decls`のタグ計算を
+             通らない)が`discriminant_tag: None`のまま放置されていた——古いコメントは
+             「milestone 7以来の設計判断・codegenは一切参照しない」としていたが、今回
+             `resolve_struct_lit_member`がpkg無し側で実際にこのフィールドを読むように
+             なったため前提が崩れていた。現状はjson.Valueの構築が常にpkg修飾
+             (`json.Value{...}`)経由でこの新しい検証をまだ通らないため実害は無いが、
+             将来pkg修飾側も同じ検証経路に統一すると即座に「タグが無い」という誤った
+             Errになる潜在的な地雷だった(TS版`src/stdlib.ts`は最初からこの手組みunionに
+             `discriminantTag: "kind"`を手で設定済みで、Rust版のmilestone 9移植時に
+             見落としていた)。6メンバー全てが共有する`"kind"`の値を直接
+             `Some("kind".to_string())`として設定し解消。
+          **記録に留めた1件**(過去PRコメントレビューエージェント指摘・現状どの
+          example/testからも到達不能): milestone 8の`tag_error_union`にも
+          `compute_discriminant_tag`と同じ「Errに位置情報が無い」という欠落がある
+          (`error type Bad = { kind: "a" } | Existing`のようなケース)。今回の
+          PRが新規に持ち込んだものではなくmilestone 8由来の既存の欠落であり、
+          このPR自体は変更していないため、今回はスコープ外として記録に留める
+          (次にこの関数へ触れる際にまとめて直す候補)。
+        - **milestone 12のスコープ外(意図的)**: pkg修飾された(他パッケージの)struct
+          literalの厳密なmember disambiguation(pkg無しの場合だけ厳密化、pkg修飾側は
+          既存の"all"ヒューリスティックのまま——**git historyレビューエージェントが
+          `mathutil.Point{x: 1, typo: 2}`〈未知フィールド+欠落フィールド〉や
+          `json.Value{kind: "bogus", extra: 1}`〈組み込みパッケージ経由の不正なタグ値〉が
+          いずれも無検証で素通りすることを実行確認済み——技術的な制約ではなく
+          単なるスコープ判断、上記参照**)・`gen_lvalue`(代入先)のフィールド名検証・
+          struct宣言時点の`__proto__`ガード(いずれもPR #17以来の既知の限界のうち、
+          今回のスコープに含めなかった残り)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
