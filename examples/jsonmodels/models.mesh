@@ -1,0 +1,5 @@
+import "mesh/json"
+
+export json struct User {
+	name: string
+}

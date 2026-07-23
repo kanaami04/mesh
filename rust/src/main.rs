@@ -4,6 +4,7 @@
 // 複数ファイル発見(エントリファイル+importされたパッケージのソース一式)はmodules::load_modules
 // (TS版cli.tsのloadModules/loadDependencies相当)に委ねる
 use mesh::codegen::{self, ModuleUnit};
+use mesh::json_decode::synthesize_json_decoders;
 use mesh::modules::load_modules;
 use mesh::parser::parse;
 use std::env;
@@ -30,7 +31,13 @@ fn main() -> ExitCode {
     for m in &sources {
         let file = m.file.display().to_string();
         match parse(&m.source) {
-            Ok(program) => units.push(ModuleUnit { pkg: m.pkg.clone(), file, program }),
+            Ok(mut program) => {
+                if let Err(e) = synthesize_json_decoders(&mut program) {
+                    eprintln!("{file}: {e}");
+                    return ExitCode::FAILURE;
+                }
+                units.push(ModuleUnit { pkg: m.pkg.clone(), file, program });
+            }
             Err(errors) => {
                 for e in &errors {
                     eprintln!("{file}:{}:{}: {} [{}]", e.pos.line, e.pos.col, e.message, e.code);

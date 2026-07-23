@@ -1164,6 +1164,155 @@
           `export error type DbError = {...}|{...}`をパッケージ越しに構築・
           文脈付き`?`で伝播する2ケースで、修正前後の差分をTS版と直接比較して
           確定させた。
+  - [x] **checker+codegen milestone 9(json struct)** ✅ 2026-07-23実装。milestone 8
+        完了後、kanayamaから「error typeとjson structは一緒にできるか」と聞かれ、
+        TS版`stdlib.ts`(組み込みパッケージ定義)と`json-decode.ts`(313行、AST合成)を
+        直接読んで調査した結果、分量・複雑さが1桁近く違い技術的にも無関係と判明した
+        ため分けて実装することに決定(kanayamaに提示し選択された)。
+        - **これまでの8マイルストーンと質的に違う点**: checker/codegenの「解析」だけ
+          でなく、`json struct X {...}`宣言から`decode<X>(v: json.Value) X | error`
+          という新しいMesh関数を**構文レベルのAST(Stmt/Expr)として合成し
+          program.fnsへ追加する新しいパイプライン段階**が必要(TS版`compiler.ts`が
+          `parse`直後・`check`前に`synthesizeJsonDecoders(program)`を挟むのと同じ)。
+          合成後のASTは以降の通常のcheck/codegenをそのまま流用する。
+        - **`mesh/json`は`.mesh`ソースを持たない組み込みパッケージ**: TS版`stdlib.ts`の
+          `BUILTIN_PACKAGES`に相当する新設`json_stdlib_symbols()`(`codegen.rs`)で
+          `PackageSymbols`(Value型+parse/stringify/field/optField/asString/asInt/
+          asFloat/asBool/asArrayの9関数)を直接手組みし、`generate_all_modules`の
+          パッケージループ開始前に`register_package("json", ...)`で1回だけ登録する
+          (`topo_sort_packages`はpackagesに無い名前への参照を無視するため無害だと
+          確認済み)。**ランタイムJS側は既に完全に揃っていた**——`prelude()`には
+          H-2実装時にruntime.ts全体が移植済みで`json$parse`等が既に実装済みだった
+          ため、codegen自体への変更は「registryへの1回の登録」だけで済み、pkg修飾
+          関数呼び出し・struct literal構築の既存経路(milestone 6)は無改造で流用できた。
+        - **`json.Value`の自己参照は不透明な殻structとして扱う(意図的なスコープ縮小)**:
+          TS版の`json.Value`は真に自己参照する判別可能union(`arr`/`obj`メンバーが
+          Value自身を配列/map越しに参照、共有可変オブジェクトとして手組み)——
+          milestone 2以来一貫して「対応不可、明確なErr」としてきた自己参照型の壁
+          そのもの(`examples/tree.mesh`と同じ)。TS版のテスト(`tests/e2e.test.ts`)を
+          確認し、`json struct`が自動生成する`decode<X>`は`json.field`/`json.asString`
+          等の**不透明なヘルパー呼び出しだけ**を経由しValueを直接構造分解しないこと
+          (construct側の`json.Value{kind:"null"}`という定番イディオムも、struct
+          literalのフィールドが宣言済み型と照合されない既存のギャップのおかげで
+          殻structでも問題なく動くこと)を検証してから、`Value`を
+          `Type::Struct{name:"json.Value", fields:vec![], is_error_type:false}`と
+          いう不透明な殻として登録する設計を選んだ。**一方、TS版のテストには
+          `if v is {kind:"obj"} { print(len(v.entries)) }`という、生のjson.Valueを
+          直接is/matchで構造分解する手書きデコーダの例も存在する**——これは
+          `tree.mesh`と同じ理由でmilestone 9のスコープ外とした(`json struct`の
+          自動生成機能自体には一切影響しないことを確認済み)。
+        - **既存バグの発見・修正(このmilestoneの副産物)**: TS版`checker/types-resolve.ts`
+          を確認したところ、`isJson`フラグはstruct自体の型解決(構築・フィールド
+          アクセス)には一切影響せず、decode<X>自動生成の対象を決めるだけだと判明。
+          Rust側は milestone 3時点で(json struct未実装のプレースホルダとして)
+          `resolve_type_decls`の対象から`is_json`宣言を丸ごと除外していたため、
+          json structを手書きの`X{...}`で構築してもフィールドが空の殻へ静かに
+          フォールバックし、フィールドアクセスが`ANY`型になる(`__iarith`が
+          選ばれない等)潜在バグになっていた。TS版と同じく`is_json`を除外条件から
+          削除(`checker.rs`)、`codegen.rs`の「json struct宣言は未対応」という
+          明確なErrゲートも撤去(json structは今や普通のstruct宣言として解決できる)。
+        - `rust/src/modules.rs`: `load_dependencies`に`path == "mesh/json"`の早期
+          continueを追加(ファイルシステムを見ない)——`'/'`を含むパスのため、
+          この判定が無いと「ネストしたパッケージパスは非対応」で誤って弾かれていた。
+        - 新規`rust/src/json_decode.rs`(TS版`json-decode.ts`の忠実な移植):
+          `pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), String>`。
+          `program.types`から`is_json`なdeclを集め(無ければ即Ok)、
+          `import "mesh/json"`が無ければErr、各json structについて
+          `decode<Name>(v: json.Value) Name | error`のFnDeclをMesh構文レベルの
+          AST(Stmt/Expr)として合成しprogram.fnsへ追加する。対応するフィールド型
+          (TS版と同じv1スコープ): int/float/string/bool(`json.asXxx`経由)・
+          同一ファイル内の他のjson struct(`decode<Other>`経由、再帰)・それらの
+          配列(range-forで1件ずつデコードして`push`)・それらの`T | none`
+          (`json.optField`+`!(x is none)`ガード)。未対応の型は明確なErr
+          (TS版`json-struct-unsupported-field`相当)。TS版の`MultiCompileError`
+          (複数エラー蓄積)は、このリゾルバの「Result<_, String>単一エラー」設計と
+          馴染まないため移植せず、最初に見つかったエラーだけを返す簡略化(診断を
+          出さない設計なので実害は無い)。TS版の小さなAST合成ヘルパー関数群
+          (`identExpr`/`stringLit`/`callExpr`/`jsonCall`等)も1:1で移植。
+        - `rust/src/main.rs`: `parse(&m.source)`成功直後、`ModuleUnit`を作る前に
+          `json_decode::synthesize_json_decoders(&mut program)?`を呼ぶ(TS版
+          `compiler.ts`の`parse`直後・`check`前という挿入位置と同じ)。
+        - テスト: `json_decode.rs`に8件(flat構造体・ネストしたjson struct・配列
+          フィールド・optionalフィールド・`import`無しはErr・未対応フィールド型
+          〈map/配列要素map〉はErr・宣言0件は即Ok)、`modules.rs`に1件(`mesh/json`が
+          ファイルシステムを見ずに解決できる)、`codegen.rs`に3件(json structが
+          普通のstructとして解決・構築できフィールドアクセスが正しい型で推論される
+          〈`__iarith`が選ばれる〉こと・`mesh/json`組み込みパッケージの関数呼び出しと
+          Value構築が解決できること・`mesh/json`とユーザーパッケージのimportが
+          共存できること)を追加。253→264件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: `tests/e2e.test.ts:2738-2859`(H-2: json structの節)の実際の
+          シナリオ(フラットなstruct decode・欠落/型違い/非objectフィールドの
+          エラー・ネストしたjson struct+配列+optionalフィールドの組み合わせ・
+          配列-of-ネストstruct+optional配列・整数フィールドへの小数値の拒否)を元に
+          新規`examples/json_decode.mesh`を、cross-packageのexportシナリオを元に
+          新規`examples/json_models_demo.mesh`+`examples/jsonmodels/models.mesh`を
+          作成し、Rust版で実行して`bun run mesh run`(TS版)の出力とbyte-for-byte
+          一致を確認。既存の全example(`hello`/`fizzbuzz`/`struct_methods`/
+          `error_propagation`/`errors`/`discriminated_union`/`status`/`users`/
+          `channel_spec`/`collections`/`maps`/`concurrency`/`channels`/
+          `modules_demo`/`db_error`+`mathutil/*`)も回帰無しを再確認。`tree.mesh`
+          (自己参照union)は引き続き明確なErrのまま。
+        - **副産物: TS版自体のフォーマッタのバグを発見・修正**。CI(TS版の全example
+          往復整形テスト)で`examples/json_decode.mesh`が失敗——`src/formatter.ts`の
+          `printTypeDecl`が`decl.isError`(→`"error "`)だけを見て`decl.isJson`を
+          見ておらず、`json struct X {...}`を再整形すると普通の`struct X {...}`に
+          化けてしまい(`json`キーワードが消える)、再整形後のソースを実行すると
+          `decodeX`が合成されず壊れた挙動になっていた。`jsonKw`を追加して修正、
+          回帰テスト1件追加(`tests/formatter.test.ts`)。あわせて、cross-package
+          example(`json_models_demo.mesh`)の往復整形テストが依存パッケージ
+          (`examples/jsonmodels`)を一時ディレクトリへ複製していなかった問題も
+          (`modules_demo.mesh`/`mathutil`の既存の特別扱いと同じパターンで)修正。
+          TS版テストスイート484→485件、全件パス。
+        - **PR #24コードレビュー(5エージェント)で発見・実行確認して即修正した2件**
+          (score付けを待たず、milestone 4〜8と同じ「実行して再現確認済みのバグは
+          即修正」の前例に従った):
+          1. **`json.Value`を完全に不透明な殻(フィールド0個)にする当初の設計は
+             スコープの見積もりが甘かった**: `json struct`が自動生成する
+             `decode<X>`自体は不透明なヘルパー呼び出ししか使わないため実害が
+             無いことは検証済みだったが、`tests/e2e.test.ts:1146-1160`(json struct
+             機能より前からある既存のmesh/json手書きdestructure、`if v is
+             {kind:"obj"} { len(v.entries) }`)という現存するTS版の検証済み機能を
+             見落としていた——`mesh/json`のimport自体がこのPRで初めて可能になる
+             (以前は`'/'`を含むパスとして「ネストしたパッケージパスは非対応」で
+             丸ごと弾かれていた)ため、このPRが初めてこの既存機能の到達可能性を
+             左右する立場になっていた。修正: `json.Value`をkind判別フィールド+
+             実フィールドを持つ本物のunion(6メンバー)にし、**真に自己参照する
+             再帰位置(`arr.items`/`obj.entries`の要素/値型)だけ**を名前だけの
+             不透明な殻に留める設計に変更(自己参照のRust版の壁——milestone 2・
+             `tree.mesh`と同じ——を回避しつつ、1階層の絞り込み+フィールド
+             アクセスは正しい型〈`len`が`.size`を選ぶ等〉で動くようにした)。
+          2. **合成する`decode<Name>`という名前が手書きの同名関数と衝突すると
+             検出されず、無効なJS(二重宣言のSyntaxError)を静かに出力していた**。
+             このシンセシス自体が初めて「利用者から見えない隠れた予約名」を
+             生む処理だったため、`json struct User {...}`の横に(気づかず、
+             または偶然)`fn decodeUser(...)`を書くという自然な間違いが、
+             一般的な「トップレベル関数名の重複」検出(このリゾルバにはまだ
+             存在しない、別スコープの既知のギャップ)よりずっと踏みやすい形に
+             なっていた。修正: `synthesize_json_decoders`が合成前に既存の
+             関数名との衝突を確認し、明確なErrにする。
+          いずれも回帰テスト追加(`json_decode.rs`+1、`codegen.rs`+1)、
+          `examples/json_decode.mesh`に生destructureの実例セクションを追加、
+          264→266件、`cargo clippy --all-targets -- -D warnings`クリーン、
+          既存の全exampleがbyte-for-byte一致のまま回帰無しを再確認済み。
+        - **milestone 9のスコープ外(意図的、上記の修正を踏まえて再整理)**:
+          `json.Value`の2階層以上の入れ子destructure(絞り込み後さらに絞り込む
+          ケース——checker側の型推論の精度だけが劣化し`is`/`match`自体はASTから
+          直接テストを組み立てるため実行時には動く、が算術演算等の型依存判断が
+          `__iarith`等を選べずANY相当になる)。**自己参照する`json struct`宣言
+          自体**(木構造・連結リストのような、フィールドが〈配列/optional越しに
+          間接的にでも〉自分自身を参照する形、例: `json struct TreeNode { value:
+          int, children: TreeNode[] }`)——`json_decode.rs`自身のフィールド対応
+          表はこれを弾く専用ロジックを持たず、`resolve_type_decls`の汎用サイクル
+          検出(`tree.mesh`と同じ、milestone 2以来の壁)に委ねる形になり、
+          「json struct宣言以外の一般的な自己参照structと全く同じ理由・同じ
+          扱い」という前提で許容した(2エージェント独立指摘、いずれも
+          「回帰ではなく既存の壁がこの機能でも顕在化しただけ」と判定)——
+          専用の分かりやすいエラーメッセージにする余地はあるが、汎用サイクル
+          検出を複製する必要がありコストに見合わないため見送り。`mesh/io`・
+          `mesh/http`(無関係、対象外のまま)。cross-file/cross-packageの
+          json struct同士のネスト参照(TS版自体がv1スコープ外)。
+          `filter`/`map`/`reduce`・`defer`。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
