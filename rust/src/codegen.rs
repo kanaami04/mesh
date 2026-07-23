@@ -495,10 +495,16 @@ impl Codegen {
                 Some(ElseClause::Block(block)) => {
                     self.emit("} else {");
                     self.ctx.push_scope();
-                    self.ctx.declare(name, else_ty);
+                    self.ctx.declare(name, else_ty.clone());
                     self.gen_block(block)?;
                     self.ctx.pop_scope();
                     self.emit("}");
+                    // then節が必ず終端するなら、if/elseの後に到達できるのはelse経由だけ
+                    // なので、else側の絞り込みをここでも現在のスコープへ反映する
+                    // (else節が無い場合の直上の分岐と同じ理由)
+                    if block_always_terminates(&if_stmt.then) {
+                        self.ctx.declare(name, else_ty);
+                    }
                 }
                 // else ifチェーンはnarrowing対象外のまま(実際のexampleに存在しない組み合わせ)
                 Some(other) => self.gen_else(Some(other))?,
@@ -2183,5 +2189,25 @@ mod tests {
     fn 自己参照するunion型aliasは明確なエラーになる() {
         let err = gen_js("type Tree = { kind: \"leaf\" } | { kind: \"node\", left: Tree, right: Tree }\nfn main() {}").unwrap_err();
         assert!(err.contains("self-referential/cyclic type definitions"), "got: {err}");
+    }
+
+    #[test]
+    fn アーム0個のmatchは非union_subjectでもpanicのみの正しい構文のjsになる() {
+        // 回帰テスト: subjectがUnion以外だと`match_is_exhaustive`が無条件trueを返して
+        // いた頃は、空のアーム本体がそのまま生成され構文的に壊れたJS
+        // (`async (__m) => `)になっていた
+        let js = gen_body("fn main() {\n  n := 5\n  r := match n {}\n  print(r)\n}");
+        assert!(js.contains("(await (async (__m) => (() => { throw new __Panic("), "got: {js}");
+        assert!(!js.contains("=> )("), "got: {js}");
+    }
+
+    #[test]
+    fn if_isのnarrowingはelse節がありthen節が終端する場合も後続文へ伝播する() {
+        // 回帰テスト: else節がある場合の絞り込み伝播が抜けていて、if/elseの後の文が
+        // 絞り込み前のUnion型のまま扱われ__idivではなく素の`/`が生成されていた
+        let js = gen_body(
+            "fn g(x: int | error) int {\n  if x is error {\n    return 0\n  } else {\n    print(\"ok\")\n  }\n  return x / 2\n}\nfn main() {\n  print(1)\n}",
+        );
+        assert!(js.contains("__idiv(x, 2,"), "got: {js}");
     }
 }

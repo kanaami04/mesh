@@ -611,25 +611,26 @@ pub fn has_structured_failure(t: &Type) -> bool {
 
 // パターン(`is`の右辺・matchアームの型パターン)がunionのmemberに構造的に一致するか
 // (TS版`narrowing.ts`のstructPatternMatchesを移植、milestone 7・判別可能union対応)。
-// リテラルパターン(`"active"`)は値の完全一致。裸の型名パターンは`type_equals`で比較する
-// (`"error"`だけは特別扱い——is_error_typeでタグ付けされたstructもis_failure_typeと
-// 同じ理由で拾う必要がある。type_equalsは名前付きstructを名前だけで比較するため素通り
-// してしまう)。struct形パターン(部分構造、`{kind: "ok"}`)は対象memberがstructで、
-// パターンの各fieldについて同名フィールドがあり(リテラル型パターンなら値まで、それ以外は
-// 名前の一致だけの緩い判定——TS版ほど深い構造検査はこの移植の範囲では不要)一致すれば
-// 良い(TS版と同じ「余分なfieldは無視」)
+// リテラルパターン(`"active"`)は値の完全一致。裸の型名パターン`error`はプリミティブ
+// ERROR型のみに一致させる(named error structはTS版でも`error`パターンとは別物——
+// 両者が同じunionに共存する場合、TS版は`impossible-pattern`診断でコンパイルエラーに
+// する。codegen側の`gen_type_test`も`error`を`instanceof Error`としてのみテストし
+// named error struct〈タグ付きの普通のobject〉には決してマッチしないため、ここで
+// is_error_type付きstructまで拾ってしまうとchecker/codegenが食い違い、実行時に
+// 静かに誤ったアームへ落ちる)。struct形パターン(部分構造、`{kind: "ok"}`)は対象memberが
+// structで、パターンの各fieldについて同名フィールドがあり、型まで一致(リテラル型
+// パターンなら値まで、それ以外は`type_equals`で構造まで比較——TS版`structPatternMatches`
+// と同じ厳密さ)すれば良い(TS版と同じ「余分なfieldは無視」)
 pub fn pattern_matches_member(ctx: &CheckerCtx, member: &Type, pattern: &TypeNode) -> bool {
     match pattern {
         TypeNode::Literal { value, .. } => matches!(member, Type::Literal(v) if v == value),
-        TypeNode::Name { name, pkg: None, .. } if name == "error" => {
-            types::type_equals(member, &ERROR) || matches!(member, Type::Struct { is_error_type: true, .. })
-        }
+        TypeNode::Name { name, pkg: None, .. } if name == "error" => types::type_equals(member, &ERROR),
         TypeNode::StructType { fields, .. } => {
             let Type::Struct { fields: member_fields, .. } = member else { return false };
             fields.iter().all(|pf| {
                 member_fields.iter().find(|mf| mf.name == pf.name).is_some_and(|mf| match &pf.type_node {
                     TypeNode::Literal { value, .. } => matches!(&mf.type_, Type::Literal(v) if v == value),
-                    _ => true,
+                    _ => types::type_equals(&mf.type_, &resolve_type_node(ctx, &pf.type_node)),
                 })
             })
         }
@@ -673,9 +674,18 @@ pub fn narrow_for_is(ctx: &CheckerCtx, subject_ty: &Type, target: &TypeNode) -> 
 // エラーメッセージは一切出さず、codegenが「最後のアームを無条件elseとして信用してよいか」を
 // 内部判断するためだけに使う(milestone 2〜6と同じ「TS本体は診断で到達不能だが、診断を
 // 出さないこのリゾルバでは実際に到達しうる」パターン——ここでは"到達しうる"のが
-// 非exhaustiveなmatchで、codegen側がそれ用の安全ガードを別途持つ)
+// 非exhaustiveなmatchで、codegen側がそれ用の安全ガードを別途持つ)。
+// アーム0個は(subjectの型を問わず)絶対に網羅的ではない——TS版はこれを別の診断
+// (`empty-match`)で弾くが、このリゾルバは診断を出さないため、ここで確実にfalseを
+// 返し、codegenのpanicフォールバックだけで空のアーム本体〈構文的に壊れたJS〉を
+// 防ぐ。subject_tyが確実にUnion以外だと分かる場合(struct/int/string等)も、TS版の
+// 「union-required」診断が無いこのリゾルバではfalseにして安全ガードを効かせる
+// (ANYは型が分からないだけで確実に非unionとは言えないため、これまで通り寛容にtrue)
 pub fn match_is_exhaustive(ctx: &CheckerCtx, subject_ty: &Type, arms: &[MatchArm]) -> bool {
-    let Type::Union { members, .. } = subject_ty else { return true };
+    if arms.is_empty() {
+        return false;
+    }
+    let Type::Union { members, .. } = subject_ty else { return matches!(subject_ty, Type::Any) };
     if arms.iter().any(|a| a.patterns.iter().any(|p| matches!(p, MatchPattern::Wildcard { .. }))) {
         return true;
     }
@@ -1449,8 +1459,11 @@ mod tests {
         assert!(!pattern_matches_member(&ctx, &Type::Literal("active".into()), &literal_type("banned")));
 
         assert!(pattern_matches_member(&ctx, &ERROR, &name_type("error")));
+        // named error struct(is_error_type付き)は`error`パターンとは別物——TS版は
+        // これをimpossible-patternで弾き、codegenの`instanceof Error`テストも
+        // named error structには決してマッチしないため、checker側もマッチさせない
         let err_struct = Type::Struct { name: "Oops".into(), fields: vec![], is_error_type: true };
-        assert!(pattern_matches_member(&ctx, &err_struct, &name_type("error")));
+        assert!(!pattern_matches_member(&ctx, &err_struct, &name_type("error")));
         assert!(pattern_matches_member(&ctx, &NONE, &name_type("none")));
         assert!(pattern_matches_member(&ctx, &INT, &name_type("int")));
 
@@ -1458,8 +1471,9 @@ mod tests {
         // リテラル値フィールドが一致するパターンだけ通す
         assert!(pattern_matches_member(&ctx, &member, &struct_type_node(&[("kind", literal_type("ok"))])));
         assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("kind", literal_type("notFound"))])));
-        // 非リテラルフィールドは名前一致だけの緩い判定
-        assert!(pattern_matches_member(&ctx, &member, &struct_type_node(&[("user", name_type("int"))])));
+        // 非リテラルフィールドも型まで一致して初めて通る(TS版structPatternMatchesと同じ厳密さ)
+        assert!(pattern_matches_member(&ctx, &member, &struct_type_node(&[("user", name_type("string"))])));
+        assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("user", name_type("int"))])));
         // 対象memberに無いフィールド名を要求するパターンは一致しない
         assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("missing", name_type("string"))])));
     }
@@ -1493,9 +1507,16 @@ mod tests {
         assert!(!match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone())]));
 
         let wildcard_arm = MatchArm { patterns: vec![MatchPattern::Wildcard { pos: pos() }], body: int_lit("1"), pos: pos() };
-        assert!(match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape), wildcard_arm]));
+        assert!(match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone()), wildcard_arm]));
 
-        assert!(match_is_exhaustive(&ctx, &INT, &[]));
+        // アーム0個は(subjectの型を問わず)絶対に非網羅的——空のmatchを無条件elseとして
+        // 信用してしまうと、codegenが空のアーム本体を生成し構文的に壊れたJSになる
+        assert!(!match_is_exhaustive(&ctx, &INT, &[]));
+        // 確実にUnion以外だと分かるsubjectは、アームがあっても無条件では信用しない
+        // (TS版の"union-required"診断が無いこのリゾルバの安全ガード)
+        assert!(!match_is_exhaustive(&ctx, &INT, &[arm(ok_shape)]));
+        // ANYは「確実に非unionとは言えない」ので、これまで通り寛容にtrue
+        assert!(match_is_exhaustive(&ctx, &Type::Any, &[arm(name_type("int"))]));
     }
 
     #[test]

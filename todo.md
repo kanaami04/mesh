@@ -994,6 +994,73 @@
           実計算・struct literal構築時のdiscriminant厳密disambiguation・自己参照する
           判別可能union(`tree.mesh`)・`error type`(union形式の名前付きエラー型)・
           `json struct`・`filter`/`map`/`reduce`・`defer`。
+        - **PR #22コードレビュー(5エージェント)で発見・実行確認して即修正した4件**
+          (score付けを待たず、milestone 4/5/6と同じ「実行して再現確認済みのバグは
+          即修正」の前例に従った):
+          1. `match_is_exhaustive`が(0アーム含め)Union以外のsubjectを常に「網羅的」
+             扱いしていたため、非union型へのmatchや空の`match x {}`が安全ガード無しで
+             最後のアームを無条件に信用していた(0アームでは空のアーム本体がそのまま
+             出力され構文的に壊れたJSになる、非union structへのmatchでは想定外の値が
+             静かに誤ったアームへ落ちる)。0アームは常にfalse、確実に非union(ANY以外)な
+             subjectも常にfalseに修正——安全ガード(各アームへの実テスト+`__Panic`
+             フォールバック)が正しく効くようにした。
+          2. `pattern_matches_member`のstruct形パターンで非リテラルフィールドが
+             「同名フィールドがあれば型を問わず一致」という緩い判定だったため、
+             同名だが型の異なるフィールドで判別するunion(例:
+             `{tag: int, ...} | {tag: string, ...}`)で`match_is_exhaustive`が
+             カバレッジを過大評価し、値が実行時に誤ったアームへ静かに振り分けられて
+             いた(3エージェント中3件が独立に指摘・再現)。TS版`structPatternMatches`と
+             同じく非リテラルフィールドも`type_equals`で型まで厳密照合するよう修正。
+          3. `pattern_matches_member`の裸型名`"error"`パターンが`is_error_type`付き
+             named error structも拾っていたが、codegen側の`gen_type_test`は
+             `(ref instanceof Error)`のみをテストし、named error struct
+             (タグ付きの普通のobject)には決してマッチしない——checker/codegenの
+             認識が食い違い、`r is error`/`match r { error => ... }`が静かに誤った
+             narrowing/exhaustiveness判断をしていた。TS版はそもそもこの組み合わせ
+             (プリミティブerrorを含まないunionでnamed error structを`error`
+             パターンで捕捉しようとする)を`impossible-pattern`診断でコンパイル
+             エラーにする——このリゾルバは診断を出さないため、`"error"`パターンは
+             プリミティブERROR型のみに一致するよう修正しcodegenの実際のランタイム
+             テストと一致させた(named error structを`error`パターンで捕捉する構文は
+             元々TS版でも不可能パターンとして拒否される組み合わせであり、今回の
+             修正でその「捕捉できない」という事実がchecker/codegenで一貫するように
+             なった、という位置付け)。
+          4. `gen_if`のnarrowing伝播が「else節が無くthen節が必ず終端する」場合しか
+             実装されておらず、「else節がありthen節が必ず終端する」場合(if/elseの
+             後に到達できるのはelse経由だけ)が漏れていた——`if x is error { return 0 }
+             else { ... }`の後で`x`が絞り込み前の`int | error`のまま扱われ、
+             `__idiv`ではなく素の`/`が生成され浮動小数点除算になっていた。
+             else節ブロックの生成後にも同じ再宣言ロジックを追加。
+          いずれも`cargo test`(246件、+2件)/`cargo clippy --all-targets -- -D
+          warnings`クリーンを再確認し、既存の全example(milestone 7で検証したもの含む)
+          がbyte-for-byte一致のまま回帰していないことも再確認済み。
+        - **PR #22コードレビューで発見したが、既存の別スコープ決定の帰結として
+          todo.mdに記録するだけに留めた3件**(スコアリング前だが、いずれも
+          「既に受け入れ済みの大きなスコープカットの帰結」または「現状どの
+          example/testからも到達不能」に該当し、milestone 7自体のバグではないため
+          即修正はしなかった):
+          - struct literalのfield名は宣言済みstruct/unionの形と照合されない
+            (`GetUserResponse{knd: "ok", ...}`のようなtypoがあっても検出されない、
+            PR #17以来繰り返し指摘されてきた既知のギャップ)。今回の`match`の
+            exhaustive最適化(最後のアームを無条件elseにする)と組み合わさると、
+            以前は`undefined`表示や分かりやすいpanicで済んでいたのが、typoしたstruct
+            literalが「もっともらしいが誤った」別のアームへ静かに振り分けられる
+            (`undefined`より発見しづらい)形に変わる。struct literalのfield検証は
+            それ自体大きな別スコープなので、今回は「帰結が悪化した」という事実を
+            記録するに留める。
+          - union alias名でのstruct literal構築(`Resp{kind:"ok", value:5}`)は
+            union全体を近似型として返す設計(discriminant厳密disambiguationは
+            意図的にスコープ外、上記参照)のため、構築直後のフィールドアクセスは
+            `ANY`型になり算術演算が`__iarith`ではなく素の演算子になる
+            (PR #20で既にscore 25/100・非ブロッキングとされた「union/ANY型への
+            算術演算」ギャップの、今回の新しい到達経路)。
+          - 裸のstruct名パターン(`match shape { Circle => ..., Square => ... }`、
+            構文的にはパース可能)は、checker側の`pattern_matches_member`は名前で
+            厳密に判別できるが、codegen側の`gen_type_test`(TS版`genTypeTest`を
+            忠実に移植)は「オブジェクトかどうか」という汎用テストしかできず、
+            形が似た複数のstructを判別できない(TS版自体の既知の制約、discriminant_tag
+            を計算しない設計上避けられない)。現状どのexample/testもこの構文を
+            使っておらず到達不能。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
