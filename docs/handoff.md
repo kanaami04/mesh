@@ -314,10 +314,40 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   再確認。詳細と、修正せず記録に留めた3件(struct literalのfield未検証・
   union型struct literalの算術ギャップ・裸struct名パターンの判別不能、いずれも
   既存の別スコープ決定の帰結)はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの7マイルストーン(struct/メソッド → error/json →
-  配列/map → 並行処理 → モジュール → match/is式・判別可能union)が全て完了。
-  次の対象はkanayamaと相談して決める(`error type`〈union形式〉・`json struct`・
-  `filter`/`map`/`reduce`・`defer`が主な既知の未対応機能。todo.md参照)
+- **checker+codegen milestone 8(error type・union形式の名前付きエラー型)完了
+  (2026-07-23)**。milestone 7完了後、kanayamaから「error typeとjson structは
+  一緒にできるか」と聞かれ、TS版`tagErrorMembers`(約20行)と`json-decode.ts`
+  (313行、AST合成による`decode<X>`自動生成+`mesh/json`スタブが未実装)を直接
+  読んで調査した結果、分量・複雑さが1桁近く違い技術的にも無関係と判明したため
+  分けて進めることに決定。`checker.rs`の`resolve_type_decls`に新設
+  `tag_error_union`を追加——union宣言のソースmembersがすべて無名`{...}`由来
+  (今まさに作られたfresh struct)であることを検証し(既存の名前付き型への参照や
+  非struct形はTS版の2診断をまとめた明確なErrに)、通れば全メンバーに
+  `is_error_type: true`を立てる(単体の`error struct`と違い、union形は全メンバーが
+  等しく失敗を表す設計)。既存の`is_failure_type`/`has_structured_failure`/
+  `or_binding_type`(milestone 3)・`pattern_matches_member`/`match_is_exhaustive`
+  (milestone 7)は無変更でそのまま効く。`codegen.rs`は`generate_package`の
+  「union形error typeは未対応」ゲートを撤去し、`Expr::StructLit`の`__errTag`
+  ラップ判定を`lookup_union`にも対応させた。新規`examples/db_error.mesh`
+  (`error type DbError = {...}|{...}`+`?`伝播+`or e => match e {...}`)で
+  TS版とbyte-for-byte一致を確認、既存の全exampleも回帰無し。
+  **PR #23コードレビューで発見・即修正した2件**: (1) `__errTag`ラップ判定が
+  "any"判定だったため、通常structとerror type unionを混ぜたさらに外側の
+  unionで成功値まで誤ってerrTagラップされる回帰(このPR自身の新規コードの
+  バグ)、(2) パッケージのexportedシンボル登録がunion型alias宣言
+  (milestone 7)を一切見ておらず、milestone 8がこのmilestone 6/7由来の
+  既存ギャップを実害のある形で顕在化させていた——exportされた`error type`が
+  パッケージ越しに構築できない、かつpkg修飾された戻り値型注釈がis_error_type
+  無しの殻structへ静かにフォールバックしmilestone 3の安全ガードを素通りして
+  文脈付き`?`が構造化errorを「成功扱い」してしまう(2エージェント独立指摘・
+  実行確認済み)。いずれも修正しexport登録をunion型aliasにも対応、
+  新設`type_is_error_instance`ヘルパへ集約。テスト246→253件(+7)。
+  詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの8マイルストーン(struct/メソッド → error/json →
+  配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
+  〈union形式〉)が全て完了。次の対象はkanayamaと相談して決める(`json struct`
+  〈`mesh/json`スタブ実装込みの独立した大きめmilestone〉・`filter`/`map`/`reduce`・
+  `defer`が主な既知の未対応機能。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

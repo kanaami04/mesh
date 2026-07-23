@@ -296,15 +296,45 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
                 }
                 // union型alias(`type Status = "active" | "banned"`等)。discriminant_tagは
                 // 計算しない——is/matchのcodegenはASTのTypeNodeから直接テストを組み立てる
-                // (TS版genTypeTestと同じ)ため、コード生成には不要(§計画参照)
-                TypeNode::Union { .. } => {
-                    ctx.declare_union(&decl.name, resolve_type_node(ctx, &decl.node));
+                // (TS版genTypeTestと同じ)ため、コード生成には不要(§計画参照)。
+                // `error type X = A | B`(milestone 8)ならタグ付けも行う
+                TypeNode::Union { members, .. } => {
+                    let resolved = resolve_type_node(ctx, &decl.node);
+                    let resolved = if decl.is_error { tag_error_union(&decl.name, members, resolved)? } else { resolved };
+                    ctx.declare_union(&decl.name, resolved);
                 }
                 _ => {}
             }
         }
     }
     Ok(())
+}
+
+// error type X = A | B(union形式、milestone 8)。TS版`tagErrorMembers`の移植——union宣言の
+// メンバーは「このunionのために今まさに作られた無名{...}」だけを許す(既存の名前付き型への
+// 参照は、その型が使われる他の場所すべてにis_error_typeが波及してしまうため、TS版でも
+// `error-type-aliases-existing`診断で常に拒否される)。通ったメンバーすべてに
+// is_error_type: trueを立てる(単体の`error struct`と違い、union形は「全メンバーが
+// 等しく失敗を表す」——discriminated unionの各バリアントがそれぞれ別の種類の失敗、
+// という設計)。診断を出さない設計なので、TS版の2つの診断(`error-type-must-be-struct`/
+// `error-type-aliases-existing`)はまとめて明確なErrにする
+fn tag_error_union(name: &str, source_members: &[TypeNode], resolved: Type) -> Result<Type, String> {
+    if !source_members.iter().all(|m| matches!(m, TypeNode::StructType { .. })) {
+        return Err(format!(
+            "checker: error type '{name}' members must be freshly-declared struct shapes ({{ ... }}) \
+             — referencing an existing named type as an error type member is not supported"
+        ));
+    }
+    fn tag(t: Type) -> Type {
+        match t {
+            Type::Struct { name, fields, .. } => Type::Struct { name, fields, is_error_type: true },
+            other => other,
+        }
+    }
+    Ok(match resolved {
+        Type::Union { members, discriminant_tag } => Type::Union { members: members.into_iter().map(tag).collect(), discriminant_tag },
+        other => tag(other),
+    })
 }
 
 // struct型の内部識別名にパッケージを織り込む(TS版`types-resolve.ts`と同じ、ドット区切り)。
@@ -1071,6 +1101,66 @@ mod tests {
         resolve_type_decls(&mut ctx, &types).unwrap();
         let Some(Type::Struct { is_error_type, .. }) = ctx.lookup_struct("NotFound") else { panic!("expected struct") };
         assert!(*is_error_type);
+    }
+
+    fn error_union_decl(name: &str, members: Vec<TypeNode>) -> TypeDecl {
+        let mut decl = union_decl(name, members);
+        decl.is_error = true;
+        decl
+    }
+
+    #[test]
+    fn resolve_type_declsはerror_typeのunion形式を全メンバーis_error_typeとして解決する() {
+        let types = vec![error_union_decl(
+            "DbError",
+            vec![
+                struct_type_node(&[("kind", literal_type("notFound")), ("table", name_type("string"))]),
+                struct_type_node(&[("kind", literal_type("timeout")), ("ms", name_type("int"))]),
+            ],
+        )];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Union { members, .. }) = ctx.lookup_union("DbError") else { panic!("expected union") };
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })));
+    }
+
+    #[test]
+    fn resolve_type_declsはerror_typeのメンバーが非struct形ならerrになる() {
+        // TS版のerror-type-must-be-struct相当。単一メンバー(`error type Bad = int`)は
+        // Rust版のパーサーではUnionノードにすらならず素通りするため、実際に
+        // Union分岐へ到達する2メンバーの非struct形(リテラルunion)で検証する
+        let types = vec![error_union_decl("Bad", vec![literal_type("a"), literal_type("b")])];
+        let mut ctx = CheckerCtx::new();
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+    }
+
+    #[test]
+    fn resolve_type_declsはerror_typeのメンバーが既存の名前付き型への参照ならerrになる() {
+        // TS版のerror-type-aliases-existing相当
+        let types = vec![
+            struct_decl("Existing", &[("x", name_type("int"))]),
+            error_union_decl("Aliased", vec![name_type("Existing"), struct_type_node(&[("kind", literal_type("other"))])]),
+        ];
+        let mut ctx = CheckerCtx::new();
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+    }
+
+    #[test]
+    fn has_structured_failureとor_binding_typeはerror_typeのunionを正しく失敗として認識する() {
+        let types = vec![error_union_decl(
+            "DbError",
+            vec![struct_type_node(&[("kind", literal_type("notFound"))]), struct_type_node(&[("kind", literal_type("timeout"))])],
+        )];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let db_error = ctx.lookup_union("DbError").unwrap().clone();
+        let with_db_error = types::union_of(vec![INT, db_error]);
+        assert!(has_structured_failure(&with_db_error));
+        let bound = or_binding_type(&with_db_error);
+        let Type::Union { members, .. } = &bound else { panic!("expected union binding type, got {bound:?}") };
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })));
     }
 
     #[test]

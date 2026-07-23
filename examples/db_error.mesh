@@ -1,0 +1,32 @@
+// error type(union形式の名前付きエラー型、milestone 8)。error struct(単体形)と違い、
+// 判別可能unionの各バリアントがそれぞれ別の種類の失敗を表す
+
+error type DbError = { kind: "notFound", table: string } | { kind: "timeout", ms: int }
+
+fn find(id: int) int | DbError {
+	if id == 1 {
+		return 100
+	}
+	if id == 2 {
+		return DbError{kind: "timeout", ms: 500}
+	}
+	return DbError{kind: "notFound", table: "users"}
+}
+
+// bareの`?`(int | DbErrorへ、error typeのunion形式でも今まで通り伝播できる)
+fn useIt(id: int) int | DbError {
+	v := find(id)?
+	return v + 1
+}
+
+fn main() {
+	print(useIt(1))
+
+	// or: 束縛形でDbErrorのバリアントをmatchで分岐
+	a := find(1) or e => match e { { kind: "notFound" } => -1  { kind: "timeout" } => -2 }
+	print(a)
+	b := find(2) or e => match e { { kind: "notFound" } => -1  { kind: "timeout" } => -2 }
+	print(b)
+	c := find(3) or e => match e { { kind: "notFound" } => -1  { kind: "timeout" } => -2 }
+	print(c)
+}
