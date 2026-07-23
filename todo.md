@@ -1122,6 +1122,48 @@
           常に拒否される組み合わせなので実質的な機能損失は無い)。`json struct`
           (独立した大きめmilestoneとして後日別途進める)。`filter`/`map`/`reduce`・
           `defer`。
+        - **PR #23コードレビュー(5エージェント)で発見・実行確認して即修正した2件**
+          (score付けを待たず、milestone 4〜7と同じ「実行して再現確認済みのバグは
+          即修正」の前例に従った):
+          1. `Expr::StructLit`の`__errTag`ラップ判定(このPR自身の新規コード)が
+             "any"(union内のいずれかのmemberがis_error_type付き)判定だったため、
+             通常structとerror type unionを混ぜたさらに外側のunion
+             (`type Result = Success | DbError`)で、DbError由来のタグ付き
+             メンバーが1つ混じっているだけで`Result{value:...}`という普通の
+             成功値までerrTagで包んでしまい、`?`/`or`が成功値を誤って失敗として
+             握り潰していた。"all"判定(`tag_error_union`は対象unionが自身
+             error typeとして宣言された場合に限り全メンバーへ揃ってタグ付けする
+             ため、"all"にしてもerror type宣言そのものの構築は変わらず正しく
+             ラップされる)に修正、新設`type_is_error_instance`ヘルパへ集約。
+          2. **milestone 6/7由来の既存ギャップ**(このPR自身の新規ロジックの
+             バグではないが、milestone 8がこのギャップを実害のある形で顕在化
+             させた——2エージェント独立指摘): パッケージのexportedシンボル登録
+             (`generate_package`)が`TypeNode::StructType`宣言だけを見ており、
+             union型alias宣言(milestone 7)が一切登録されていなかった。
+             milestone 7時点では判別可能unionは通常「各named memberが自分自身の
+             名前で構築される」ため実害が無かったが、milestone 8はunion
+             メンバーを無名{...}限定にする設計のため、union自身の名前が構築・
+             型解決の唯一の手がかりになり実害が顕在化した。2つの失敗モードを
+             実行確認: (a) exportされた`error type`をパッケージ越しに構築すると
+             `no exported struct`という明確なErrになる(TS版は成功する)、
+             (b) `fn f() int | pkg.DbError`のようなpkg修飾された戻り値型注釈は
+             is_error_typeの付かない殻structへ静かにフォールバックし、
+             milestone 3の`has_structured_failure`安全ガード(文脈付き`?`が
+             構造化errorに対して使われるのを弾く役目)を素通りしてしまい、
+             文脈付き`?`が構造化errorに対してコンパイルを通り、実行時に
+             `__propCtx`が構造化errorを「成功扱い」して静かに壊れた挙動になって
+             いた(`[object Object]1`のような出力)。修正: `generate_package`の
+             export登録を`TypeNode::Union`宣言(`lookup_union`経由)にも拡張
+             (`lookup_package_type`は型の種類を区別しないので、pkg修飾側の
+             参照箇所〈`resolve_type_node`/`infer_expr`〉は無変更で自動的に
+             正しく動くようになった)。codegen側のpkg修飾`__errTag`判定も
+             新設`type_is_error_instance`ヘルパで統一。
+          いずれも`cargo test`(251→253、+2)/`cargo clippy --all-targets --
+          -D warnings`クリーンを再確認し、既存の全exampleがbyte-for-byte一致の
+          まま回帰していないことも再確認済み。2件目の実行確認は
+          `export error type DbError = {...}|{...}`をパッケージ越しに構築・
+          文脈付き`?`で伝播する2ケースで、修正前後の差分をTS版と直接比較して
+          確定させた。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

@@ -330,8 +330,19 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   「union形error typeは未対応」ゲートを撤去し、`Expr::StructLit`の`__errTag`
   ラップ判定を`lookup_union`にも対応させた。新規`examples/db_error.mesh`
   (`error type DbError = {...}|{...}`+`?`伝播+`or e => match e {...}`)で
-  TS版とbyte-for-byte一致を確認、既存の全exampleも回帰無し。新規テスト6件、
-  244→250件。詳細はtodo.mdの当該項目が一次情報源
+  TS版とbyte-for-byte一致を確認、既存の全exampleも回帰無し。
+  **PR #23コードレビューで発見・即修正した2件**: (1) `__errTag`ラップ判定が
+  "any"判定だったため、通常structとerror type unionを混ぜたさらに外側の
+  unionで成功値まで誤ってerrTagラップされる回帰(このPR自身の新規コードの
+  バグ)、(2) パッケージのexportedシンボル登録がunion型alias宣言
+  (milestone 7)を一切見ておらず、milestone 8がこのmilestone 6/7由来の
+  既存ギャップを実害のある形で顕在化させていた——exportされた`error type`が
+  パッケージ越しに構築できない、かつpkg修飾された戻り値型注釈がis_error_type
+  無しの殻structへ静かにフォールバックしmilestone 3の安全ガードを素通りして
+  文脈付き`?`が構造化errorを「成功扱い」してしまう(2エージェント独立指摘・
+  実行確認済み)。いずれも修正しexport登録をunion型aliasにも対応、
+  新設`type_is_error_instance`ヘルパへ集約。テスト246→253件(+7)。
+  詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの8マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉)が全て完了。次の対象はkanayamaと相談して決める(`json struct`

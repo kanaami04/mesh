@@ -189,18 +189,30 @@ impl Codegen {
             }
         }
 
-        // このパッケージのexportedなstruct型/自由関数をレジストリへ確定登録する(依存先で
-        // 処理される他パッケージが後から`alias.Name`で引けるように——パッケージは依存順に
-        // 処理されるので、この時点で依存先は無くこのパッケージ自身の話だけでよい)。
-        // exportedなconstは今回のどの検証exampleも使わないため対象外のまま
+        // このパッケージのexportedなstruct型/union型alias/自由関数をレジストリへ確定登録する
+        // (依存先で処理される他パッケージが後から`alias.Name`で引けるように——パッケージは
+        // 依存順に処理されるので、この時点で依存先は無くこのパッケージ自身の話だけでよい)。
+        // union型alias(milestone 7)の登録漏れ(milestone 8のcode reviewで発覚・実行確認済み——
+        // exportされたerror type union形式がパッケージ越しに構築できず明確なErrになり、
+        // さらに`fn f() int | pkg.DbError`のようなpkg修飾された戻り値型注釈では
+        // is_error_typeが付かない殻structへ静かにフォールバックしてhas_structured_failureの
+        // 安全ガードごと素通りしてしまう、milestone 3の安全ガードの目的を回避する深刻な
+        // バグだった)を修正——union型aliasも同じ`symbols.types`へ登録する
+        // (`lookup_package_type`は型の種類を区別しないので、pkg修飾側の参照箇所は
+        // 変更不要)。exportedなconstは今回のどの検証exampleも使わないため対象外のまま
         // (PackageSymbols.constsは常に空——将来pkg修飾constの読み出しに対応する際に埋める)
         let mut symbols = checker::PackageSymbols::default();
         for t in &all_types {
-            if t.exported
-                && matches!(t.node, TypeNode::StructType { .. })
-                && let Some(ty) = self.ctx.lookup_struct(&t.name)
-            {
-                symbols.types.insert(t.name.clone(), ty.clone());
+            if !t.exported {
+                continue;
+            }
+            let resolved = match &t.node {
+                TypeNode::StructType { .. } => self.ctx.lookup_struct(&t.name).cloned(),
+                TypeNode::Union { .. } => self.ctx.lookup_union(&t.name).cloned(),
+                _ => None,
+            };
+            if let Some(ty) = resolved {
+                symbols.types.insert(t.name.clone(), ty);
             }
         }
         for f in files {
@@ -876,22 +888,17 @@ impl Codegen {
                         let Some(ty) = self.ctx.lookup_package_type(alias, name) else {
                             return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                         };
-                        matches!(ty, Type::Struct { is_error_type: true, .. })
+                        type_is_error_instance(ty)
                     }
                     Some(alias) => {
                         return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                     }
                     // `error type X = A | B`(union形式、milestone 8)で構築されたstruct
                     // literalも同じく__errTagが要る——lookup_structで見つからなければ
-                    // lookup_unionも試し、いずれかのmemberがis_error_type付きなら
-                    // ラップする(union形は全メンバーが等しくタグ付けされる設計なので
-                    // "any"判定で十分、resolve_type_nodeのstruct/union両対応
-                    // フォールバックと同じ考え方)
-                    None => matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. }))
-                        || matches!(
-                            self.ctx.lookup_union(name),
-                            Some(Type::Union { members, .. }) if members.iter().any(|m| matches!(m, Type::Struct { is_error_type: true, .. }))
-                        ),
+                    // lookup_unionも試す(type_is_error_instanceが"all"判定で、通常struct
+                    // とerror type unionを混ぜたさらに外側のunionを誤って全部error扱い
+                    // しないようにする、code reviewで確定)
+                    None => self.ctx.lookup_struct(name).or_else(|| self.ctx.lookup_union(name)).map(type_is_error_instance).unwrap_or(false),
                 };
                 let mut js_fields = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -1246,6 +1253,18 @@ impl Codegen {
 // 自パッケージ内のstructを指す前提(`fn (p: Point) ...`はPointが今処理中のパッケージの
 // struct、という意味)——他パッケージの型に生やす拡張メソッド的な書き方
 // (`fn (p: math.Point) ...`)はモジュールのこの段階でも対象外のまま
+// struct literalが__errTagで包まれるべきか(単体のerror struct、または`error type`の
+// union形式——milestone 8。union形は全メンバーが揃ってis_error_type付きのときだけ——
+// 通常structとerror type unionを混ぜたさらに外側のunionを、混入した1メンバーだけで
+// 誤って全部error扱いしないための"all"判定、milestone 8のcode reviewで確定)
+fn type_is_error_instance(ty: &Type) -> bool {
+    match ty {
+        Type::Struct { is_error_type: true, .. } => true,
+        Type::Union { members, .. } => members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })),
+        _ => false,
+    }
+}
+
 fn receiver_struct_name(recv: &Receiver) -> CodegenResult<String> {
     match &recv.type_node {
         TypeNode::Name { name, pkg: None, .. } => Ok(name.clone()),
@@ -1993,6 +2012,44 @@ mod tests {
         assert!(js.contains("async function __m_mathutil$Point_magnitudeSq(p)"), "got: {js}");
     }
 
+    const DBERROR_MESH: &str = "export error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\", ms: int }\nexport fn find(id: int) int | DbError {\n  if id == 1 {\n    return 100\n  }\n  return DbError{kind: \"notFound\", table: \"users\"}\n}\n";
+
+    #[test]
+    fn パッケージ修飾のerror_type_union形式はerrtag付きで構築できる() {
+        // code review発覚・実行確認済みの回帰: exportedなunion型alias(error type含む)が
+        // パッケージレジストリに登録されておらず、パッケージ越しの構築が
+        // 「no exported struct」という明確なErrになっていた(TS版は成功する)
+        let js = gen_modules_body(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"errpkg\"\nfn main() {\n  e := errpkg.DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}",
+            ),
+            ("errpkg", "errpkg/errs.mesh", DBERROR_MESH),
+        ]);
+        assert!(js.contains("const e = __errTag({ kind: \"notFound\", table: \"users\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn パッケージ修飾のerror_type_union形式でも構造化errorへの文脈付きは安全ガードが効く() {
+        // code review発覚・実行確認済みの回帰(より深刻な方): 修正前はpkg修飾された戻り値型
+        // 注釈(`int | errpkg.DbError`)がis_error_typeの付かない殻structへ静かに
+        // フォールバックしており、has_structured_failureの安全ガード(checker.rs参照)が
+        // 素通りしてしまっていた。結果、文脈付き`?`が構造化errorに対してコンパイルを
+        // 通ってしまい、実行時に__propCtxがnull/instanceof Errorしか見ないため
+        // 構造化errorを「成功扱い」して静かに壊れた挙動になっていた
+        let err = gen_modules(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"errpkg\"\nfn wrap(id: int) int | errpkg.DbError {\n  return errpkg.find(id)\n}\nfn useIt(id: int) int | errpkg.DbError {\n  v := wrap(id) ? \"lookup failed\"\n  return v\n}\nfn main() {}",
+            ),
+            ("errpkg", "errpkg/errs.mesh", DBERROR_MESH),
+        ])
+        .unwrap_err();
+        assert!(err.contains("cannot propagate a structured error"), "got: {err}");
+    }
+
     #[test]
     fn 未exportな関数をパッケージ修飾で呼ぶと明確なエラーになる() {
         let err = gen_modules(&[
@@ -2150,6 +2207,18 @@ mod tests {
             "error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\", ms: int }\nfn main() {\n  e := DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}",
         );
         assert!(js.contains("const e = __errTag({ kind: \"notFound\", table: \"users\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn error_type_unionと通常structを混ぜたさらに外側のunionでは成功値をerrtagで包まない() {
+        // code review発覚・実行確認済みの回帰: "any"判定だと、DbError由来のタグ付き
+        // メンバーが1つでも混じっているだけでResult{value:...}という普通の成功値まで
+        // errTagで包んでしまい、?/orが成功値を誤って失敗として握り潰していた
+        let js = gen_body(
+            "error type DbError = { kind: \"notFound\" } | { kind: \"timeout\" }\nstruct Success { value: int }\ntype Result = Success | DbError\nfn getIt() Result {\n  return Result{value: 42}\n}\nfn main() {\n  print(getIt())\n}",
+        );
+        assert!(js.contains("return ({ value: 42 });"), "got: {js}");
+        assert!(!js.contains("__errTag"), "got: {js}");
     }
 
     #[test]
