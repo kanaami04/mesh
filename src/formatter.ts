@@ -239,6 +239,9 @@ function printStmt(p: Printer, stmt: Stmt, indent: number) {
     case "continue":
       emitSimple("continue");
       return;
+    case "deferStmt":
+      emitSimple(`defer ${printExpr(stmt.call, indent)}`);
+      return;
   }
 }
 

@@ -412,10 +412,42 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   発覚しなかった)。`prelude()`の戻り値を所有型にしエスケープを評価する形に修正。
   テスト266→276件(+10)。`defer`は独立した別機能なので今回のスコープ外
   (次のmilestone候補)。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの10マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 11(defer)完了(2026-07-23)**。todo.mdに残っていた
+  既知の未対応機能が`defer`のみになり実装。TS版`genDeferStmt`の「影武者call式」
+  トリック(引数・レシーバをdefer時点の値で一時変数〈`__d0`,`__d1`,...、コンパイル
+  全体で1つのカウンタ〉へ捕捉し、一時変数への参照に差し替えた影武者のcall式を
+  既存の`gen_call`にそのまま渡すことで呼び出し形の判定を重複させない)をそのまま
+  踏襲。**TS版との違い**: checker/codegenが融合しているため、影武者の一時変数の
+  型を`self.ctx.declare`でも宣言しないと`gen_call`自身のメソッド判定がANY扱いに
+  なってしまう(実装中に発見・対応)。milestone 10で切り出し済みの`gen_fn_body`
+  (FnDecl/Expr::FnExpr共通)へ`defer_used`スタックを追加、`finally`節を
+  「spawnした子タスクを待ってからdeferを実行」の順序に拡張。無名関数式の中の
+  `defer`もmilestone 10のprop/spawnスタック分離のおかげで独立して働く。**副産物
+  としてTS版自体のフォーマッタのバグを発見・修正**(milestone 9の`json struct`
+  キーワード欠落と同じ構図)——`printStmt`のswitchに`deferStmt`のcase自体が無く、
+  `defer`文を再整形すると丸ごと消えてしまっていた。新規`examples/defer.mesh`
+  (複数defer LIFO・引数固定・メソッドdefer・組み込み/パッケージ修飾defer・早期
+  return・ループ内累積・spawn併用・無名関数内defer)+`examples/defer_panic.mesh`
+  (panicでの巻き戻り、終了コード/stdout/stderrの3点確認)+
+  `examples/defer_pkg_demo.mesh`(cross-package)でTS版とbyte-for-byte一致を確認、
+  既存の全exampleも回帰無し。**PR #26コードレビューで発見・即修正した1件**:
+  影武者call式にdefer文自体の`pos`を使ってしまっており(TS版は元のcall式自身の
+  `pos`をそのまま引き継ぐ)、deferした組み込み呼び出しの型エラー・パニック位置
+  情報がdefer文の位置を指してしまっていた(値・フロー自体は正しかった)。元のcall式
+  の`pos`を捕捉し引き継ぐよう修正。あわせて`ast.rs`/`parser.rs`の古いコメント
+  (「checkerが検証する」→実際は今回実装した`codegen.rs`が検証)も修正。1件、
+  TS版自体にも同じ理由で存在する既知の限界(構造体フィールドが保持する関数値
+  経由の呼び出しではレシーバが固定されない)を確認したが、Rust版だけの新しい
+  退行ではないため記録に留めた。テスト276→284件(+8)、TS版テストスイート
+  486→490件。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの11マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
-  〈union形式〉→ json struct → filter/map/reduce)が全て完了。次の対象は
-  kanayamaと相談して決める(`defer`が主な既知の未対応機能。todo.md参照)
+  〈union形式〉→ json struct → filter/map/reduce → defer)が全て完了——TS版
+  リファレンス実装の主要機能をRust版がひととおり移植し終えた。細かな既知の限界・
+  意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上のdestructure・
+  ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct
+  参照 等)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して
+  決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

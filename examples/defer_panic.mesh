@@ -1,0 +1,14 @@
+// defer(milestone 11) — panicで巻き戻るときもdeferは実行されることを確認する
+// (try/finallyで実装されているため)。この例は必ずpanicして終了コード1で終わるので、
+// examples/defer.meshの通常の検証(標準出力の一致だけ確認)とは別に、終了コード・
+// 標準出力・標準エラーの3点をTS版と突き合わせて確認する
+
+fn work() {
+	defer print("cleanup ran")
+	nums := [1, 2, 3]
+	print(nums[10])
+}
+
+fn main() {
+	work()
+}

@@ -1,0 +1,91 @@
+// defer(milestone 11) — 関数を抜けるときに実行される後始末を一巡する。
+// 複数deferのLIFO順・引数のdefer時点固定・メソッド呼び出しdefer(レシーバもコピー)・
+// 組み込み関数のdefer・早期return・ループ内での積み上がり・spawnとの併用・
+// 無名関数(クロージャ)の中のdefer、を一通り確認する
+// (panicで巻き戻るケースはexamples/defer_panic.mesh、複数パッケージでのdeferは
+// examples/defer_pkg_demo.meshで別途確認する)
+
+struct Box {
+	label: string
+}
+
+fn (b: Box) announce() {
+	print("closing ${b.label}")
+}
+
+fn multiDefer() {
+	defer print("first")
+	defer print("second")
+	defer print("third")
+	print("body")
+}
+
+fn argCapture() {
+	mut n := 1
+	defer print("deferred: ${n}")
+	n = 99
+	print("live: ${n}")
+}
+
+fn methodDefer() {
+	mut b := Box{label: "first"}
+	defer b.announce()
+	b = Box{label: "second"}
+	print("done")
+}
+
+fn builtinDefer() int {
+	ch := chan<int>(1)
+	defer close(ch)
+	ch <- 5
+	v := <-ch
+	if v is closed { return -1 }
+	return v
+}
+
+fn earlyReturn(fail: bool) {
+	defer print("cleanup")
+	if fail {
+		print("early exit")
+		return
+	}
+	print("normal exit")
+}
+
+fn loopDefer() {
+	for i := range 3 {
+		defer print("deferred ${i}")
+	}
+	print("loop done")
+}
+
+fn slow() int {
+	sleep(5)
+	print("slow done")
+	return 1
+}
+
+fn spawnDefer() {
+	defer print("final cleanup")
+	ch := spawn slow()
+	v := <-ch
+	if v is closed { return }
+	print("got ${v}")
+}
+
+fn main() {
+	multiDefer()
+	argCapture()
+	methodDefer()
+	print(builtinDefer())
+	earlyReturn(true)
+	loopDefer()
+	spawnDefer()
+
+	f := fn() {
+		defer print("closure cleanup")
+		print("closure body")
+	}
+	f()
+	print("after closure")
+}

@@ -145,7 +145,8 @@ pub enum Stmt {
     // namesは1個(int range)または2個。"_"で捨てられる(捨てる指定自体はcheckerの仕事)
     RangeFor { names: Vec<String>, subject: Expr, body: Block, pos: Pos },
     // defer f(x) — 関数を抜けるとき(panicによる巻き戻りも含む)に呼び出す。
-    // checkerがcall.kind===Callであることを検証する(パーサは任意の式を許して渡すだけ)
+    // callがCall式であることの検証はcodegen(gen_defer_stmt、milestone 11)の仕事
+    // (パーサは任意の式を許して渡すだけ——checker.rsは文を検査しない設計のため)
     DeferStmt { call: Expr, pos: Pos },
 }
 

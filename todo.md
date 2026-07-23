@@ -1421,6 +1421,110 @@
           利用者定義の総称関数、既にF-1後半として別スコープで管理されている
           既知の未対応機能——`filter`/`map`/`reduce`は組み込み関数であり
           ジェネリクスとは無関係)。
+  - [x] **checker+codegen milestone 11(defer)** ✅ 2026-07-23実装。milestone 10
+        完了後、todo.mdに残っていた既知の未対応機能が`defer`のみになり、kanayamaと
+        相談し次の対象として選んだ。TS版`src/codegen.ts`の`genDeferStmt`/
+        `genFnBody`・`src/checker/statements.ts`の`deferStmt`検査を直接読んで調査。
+        パーサーは既に完全実装済み(`Stmt::DeferStmt{call: Expr, pos: Pos}`——
+        「パーサーは任意の式を許して渡すだけ、callがCallであることの検証は
+        checker/codegenの仕事」という設計がast.rsのコメントに明記済み)。checker.rsは
+        文(Stmt)を検査しない設計なので、**今回の実装は完全にcodegen.rsだけで完結**。
+        - **TS版`genDeferStmt`の「影武者(かげむしゃ)call式」トリック**: `defer f(a,
+          b)`/`defer recv.method(a)`は、Goと同じく引数(メソッドならレシーバも)を
+          defer文を書いた時点の値で固定する(後で書き換えても古い値を見る)。TS版は
+          これを、引数・レシーバをその場で一時変数(`__d0`,`__d1`,...、コンパイル
+          全体で1つのカウンタ、関数ごとにリセットしない)へ評価してから、一時変数
+          への参照に差し替えた「影武者」のcall式を組み立て、**既存のgen_call
+          (パッケージ修飾/メソッド/組み込み/素の関数呼び出しの分岐ロジック)に
+          そのまま渡す**ことで実装している——呼び出し形の判定を重複させずに済む
+          巧妙なトリックで、Rust版もそのまま踏襲した。**TS版との違い**: TS版は
+          checker/codegenが完全に分かれた2パスなので、影武者のIdentノードへ
+          `resolvedType`を直接埋め込むだけで済むが、このリゾルバはchecker/codegenが
+          融合していて`gen_call`が`self.ctx`を都度引くため、一時変数の型を
+          `self.ctx.declare`でも宣言しておかないと`gen_call`自身のメソッド判定等が
+          ANY扱いになってしまう(実装中に発見・対応)。
+        - `gen_fn_body`(milestone 10で切り出し済みのFnDecl/Expr::FnExpr共通の
+          ボディ生成+ラップ判定ヘルパー)に`defer_used: Vec<bool>`
+          (prop_used/spawn_usedと同じスタック)を追加。ラップ判定を`used_prop ||
+          used_spawn || used_defer`に、`used_defer`なら`try`の前に`const __defers =
+          [];`を追加、`finally`節の中身をTS版と同じ順序(**spawnした子タスクを
+          先に待ってから**、自分のdeferを最後の後片付けとして走らせる——LIFO=登録の
+          逆順)に拡張。無名関数式の中で`defer`を使っても、milestone 10のprop/spawn
+          スタック分離のおかげで外側の関数を汚さず独立して働く(無名関数自身を
+          抜けるときに実行される、TS版のテストでも確認済みの挙動)。
+        - 新設`gen_defer_stmt`(TS版`genDeferStmt`の移植)。`Stmt::DeferStmt`が
+          常にErrを返していた既存の分岐をこの呼び出しに差し替え。`call`が
+          `Expr::Call`でなければ(パーサーは任意の式を許すため)明確なErrにする
+          (TS版の`defer-requires-call`診断に相当)。
+        - テスト: `codegen.rs`に7件(複数deferのLIFO順・引数のdefer時点固定・
+          メソッド呼び出しdefer〈レシーバも一時変数へ捕捉〉・組み込み/パッケージ
+          修飾関数のdefer・deferでない式は明確なErr・無名関数式の中のdeferが
+          独立して働く・spawn併用時のfinally内の順序)を追加。276→283件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **副産物: TS版自体のフォーマッタのバグを発見・修正**(milestone 9の
+          `json struct`キーワード欠落と同じ構図)。CI相当の確認(TS版の全example
+          往復整形テスト)で`examples/defer.mesh`が失敗——`src/formatter.ts`の
+          `printStmt`のswitchに`deferStmt`のcase自体が無く(default節も無いため
+          型検査でも検出できなかった)、`defer`文を再整形すると文そのものが丸ごと
+          消えてしまっていた。caseを追加して修正、回帰テスト1件追加
+          (`tests/formatter.test.ts`)。あわせて、cross-package example
+          (`defer_pkg_demo.mesh`)の往復整形テストが依存パッケージ
+          (`examples/loggerpkg`)を一時ディレクトリへ複製していなかった問題も
+          (既存の特別扱いと同じパターンで)修正。TS版テストスイート486→490件、
+          全件パス。
+        - **実行確認**: `tests/e2e.test.ts`の"defer文"節(複数defer LIFO・引数固定・
+          メソッドdefer〈レシーバコピー〉・組み込み/パッケージ修飾defer・早期
+          return・panicでの巻き戻り・ループ内での積み上がり・spawn併用・無名関数
+          内のdefer・複数パッケージでのdefer)を元に新規`examples/defer.mesh`
+          (通常シナリオ一式)・`examples/defer_panic.mesh`(panicで巻き戻る
+          ケース——終了コード・標準出力・標準エラーの3点をTS版と突き合わせ)・
+          `examples/defer_pkg_demo.mesh`+`examples/loggerpkg/logger.mesh`
+          (cross-package defer)を作成し、Rust版で実行してTS版の出力とbyte-for-byte
+          一致を確認。既存の全example(`hello`/`fizzbuzz`/`struct_methods`/
+          `error_propagation`/`errors`/`discriminated_union`/`status`/`users`/
+          `channel_spec`/`collections`/`maps`/`concurrency`/`channels`/
+          `modules_demo`/`db_error`/`json_decode`/`json_models_demo`/
+          `filter_map_reduce`+`mathutil/*`)も回帰無しを再確認。`tree.mesh`の
+          明確なErrも回帰無し。
+        - **PR #26コードレビュー(5エージェント)で発見・実行確認して即修正した1件、
+          記録に留めた2件**:
+          1. **影武者call式に、defer文自体の`pos`ではなく元のcall式自身の`pos`を
+             使っていなかった**(バグスキャンエージェント発見・実行確認済み)。
+             TS版`genDeferStmt`は`{ ...call, callee: calleeForInvoke, args:
+             argTemps }`で元のcall式のposをそのまま引き継ぐが、Rust版は
+             `Stmt::DeferStmt`自体の`pos`を影武者call式に渡してしまっていたため、
+             deferした組み込み呼び出しの型エラー・パニック位置情報が(defer文の
+             位置ではなく)呼び出し式自身の位置を指すべきところ、defer文自体の
+             位置を指してしまっていた(例: `defer round(x)`でxがオーバーフロー
+             する場合、TS版は`round(`の位置でpanicするが、修正前のRust版は
+             `defer`キーワードの位置でpanicしていた)。値やフロー自体は壊れて
+             いなかったが、位置情報の不一致は確認済みの回帰なので修正(元のcall式の
+             `pos`を捕捉し影武者call式へ引き継ぐ)。回帰テスト1件追加。
+          2. **`ast.rs`/`parser.rs`の古いコメントを修正**(コードコメント準拠
+             エージェント発見): 「checkerがcall.kind===Callであることを検証する」
+             という記述が、実際には(checker.rsは文を検査しない設計のため)
+             このPRで実装した`codegen.rs`の`gen_defer_stmt`が検証している、という
+             実態と食い違っていた(パーサー移植時からの古い記述で、このPRより
+             前から不正確だったが、defer自体がこのPRで初めて実装されたことで
+             食い違いが明確になった)。「codegen(gen_defer_stmt)」に修正。
+          3. **記録に留めた既知の限界1件**(過去PRコメントエージェント発見・
+             TS版でも再現確認済み): `defer recv.fieldFn(args)`(structのフィールドが
+             保持する関数値経由の呼び出し、真のメソッド呼び出しではない)は、
+             レシーバがdefer時点の値で固定されない(後の再代入後の値を見てしまう)。
+             TS版`genDeferStmt`自身が「struct型かつ同名フィールドが無い」場合だけ
+             メソッド呼び出しとみなしレシーバを捕捉する設計になっており、この
+             ケース(フィールドがある=同名メソッドではない)はTS版でも同じ理由で
+             捕捉されない——Rust版はTS版を忠実に移植しているだけで、Rust側だけの
+             新しい退行ではないため修正はせず記録に留める。
+          いずれも回帰テスト追加(`codegen.rs`+1)、284件、
+          `cargo clippy --all-targets -- -D warnings`クリーン、既存の全example
+          がbyte-for-byte一致のまま回帰無しを再確認済み。
+        - **milestone 11のスコープ外**: 無し——`defer`はtodo.mdに残っていた最後の
+          既知の未対応機能であり、これでTS版リファレンス実装の主要機能をRust版が
+          ひととおり移植し終えた(細かな既知の限界・意図的なスコープ縮小は引き続き
+          このtodo.mdに記録済みの通り残る: 自己参照型・`json.Value`の2階層以上の
+          destructure・ジェネリック関数・`mesh/io`/`mesh/http`・
+          cross-file/cross-packageのjson struct参照 等)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

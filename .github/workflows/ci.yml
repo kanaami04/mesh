@@ -32,6 +32,12 @@ jobs:
       - name: Run examples
         run: |
           for f in examples/*.mesh; do
+            # examples/defer_panic.mesh(milestone 11)はpanicで終了コード1になることが
+            # 意図的な検証内容(defer実行との組み合わせ、tests/e2e.test.tsに専用テストが
+            # ある)なので、この「全exampleが正常終了するか」というスモークテストの対象外にする
+            if [ "$f" = "examples/defer_panic.mesh" ]; then
+              continue
+            fi
             echo "=== $f ==="
             bun src/cli.ts run "$f"
           done
