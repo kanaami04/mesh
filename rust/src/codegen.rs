@@ -79,6 +79,13 @@ struct Codegen {
     // 今生成中の関数本体のどこかで(detachではない)spawnが使われたか。TS版のspawnStackに
     // 相当——prop_usedと同じ理由でスタックにする
     spawn_used: Vec<bool>,
+    // 今生成中の関数本体のどこかで`defer`が使われたか(milestone 11)。TS版のdeferStackに
+    // 相当——prop_used/spawn_usedと同じ理由でスタックにする
+    defer_used: Vec<bool>,
+    // defer文が引数/レシーバの捕捉に使う一時変数(`__d0`,`__d1`,...)の連番。TS版
+    // `deferTempCounter`と同じくコンパイル全体で1つ(関数ごとにはリセットしない)——
+    // 全ての一時変数名がコンパイル全体で一意になればよく、関数内で閉じている必要は無い
+    defer_temp_counter: u32,
     // これまでに生成したトップレベルconstの名前(全パッケージ分、リセットしない)。
     // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_nameで
     // pkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
@@ -99,6 +106,8 @@ impl Codegen {
             ctx: CheckerCtx::new(),
             prop_used: Vec::new(),
             spawn_used: Vec::new(),
+            defer_used: Vec::new(),
+            defer_temp_counter: 0,
             declared_consts: HashSet::new(),
         }
     }
@@ -308,20 +317,21 @@ impl Codegen {
         Ok(())
     }
 
-    // 関数本体(FnDecl・Expr::FnExpr共通)を生成する: `?`/(detachでない)spawnが本体の
-    // どこかに現れたかどうかは生成してみるまで分からない(if/forの中にネストしていても
-    // よい)ので、本体をいったん別バッファに生成してから、try/catch(?用)・finally(spawn用)
-    // で包むかどうかを事後に決める(TS版genFnBodyのpropStack/spawnStackと同じ設計)。
-    // milestone 10でExpr::FnExprに対応し関数本体生成がネストしうるようになったため、
-    // prop_used/spawn_usedはスタックにしてこの呼び出し単位でpush/popする(外側の関数の
-    // 使用状況を内側のFnExprが汚さない、逆も同様)。`self.out`/`self.indent`の意味
-    // (トップレベル関数なら直接追記、Expr::FnExprなら隔離済みバッファ)は呼び出し元が
-    // 管理する——この関数は現在の`self.out`/`self.indent`をそのまま使う。
-    // `defer`(TS版usesDefer相当)は`Stmt::DeferStmt`が常にErrを返すため絶対に発生せず、
-    // 対象外のままでよい
+    // 関数本体(FnDecl・Expr::FnExpr共通)を生成する: `?`/(detachでない)spawn/`defer`が
+    // 本体のどこかに現れたかどうかは生成してみるまで分からない(if/forの中にネストして
+    // いてもよい)ので、本体をいったん別バッファに生成してから、try/catch(?用)・
+    // finally(spawn/defer用)で包むかどうかを事後に決める(TS版genFnBodyの
+    // propStack/spawnStack/deferStackと同じ設計)。milestone 10でExpr::FnExprに対応し
+    // 関数本体生成がネストしうるようになったため、prop_used/spawn_used/defer_usedは
+    // スタックにしてこの呼び出し単位でpush/popする(外側の関数の使用状況を内側のFnExprが
+    // 汚さない、逆も同様——無名関数の中のdeferはその無名関数自身を抜けるときに実行される)。
+    // `self.out`/`self.indent`の意味(トップレベル関数なら直接追記、Expr::FnExprなら
+    // 隔離済みバッファ)は呼び出し元が管理する——この関数は現在の`self.out`/`self.indent`
+    // をそのまま使う
     fn gen_fn_body(&mut self, stmts: &[Stmt]) -> CodegenResult<()> {
         self.prop_used.push(false);
         self.spawn_used.push(false);
+        self.defer_used.push(false);
         let saved_out = std::mem::take(&mut self.out);
         self.indent += 1;
         let body_result = self.gen_stmts(stmts);
@@ -329,8 +339,12 @@ impl Codegen {
         let body_lines = std::mem::replace(&mut self.out, saved_out);
         let used_prop = self.prop_used.pop().expect("pushed at the start of gen_fn_body");
         let used_spawn = self.spawn_used.pop().expect("pushed at the start of gen_fn_body");
+        let used_defer = self.defer_used.pop().expect("pushed at the start of gen_fn_body");
 
-        if used_prop || used_spawn {
+        if used_prop || used_spawn || used_defer {
+            if used_defer {
+                self.emit("const __defers = [];");
+            }
             if used_spawn {
                 self.emit("__waitStack.push([]);");
             }
@@ -345,10 +359,16 @@ impl Codegen {
                 self.emit("throw e;");
                 self.indent -= 1;
             }
-            if used_spawn {
+            if used_spawn || used_defer {
                 self.emit("} finally {");
                 self.indent += 1;
-                self.emit("await Promise.all(__waitStack.pop());");
+                // spawnした子タスクを先に待ってから、自分のdeferを最後の後片付けとして走らせる
+                if used_spawn {
+                    self.emit("await Promise.all(__waitStack.pop());");
+                }
+                if used_defer {
+                    self.emit("for (let __i = __defers.length - 1; __i >= 0; __i--) await __defers[__i]();");
+                }
                 self.indent -= 1;
             }
             self.emit("}");
@@ -490,8 +510,75 @@ impl Codegen {
                 Ok(())
             }
             Stmt::RangeFor { names, subject, body, pos } => self.gen_range_for(names, subject, body, *pos),
-            Stmt::DeferStmt { pos, .. } => Err(format!("codegen: 'defer' is not yet supported ({}:{})", pos.line, pos.col)),
+            Stmt::DeferStmt { call, pos } => self.gen_defer_stmt(call, *pos),
         }
+    }
+
+    // defer f(a, b) / defer recv.method(a)(milestone 11): 引数(メソッドならレシーバも)は
+    // defer文を書いた時点の値で固定する(Goと同じ——mutな変数を後で書き換えても、
+    // deferした呼び出しは古い値を見る)。呼び出し本体はgen_callの通常の分岐(パッケージ
+    // 修飾/メソッド/組み込み/素の関数)をそのまま再利用したいので、レシーバ・引数を
+    // 一時変数への参照に差し替えた「影武者」のcall式を作ってgen_callに渡す——呼び出し形の
+    // 分岐ロジックを重複させずに済む(TS版genDeferStmtの移植)。パーサーは任意の式を
+    // deferの後ろに許す(callであることの検証はここの仕事、ast.rs参照)ので、Callでなければ
+    // 診断を出さないこのリゾルバでは明確なErrにする(TS版のdefer-requires-call診断に相当)
+    fn gen_defer_stmt(&mut self, call: &Expr, pos: Pos) -> CodegenResult<()> {
+        let Expr::Call { callee, args, .. } = call else {
+            return Err(format!(
+                "codegen: 'defer' must be followed by a function or method call, e.g. 'defer f(x)' ({}:{})",
+                pos.line, pos.col
+            ));
+        };
+
+        let mut assigns: Vec<String> = Vec::new();
+
+        // メソッド呼び出しなら(recv.method(...)、gen_callの既存のメソッド判定と同じ——
+        // struct型かつ同名フィールドが無い)、レシーバもdefer時点の値で固定する。
+        // 影武者のIdentが指す一時変数は、TS版なら`resolvedType`をノードへ直接埋め込む
+        // だけで済む(checkerが別パスで済んでいるため)が、このリゾルバはchecker/codegenが
+        // 融合していて`gen_call`が`self.ctx`を都度引くため、一時変数の型を`self.ctx`へも
+        // 宣言しておかないと(例えば)`gen_call`自身のメソッド判定がANY扱いになってしまう
+        let invoke_callee: Expr = if let Expr::Member { target, name, pos: member_pos } = &**callee {
+            let target_ty = checker::infer_expr(&self.ctx, target);
+            let is_method = matches!(&target_ty, Type::Struct { fields, .. } if !fields.iter().any(|f| &f.name == name));
+            if is_method {
+                let recv_js = self.gen_expr(target)?;
+                let recv_temp = format!("__d{}", self.defer_temp_counter);
+                self.defer_temp_counter += 1;
+                assigns.push(format!("const {recv_temp} = {recv_js};"));
+                self.ctx.declare(&recv_temp, target_ty);
+                Expr::Member { target: Box::new(Expr::Ident { name: recv_temp, pos: *member_pos }), name: name.clone(), pos: *member_pos }
+            } else {
+                (**callee).clone()
+            }
+        } else {
+            (**callee).clone()
+        };
+
+        let mut invoke_args = Vec::with_capacity(args.len());
+        for a in args {
+            let arg_ty = checker::infer_expr(&self.ctx, a);
+            let arg_js = self.gen_expr(a)?;
+            let temp = format!("__d{}", self.defer_temp_counter);
+            self.defer_temp_counter += 1;
+            assigns.push(format!("const {temp} = {arg_js};"));
+            self.ctx.declare(&temp, arg_ty);
+            invoke_args.push(Expr::Ident { name: temp, pos: a.pos() });
+        }
+
+        let shadow_call = Expr::Call { callee: Box::new(invoke_callee), args: invoke_args, pos };
+        let invoke_js = self.gen_call(&shadow_call)?;
+
+        *self.defer_used.last_mut().expect("inside a function body") = true;
+        self.emit("{");
+        self.indent += 1;
+        for a in assigns {
+            self.emit(a);
+        }
+        self.emit(format!("__defers.push(async () => {{ {invoke_js}; }});"));
+        self.indent -= 1;
+        self.emit("}");
+        Ok(())
     }
 
     // `if x is T { ... }`という単純形(condが裸Identに対する`is`)ならnarrowing(milestone 7)
@@ -2534,5 +2621,68 @@ mod tests {
         let js = gen_js("fn main() {}").unwrap();
         assert!(js.contains("/^[+-]?\\d+$/"), "got prelude toInt regex context: {js}");
         assert!(!js.contains("\\\\d"), "got: {js}");
+    }
+
+    #[test]
+    fn 複数のdeferはlifo順で関数を抜けるときに実行される() {
+        let js = gen_body("fn work() {\n  defer print(\"first\")\n  defer print(\"second\")\n  defer print(\"third\")\n  print(\"body\")\n}\nfn main() {\n  work()\n}");
+        assert!(js.contains("const __defers = [];"), "got: {js}");
+        // 各defer文の引数(文字列リテラルでも)は一時変数へ捕捉される(TS版と同じ)
+        let push_first = js.find("__d0 = \"first\"").unwrap();
+        let push_second = js.find("__d1 = \"second\"").unwrap();
+        let push_third = js.find("__d2 = \"third\"").unwrap();
+        assert!(push_first < push_second && push_second < push_third, "登録順(first, second, third)のはず, got: {js}");
+        assert!(js.contains("for (let __i = __defers.length - 1; __i >= 0; __i--) await __defers[__i]();"), "got: {js}");
+    }
+
+    #[test]
+    fn deferの引数はdefer文の時点の値で一時変数へ捕捉される() {
+        let js = gen_body("fn work() {\n  mut n := 1\n  defer print(n)\n  n = 99\n}\nfn main() {\n  work()\n}");
+        assert!(js.contains("const __d0 = n;"), "got: {js}");
+        assert!(js.contains("__defers.push(async () => { __print(__d0); });"), "got: {js}");
+    }
+
+    #[test]
+    fn deferのメソッド呼び出しはレシーバも一時変数へ捕捉される() {
+        let js = gen_body(
+            "struct Box {\n  label: string\n}\nfn (b: Box) announce() {\n  print(b.label)\n}\nfn work() {\n  mut b := Box{label: \"first\"}\n  defer b.announce()\n  b = Box{label: \"second\"}\n}\nfn main() {\n  work()\n}",
+        );
+        assert!(js.contains("const __d0 = b;"), "got: {js}");
+        assert!(js.contains("__defers.push(async () => { (await __m_Box_announce(__d0)); });"), "got: {js}");
+    }
+
+    #[test]
+    fn 組み込み関数もパッケージ修飾関数もdeferできる() {
+        let js = gen_body("fn main() {\n  ch := chan<int>(1)\n  defer close(ch)\n}");
+        assert!(js.contains("const __d0 = ch;"), "got: {js}");
+        assert!(js.contains("__defers.push(async () => { __d0.close(); });"), "got: {js}");
+
+        let js2 = gen_modules_body(&[
+            ("main", "main.mesh", "import \"mathutil\"\nfn main() {\n  defer mathutil.add(1, 2)\n}"),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js2.contains("__defers.push(async () => { (await mathutil$add(__d0, __d1)); });"), "got: {js2}");
+    }
+
+    #[test]
+    fn deferでない式は明確なerrになる() {
+        let err = gen_js("fn main() {\n  defer 1 + 1\n}").unwrap_err();
+        assert!(err.contains("'defer' must be followed by a function or method call"), "got: {err}");
+    }
+
+    #[test]
+    fn 無名関数式の中のdeferは外側の関数を汚さず独立したdefers配列を持つ() {
+        let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  g := fn() {\n    defer f()\n  }\n  g()\n  print(2)\n}");
+        let defers_count = js.matches("const __defers = [];").count();
+        assert_eq!(defers_count, 1, "got: {js}"); // 無名関数の中の1回だけ(外側のmainはdeferを使っていない)
+        assert!(js.contains("(await g());\n  __print(2);"), "got: {js}"); // mainの残りの文はtry/finallyで包まれない(2段インデントのまま)
+    }
+
+    #[test]
+    fn spawnとdeferを併用するとfinally内でspawn待ちの後にdeferが実行される() {
+        let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  defer print(\"cleanup\")\n  spawn f()\n}");
+        let wait_pos = js.find("await Promise.all(__waitStack.pop());").unwrap();
+        let defer_pos = js.find("for (let __i = __defers.length - 1;").unwrap();
+        assert!(wait_pos < defer_pos, "spawn待ちがdefer実行より先のはず, got: {js}");
     }
 }

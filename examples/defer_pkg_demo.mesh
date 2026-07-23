@@ -1,0 +1,9 @@
+// defer(milestone 11) — パッケージ修飾関数もdeferできることを確認する
+// (examples/loggerpkg/logger.meshがexport fn flushを宣言)
+
+import "loggerpkg"
+
+fn main() {
+	defer loggerpkg.flush("done")
+	print("working")
+}
