@@ -1565,8 +1565,16 @@
         - `codegen.rs`: `Expr::StructLit`のpkg無し分岐で上記2関数を呼び、Errなら伝播する。
           milestone 8の`type_is_error_instance`(pkg無し時の"all"判定ヒューリスティック)は
           disambiguationで特定した具体的なメンバー自身の`is_error_type`を直接見るように
-          置き換え、より正確になった(pkg修飾側は他パッケージの構造を持たない制約のため
-          現状の"all"ヒューリスティックを維持、スコープを広げすぎないための意図的な決定)。
+          置き換え、より正確になった(pkg修飾側は現状の"all"ヒューリスティックを維持、
+          スコープを広げすぎないための意図的な決定——**訂正(2026-07-24、git historyレビュー
+          エージェント指摘)**: 当初「他パッケージの構造をここでは持たない制約のため」と
+          説明していたが、これは不正確——`lookup_package_type`は解決済みの完全な`Type`
+          〈fields/discriminant_tag/is_error_type込み〉を返すため、技術的にはpkg修飾側でも
+          同じdisambiguation/検証ができる。単にスコープを広げすぎないための意図的な選択
+          であり、技術的制約ではない。**結果、`mathutil.Point{x: 1, typo: 2}`のような
+          pkg修飾struct literalのフィールドtypo/欠落/型不一致は今回も無検証のまま
+          (`json.Value{kind: "bogus", extra: 1}`のような組み込みパッケージ経由の構築も
+          同様、実行確認済み)——次にpkg修飾側を厳密化する際にまとめて対応する候補**)。
         - **検証中に発覚**: milestone 8の既存回帰テスト
           (`error_type_unionと通常structを混ぜたさらに外側のunionでは成功値をerrtagで
           包まない`)のmeshソースが`Result{value: 42}`(union自身の名前で名前付きメンバー
@@ -1589,9 +1597,40 @@
           typoさせた変種を実際にRust版・TS版両方でコンパイルし、両者とも
           `unknown-field`相当のエラーで拒否することを確認(以前のRust版はここを
           静かに素通ししていた)。
+        - **5エージェントのcode reviewで発見・即修正した2件**(いずれもこのPR自身の
+          新規コードに対する指摘で、実行確認済み):
+          1. `compute_discriminant_tag`のErrに位置情報`(line:col)`が一切付いていなかった
+             ——同じPRの兄弟関数(`resolve_struct_lit_member`/`validate_struct_lit_fields`)
+             は位置情報を付けているのに、この関数だけこのコードベース全体の慣習
+             (ほぼ全エラーに`(line:col)`が付く)から外れていた。呼び出し元で既に
+             手元にある`decl.pos`をそのまま渡すだけで解消(回帰テストに位置情報の
+             アサーションを追加)。
+          2. 組み込み`mesh/json`パッケージの`json.Value`(milestone 9、コード直組みの
+             union、`.mesh`の型宣言を経由しないため`resolve_type_decls`のタグ計算を
+             通らない)が`discriminant_tag: None`のまま放置されていた——古いコメントは
+             「milestone 7以来の設計判断・codegenは一切参照しない」としていたが、今回
+             `resolve_struct_lit_member`がpkg無し側で実際にこのフィールドを読むように
+             なったため前提が崩れていた。現状はjson.Valueの構築が常にpkg修飾
+             (`json.Value{...}`)経由でこの新しい検証をまだ通らないため実害は無いが、
+             将来pkg修飾側も同じ検証経路に統一すると即座に「タグが無い」という誤った
+             Errになる潜在的な地雷だった(TS版`src/stdlib.ts`は最初からこの手組みunionに
+             `discriminantTag: "kind"`を手で設定済みで、Rust版のmilestone 9移植時に
+             見落としていた)。6メンバー全てが共有する`"kind"`の値を直接
+             `Some("kind".to_string())`として設定し解消。
+          **記録に留めた1件**(過去PRコメントレビューエージェント指摘・現状どの
+          example/testからも到達不能): milestone 8の`tag_error_union`にも
+          `compute_discriminant_tag`と同じ「Errに位置情報が無い」という欠落がある
+          (`error type Bad = { kind: "a" } | Existing`のようなケース)。今回の
+          PRが新規に持ち込んだものではなくmilestone 8由来の既存の欠落であり、
+          このPR自体は変更していないため、今回はスコープ外として記録に留める
+          (次にこの関数へ触れる際にまとめて直す候補)。
         - **milestone 12のスコープ外(意図的)**: pkg修飾された(他パッケージの)struct
           literalの厳密なmember disambiguation(pkg無しの場合だけ厳密化、pkg修飾側は
-          既存の"all"ヒューリスティックのまま)・`gen_lvalue`(代入先)のフィールド名検証・
+          既存の"all"ヒューリスティックのまま——**git historyレビューエージェントが
+          `mathutil.Point{x: 1, typo: 2}`〈未知フィールド+欠落フィールド〉や
+          `json.Value{kind: "bogus", extra: 1}`〈組み込みパッケージ経由の不正なタグ値〉が
+          いずれも無検証で素通りすることを実行確認済み——技術的な制約ではなく
+          単なるスコープ判断、上記参照**)・`gen_lvalue`(代入先)のフィールド名検証・
           struct宣言時点の`__proto__`ガード(いずれもPR #17以来の既知の限界のうち、
           今回のスコープに含めなかった残り)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)

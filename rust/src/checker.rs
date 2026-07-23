@@ -306,7 +306,7 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
                 TypeNode::Union { members, .. } => {
                     let resolved = resolve_type_node(ctx, &decl.node);
                     let resolved = if decl.is_error { tag_error_union(&decl.name, members, resolved)? } else { resolved };
-                    let resolved = compute_discriminant_tag(&decl.name, resolved)?;
+                    let resolved = compute_discriminant_tag(&decl.name, resolved, decl.pos)?;
                     ctx.declare_union(&decl.name, resolved);
                 }
                 _ => {}
@@ -353,7 +353,7 @@ fn is_anonymous_struct(t: &Type) -> bool {
 // ため対象外。無名メンバーが2個以上あるのに有効な共有タグが見つからない場合はTS版
 // `discriminated-union-tag-required`相当の明確なErrにする(このリゾルバは診断を出さない
 // 設計のため)
-fn compute_discriminant_tag(name: &str, resolved: Type) -> Result<Type, String> {
+fn compute_discriminant_tag(name: &str, resolved: Type, pos: Pos) -> Result<Type, String> {
     match resolved {
         Type::Union { members, discriminant_tag } => {
             let anonymous: Vec<Type> = members.iter().filter(|m| is_anonymous_struct(m)).cloned().collect();
@@ -363,7 +363,8 @@ fn compute_discriminant_tag(name: &str, resolved: Type) -> Result<Type, String> 
                     None => Err(format!(
                         "checker: discriminated union '{name}' needs a tag field — every struct member must share \
                          one field with a distinct string-literal value (e.g. kind: \"...\") so a member can be \
-                         identified from its tag alone, without comparing against the other members (F-7)"
+                         identified from its tag alone, without comparing against the other members (F-7) ({}:{})",
+                        pos.line, pos.col
                     )),
                 }
             } else {
@@ -2037,7 +2038,10 @@ mod tests {
             vec![struct_type_node(&[("a", name_type("int"))]), struct_type_node(&[("b", name_type("int"))])],
         )];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+        // past PR comment review発覚: 以前は宣言の位置情報が無く、このコードベースの他の
+        // エラーと一貫していなかった(`decl.pos`をそのまま使うだけで解消できる、独立検証済み)
+        let err = resolve_type_decls(&mut ctx, &types).unwrap_err();
+        assert!(err.contains(&format!("({}:{})", pos().line, pos().col)), "got: {err}");
     }
 
     #[test]

@@ -1477,7 +1477,13 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
                 field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(hollow_value) }),
             ]),
         ],
-        discriminant_tag: None, // milestone 7以来の設計判断: discriminant_tagはcodegenが一切参照しないため計算しない
+        // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
+        // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
+        // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
+        // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
+        // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
+        // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
+        discriminant_tag: Some("kind".to_string()),
     };
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
