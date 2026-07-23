@@ -1061,6 +1061,67 @@
             形が似た複数のstructを判別できない(TS版自体の既知の制約、discriminant_tag
             を計算しない設計上避けられない)。現状どのexample/testもこの構文を
             使っておらず到達不能。
+  - [x] **checker+codegen milestone 8(error type・union形式の名前付きエラー型)**
+        ✅ 2026-07-23実装。milestone 7完了後、kanayamaから「error typeとjson structは
+        一緒にできるか」と聞かれ、TS版`src/checker/types-resolve.ts`
+        (`tagErrorMembers`、約20行)と`src/json-decode.ts`(313行、AST合成による
+        `decode<X>`自動生成)を直接読んで調査した結果、分量・複雑さが1桁近く違い
+        技術的にも無関係と分かったため、分けて進めることに決定——error type
+        (union形式)を先に小さいmilestoneとして実装し、json structは
+        `mesh/json`スタブ実装込みの独立した大きめmilestoneとして後日別途進める。
+        - **TS版の挙動**: `resolveAlias`がstruct/union/その他いずれの解決でも
+          `ctx.errorTypeNames.has(name)`なら`tagErrorMembers`を呼ぶ。対象memberは
+          「このunionのために今まさに作られた無名`{...}`」だけ——既存の名前付き型への
+          参照(`error type Aliased = Existing`)は診断`error-type-aliases-existing`で
+          常に拒否される(共有される型オブジェクトを介した意図しない波及を防ぐため)。
+          非struct形のmember(`error type Bad = int`)も診断`error-type-must-be-struct`
+          で拒否。union全体は他の型と組み合わせて使われる際`union_of`で平坦化される
+          ため、DbErrorの各メンバーは外側のunionに直接展開され、既存の
+          `isFailureType`/`or`の束縛型計算がDbError固有の特別扱い無しにそのまま働く
+          (`tests/checker.test.ts:1037-1117`で確認済み、`or e => match e {...}`との
+          組み合わせも同テストで検証済み)。
+        - `checker.rs`: `resolve_type_decls`の`TypeNode::Union`分岐で`decl.is_error`が
+          真の場合、新設`tag_error_union(name, source_members, resolved)`を呼ぶ。
+          元のソースmembers(TypeNodeレベル)がすべて`TypeNode::StructType`
+          (union内の無名`{...}`由来)であることを検証し(1つでも既存型への参照や
+          非struct形があればTS版の2つの診断をまとめた明確なErrを返す——診断を
+          出さない設計なのでmilestone 2〜7と同じ「TS本体は診断で弾くが、この
+          リゾルバではErrにする」パターン)、通れば解決済みUnionの各Struct memberに
+          `is_error_type: true`を立て直す(単体の`error struct`と違い、union形は
+          「全メンバーが等しく失敗を表す」——discriminated unionの各バリアントが
+          それぞれ別の種類の失敗、という設計)。`is_failure_type`/
+          `has_structured_failure`/`or_binding_type`(milestone 3実装)・
+          `pattern_matches_member`/`match_is_exhaustive`(milestone 7実装)は
+          いずれも変更不要——既存のis_error_typeベースのロジックがそのまま効く。
+        - `codegen.rs`: `generate_package`の型宣言ゲートから`is_error && Union`を
+          拒否する専用チェックを削除(milestone 7時点では明示的に対象外としていた
+          組み合わせ)。`Expr::StructLit`の`__errTag`ラップ判定(`None`分岐)を、
+          `lookup_struct`が失敗したら`lookup_union`も試しいずれかのmemberが
+          `is_error_type`付きなら`true`にするよう拡張(union形は全メンバーが
+          等しくタグ付けされる設計なので"any"判定で十分)。`?`/`or`のランタイム
+          呼び出し生成(`__prop`/`__or`)は値ベースの`__errTag`検出なので変更不要。
+        - テスト: `checker.rs`に5件(union形式の全メンバーis_error_type解決・
+          非struct形memberのErr・既存型参照memberのErr・
+          has_structured_failure/or_binding_typeの統合確認)、`codegen.rs`に1件
+          (union形error typeのstruct literalが`__errTag`でラップされること)を追加。
+          既存の「error type union形式は未対応」テストは削除(now supported)。
+          244→250件(前milestoneのPR #22コードレビュー修正分246件から+4)、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: `tests/checker.test.ts:1037-1117`の実際のシナリオを元に新規
+          `examples/db_error.mesh`(`error type DbError = {kind:"notFound",...} |
+          {kind:"timeout",...}`+`find`/`useIt`+bareな`?`での伝播+
+          `or e => match e {...}`での分岐)を作成しRust版で実行、`bun run mesh run`
+          (TS版)の出力とbyte-for-byte一致を確認。宣言時検証(非struct形member・
+          既存型参照member)がそれぞれ明確なErrになることも確認。既存の全example
+          (`hello`/`fizzbuzz`/`struct_methods`/`error_propagation`/`errors`/
+          `discriminated_union`/`status`/`users`/`channel_spec`/`collections`/
+          `maps`/`concurrency`/`channels`/`modules_demo`+`mathutil/*`)も回帰無しを
+          再確認。`tree.mesh`(自己参照union)は引き続き明確なErrのまま。
+        - **milestone 8のスコープ外(意図的)**: `error type`の単体宣言以外の形
+          (`type X = SomeExistingStruct`をerror typeとしてタグ付けする形——TS版でも
+          常に拒否される組み合わせなので実質的な機能損失は無い)。`json struct`
+          (独立した大きめmilestoneとして後日別途進める)。`filter`/`map`/`reduce`・
+          `defer`。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

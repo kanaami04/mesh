@@ -143,17 +143,12 @@ impl Codegen {
         self.ctx.begin_package(pkg, import_aliases);
 
         // plain struct宣言 + error struct宣言(milestone 3で対応)+ 判別可能union型alias
-        // (`type X = A | B`、milestone 7)まで。json struct(decode<X>自動生成は対象外)・
-        // `error type`(union形式の名前付きエラー型——is_error付きのUnion decl)はまだ対象外
-        // (error structとは別に、union全体をerror扱いするタグ機構〈?/orの伝播判定〉が
-        // 未実装のため、静かにerror性を落として通すのではなく明確なErrにする)
+        // (`type X = A | B`、milestone 7)+ error typeのunion形式(`error type X = A | B`、
+        // milestone 8)まで。json struct(decode<X>自動生成)だけが引き続き対象外
         let all_types: Vec<TypeDecl> = files.iter().flat_map(|f| f.program.types.iter().cloned()).collect();
         for t in &all_types {
             if t.is_json {
                 return Err(format!("codegen: json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
-            }
-            if t.is_error && matches!(t.node, TypeNode::Union { .. }) {
-                return Err(format!("codegen: only plain struct declarations are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
             }
             if !matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) {
                 return Err(format!("codegen: only plain struct declarations and union type aliases are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
@@ -886,7 +881,17 @@ impl Codegen {
                     Some(alias) => {
                         return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                     }
-                    None => matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. })),
+                    // `error type X = A | B`(union形式、milestone 8)で構築されたstruct
+                    // literalも同じく__errTagが要る——lookup_structで見つからなければ
+                    // lookup_unionも試し、いずれかのmemberがis_error_type付きなら
+                    // ラップする(union形は全メンバーが等しくタグ付けされる設計なので
+                    // "any"判定で十分、resolve_type_nodeのstruct/union両対応
+                    // フォールバックと同じ考え方)
+                    None => matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. }))
+                        || matches!(
+                            self.ctx.lookup_union(name),
+                            Some(Type::Union { members, .. }) if members.iter().any(|m| matches!(m, Type::Struct { is_error_type: true, .. }))
+                        ),
                 };
                 let mut js_fields = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -1612,12 +1617,6 @@ mod tests {
     }
 
     #[test]
-    fn error_type_union形式はまだ未対応として明確なエラーになる() {
-        let err = gen_js("error type Oops = { kind: \"a\" } | { kind: \"b\" }\nfn main() {}").unwrap_err();
-        assert!(err.contains("only plain struct declarations"), "got: {err}");
-    }
-
-    #[test]
     fn json_structはまだ未対応として明確なエラーになる() {
         let err = gen_js("json struct Data {\n  n: int\n}\nfn main() {}").unwrap_err();
         assert!(err.contains("not yet supported"), "got: {err}");
@@ -2143,6 +2142,14 @@ mod tests {
     fn union型aliasの名前でstruct_literalを構築できる() {
         let js = gen_body("type Resp = { kind: \"ok\" } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\"}\n  print(r)\n}");
         assert!(js.contains("const r = ({ kind: \"ok\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn error_typeのunion形式で構築したstruct_literalはerrtagでラップされる() {
+        let js = gen_body(
+            "error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\", ms: int }\nfn main() {\n  e := DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}",
+        );
+        assert!(js.contains("const e = __errTag({ kind: \"notFound\", table: \"users\" });"), "got: {js}");
     }
 
     #[test]
