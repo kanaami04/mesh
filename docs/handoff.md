@@ -242,8 +242,32 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   につき既知の限界として明記するに留めた。現在テスト204件、
   `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
   一次情報源
-- **次にやるなら**: milestone 6(モジュール。`examples/*.mesh`を1本ずつ動かす計画。
-  todo.md参照)
+- **checker+codegen milestone 6(モジュール)完了(2026-07-23)**。複数ファイル
+  コンパイル・`import`・パッケージ修飾参照(`mathutil.Point`・`mathutil.add(...)`等)を
+  実装——これまでの5マイルストーンと違い、初めて構造そのもの(`main.rs`の単一ファイル
+  前提・`CheckerCtx`の単一名前空間)を拡張した、この移植で最大の構造変更。新規
+  `rust/src/modules.rs`(TS版`cli.ts`のloadModules/loadDependencies相当、ファイル発見)。
+  `CheckerCtx`にパッケージレジストリ(`PackageSymbols`のtypes/fns/consts、パッケージ名で
+  引く)を追加、struct名は`qualify_struct_name`で`pkg.Name`に修飾(TS版
+  `types-resolve.ts`と同じ)。パッケージ間のstruct循環は構造的に起こり得ないため
+  milestone 2の固定点反復はパッケージ内のみで済む。`codegen.rs`は`generate_all`を
+  `generate_all_modules`(パッケージを依存順にトポロジカルソート、循環は明確なErr)+
+  `generate_package`(1パッケージぶんの処理、ファイルごとに`self.file`を切り替えて
+  パニック位置情報を正しく保つ)に分割。`generate(program, file)`は1パッケージのみの
+  薄いラッパーになり既存220件近いテストは無変更で通る。新設`fn_js_name`
+  (mainは無修飾、それ以外は`{pkg}$name`——TS版`fnJsName`と同じ)を自由関数/メソッド以外の
+  命名に使用。**意図的なスコープ縮小**: 未export診断・パッケージ誤用診断・パッケージ
+  修飾された値参照(呼び出しを伴わない)・パッケージ修飾レシーバ・exportedなconstの
+  レジストリ登録(同名のトップレベルconstが複数パッケージにまたがるとJS名が衝突しうる
+  残存リスクを記録)は対象外。新設`modules.rs`5件+`checker.rs`4件+`codegen.rs`7件の
+  テストを追加、201→220件、`cargo clippy --all-targets -- -D warnings`クリーン。
+  新設のマルチファイルエントリポイント経由で`examples/modules_demo.mesh`+
+  `examples/mathutil/{ops,point}.mesh`を実行し`bun run mesh run`(TS版)とbyte-for-byte
+  一致を確認、既存の全exampleも回帰無しを再確認。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの6マイルストーン(struct/メソッド → error/json →
+  配列/map → 並行処理 → モジュール)が全て完了。次の対象はkanayamaと相談して決める
+  (`match`/`is`式・判別可能union・`error type`〈union形式〉・`json struct`・
+  `filter`/`map`/`reduce`・`defer`が主な既知の未対応機能。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
