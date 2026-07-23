@@ -276,9 +276,47 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   処理順に依存して非決定的に振る舞っていた)。回帰テスト6件追加、220→226件、
   `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
   一次情報源
-- **次にやるなら**: 確認済みの6マイルストーン(struct/メソッド → error/json →
-  配列/map → 並行処理 → モジュール)が全て完了。次の対象はkanayamaと相談して決める
-  (`match`/`is`式・判別可能union・`error type`〈union形式〉・`json struct`・
+- **checker+codegen milestone 7(match/is式・判別可能union)完了(2026-07-23)**。
+  パーサー・型システムは既に完全実装済み。**最重要の発見**(TS版codegen.tsを深掘りして
+  確認): narrowing(絞り込み)はcheckerのスコープだけの概念で、生成JSには一切
+  影響しない——`match`のアーム本体は`__m`という合成パラメータを一切参照せず、元の
+  Mesh変数名をそのまま参照する生JSになる(JSは動的型付けのため)。つまりnarrowingは
+  codegen側の型依存判断(`__iarith`等)を正しくするためだけに必要で、生成JSの「形」
+  自体は変えない(milestone 5のselect/orElseの束縛パターンの再利用)。`checker.rs`は
+  `resolve_struct_decls`を`resolve_type_decls`へ汎化(struct/union型aliasを同じ依存
+  グラフで扱いサイクル検出も拡張)、`pattern_matches_member`/`narrow_for_match_patterns`/
+  `narrow_for_is`/`match_is_exhaustive`を新設。`codegen.rs`は新設`gen_type_test`
+  (TS版genTypeTestの移植、discriminant_tagは一切参照せずASTから直接構造テストを
+  組み立てる)、`match`はexhaustiveならTS版と同じ形でbyte-for-byte一致、**exhaustive
+  でない場合だけ**(Rust版だけの安全ガード)明確なpanicを追加。`if x is T {...}`は
+  then/else/フォールスルー(then節が必ず終端する場合、絞り込んだ「残り」の型を後続の
+  同ブロックへ引き継ぐ)いずれでも正しくnarrowingする——`examples/channel_spec.mesh`の
+  `if v is closed { break } total = total + v`で実際に検証済み。自己参照する判別可能
+  union(`examples/tree.mesh`)はmilestone 2の自己参照structと同じ理由で対象外、
+  明確なErrになることを確認。新規テスト19件(checker9+codegen10)、226→244件。
+  **想定外の副産物**: `examples/maps.mesh`も今回`is`実装により初めてフルに動くことを
+  確認(milestone 4時点では`is none`未対応で止まっていた)。詳細はtodo.mdの当該項目が
+  一次情報源
+- **PR #22の5エージェントコードレビューで発見し即修正した4件のバグ**(いずれも
+  実行して再現確認済み、milestone 4/5/6と同じ「再現確認済みなら即修正」の前例に
+  従った): (1) `match_is_exhaustive`が0アーム・非union subjectを常に「網羅的」
+  扱いし安全ガードが完全に無効化(空の`match x {}`は構文的に壊れたJSにすらなって
+  いた)、(2) `pattern_matches_member`の非リテラルフィールドが型を見ない緩い判定
+  だったため同名・型違いフィールドで判別するunionのexhaustivenessが過大評価され
+  値が誤ったアームへ静かに振り分けられる(3エージェント中3件が独立指摘)、
+  (3) 裸型名`"error"`パターンがchecker側ではnamed error structも拾うのに
+  codegen側の`instanceof Error`テストは拾わないという認識の食い違い(TS版はこの
+  組み合わせを`impossible-pattern`診断で弾く、このリゾルバはプリミティブERROR型
+  のみに一致させ食い違いを解消)、(4) `gen_if`のnarrowing伝播がelse節ありthen節
+  必ず終端のケースを見落としていた(if/elseの後で絞り込み前の型のまま扱われ
+  `__idiv`ではなく浮動小数点除算になる)。回帰テスト2件追加、244→246件、
+  `cargo clippy`クリーン、既存の全exampleがbyte-for-byte一致のまま回帰なしを
+  再確認。詳細と、修正せず記録に留めた3件(struct literalのfield未検証・
+  union型struct literalの算術ギャップ・裸struct名パターンの判別不能、いずれも
+  既存の別スコープ決定の帰結)はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの7マイルストーン(struct/メソッド → error/json →
+  配列/map → 並行処理 → モジュール → match/is式・判別可能union)が全て完了。
+  次の対象はkanayamaと相談して決める(`error type`〈union形式〉・`json struct`・
   `filter`/`map`/`reduce`・`defer`が主な既知の未対応機能。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/

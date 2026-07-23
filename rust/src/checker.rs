@@ -15,7 +15,7 @@
 // このリゾルバの対象外(フルchecker移植の段階で改めて対応する)。未解決の名前・型は
 // `Type::Any`へフォールバックし、コンパイラ自体をpanicさせない
 
-use crate::ast::{Expr, TypeDecl, TypeNode};
+use crate::ast::{Expr, MatchArm, MatchPattern, TypeDecl, TypeNode};
 use crate::token::TokenType;
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
 use std::collections::{HashMap, HashSet};
@@ -51,11 +51,14 @@ pub struct CheckerCtx {
     // 以下4つは「現在処理中のパッケージ」ぶんだけを持つフラット名前空間——codegen側が
     // パッケージを切り替えるたびbegin_packageでリセットする(milestone 6・複数パッケージ対応)
     fn_decls: HashMap<String, Type>,
-    // 名前→解決済みのstruct型(resolve_struct_declsが埋める)。TS版のresolvedAliasesに相当するが、
+    // 名前→解決済みのstruct型(resolve_type_declsが埋める)。TS版のresolvedAliasesに相当するが、
     // knot-tying(共有可変状態)ではなく固定点反復で埋めるため、単純な所有権ベースのmapでよい
     // (ファイル冒頭のコメント参照)。キーは常に素の(pkg修飾されていない)名前——ただし
     // 値のType::Struct.name自体はpkg=="main"以外ならpkg修飾済み(qualify_struct_name参照)
     struct_types: HashMap<String, Type>,
+    // 名前→解決済みのunion型(`type X = A | B`、milestone 7・判別可能union対応)。
+    // struct_typesと並ぶ姉妹テーブル——resolve_type_declsが同じ固定点反復の中で埋める
+    union_types: HashMap<String, Type>,
     pkg: String,                     // 現在処理中パッケージ名("main"かimportエイリアス名)
     import_aliases: HashSet<String>, // 現在処理中パッケージのimportエイリアス集合
     // struct名(既にpkg修飾済み)→メソッド名→関数型。全パッケージ共有——struct名が
@@ -79,6 +82,7 @@ impl CheckerCtx {
             scopes: vec![HashMap::new()],
             fn_decls: HashMap::new(),
             struct_types: HashMap::new(),
+            union_types: HashMap::new(),
             pkg: "main".to_string(),
             import_aliases: HashSet::new(),
             method_table: HashMap::new(),
@@ -97,6 +101,7 @@ impl CheckerCtx {
         self.import_aliases = import_aliases;
         self.fn_decls.clear();
         self.struct_types.clear();
+        self.union_types.clear();
         self.scopes = vec![HashMap::new()];
     }
 
@@ -163,6 +168,14 @@ impl CheckerCtx {
         self.struct_types.get(name)
     }
 
+    pub fn declare_union(&mut self, name: &str, ty: Type) {
+        self.union_types.insert(name.to_string(), ty);
+    }
+
+    pub fn lookup_union(&self, name: &str) -> Option<&Type> {
+        self.union_types.get(name)
+    }
+
     pub fn declare_method(&mut self, struct_name: &str, method_name: &str, ty: Type) {
         self.method_table.entry(struct_name.to_string()).or_default().insert(method_name.to_string(), ty);
     }
@@ -173,10 +186,11 @@ impl CheckerCtx {
 }
 
 // 型注釈(構文)を内部表現の型へ変換。TS版`checker/types-resolve.ts`のresolveTypeのうち、
-// milestone 2で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying。循環検出込み)は
-// 判別可能union/自己参照型を移植する段階まで先送り——今は`ctx.struct_types`(milestone 2で
-// resolve_struct_declsが埋める)を引き、無ければ名前だけを覚えた空フィールドのstruct型として
-// 素通しする(未宣言の型名・判別可能unionのtype alias等のフォールバック)
+// このRust移植で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying。循環検出込み)は
+// 自己参照型(milestone 2の自己参照struct・milestone 7の自己参照判別可能union、共に
+// 明確なErrで対象外)を除き`ctx.struct_types`/`ctx.union_types`(resolve_type_declsが
+// 埋める)を引き、無ければ名前だけを覚えた空フィールドのstruct型として素通しする
+// (未宣言の型名のフォールバック)
 pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
     match node {
         TypeNode::Union { members, .. } => types::union_of(members.iter().map(|m| resolve_type_node(ctx, m)).collect()),
@@ -206,7 +220,13 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
             "error" => ERROR,
             "none" => NONE,
             "closed" => types::CLOSED,
-            _ => ctx.lookup_struct(name).cloned().unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
+            // union型alias(`type Status = "active" | "banned"`、milestone 7)はstruct_typesに
+            // 無ければunion_typesも試す。どちらにも無ければ従来通り殻structへフォールバック
+            _ => ctx
+                .lookup_struct(name)
+                .or_else(|| ctx.lookup_union(name))
+                .cloned()
+                .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
         },
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_node(ctx, elem))),
         TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node(ctx, elem))),
@@ -229,41 +249,59 @@ pub fn resolve_return_type(ctx: &CheckerCtx, ret: &Option<TypeNode>) -> Type {
     ret.as_ref().map(|r| resolve_type_node(ctx, r)).unwrap_or(VOID)
 }
 
-// トップレベルのstruct宣言をすべて`ctx.struct_types`へ解決する。TS版はASTを直接書き換える
-// knot-tyingで自己参照型を表現するが、Rustの所有権ベースの木ではそのパターンに向かない
-// (types.rs冒頭のコメント参照)。代わりに**固定点反復**で解決する: 現時点のレジストリを使って
-// 全struct宣言のfieldsを繰り返し再解決し、`types.len()`回のパスで非循環(DAG)なら宣言順に
-// 関係なく必ず収束する。ただし循環(自己参照含む)は固定点反復では「クラッシュはしないが
-// 深さが毎パス線形に伸びる中途半端な入れ子」になってしまい、「自己参照は未対応」という
-// 前提を静かに裏切ってしまうため、固定点反復の前に生のTypeNode参照関係だけを見た軽量な
-// DFSサイクル検出を挟み、循環があれば明確なErrを返す(codegenの「まだ対応していません」と
-// 同じ精神——診断ではなく、対応していない構造を正直に伝える)
-pub fn resolve_struct_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<(), String> {
+// トップレベルのtype宣言(struct・union型alias)をすべて`ctx.struct_types`/`ctx.union_types`
+// へ解決する。TS版はASTを直接書き換えるknot-tyingで自己参照型を表現するが、Rustの
+// 所有権ベースの木ではそのパターンに向かない(types.rs冒頭のコメント参照)。代わりに
+// **固定点反復**で解決する: 現時点のレジストリを使って全宣言のfields/membersを繰り返し
+// 再解決し、`types.len()`回のパスで非循環(DAG)なら宣言順に関係なく必ず収束する。
+// ただし循環(自己参照含む)は固定点反復では「クラッシュはしないが深さが毎パス線形に
+// 伸びる中途半端な入れ子」になってしまい、「自己参照は未対応」という前提を静かに
+// 裏切ってしまうため、固定点反復の前に生のTypeNode参照関係だけを見た軽量なDFSサイクル
+// 検出を挟み、循環があれば明確なErrを返す(codegenの「まだ対応していません」と同じ
+// 精神——診断ではなく、対応していない構造を正直に伝える)。struct宣言とunion型alias宣言
+// (milestone 7・判別可能union対応)は同じ依存グラフの中で扱う——一方が他方を参照しうる
+// ため(例: unionのメンバーが名前付きstructを参照する、structのフィールドがunion型
+// aliasを参照する)。**自己参照する判別可能union(`examples/tree.mesh`)はこの循環検出で
+// 明確なErrになり対象外のまま**——無名structの構造的比較(ANONYMOUS_STRUCT_NAME)では
+// 自己参照を安全に表現できないため、milestone 2の自己参照structと同じ理由の意図的な
+// スコープ縮小
+pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<(), String> {
     // code review(milestone 3で発覚): 以前は`!t.is_error`も条件に含めていたため、
     // `error struct X {...}`宣言がここで丸ごと無視され、is_error_typeタグが一切効かない
     // バグになっていた。error structもここで解決し(下のstruct構築コードが既に
     // `is_error_type: decl.is_error`を渡しているので、それ以外の変更は不要)、
     // json structだけを引き続き対象外にする(decode<X>自動生成はモジュールmilestoneまで先送り)
-    let struct_decls: Vec<&TypeDecl> = types.iter().filter(|t| !t.is_json && matches!(t.node, TypeNode::StructType { .. })).collect();
-    let names: HashSet<&str> = struct_decls.iter().map(|t| t.name.as_str()).collect();
+    let type_decls: Vec<&TypeDecl> =
+        types.iter().filter(|t| !t.is_json && matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. })).collect();
+    let names: HashSet<&str> = type_decls.iter().map(|t| t.name.as_str()).collect();
 
-    if let Some(cycle_name) = find_struct_cycle(&struct_decls, &names) {
-        return Err(format!("checker: self-referential/cyclic struct definitions are not yet supported (found via '{cycle_name}')"));
+    if let Some(cycle_name) = find_type_decl_cycle(&type_decls, &names) {
+        return Err(format!("checker: self-referential/cyclic type definitions are not yet supported (found via '{cycle_name}')"));
     }
 
     // 固定点反復: 依存先が(宣言順に関係なく)先に解決されているかどうかに関わらず、
     // 現在のレジストリの中身で全宣言を素朴に再解決するのをN回繰り返す。非循環である
     // ことは上のサイクル検出で保証済みなので、依存の深さはtypes.len()を超えない。
-    // 他パッケージへの参照(pkg修飾された型注釈)はfind_struct_cycleが素の名前しか
+    // 他パッケージへの参照(pkg修飾された型注釈)はfind_type_decl_cycleが素の名前しか
     // 見ないため対象に含まれず、resolve_type_node経由でregistryから都度解決される
     // (パッケージは依存順に処理されるので、そのregistry参照は既に確定済み——反復不要)
-    for _ in 0..struct_decls.len().max(1) {
-        for decl in &struct_decls {
-            let TypeNode::StructType { fields, .. } = &decl.node else { continue };
-            let resolved_fields =
-                fields.iter().map(|f| types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) }).collect();
-            let name = qualify_struct_name(ctx.pkg(), &decl.name);
-            ctx.declare_struct(&decl.name, Type::Struct { name, fields: resolved_fields, is_error_type: decl.is_error });
+    for _ in 0..type_decls.len().max(1) {
+        for decl in &type_decls {
+            match &decl.node {
+                TypeNode::StructType { fields, .. } => {
+                    let resolved_fields =
+                        fields.iter().map(|f| types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) }).collect();
+                    let name = qualify_struct_name(ctx.pkg(), &decl.name);
+                    ctx.declare_struct(&decl.name, Type::Struct { name, fields: resolved_fields, is_error_type: decl.is_error });
+                }
+                // union型alias(`type Status = "active" | "banned"`等)。discriminant_tagは
+                // 計算しない——is/matchのcodegenはASTのTypeNodeから直接テストを組み立てる
+                // (TS版genTypeTestと同じ)ため、コード生成には不要(§計画参照)
+                TypeNode::Union { .. } => {
+                    ctx.declare_union(&decl.name, resolve_type_node(ctx, &decl.node));
+                }
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -278,20 +316,29 @@ pub fn qualify_struct_name(pkg: &str, name: &str) -> String {
 // struct宣言同士の直接参照関係(fieldsに現れる型名)を有向グラフとして辿り、循環を検出する。
 // Array/Chan/MapType/Union/FnTypeの中も再帰的に見る(例: `children: Node[]`も
 // `Node`への依存として数える——配列越しでも固定点反復の収束が壊れる点は同じため)
-fn find_struct_cycle(struct_decls: &[&TypeDecl], names: &HashSet<&str>) -> Option<String> {
+fn find_type_decl_cycle(type_decls: &[&TypeDecl], names: &HashSet<&str>) -> Option<String> {
     let mut deps: HashMap<String, Vec<String>> = HashMap::new();
-    for decl in struct_decls {
-        let TypeNode::StructType { fields, .. } = &decl.node else { continue };
+    for decl in type_decls {
         let mut referenced = Vec::new();
-        for f in fields {
-            collect_referenced_names(&f.type_node, &mut referenced);
+        match &decl.node {
+            TypeNode::StructType { fields, .. } => {
+                for f in fields {
+                    collect_referenced_names(&f.type_node, &mut referenced);
+                }
+            }
+            TypeNode::Union { members, .. } => {
+                for m in members {
+                    collect_referenced_names(m, &mut referenced);
+                }
+            }
+            _ => {}
         }
         deps.insert(decl.name.clone(), referenced.into_iter().filter(|n| names.contains(n.as_str())).collect());
     }
 
     let mut visiting: HashSet<String> = HashSet::new();
     let mut done: HashSet<String> = HashSet::new();
-    for decl in struct_decls {
+    for decl in type_decls {
         if visit_for_cycle(&decl.name, &deps, &mut visiting, &mut done) {
             return Some(decl.name.clone());
         }
@@ -374,9 +421,15 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
             if ctx.is_package_alias(alias) { ctx.lookup_package_type(alias, name).cloned() } else { None }
                 .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false })
         }
-        Expr::StructLit { name, pkg: None, .. } => {
-            ctx.lookup_struct(name).cloned().unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false })
-        }
+        // union型aliasの名前でも構築できる(`GetUserResponse{kind: "ok", ...}`、milestone 7)。
+        // discriminant一致による厳密なmember disambiguationはしない——union全体を近似型
+        // として返す(どのexampleも構築直後の式自体の型を厳密に使わないため、実害は無い。
+        // §計画参照)
+        Expr::StructLit { name, pkg: None, .. } => ctx
+            .lookup_struct(name)
+            .or_else(|| ctx.lookup_union(name))
+            .cloned()
+            .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
         // フィールドアクセス。targetがstruct型でnameが宣言済みフィールドならその型を返す。
         // メソッド名(フィールドではない名前)はここでは解決しない——裸のメンバー値として
         // メソッドを参照する式はcodegen側でも対象外(TS版と同じくcall式側だけで判別する)
@@ -476,7 +529,44 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
                 }
             }
         }
-        // M5未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
+        // `is`式は常にbool(TS版と同じ——絞り込みの事実はスコープにだけ影響し、式自体の型は
+        // 常にBOOL)
+        Expr::Is { .. } => BOOL,
+        // matchは各アームのunion(milestone 5のselectと全く同じロジックを再利用)。
+        // subjectが裸Identの場合だけ、そのアームのパターン集合で絞り込んだ型を一時的に
+        // 同じ名前で再宣言してからbodyを推論する(TS版のnarrowPathと同じ目的——codegen側の
+        // gen_matchも同じ理由で同じ絞り込みをスコープに反映する。selectの束縛と違い、
+        // matchは新しい名前を導入しない〈既存のsubjectの名前をそのまま絞り込むだけ〉ため、
+        // スクラッチctxで同名を上書き宣言する形になる)
+        Expr::Match { subject, arms, .. } => {
+            let subject_ty = infer_expr(ctx, subject);
+            let arm_types: Vec<Type> = arms
+                .iter()
+                .map(|a| {
+                    if let Expr::Ident { name, .. } = &**subject {
+                        let narrowed = narrow_for_match_patterns(ctx, &subject_ty, &a.patterns);
+                        let mut scratch = ctx.clone();
+                        scratch.declare(name, narrowed);
+                        infer_expr(&scratch, &a.body)
+                    } else {
+                        infer_expr(ctx, &a.body)
+                    }
+                })
+                .collect();
+            if arm_types.is_empty() {
+                ANY
+            } else {
+                let void_count = arm_types.iter().filter(|t| types::type_equals(t, &VOID)).count();
+                if void_count == arm_types.len() {
+                    VOID
+                } else if void_count > 0 {
+                    ANY // TS版のmixed-void-arms診断に相当。診断を出さないのでANYへ寛容フォールバック
+                } else {
+                    types::union_of(arm_types)
+                }
+            }
+        }
+        // M7未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
         // 「まだ対応していません」と明確なエラーにするので、ここで型を誤魔化しても実害は無い
         _ => ANY,
     }
@@ -517,6 +607,89 @@ pub fn has_structured_failure(t: &Type) -> bool {
         Type::Struct { is_error_type: true, .. } => true,
         _ => false,
     }
+}
+
+// パターン(`is`の右辺・matchアームの型パターン)がunionのmemberに構造的に一致するか
+// (TS版`narrowing.ts`のstructPatternMatchesを移植、milestone 7・判別可能union対応)。
+// リテラルパターン(`"active"`)は値の完全一致。裸の型名パターン`error`はプリミティブ
+// ERROR型のみに一致させる(named error structはTS版でも`error`パターンとは別物——
+// 両者が同じunionに共存する場合、TS版は`impossible-pattern`診断でコンパイルエラーに
+// する。codegen側の`gen_type_test`も`error`を`instanceof Error`としてのみテストし
+// named error struct〈タグ付きの普通のobject〉には決してマッチしないため、ここで
+// is_error_type付きstructまで拾ってしまうとchecker/codegenが食い違い、実行時に
+// 静かに誤ったアームへ落ちる)。struct形パターン(部分構造、`{kind: "ok"}`)は対象memberが
+// structで、パターンの各fieldについて同名フィールドがあり、型まで一致(リテラル型
+// パターンなら値まで、それ以外は`type_equals`で構造まで比較——TS版`structPatternMatches`
+// と同じ厳密さ)すれば良い(TS版と同じ「余分なfieldは無視」)
+pub fn pattern_matches_member(ctx: &CheckerCtx, member: &Type, pattern: &TypeNode) -> bool {
+    match pattern {
+        TypeNode::Literal { value, .. } => matches!(member, Type::Literal(v) if v == value),
+        TypeNode::Name { name, pkg: None, .. } if name == "error" => types::type_equals(member, &ERROR),
+        TypeNode::StructType { fields, .. } => {
+            let Type::Struct { fields: member_fields, .. } = member else { return false };
+            fields.iter().all(|pf| {
+                member_fields.iter().find(|mf| mf.name == pf.name).is_some_and(|mf| match &pf.type_node {
+                    TypeNode::Literal { value, .. } => matches!(&mf.type_, Type::Literal(v) if v == value),
+                    _ => types::type_equals(&mf.type_, &resolve_type_node(ctx, &pf.type_node)),
+                })
+            })
+        }
+        _ => types::type_equals(member, &resolve_type_node(ctx, pattern)),
+    }
+}
+
+fn match_pattern_matches_member(ctx: &CheckerCtx, member: &Type, pattern: &MatchPattern) -> bool {
+    match pattern {
+        MatchPattern::Wildcard { .. } => true,
+        MatchPattern::Type(node) => pattern_matches_member(ctx, member, node),
+    }
+}
+
+// matchアーム(カンマ区切りの複数パターン、いずれか一致でアーム全体が一致)を踏まえて
+// subject_tyを絞り込む(TS版match-select.tsのnarrowPathと同じ目的——ただしcodegen側は
+// `&mut self.ctx`を持つので実際のスコープ宣言はcodegen側で行う。ここは絞り込んだ型を
+// 計算するだけ)。subject_tyがUnionでなければ絞り込めないのでそのまま返す。ワイルドカードが
+// 含まれていればそのアームは何にでも一致するので絞り込まない。一致するmemberが無ければ
+// (診断を出さない設計なので)安全側でsubject_tyそのものへフォールバックする
+pub fn narrow_for_match_patterns(ctx: &CheckerCtx, subject_ty: &Type, patterns: &[MatchPattern]) -> Type {
+    let Type::Union { members, .. } = subject_ty else { return subject_ty.clone() };
+    if patterns.iter().any(|p| matches!(p, MatchPattern::Wildcard { .. })) {
+        return subject_ty.clone();
+    }
+    let matched: Vec<Type> = members.iter().filter(|m| patterns.iter().any(|p| match_pattern_matches_member(ctx, m, p))).cloned().collect();
+    if matched.is_empty() { subject_ty.clone() } else { types::union_of(matched) }
+}
+
+// `is`式・`if x is T`文用: 単一パターンでの絞り込み。戻り値は(then節での絞り込み型,
+// else節での絞り込み型)。subject_tyがUnionでなければ絞り込めないのでどちらもそのまま
+pub fn narrow_for_is(ctx: &CheckerCtx, subject_ty: &Type, target: &TypeNode) -> (Type, Type) {
+    let Type::Union { members, .. } = subject_ty else { return (subject_ty.clone(), subject_ty.clone()) };
+    let (matched, rest): (Vec<Type>, Vec<Type>) = members.iter().cloned().partition(|m| pattern_matches_member(ctx, m, target));
+    let then_ty = if matched.is_empty() { subject_ty.clone() } else { types::union_of(matched) };
+    let else_ty = if rest.is_empty() { subject_ty.clone() } else { types::union_of(rest) };
+    (then_ty, else_ty)
+}
+
+// TS版`match-not-exhaustive`診断と同じロジックだが、診断は出さない設計なので
+// エラーメッセージは一切出さず、codegenが「最後のアームを無条件elseとして信用してよいか」を
+// 内部判断するためだけに使う(milestone 2〜6と同じ「TS本体は診断で到達不能だが、診断を
+// 出さないこのリゾルバでは実際に到達しうる」パターン——ここでは"到達しうる"のが
+// 非exhaustiveなmatchで、codegen側がそれ用の安全ガードを別途持つ)。
+// アーム0個は(subjectの型を問わず)絶対に網羅的ではない——TS版はこれを別の診断
+// (`empty-match`)で弾くが、このリゾルバは診断を出さないため、ここで確実にfalseを
+// 返し、codegenのpanicフォールバックだけで空のアーム本体〈構文的に壊れたJS〉を
+// 防ぐ。subject_tyが確実にUnion以外だと分かる場合(struct/int/string等)も、TS版の
+// 「union-required」診断が無いこのリゾルバではfalseにして安全ガードを効かせる
+// (ANYは型が分からないだけで確実に非unionとは言えないため、これまで通り寛容にtrue)
+pub fn match_is_exhaustive(ctx: &CheckerCtx, subject_ty: &Type, arms: &[MatchArm]) -> bool {
+    if arms.is_empty() {
+        return false;
+    }
+    let Type::Union { members, .. } = subject_ty else { return matches!(subject_ty, Type::Any) };
+    if arms.iter().any(|a| a.patterns.iter().any(|p| matches!(p, MatchPattern::Wildcard { .. }))) {
+        return true;
+    }
+    members.iter().all(|m| arms.iter().any(|a| a.patterns.iter().any(|p| match_pattern_matches_member(ctx, m, p))))
 }
 
 // range-forのループ変数をsubjectの型に応じてスコープへ宣言する(TS版
@@ -828,7 +1001,7 @@ mod tests {
             struct_decl("Point", &[("x", name_type("int")), ("y", name_type("int"))]),
         ];
         let mut ctx = CheckerCtx::new();
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         let Some(Type::Struct { fields, .. }) = ctx.lookup_struct("Line").cloned() else { panic!("expected struct") };
         let Type::Struct { fields: point_fields, name, .. } = &fields[0].type_ else { panic!("expected resolved Point field") };
         assert_eq!(name, "Point");
@@ -839,21 +1012,21 @@ mod tests {
     fn resolve_struct_declsは相互循環structを検出してerrを返す() {
         let types = vec![struct_decl("A", &[("b", name_type("B"))]), struct_decl("B", &[("a", name_type("A"))])];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_struct_decls(&mut ctx, &types).is_err());
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
     }
 
     #[test]
     fn resolve_struct_declsは自己参照structも検出してerrを返す() {
         let types = vec![struct_decl("Node", &[("next", name_type("Node"))])];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_struct_decls(&mut ctx, &types).is_err());
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
     }
 
     #[test]
     fn infer_exprはstruct_litとフィールドアクセスの型を解決する() {
         let types = vec![struct_decl("User", &[("name", name_type("string")), ("age", name_type("int"))])];
         let mut ctx = CheckerCtx::new();
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         let lit = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
         let lit_ty = infer_expr(&ctx, &lit);
         assert!(matches!(&lit_ty, Type::Struct { name, .. } if name == "User"));
@@ -865,7 +1038,7 @@ mod tests {
     fn infer_callはメソッドの戻り値型を引き_同名フィールドがあれば勝つ() {
         let types = vec![struct_decl("User", &[("name", name_type("string"))])];
         let mut ctx = CheckerCtx::new();
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         let user_ty = ctx.lookup_struct("User").unwrap().clone();
         ctx.declare_method("User", "describe", Type::Fn { params: vec![user_ty], ret: Box::new(STRING) });
         let recv = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
@@ -895,7 +1068,7 @@ mod tests {
         // code review(milestone 3で発覚): 以前はerror struct宣言自体が無視されていたバグ
         let types = vec![error_struct_decl("NotFound", &[("message", name_type("string"))])];
         let mut ctx = CheckerCtx::new();
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         let Some(Type::Struct { is_error_type, .. }) = ctx.lookup_struct("NotFound") else { panic!("expected struct") };
         assert!(*is_error_type);
     }
@@ -904,7 +1077,7 @@ mod tests {
     fn infer_exprのprop_orelseはerror_struct込みのunionでも成功メンバーだけを返す() {
         let types = vec![error_struct_decl("NotFound", &[])];
         let mut ctx = CheckerCtx::new();
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         let not_found = ctx.lookup_struct("NotFound").unwrap().clone();
 
         let plain_union = types::union_of(vec![INT, ERROR]);
@@ -1146,7 +1319,7 @@ mod tests {
         let types = vec![struct_decl("Point", &[("x", name_type("int"))])];
         let mut ctx = CheckerCtx::new();
         ctx.begin_package("mathutil", HashSet::new());
-        resolve_struct_decls(&mut ctx, &types).unwrap();
+        resolve_type_decls(&mut ctx, &types).unwrap();
         // struct_typesのキー自体は素の名前のまま(パッケージ内部からは無修飾で引ける)
         let Some(Type::Struct { name, .. }) = ctx.lookup_struct("Point").cloned() else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
@@ -1215,5 +1388,180 @@ mod tests {
         // ローカル変数によるshadowが優先される(TS版tryPackageMemberと同じ優先順位)
         ctx.declare("mathutil", INT);
         assert!(matches!(infer_call(&ctx, &callee, &args), Type::Any));
+    }
+
+    // ---- milestone 7: match/is式・判別可能union ----
+
+    fn struct_type_node(fields: &[(&str, TypeNode)]) -> TypeNode {
+        TypeNode::StructType {
+            fields: fields.iter().map(|(fname, ft)| StructFieldNode { name: fname.to_string(), type_node: ft.clone(), pos: pos() }).collect(),
+            pos: pos(),
+        }
+    }
+
+    fn literal_type(v: &str) -> TypeNode {
+        TypeNode::Literal { value: v.to_string(), pos: pos() }
+    }
+
+    fn union_decl(name: &str, members: Vec<TypeNode>) -> TypeDecl {
+        TypeDecl { name: name.to_string(), node: TypeNode::Union { members, pos: pos() }, exported: false, is_error: false, is_json: false, pos: pos() }
+    }
+
+    #[test]
+    fn union型aliasが登録されresolve_type_nodeで解決できる() {
+        let types = vec![union_decl("Status", vec![literal_type("active"), literal_type("banned")])];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let status_ty = resolve_type_node(&ctx, &name_type("Status"));
+        let Type::Union { members, .. } = &status_ty else { panic!("expected union, got {status_ty:?}") };
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn structとunion型aliasの相互参照でも循環が無ければ解決できる() {
+        let types = vec![
+            struct_decl("User", &[("name", name_type("string"))]),
+            union_decl(
+                "Resp",
+                vec![
+                    struct_type_node(&[("kind", literal_type("ok")), ("user", name_type("User"))]),
+                    struct_type_node(&[("kind", literal_type("err"))]),
+                ],
+            ),
+        ];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let resp_ty = resolve_type_node(&ctx, &name_type("Resp"));
+        let Type::Union { members, .. } = &resp_ty else { panic!("expected union") };
+        assert_eq!(members.len(), 2);
+        let Type::Struct { fields, .. } = &members[0] else { panic!("expected struct member") };
+        let user_field = fields.iter().find(|f| f.name == "user").expect("user field");
+        assert!(types::type_equals(&user_field.type_, &resolve_type_node(&ctx, &name_type("User"))));
+    }
+
+    #[test]
+    fn 自己参照するunion型aliasは循環として検出されerrになる() {
+        let types = vec![union_decl(
+            "Tree",
+            vec![
+                struct_type_node(&[("kind", literal_type("leaf")), ("value", name_type("int"))]),
+                struct_type_node(&[("kind", literal_type("node")), ("left", name_type("Tree")), ("right", name_type("Tree"))]),
+            ],
+        )];
+        let mut ctx = CheckerCtx::new();
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+    }
+
+    #[test]
+    fn pattern_matches_memberはリテラル_裸型名_struct形パターンを判定する() {
+        let ctx = CheckerCtx::new();
+        assert!(pattern_matches_member(&ctx, &Type::Literal("active".into()), &literal_type("active")));
+        assert!(!pattern_matches_member(&ctx, &Type::Literal("active".into()), &literal_type("banned")));
+
+        assert!(pattern_matches_member(&ctx, &ERROR, &name_type("error")));
+        // named error struct(is_error_type付き)は`error`パターンとは別物——TS版は
+        // これをimpossible-patternで弾き、codegenの`instanceof Error`テストも
+        // named error structには決してマッチしないため、checker側もマッチさせない
+        let err_struct = Type::Struct { name: "Oops".into(), fields: vec![], is_error_type: true };
+        assert!(!pattern_matches_member(&ctx, &err_struct, &name_type("error")));
+        assert!(pattern_matches_member(&ctx, &NONE, &name_type("none")));
+        assert!(pattern_matches_member(&ctx, &INT, &name_type("int")));
+
+        let member = resolve_type_node(&ctx, &struct_type_node(&[("kind", literal_type("ok")), ("user", name_type("string"))]));
+        // リテラル値フィールドが一致するパターンだけ通す
+        assert!(pattern_matches_member(&ctx, &member, &struct_type_node(&[("kind", literal_type("ok"))])));
+        assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("kind", literal_type("notFound"))])));
+        // 非リテラルフィールドも型まで一致して初めて通る(TS版structPatternMatchesと同じ厳密さ)
+        assert!(pattern_matches_member(&ctx, &member, &struct_type_node(&[("user", name_type("string"))])));
+        assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("user", name_type("int"))])));
+        // 対象memberに無いフィールド名を要求するパターンは一致しない
+        assert!(!pattern_matches_member(&ctx, &member, &struct_type_node(&[("missing", name_type("string"))])));
+    }
+
+    #[test]
+    fn narrow_for_match_patternsはunionを絞り込みワイルドカードなら絞り込まない() {
+        let ctx = CheckerCtx::new();
+        let ok_shape = struct_type_node(&[("kind", literal_type("ok"))]);
+        let err_shape = struct_type_node(&[("kind", literal_type("notFound"))]);
+        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+
+        let narrowed = narrow_for_match_patterns(&ctx, &subject_ty, &[MatchPattern::Type(ok_shape.clone())]);
+        let Type::Struct { fields, .. } = &narrowed else { panic!("expected single struct member, got {narrowed:?}") };
+        assert!(fields.iter().any(|f| f.name == "kind"));
+
+        let wildcard_narrowed = narrow_for_match_patterns(&ctx, &subject_ty, &[MatchPattern::Wildcard { pos: pos() }]);
+        assert!(types::type_equals(&wildcard_narrowed, &subject_ty));
+
+        assert!(types::type_equals(&narrow_for_match_patterns(&ctx, &INT, &[MatchPattern::Type(name_type("int"))]), &INT));
+    }
+
+    #[test]
+    fn match_is_exhaustiveは網羅性を判定する() {
+        let ctx = CheckerCtx::new();
+        let ok_shape = struct_type_node(&[("kind", literal_type("ok"))]);
+        let err_shape = struct_type_node(&[("kind", literal_type("notFound"))]);
+        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+
+        let arm = |pattern: TypeNode| MatchArm { patterns: vec![MatchPattern::Type(pattern)], body: int_lit("1"), pos: pos() };
+        assert!(match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone()), arm(err_shape.clone())]));
+        assert!(!match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone())]));
+
+        let wildcard_arm = MatchArm { patterns: vec![MatchPattern::Wildcard { pos: pos() }], body: int_lit("1"), pos: pos() };
+        assert!(match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone()), wildcard_arm]));
+
+        // アーム0個は(subjectの型を問わず)絶対に非網羅的——空のmatchを無条件elseとして
+        // 信用してしまうと、codegenが空のアーム本体を生成し構文的に壊れたJSになる
+        assert!(!match_is_exhaustive(&ctx, &INT, &[]));
+        // 確実にUnion以外だと分かるsubjectは、アームがあっても無条件では信用しない
+        // (TS版の"union-required"診断が無いこのリゾルバの安全ガード)
+        assert!(!match_is_exhaustive(&ctx, &INT, &[arm(ok_shape)]));
+        // ANYは「確実に非unionとは言えない」ので、これまで通り寛容にtrue
+        assert!(match_is_exhaustive(&ctx, &Type::Any, &[arm(name_type("int"))]));
+    }
+
+    #[test]
+    fn infer_exprのisは常にboolになる() {
+        let ctx = CheckerCtx::new();
+        let is_expr = Expr::Is { operand: Box::new(int_lit("1")), target: name_type("int"), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &is_expr), &BOOL));
+    }
+
+    #[test]
+    fn infer_exprのmatchはアームの型のunionになりnarrowingが効く() {
+        let base_ctx = CheckerCtx::new();
+        let ok_shape = struct_type_node(&[("kind", literal_type("ok")), ("value", name_type("int"))]);
+        let err_shape = struct_type_node(&[("kind", literal_type("err"))]);
+        let union_ty = resolve_type_node(&base_ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("res", union_ty);
+
+        // "ok"アームのbodyがres.valueを参照——narrowingが効いていればint、
+        // 効いていなければ(絞り込まれずunion全体のままだと)フィールドが揃わずANYになる
+        let field_access = Expr::Member { target: Box::new(ident("res")), name: "value".into(), pos: pos() };
+        let match_expr = Expr::Match {
+            subject: Box::new(ident("res")),
+            arms: vec![
+                MatchArm { patterns: vec![MatchPattern::Type(ok_shape)], body: field_access, pos: pos() },
+                MatchArm { patterns: vec![MatchPattern::Type(err_shape)], body: int_lit("0"), pos: pos() },
+            ],
+            pos: pos(),
+        };
+        assert!(types::type_equals(&infer_expr(&ctx, &match_expr), &INT));
+    }
+
+    #[test]
+    fn infer_exprのmatchは全void_混在も扱う() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
+        ctx.declare("x", INT);
+        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos() };
+        let arm = |body: Expr| MatchArm { patterns: vec![MatchPattern::Wildcard { pos: pos() }], body, pos: pos() };
+
+        let all_void = Expr::Match { subject: Box::new(ident("x")), arms: vec![arm(void_call()), arm(void_call())], pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &all_void), &types::VOID));
+
+        let mixed = Expr::Match { subject: Box::new(ident("x")), arms: vec![arm(int_lit("1")), arm(void_call())], pos: pos() };
+        assert!(matches!(infer_expr(&ctx, &mixed), Type::Any));
     }
 }
