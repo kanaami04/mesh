@@ -629,6 +629,48 @@
           codegenが必要)・`match`/`is`式・判別可能union・`error type`(union形式)・
           `json struct`・並行処理・パッケージ修飾・forヘッダ内での添字代入。次のmilestone
           (並行処理)以降で順に対応する
+        - **PR #19の5エージェントcode reviewで見つかった問題(2026-07-23)**:
+          - `delete()`をmap以外(配列等)に呼ぶと`.delete()`という存在しないメソッドを
+            無条件で生成し実行時に`panic: xs.delete is not a function`でクラッシュする
+            バグを発見・**PR内で修正済み**(`len`と同様、確実にMap以外だと分かる場合は
+            `codegen: 'delete' requires a map argument`という明確なErrにする。ANYは
+            この設計の他の箇所と同じく許容——確実に「Mapではない」と分かる場合だけ弾く)。
+          - ネストしたmap(`map<K, map<K2,V2>>`)への二重添字(`m["a"]["b"]`)が、milestone 4で
+            追加した3件の安全ガード(map複合代入・map IncDec)と、添字読み書きの
+            Map/Array判定そのものを**すり抜けてしまう**バグを発見・**PR内で修正済み**。
+            原因: mapの読みは常に`V | none`(`Union`型)を返すため、内側の`m["a"]`を
+            さらに添字対象にすると、その型は厳密な`Type::Map`ではなく`Type::Union`になり、
+            `matches!(container_ty, Type::Map{..})`という厳密一致のガードが素通りして
+            配列扱い(`__idx`/`__idxset`)になってしまっていた。TS版のchecker
+            (`src/checker/expressions.ts`)を調査した結果、TS本体はそもそも`Union`型への
+            添字自体を`not-indexable`診断で拒否している(noneかもしれない値へ安全に
+            添字を続けられないため)と判明したため、それに倣い、添字の読み・代入・
+            複合代入・IncDecの4箇所すべてで`Type::Union`のcontainerを明確な
+            `codegen: cannot index into '...' — narrow away 'none' first (e.g. with 'or')`
+            というErrにする形で修正(独立検証で82点)。回帰テスト追加、`cargo test`
+            182件・clippyクリーンを確認済み
+          - 以下3件は独立検証で75点(80点未満)——PR #17/#18で既に受け入れ済みの
+            「診断を出さないリゾルバ」設計の限界の再確認であり、このPR自体が新しい
+            誤ったロジックを持ち込んだわけではないため、修正せず既知の限界として
+            明記するに留める(2026-07-23判断):
+            - 配列/mapリテラルの要素/エントリの型がPR #17の「struct literalのフィールドが
+              検証されない」と同じ理由で相互検証されない(例:
+              `xs := [1, "a"]; xs[1] + 1`が黙って`__iarith`に文字列を渡す、
+              `xs["foo"]`〈非intの配列添字〉も明確なエラーにならない)。将来PR #17の
+              3件とまとめて対応する候補
+            - `gen_lvalue`のMember(構造体フィールド)は「確実にstructだと証明できないと
+              拒否」という許可リスト方式だが、`gen_index_assign`/`gen_index_incdec`は
+              「確実にMap以外は配列扱い」という拒否リスト方式であり非対称——例えば
+              `mut x := true; x[0] = 5`は明確なエラーにならず`__idxset(x, 0, 5, at)`を
+              生成し実行時に生の`TypeError`でクラッシュする(`x.field = 5`という等価な
+              Member版は正しくコンパイルエラーになる)。今回のUnion修正で「確実に
+              Map以外」の一部(Union)は塞いだが、bool/float/struct等の非indexable型は
+              引き続き未対応のまま
+            - range-forのアリティガードはArray/Map/intの3形態にのみ反応し、それ以外の
+              確定した具体型(string/bool/struct等)には反応しない(TS版の`not-rangeable`
+              診断に相当するものが無い)ため、例えば`for i, v := range someStruct`が
+              明確なエラーにならず`.entries is not a function`でクラッシュしうる。
+              ANYの限界(既知・対象外)より広い穴だが、今回は未修正
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

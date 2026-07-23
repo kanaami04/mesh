@@ -196,7 +196,18 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   mapに`.set`を呼ばない壊れた形を素通しするが、これは意図的に移植しなかった)。
   **`examples/collections.mesh`を新規作成し実行確認**(既存の`examples/maps.mesh`は
   `is none`を使うため変更せず、そのままだと明確な「未対応」エラーになることを確認)——
-  生成JSを`bun`で走らせてTS版と標準出力が完全一致。現在テスト180件、
+  生成JSを`bun`で走らせてTS版と標準出力が完全一致。詳細はtodo.mdの当該項目が
+  一次情報源
+- **PR #19の5エージェントcode reviewで2件のバグを発見・PR内で修正済み(2026-07-23)**:
+  (1) `delete()`をmap以外に呼ぶと存在しないメソッドを無条件生成しクラッシュするバグ、
+  (2) ネストしたmap(`map<K, map<K2,V2>>`)への二重添字が、milestone 4で追加した
+  安全ガードやMap/Array判定そのものをすり抜けるバグ(`m["a"]`の型が厳密な`Type::Map`
+  ではなく`V | none`の`Union`になるため)——TS版のcheckerが実はUnion型への添字自体を
+  `not-indexable`診断で拒否していると判明したため、Rust版でも添字の読み・代入・
+  複合代入・IncDecの4箇所でUnion containerを明確なErrにする形で修正。他に3件
+  (配列/mapリテラルの相互検証なし・`gen_lvalue`のMember/Index非対称・range-forの
+  アリティガードがstring/bool/struct等をカバーしない)は独立検証で75点(80点未満)
+  につき既知の限界として明記するに留めた。現在テスト182件、
   `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
   一次情報源
 - **次にやるなら**: milestone 5(並行処理。次いでモジュール、の順で

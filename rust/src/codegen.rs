@@ -432,6 +432,18 @@ impl Codegen {
         value_expr: &Expr,
     ) -> CodegenResult<()> {
         let container_ty = checker::infer_expr(&self.ctx, container);
+        // code review指摘(PR #19): map<K, map<...>>のようなネストしたmapを読むと`V | none`
+        // になり(Expr::Indexのinfer_expr参照)、`matches!(container_ty, Type::Map{..})`という
+        // 厳密一致だけではUnionをすり抜けて配列扱い(__idxset)になってしまう——TS版の
+        // checker(src/checker/expressions.ts)はそもそもUnion型への添字を`not-indexable`
+        // 診断で拒否しており(noneかもしれない値へさらに添字を続けるのは`or`/`is none`で
+        // 絞り込んでからでないと安全でないため)、それに倣い明確なErrにする
+        if let Type::Union { .. } = container_ty {
+            return Err(format!(
+                "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                types::type_to_string(&container_ty), pos.line, pos.col
+            ));
+        }
         let container_js = self.gen_expr(container)?;
         let index_js = self.gen_expr(index)?;
         let rhs = self.gen_expr(value_expr)?;
@@ -465,6 +477,14 @@ impl Codegen {
     // 診断を出さないこのリゾルバでは実際に到達しうるため、mapは明確なErrにする
     fn gen_index_incdec(&mut self, container: &Expr, index: &Expr, pos: Pos, op: TokenType) -> CodegenResult<()> {
         let container_ty = checker::infer_expr(&self.ctx, container);
+        // gen_index_assignと同じ理由(ネストしたmapの読みは`V | none`のUnionになり、
+        // 厳密一致のMapチェックをすり抜けてしまうため、Unionは明確なErrにする)
+        if let Type::Union { .. } = container_ty {
+            return Err(format!(
+                "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                types::type_to_string(&container_ty), pos.line, pos.col
+            ));
+        }
         if matches!(container_ty, Type::Map { .. }) {
             return Err(format!("codegen: increment/decrement of a map entry is not yet supported ({}:{})", pos.line, pos.col));
         }
@@ -648,6 +668,17 @@ impl Codegen {
             // (配列・文字列どちらも`.length`/`[i]`を持つのでこのまま使える。範囲外はpanic)
             Expr::Index { target, index, pos } => {
                 let target_ty = checker::infer_expr(&self.ctx, target);
+                // code review指摘(PR #19): ネストしたmap(例: map<string, map<string,int>>)を
+                // 読むとtargetの型が`V | none`のUnionになり、`Type::Map`との厳密一致では
+                // すり抜けて配列扱い(`__idx`)になってしまう。TS版のchecker(src/checker/
+                // expressions.ts)はUnion型への添字自体を`not-indexable`診断で拒否しており
+                // (noneかもしれない値へ安全に添字を続けられないため)、それに倣い明確なErrにする
+                if let Type::Union { .. } = target_ty {
+                    return Err(format!(
+                        "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                        types::type_to_string(&target_ty), pos.line, pos.col
+                    ));
+                }
                 let target_js = self.gen_expr(target)?;
                 let index_js = self.gen_expr(index)?;
                 if matches!(target_ty, Type::Map { .. }) {
@@ -746,7 +777,23 @@ impl Codegen {
                     Ok(format!("{}.length", args[0]))
                 }
             }
-            "delete" => Ok(format!("{}.delete({})", args[0], args[1])),
+            // code review指摘(PR #19): lenはmap/配列を型で分岐しているのに、deleteは
+            // 分岐せず無条件で`.delete()`を出していた——配列に`delete(xs, i)`を渡すと
+            // 実行時に`xs.delete is not a function`でクラッシュする(配列にはdeleteの
+            // 意味的な対応物が無い——TS版もdeleteはmap限定の組み込み)。型が確実に
+            // Map/Any以外だと分かる場合だけ明確なErrにする(ANYは診断を出さない設計上
+            // 許容——他の型に確実だと分かる場合だけ弾く、既存のrange-forアリティ
+            // ガードと同じ考え方)
+            "delete" => {
+                let confidently_not_map = matches!(
+                    arg_exprs.first().map(|a| checker::infer_expr(&self.ctx, a)),
+                    Some(t) if !matches!(t, Type::Map { .. } | Type::Any)
+                );
+                if confidently_not_map {
+                    return Err(format!("codegen: 'delete' requires a map argument ({}:{})", pos.line, pos.col));
+                }
+                Ok(format!("{}.delete({})", args[0], args[1]))
+            }
             "keys" => Ok(format!("Array.from({}.keys())", args[0])),
             "values" => Ok(format!("Array.from({}.values())", args[0])),
             // filter/map/reduceは無名関数(Expr::FnExpr)のcodegenがまだ無く引数を生成できない
@@ -1134,6 +1181,21 @@ mod tests {
     }
 
     #[test]
+    fn ネストしたmapへの添字は読み書きincdecともに明確なエラーになる() {
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  x := m[\"a\"][\"b\"]\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "read");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"] = 1\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "assign");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"] += 1\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "compound assign");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"]++\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "incdec");
+    }
+
+    #[test]
     fn 範囲forの3形態が生成できる() {
         let js = gen_body(
             "fn main() {\n  xs := [1, 2, 3]\n  m := map<string, int>{\"a\": 1}\n  for i, v := range xs { print(i, v) }\n  for k, v := range m { print(k, v) }\n  for i := range 3 { print(i) }\n}",
@@ -1173,6 +1235,12 @@ mod tests {
         assert!(js.contains("m.delete(\"a\");"), "got: {js}");
         assert!(js.contains("const ks = Array.from(m.keys());"), "got: {js}");
         assert!(js.contains("const vs = Array.from(m.values());"), "got: {js}");
+    }
+
+    #[test]
+    fn delete_を配列に使うと明確なerrになる() {
+        let err = gen_js("fn main() {\n  mut xs := [1, 2, 3]\n  delete(xs, 0)\n}").unwrap_err();
+        assert!(err.contains("delete"), "got: {err}");
     }
 
     #[test]
