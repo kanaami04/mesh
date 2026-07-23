@@ -440,7 +440,17 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         Expr::None { .. } => NONE,
         // 補間される式はどの型でもよい(printと同じ)。結果は常にstring
         Expr::Interp { .. } => STRING,
-        Expr::Ident { name, .. } => ctx.lookup(name).cloned().unwrap_or(ANY),
+        // 裸の識別子がトップレベル関数名を指す場合(呼び出しではなく値として参照——
+        // `map(nums, isEven)`のように既存の名前付き関数をコールバックとして渡す形、
+        // milestone 10のcode reviewで発覚・実行確認済み)、ローカルスコープに無ければ
+        // fn_decls(トップレベル関数のシグネチャ表)も試す。TS版はローカル変数も
+        // トップレベル関数名も同じスコープスタックへ`declareBinding`するため
+        // 区別が要らないが、Rust版はローカル変数用のscopesとトップレベル関数用の
+        // fn_declsを別テーブルで持つため、ここでフォールバックしないと関数を値として
+        // 渡した場合の型が常にANYへ落ち、map/reduceのコールバック戻り値型推論
+        // (__iarithのオーバーフロー安全ガード選択等)が効かなくなる。ローカル変数が
+        // 優先されるのはTS版の実際のスコープ規則(内側の宣言が外側を覆う)と同じ
+        Expr::Ident { name, .. } => ctx.lookup(name).cloned().or_else(|| ctx.lookup_fn(name).cloned()).unwrap_or(ANY),
         Expr::Binary { op, left, right, .. } => infer_binary(ctx, *op, left, right).result,
         Expr::Unary { operand, .. } => infer_expr(ctx, operand),
         Expr::Call { callee, args, .. } => infer_call(ctx, callee, args),
@@ -828,6 +838,16 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type) -> BinaryInfo {
 // __iarith経由にならずTS版とbyte単位で食い違う出力になる)
 fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     if let Expr::Ident { name, .. } = callee {
+        // ローカル変数がfn値(無名関数式、milestone 10)を保持している場合を先に確認する
+        // (code review発覚・実行確認済みの回帰: `inc := fn(x: int) int {...}; inc(5) * 2`の
+        // ように、ローカル変数へ代入した無名関数を呼び出すと戻り値型が常にANYへ落ち、
+        // __iarith等の型依存判断が効かなくなっていた——fn_declsはトップレベル関数専用の
+        // 別テーブルで、ローカルスコープに保持されたfn値までは見ないため)。ローカルが
+        // トップレベル関数名を覆う場合もこの優先順位で正しく扱われる(TS版の実際の
+        // スコープ規則と同じ)
+        if let Some(Type::Fn { ret, .. }) = ctx.lookup(name) {
+            return (**ret).clone();
+        }
         if let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name) {
             return (**ret).clone();
         }
@@ -1012,6 +1032,35 @@ mod tests {
         ctx.declare_fn("add", Type::Fn { params: vec![INT, INT], ret: Box::new(INT) });
         let call_ret = infer_call(&ctx, &Expr::Ident { name: "add".into(), pos: pos() }, &[]);
         assert!(types::type_equals(&call_ret, &INT));
+    }
+
+    #[test]
+    fn infer_callはローカル変数が保持する無名関数の戻り値型も引く() {
+        // code review発覚・実行確認済みの回帰: `inc := fn(x: int) int {...}; inc(5) * 2`の
+        // ようにローカル変数へ代入した無名関数を呼び出すと、fn_decls(トップレベル関数専用)
+        // しか見ていなかったため戻り値型が常にANYへ落ち、__iarith等の型依存判断が
+        // 効かなくなっていた
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("inc", Type::Fn { params: vec![INT], ret: Box::new(INT) });
+        let call_ret = infer_call(&ctx, &Expr::Ident { name: "inc".into(), pos: pos() }, &[]);
+        assert!(types::type_equals(&call_ret, &INT), "got {call_ret:?}");
+    }
+
+    #[test]
+    fn infer_exprは呼び出しでない裸の識別子がトップレベル関数名ならfn型を引く() {
+        // code review発覚・実行確認済みの回帰: ローカルスコープにしか無ければANYへ
+        // 落ちていたため、map(nums, isEven)のように名前付き関数を値として渡すと
+        // コールバックの戻り値型が常にANYになり、map()の戻り値要素型推論
+        // (ひいては__iarithのオーバーフロー安全ガード選択)が効かなくなっていた
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("isEven", Type::Fn { params: vec![INT], ret: Box::new(BOOL) });
+        let ident_ty = infer_expr(&ctx, &Expr::Ident { name: "isEven".into(), pos: pos() });
+        assert!(matches!(&ident_ty, Type::Fn { ret, .. } if types::type_equals(ret, &BOOL)), "got {ident_ty:?}");
+
+        // ローカル変数がトップレベル関数名を覆う場合はローカルが優先される
+        let mut shadowed = ctx.clone();
+        shadowed.declare("isEven", INT);
+        assert!(types::type_equals(&infer_expr(&shadowed, &Expr::Ident { name: "isEven".into(), pos: pos() }), &INT));
     }
 
     #[test]

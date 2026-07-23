@@ -27,10 +27,21 @@ use std::collections::{HashMap, HashSet};
 // 現れない — ランタイム本体は文字列連結のみで書かれ、テンプレートリテラルを使っていない)
 const RUNTIME_TS: &str = include_str!("../../src/runtime.ts");
 
-fn prelude() -> &'static str {
+fn prelude() -> String {
     let start = RUNTIME_TS.find('`').expect("runtime.ts should wrap PRELUDE in a template literal") + 1;
     let end = RUNTIME_TS.rfind('`').expect("runtime.ts should wrap PRELUDE in a template literal");
-    &RUNTIME_TS[start..end]
+    // code review発覚・実行確認済みの回帰: ここは`RUNTIME_TS`(runtime.tsのソーステキストその
+    // もの)からテンプレートリテラルの中身を素朴に部分文字列として取り出すだけで、JSの
+    // テンプレートリテラル自身が持つエスケープ解決(`\\`→`\`等)を一切評価していなかった。
+    // runtime.ts側は「正規表現の中でバックスラッシュ1つの意味で書きたい箇所は、外側の
+    // テンプレートリテラルが先に1段エスケープを解決することを見込んで`\\`と2つ重ねて書く」
+    // という前提で書かれている(`__toInt`の`\\d+`がその唯一の例)——TS版は実際にこの
+    // テンプレートリテラルを評価するため`\d+`になるが、ここで単純な部分文字列抽出しか
+    // していないRust版はソース上の`\\d+`をそのまま出力してしまい、`\\d`という(実質何にも
+    // マッチしない)正規表現になって`toInt`が常に失敗していた。JSの`\\`エスケープだけを
+    // 評価して埋め合わせる(runtime.ts全体を確認済みの結果、他のエスケープ〈`` \` ``や
+    // `\$`〉はこのテンプレートリテラル内に存在しない)
+    RUNTIME_TS[start..end].replace("\\\\", "\\")
 }
 
 pub type CodegenResult<T> = Result<T, String>;
@@ -1041,8 +1052,15 @@ impl Codegen {
                 self.ctx.pop_scope();
                 body_result?;
                 let pad = "  ".repeat(self.indent);
+                // code review発覚・実行確認済みの回帰: `body_lines`の各要素へ`pad`を
+                // 1回ずつ足すだけだと、その要素自体が(さらにネストしたExpr::FnExprの
+                // 出力を埋め込んでいるなどの理由で)改行を内包している場合、2行目以降が
+                // 余分なindentを受け取れない。TS版codegen.tsのfnExprケースと同じく、
+                // 一旦全体を1つの文字列に結合してから改めて改行で分割し、全ての
+                // 物理行へ`pad`を付け直す(全体を跨いで正しくインデントし直す)
+                let body_joined = body_lines.join("\n");
                 let indented =
-                    body_lines.iter().map(|l| if l.is_empty() { l.clone() } else { format!("{pad}{l}") }).collect::<Vec<_>>().join("\n");
+                    body_joined.split('\n').map(|l| if l.is_empty() { l.to_string() } else { format!("{pad}{l}") }).collect::<Vec<_>>().join("\n");
                 Ok(format!("(async ({params_js}) => {{\n{indented}\n{pad}}})"))
             }
         }
@@ -2487,5 +2505,34 @@ mod tests {
         let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  g := fn() {\n    spawn f()\n  }\n  g()\n}");
         let push_count = js.matches("__waitStack.push([]);").count();
         assert_eq!(push_count, 1, "got: {js}"); // 無名関数の中の1回だけ(外側のmainはspawnを使っていない)
+    }
+
+    #[test]
+    fn 入れ子になった無名関数式は改行を跨いで正しく再インデントされる() {
+        // code review発覚・実行確認済みの回帰(2エージェント独立指摘): 内側のExpr::FnExprが
+        // 埋め込む複数行の文字列は、外側の再インデント処理から見ると`body_lines`の
+        // 1要素の中に改行を内包する形になる——各要素へ`pad`を1回ずつ足すだけだと
+        // 2行目以降が余分なindentを受け取れず、TS版の出力(全体を一旦結合してから
+        // 改めて改行分割してpadを付け直す)と食い違っていた
+        let js = gen_body(
+            "fn main() {\n  nums := [1, 2, 3]\n  result := map(nums, fn(n: int) int {\n    doubled := map([n], fn(m: int) int { return m * 2 })\n    return doubled[0]\n  })\n  print(result)\n}",
+        );
+        assert!(
+            js.contains("      return __iarith(m, \"*\", 2,"),
+            "内側のExpr::FnExprの本体は外側より2段深くインデントされるべき、got: {js}"
+        );
+        assert!(js.contains("    })));\n    return __idx(doubled, 0,"), "got: {js}");
+    }
+
+    #[test]
+    fn preludeのtoint正規表現はテンプレートリテラルのエスケープを評価済みになる() {
+        // code review発覚・実行確認済みの回帰: runtime.tsのソース上は(外側のテンプレート
+        // リテラルが1段エスケープを解決する前提で)`\\d`と2つ重ねて書かれているが、
+        // Rust版は単純な部分文字列抽出しかしておらずソースの`\\d`をそのまま出力していた
+        // ため、生成JSの正規表現が`\\d`(バックスラッシュ文字自体を要求する、実質何にも
+        // マッチしない)になり`toInt`が常に失敗していた
+        let js = gen_js("fn main() {}").unwrap();
+        assert!(js.contains("/^[+-]?\\d+$/"), "got prelude toInt regex context: {js}");
+        assert!(!js.contains("\\\\d"), "got: {js}");
     }
 }

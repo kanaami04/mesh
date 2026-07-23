@@ -43,4 +43,23 @@ fn main() {
 	// filter→map→reduceのパイプライン合成: (2+4+6)*2 = 24
 	result := reduce(map(filter(nums, isEven), double), sum, 0)
 	print(result)
+
+	// ローカル変数へ代入した無名関数を直接呼び出す(inc(5)の戻り値型がintと
+	// 正しく推論され__iarithが選ばれることを確認する回帰)
+	inc := fn(x: int) int { return x + 1 }
+	print(inc(5) * 2)
+
+	// 入れ子になった無名関数式(内側のmapのコールバックが正しく再インデントされる
+	// ことを確認する回帰)
+	nested := map(nums, fn(n: int) int {
+		doubled := map([n], fn(m: int) int { return m * 2 })
+		return doubled[0]
+	})
+	print(nested)
+
+	// toInt(このマイルストーンのレビューで発覚したruntime.tsのテンプレートリテラル
+	// エスケープ未評価バグの回帰確認——filter/map/reduce自体とは無関係だが同じPRで
+	// 見つかり修正した)
+	parsed := toInt("42") or _ => -1
+	print(parsed)
 }
