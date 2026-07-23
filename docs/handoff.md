@@ -354,19 +354,30 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (H-2実装時にruntime.ts全体が移植済みで`json$parse`等が既に実装済み)ため、
   codegen自体への変更は「registryへの1回の登録」+`modules.rs`への`mesh/json`
   早期continueだけで済んだ。`json.Value`(TS版では真に自己参照する判別可能union)は
-  milestone 2以来の自己参照型の壁(`tree.mesh`と同じ)にぶつかるため、不透明な殻
-  structとして扱う意図的なスコープ縮小を選択——`json struct`の自動生成コードは
-  `json.field`/`json.asString`等の不透明なヘルパー越しにしかValueへ触れないため
-  実害が無いことをTS版のテストで確認済み(生のValueを`is`/`match`で直接構造分解
-  する手書きデコーダだけがスコープ外)。**副産物として既存バグを発見・修正**:
-  `is_json`宣言がstruct自体の型解決から丸ごと除外されていた(json struct未実装
-  時のプレースホルダ)ため、手書きの`X{...}`構築でフィールドが空の殻へ静かに
+  milestone 2以来の自己参照型の壁(`tree.mesh`と同じ)にぶつかる——真に自己参照する
+  再帰位置(`arr.items`/`obj.entries`の要素/値型)だけを名前だけの不透明な殻に留め、
+  それ以外(kind判別フィールド+実フィールド)は本物のunionにする設計を選んだ
+  (最初は完全に不透明な殻structにしていたが、PR #24のcode reviewで
+  `tests/e2e.test.ts:1146-1160`という既存のmesh/json手書きdestructureが壊れる
+  ことが発覚し修正——下記参照)。**副産物として既存バグを発見・修正**: `is_json`
+  宣言がstruct自体の型解決から丸ごと除外されていた(json struct未実装時の
+  プレースホルダ)ため、手書きの`X{...}`構築でフィールドが空の殻へ静かに
   フォールバックする潜在バグがあった——TS版がisJsonをstruct型解決に一切使わない
   ことを確認し、除外を撤去。新規`examples/json_decode.mesh`
   (`tests/e2e.test.ts:2738-2859`のシナリオ一式)+`examples/json_models_demo.mesh`
   (cross-package export)でTS版とbyte-for-byte一致を確認、既存の全example・
-  `tree.mesh`の明確なErrも回帰無し。テスト253→264件(+11)。詳細はtodo.mdの
-  当該項目が一次情報源
+  `tree.mesh`の明確なErrも回帰無し。**PR #24コードレビューで発見・即修正した2件**:
+  (1) `json.Value`を完全に不透明な殻にする当初設計は、json struct機能より前からある
+  既存のmesh/json手書きdestructure(`if v is {kind:"obj"} { len(v.entries) }`)を
+  壊す見積もり漏れだった——`mesh/json`のimport自体がこのPRで初めて可能になるため
+  顕在化。再帰位置だけ殻に留める設計に修正し、1階層の絞り込み+フィールドアクセスが
+  正しい型(`len`が`.size`を選ぶ等)で動くようにした。(2) 合成する`decode<Name>`が
+  手書きの同名関数と衝突しても検出されず、二重宣言の無効なJS(SyntaxError)を
+  静かに出力していた——このシンセシス自体が初めて「隠れた予約名」を生む処理だった
+  ため踏みやすい間違いになっていた。合成前に衝突を確認し明確なErrにする修正を追加。
+  副産物としてTS版自体のフォーマッタのバグ(`json struct`の`json`キーワードが
+  再整形で消える)も発見・修正。テスト253→266件(+13)、TS版テストスイート484→485件。
+  詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの9マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct)が全て完了。次の対象はkanayamaと相談して決める

@@ -1283,8 +1283,42 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
     fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
         Type::Fn { params, ret: Box::new(ret) }
     }
+    fn anon_struct(fields: Vec<types::StructField>) -> Type {
+        Type::Struct { name: types::ANONYMOUS_STRUCT_NAME.to_string(), fields, is_error_type: false }
+    }
+    fn field(name: &str, type_: Type) -> types::StructField {
+        types::StructField { name: name.to_string(), type_ }
+    }
 
-    let value_ty = Type::Struct { name: "json.Value".to_string(), fields: vec![], is_error_type: false };
+    // json.Value = { kind: "str", s: string } | { kind: "num", n: float } | { kind: "bool", b: bool }
+    //            | { kind: "null" } | { kind: "arr", items: Value[] } | { kind: "obj", entries: map<string, Value> }
+    // TS版はarr/objメンバーがValue自身を配列/map越しに参照する真の自己参照型(共有可変
+    // オブジェクトとして手組み)だが、Rustの所有権ベースのType表現では真の自己参照を
+    // 表せない(milestone 2以来の壁、examples/tree.mesh参照)。ここでは再帰位置
+    // (arr.items/obj.entriesの要素/値型)だけを名前だけの不透明な殻
+    // (is_error_instanceの再帰と紛れないよう`hollow_value`と呼ぶ)に置き換え、
+    // それ以外の各メンバー自身は本物の構造(kind判別フィールド+実フィールド)を持たせる——
+    // これにより`if v is {kind:"obj"} { len(v.entries) }`のような1階層の構造分解
+    // (TS版のF-14既存機能、json struct機能そのものより前からある、tests/e2e.test.ts:
+    // 1146-1160で確認)が正しい型で narrowing・フィールド推論される。2階層以上の
+    // 入れ子destructureだけがこのスコープ縮小の影響を受ける(is/matchの実行時テスト
+    // 自体はASTから直接組み立てるため2階層以上でも動く——影響を受けるのは
+    // checker側の型推論の精度だけ、milestone 7のgen_type_test参照)
+    let hollow_value = Type::Struct { name: "json.Value".to_string(), fields: vec![], is_error_type: false };
+    let value_ty = Type::Union {
+        members: vec![
+            anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
+            anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
+            anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
+            anon_struct(vec![field("kind", Type::Literal("null".to_string()))]),
+            anon_struct(vec![field("kind", Type::Literal("arr".to_string())), field("items", Type::Array(Box::new(hollow_value.clone())))]),
+            anon_struct(vec![
+                field("kind", Type::Literal("obj".to_string())),
+                field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(hollow_value) }),
+            ]),
+        ],
+        discriminant_tag: None, // milestone 7以来の設計判断: discriminant_tagはcodegenが一切参照しないため計算しない
+    };
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
     let mut types = HashMap::new();
@@ -2041,6 +2075,21 @@ mod tests {
         assert!(js.contains("(await json$parse(\"1\"))"), "got: {js}");
         assert!(js.contains("({ kind: \"null\" })"), "got: {js}"); // Valueはis_error_type無し、errTagで包まれない
         assert!(js.contains("(await json$stringify(v))"), "got: {js}");
+    }
+
+    #[test]
+    fn json_valueは1階層のis絞り込みでentriesがmap型に推論されlenがsizeを選ぶ() {
+        // code review発覚・実行確認済みの回帰(tests/e2e.test.ts:1146-1160、json struct機能
+        // より前からある既存のmesh/json手書きdestructure): json.Valueを完全に不透明な殻
+        // (フィールド無し)にすると、絞り込み後の`v.entries`がANY型になり`len()`が
+        // `.length`(mapには存在せずundefinedになる)を選んでしまっていた。arr/objの
+        // 再帰位置(items/entries)だけを不透明な殻に留め、それ以外の構造
+        // (kind判別フィールド+実フィールド)は本物のmap/配列型にすることで、1階層の
+        // 絞り込み+フィールドアクセスが正しい型(map)で推論され`len`が`.size`を選ぶ
+        let js = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  if v is { kind: \"obj\" } {\n    print(len(v.entries))\n  }\n}",
+        );
+        assert!(js.contains("v.entries.size"), "got: {js}");
     }
 
     #[test]

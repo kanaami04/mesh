@@ -1,7 +1,10 @@
 // json struct(milestone 9) — decode<X>(v: json.Value) X | error の自動生成を一巡する。
 // フラットなstruct・欠落/型違い/非objectフィールドのエラー・ネストしたjson struct+配列+
 // optionalフィールドの組み合わせ・配列-of-ネストstruct+optional配列・
-// 整数フィールドへの小数値の拒否、を一通り確認する
+// 整数フィールドへの小数値の拒否、を一通り確認する。冒頭のmain2は、json struct機能
+// より前からある既存のmesh/json手書きdestructure(json.Valueを直接is/matchで1階層
+// 絞り込みフィールドアクセスする、tests/e2e.test.ts:1146-1160)が今回のjson.Value表現
+// (再帰位置だけ不透明な殻)でも正しく動くことを確認する
 
 import "mesh/json"
 
@@ -32,7 +35,22 @@ json struct Cart {
 	notes: string[] | none
 }
 
+fn rawDestructure() {
+	r := json.parse("{\"a\": 1, \"b\": [true, null, \"x\"]}")
+	if r is error {
+		print("parse failed")
+		return
+	}
+	v := r
+	if v is { kind: "obj" } {
+		print(len(v.entries))
+	}
+	print(json.stringify(v))
+}
+
 fn main() {
+	rawDestructure()
+
 	v := json.parse("{\"name\": \"alice\", \"age\": 30}") or _ => json.Value{kind: "null"}
 	u := decodeUser(v)
 	if u is error { print("failed"); return }

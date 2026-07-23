@@ -1264,10 +1264,53 @@
           (`examples/jsonmodels`)を一時ディレクトリへ複製していなかった問題も
           (`modules_demo.mesh`/`mathutil`の既存の特別扱いと同じパターンで)修正。
           TS版テストスイート484→485件、全件パス。
-        - **milestone 9のスコープ外(意図的)**: `json.Value`を真に自己参照する
-          構造的union型として実装すること(手書きデコーダが生の`json.Value`を
-          `is`/`match`で直接構造分解するケース、`tree.mesh`と同じ理由で対象外)。
-          `mesh/io`・`mesh/http`(無関係、対象外のまま)。cross-file/cross-packageの
+        - **PR #24コードレビュー(5エージェント)で発見・実行確認して即修正した2件**
+          (score付けを待たず、milestone 4〜8と同じ「実行して再現確認済みのバグは
+          即修正」の前例に従った):
+          1. **`json.Value`を完全に不透明な殻(フィールド0個)にする当初の設計は
+             スコープの見積もりが甘かった**: `json struct`が自動生成する
+             `decode<X>`自体は不透明なヘルパー呼び出ししか使わないため実害が
+             無いことは検証済みだったが、`tests/e2e.test.ts:1146-1160`(json struct
+             機能より前からある既存のmesh/json手書きdestructure、`if v is
+             {kind:"obj"} { len(v.entries) }`)という現存するTS版の検証済み機能を
+             見落としていた——`mesh/json`のimport自体がこのPRで初めて可能になる
+             (以前は`'/'`を含むパスとして「ネストしたパッケージパスは非対応」で
+             丸ごと弾かれていた)ため、このPRが初めてこの既存機能の到達可能性を
+             左右する立場になっていた。修正: `json.Value`をkind判別フィールド+
+             実フィールドを持つ本物のunion(6メンバー)にし、**真に自己参照する
+             再帰位置(`arr.items`/`obj.entries`の要素/値型)だけ**を名前だけの
+             不透明な殻に留める設計に変更(自己参照のRust版の壁——milestone 2・
+             `tree.mesh`と同じ——を回避しつつ、1階層の絞り込み+フィールド
+             アクセスは正しい型〈`len`が`.size`を選ぶ等〉で動くようにした)。
+          2. **合成する`decode<Name>`という名前が手書きの同名関数と衝突すると
+             検出されず、無効なJS(二重宣言のSyntaxError)を静かに出力していた**。
+             このシンセシス自体が初めて「利用者から見えない隠れた予約名」を
+             生む処理だったため、`json struct User {...}`の横に(気づかず、
+             または偶然)`fn decodeUser(...)`を書くという自然な間違いが、
+             一般的な「トップレベル関数名の重複」検出(このリゾルバにはまだ
+             存在しない、別スコープの既知のギャップ)よりずっと踏みやすい形に
+             なっていた。修正: `synthesize_json_decoders`が合成前に既存の
+             関数名との衝突を確認し、明確なErrにする。
+          いずれも回帰テスト追加(`json_decode.rs`+1、`codegen.rs`+1)、
+          `examples/json_decode.mesh`に生destructureの実例セクションを追加、
+          264→266件、`cargo clippy --all-targets -- -D warnings`クリーン、
+          既存の全exampleがbyte-for-byte一致のまま回帰無しを再確認済み。
+        - **milestone 9のスコープ外(意図的、上記の修正を踏まえて再整理)**:
+          `json.Value`の2階層以上の入れ子destructure(絞り込み後さらに絞り込む
+          ケース——checker側の型推論の精度だけが劣化し`is`/`match`自体はASTから
+          直接テストを組み立てるため実行時には動く、が算術演算等の型依存判断が
+          `__iarith`等を選べずANY相当になる)。**自己参照する`json struct`宣言
+          自体**(木構造・連結リストのような、フィールドが〈配列/optional越しに
+          間接的にでも〉自分自身を参照する形、例: `json struct TreeNode { value:
+          int, children: TreeNode[] }`)——`json_decode.rs`自身のフィールド対応
+          表はこれを弾く専用ロジックを持たず、`resolve_type_decls`の汎用サイクル
+          検出(`tree.mesh`と同じ、milestone 2以来の壁)に委ねる形になり、
+          「json struct宣言以外の一般的な自己参照structと全く同じ理由・同じ
+          扱い」という前提で許容した(2エージェント独立指摘、いずれも
+          「回帰ではなく既存の壁がこの機能でも顕在化しただけ」と判定)——
+          専用の分かりやすいエラーメッセージにする余地はあるが、汎用サイクル
+          検出を複製する必要がありコストに見合わないため見送り。`mesh/io`・
+          `mesh/http`(無関係、対象外のまま)。cross-file/cross-packageの
           json struct同士のネスト参照(TS版自体がv1スコープ外)。
           `filter`/`map`/`reduce`・`defer`。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)

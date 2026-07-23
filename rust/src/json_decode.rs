@@ -265,7 +265,21 @@ pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), String> {
         );
     }
     let json_struct_names: HashSet<String> = json_struct_decls.iter().map(|t| t.name.clone()).collect();
+    // code review発覚・実行確認済み: 合成するdecode<Name>という名前は利用者からは見えない
+    // 「隠れた予約名」になる——同名の関数を(json struct宣言に気づかず、または偶然)手書き
+    // していると、同じファイルにdecode<Name>が2つ定義された壊れたJS(SyntaxError:
+    // 既に宣言済み)を静かに出力してしまう。この移植は「トップレベル関数名の重複」全般は
+    // まだ検出しない(既存の別スコープのギャップ)が、このシンセシス自身が新たに作る
+    // 名前が既存の手書き関数と衝突する場合だけは、ここで明確なErrにする
+    let existing_fn_names: HashSet<String> = program.fns.iter().map(|f| f.name.clone()).collect();
     for td in &json_struct_decls {
+        let decoder_name = format!("decode{}", td.name);
+        if existing_fn_names.contains(decoder_name.as_str()) {
+            return Err(format!(
+                "json struct: the auto-generated decoder function '{decoder_name}' collides with an existing function of the same name — rename one (found via 'json struct {}')",
+                td.name
+            ));
+        }
         program.fns.push(synthesize_decoder_fn(td, &json_struct_names)?);
     }
     Ok(())
@@ -371,6 +385,17 @@ mod tests {
         );
         let err = synthesize_json_decoders(&mut program).unwrap_err();
         assert!(err.contains("can't auto-decode field 'm'"), "got: {err}");
+    }
+
+    #[test]
+    fn 合成する関数名が既存の手書き関数と衝突するとerrになる() {
+        // code review発覚・実行確認済みの回帰: 検出しないと同名の関数が2つ定義された
+        // 壊れたJS(SyntaxError)を静かに出力してしまっていた
+        let src = "import \"mesh/json\"\nfn decodeUser(v: json.Value) User | error {\n  return error(\"hand-written\")\n}\nfn main() {}\n";
+        let mut program = parse(src).unwrap();
+        program.types = vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])];
+        let err = synthesize_json_decoders(&mut program).unwrap_err();
+        assert!(err.contains("'decodeUser' collides with an existing function"), "got: {err}");
     }
 
     #[test]
