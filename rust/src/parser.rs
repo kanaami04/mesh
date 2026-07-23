@@ -696,8 +696,9 @@ impl Parser {
                 Ok(Stmt::Continue { pos: t.pos })
             }
             TokenType::Defer => {
-                // checkerがcall.kind===Callであることを検証する(defer-requires-call)。
-                // パーサはどんな式でも受け取っておき、意味的な制約はcheckerに一本化する
+                // callがCall式であることの検証はcodegen(gen_defer_stmt、milestone 11)の仕事。
+                // パーサはどんな式でも受け取っておき、意味的な制約はcodegenに一本化する
+                // (checker.rsは文を検査しない設計のため)
                 self.next();
                 let call = self.parse_expr()?;
                 Ok(Stmt::DeferStmt { call, pos: t.pos })

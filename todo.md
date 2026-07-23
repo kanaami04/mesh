@@ -1486,6 +1486,39 @@
           `modules_demo`/`db_error`/`json_decode`/`json_models_demo`/
           `filter_map_reduce`+`mathutil/*`)も回帰無しを再確認。`tree.mesh`の
           明確なErrも回帰無し。
+        - **PR #26コードレビュー(5エージェント)で発見・実行確認して即修正した1件、
+          記録に留めた2件**:
+          1. **影武者call式に、defer文自体の`pos`ではなく元のcall式自身の`pos`を
+             使っていなかった**(バグスキャンエージェント発見・実行確認済み)。
+             TS版`genDeferStmt`は`{ ...call, callee: calleeForInvoke, args:
+             argTemps }`で元のcall式のposをそのまま引き継ぐが、Rust版は
+             `Stmt::DeferStmt`自体の`pos`を影武者call式に渡してしまっていたため、
+             deferした組み込み呼び出しの型エラー・パニック位置情報が(defer文の
+             位置ではなく)呼び出し式自身の位置を指すべきところ、defer文自体の
+             位置を指してしまっていた(例: `defer round(x)`でxがオーバーフロー
+             する場合、TS版は`round(`の位置でpanicするが、修正前のRust版は
+             `defer`キーワードの位置でpanicしていた)。値やフロー自体は壊れて
+             いなかったが、位置情報の不一致は確認済みの回帰なので修正(元のcall式の
+             `pos`を捕捉し影武者call式へ引き継ぐ)。回帰テスト1件追加。
+          2. **`ast.rs`/`parser.rs`の古いコメントを修正**(コードコメント準拠
+             エージェント発見): 「checkerがcall.kind===Callであることを検証する」
+             という記述が、実際には(checker.rsは文を検査しない設計のため)
+             このPRで実装した`codegen.rs`の`gen_defer_stmt`が検証している、という
+             実態と食い違っていた(パーサー移植時からの古い記述で、このPRより
+             前から不正確だったが、defer自体がこのPRで初めて実装されたことで
+             食い違いが明確になった)。「codegen(gen_defer_stmt)」に修正。
+          3. **記録に留めた既知の限界1件**(過去PRコメントエージェント発見・
+             TS版でも再現確認済み): `defer recv.fieldFn(args)`(structのフィールドが
+             保持する関数値経由の呼び出し、真のメソッド呼び出しではない)は、
+             レシーバがdefer時点の値で固定されない(後の再代入後の値を見てしまう)。
+             TS版`genDeferStmt`自身が「struct型かつ同名フィールドが無い」場合だけ
+             メソッド呼び出しとみなしレシーバを捕捉する設計になっており、この
+             ケース(フィールドがある=同名メソッドではない)はTS版でも同じ理由で
+             捕捉されない——Rust版はTS版を忠実に移植しているだけで、Rust側だけの
+             新しい退行ではないため修正はせず記録に留める。
+          いずれも回帰テスト追加(`codegen.rs`+1)、284件、
+          `cargo clippy --all-targets -- -D warnings`クリーン、既存の全example
+          がbyte-for-byte一致のまま回帰無しを再確認済み。
         - **milestone 11のスコープ外**: 無し——`defer`はtodo.mdに残っていた最後の
           既知の未対応機能であり、これでTS版リファレンス実装の主要機能をRust版が
           ひととおり移植し終えた(細かな既知の限界・意図的なスコープ縮小は引き続き

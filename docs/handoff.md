@@ -430,8 +430,16 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   return・ループ内累積・spawn併用・無名関数内defer)+`examples/defer_panic.mesh`
   (panicでの巻き戻り、終了コード/stdout/stderrの3点確認)+
   `examples/defer_pkg_demo.mesh`(cross-package)でTS版とbyte-for-byte一致を確認、
-  既存の全exampleも回帰無し。テスト276→283件(+7)、TS版テストスイート486→490件。
-  詳細はtodo.mdの当該項目が一次情報源
+  既存の全exampleも回帰無し。**PR #26コードレビューで発見・即修正した1件**:
+  影武者call式にdefer文自体の`pos`を使ってしまっており(TS版は元のcall式自身の
+  `pos`をそのまま引き継ぐ)、deferした組み込み呼び出しの型エラー・パニック位置
+  情報がdefer文の位置を指してしまっていた(値・フロー自体は正しかった)。元のcall式
+  の`pos`を捕捉し引き継ぐよう修正。あわせて`ast.rs`/`parser.rs`の古いコメント
+  (「checkerが検証する」→実際は今回実装した`codegen.rs`が検証)も修正。1件、
+  TS版自体にも同じ理由で存在する既知の限界(構造体フィールドが保持する関数値
+  経由の呼び出しではレシーバが固定されない)を確認したが、Rust版だけの新しい
+  退行ではないため記録に留めた。テスト276→284件(+8)、TS版テストスイート
+  486→490件。詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの11マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer)が全て完了——TS版

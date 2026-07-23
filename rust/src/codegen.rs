@@ -523,7 +523,11 @@ impl Codegen {
     // deferの後ろに許す(callであることの検証はここの仕事、ast.rs参照)ので、Callでなければ
     // 診断を出さないこのリゾルバでは明確なErrにする(TS版のdefer-requires-call診断に相当)
     fn gen_defer_stmt(&mut self, call: &Expr, pos: Pos) -> CodegenResult<()> {
-        let Expr::Call { callee, args, .. } = call else {
+        // code review発覚・実行確認済みの回帰: 影武者call式にはdefer文自体の`pos`ではなく
+        // 元のcall式自身の`pos`を使う(TS版genDeferStmtの`{ ...call, ... }`と同じ——
+        // calleeの解決不能エラーやgen_call内部のpanic位置情報が、defer文の位置ではなく
+        // 元の呼び出し式自身の位置を指すようにする)
+        let Expr::Call { callee, args, pos: call_pos } = call else {
             return Err(format!(
                 "codegen: 'defer' must be followed by a function or method call, e.g. 'defer f(x)' ({}:{})",
                 pos.line, pos.col
@@ -566,7 +570,7 @@ impl Codegen {
             invoke_args.push(Expr::Ident { name: temp, pos: a.pos() });
         }
 
-        let shadow_call = Expr::Call { callee: Box::new(invoke_callee), args: invoke_args, pos };
+        let shadow_call = Expr::Call { callee: Box::new(invoke_callee), args: invoke_args, pos: *call_pos };
         let invoke_js = self.gen_call(&shadow_call)?;
 
         *self.defer_used.last_mut().expect("inside a function body") = true;
@@ -2668,6 +2672,16 @@ mod tests {
     fn deferでない式は明確なerrになる() {
         let err = gen_js("fn main() {\n  defer 1 + 1\n}").unwrap_err();
         assert!(err.contains("'defer' must be followed by a function or method call"), "got: {err}");
+    }
+
+    #[test]
+    fn deferした呼び出しの影武者call式は元のcall式自身の位置情報を使う() {
+        // code review発覚・実行確認済みの回帰: 影武者call式にdefer文自体の位置を
+        // 使っていたため、defer先の組み込み呼び出しが埋め込むパニック位置情報が
+        // (TS版と違い)`defer`キーワードの位置を指してしまっていた
+        let js = gen_body("fn main() {\n  x := 1.5\n  defer round(x)\n}");
+        assert!(js.contains("\"t.mesh:3:9\""), "元のround(...)呼び出し自身の位置(3行9列目)を指すべき, got: {js}");
+        assert!(!js.contains("\"t.mesh:3:2\""), "defer文自体の位置(3行2列目)を指してはいけない, got: {js}");
     }
 
     #[test]
