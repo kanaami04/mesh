@@ -14,7 +14,7 @@
 // Rust版も同じ`src/runtime.ts`を`include_str!`で読み込んで埋め込む(ランタイムの二重管理・
 // 意味のズレを避ける。TS/Rustどちらのコンパイラが吐いたJSも同じランタイムで動く)
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Receiver, SelectArm, Stmt, TypeDecl, TypeNode};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, MatchPattern, Program, Receiver, SelectArm, Stmt, TypeDecl, TypeNode};
 use crate::checker::{self, CheckerCtx};
 use crate::token::{Pos, TokenType};
 use crate::types::{self, INT, Type};
@@ -142,19 +142,24 @@ impl Codegen {
         }
         self.ctx.begin_package(pkg, import_aliases);
 
-        // plain struct宣言 + error struct宣言(milestone 3で対応)まで。json struct
-        // (decode<X>自動生成は対象外)・判別可能union/`type X = A | B`(nodeがUnionなので
-        // 下のStructTypeチェックに自動的に引っかかる)はまだ対象外
+        // plain struct宣言 + error struct宣言(milestone 3で対応)+ 判別可能union型alias
+        // (`type X = A | B`、milestone 7)まで。json struct(decode<X>自動生成は対象外)・
+        // `error type`(union形式の名前付きエラー型——is_error付きのUnion decl)はまだ対象外
+        // (error structとは別に、union全体をerror扱いするタグ機構〈?/orの伝播判定〉が
+        // 未実装のため、静かにerror性を落として通すのではなく明確なErrにする)
         let all_types: Vec<TypeDecl> = files.iter().flat_map(|f| f.program.types.iter().cloned()).collect();
         for t in &all_types {
             if t.is_json {
                 return Err(format!("codegen: json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
             }
-            if !matches!(t.node, TypeNode::StructType { .. }) {
+            if t.is_error && matches!(t.node, TypeNode::Union { .. }) {
                 return Err(format!("codegen: only plain struct declarations are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
             }
+            if !matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) {
+                return Err(format!("codegen: only plain struct declarations and union type aliases are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+            }
         }
-        checker::resolve_struct_decls(&mut self.ctx, &all_types)?;
+        checker::resolve_type_decls(&mut self.ctx, &all_types)?;
 
         // 呼び出し先の戻り値型を解決できるよう、先に全トップレベル関数・メソッドのシグネチャを
         // (このパッケージの全ファイルぶん)登録してから本体を出力する
@@ -459,7 +464,47 @@ impl Codegen {
         }
     }
 
+    // `if x is T { ... }`という単純形(condが裸Identに対する`is`)ならnarrowing(milestone 7)
+    // を適用する——TS版のnarrowing.ts/statements.tsと同じ目的で、codegen側の型依存判断
+    // (`__iarith`等)を正しくするためだけに必要(生成JSの「形」自体は変えない、
+    // milestone 5のselect/orElseの束縛パターンと同じ設計)。`&&`/`||`/`!`との複合条件は
+    // 対象外のまま(実際のexampleに複合条件のnarrowingは存在しない)
     fn gen_if(&mut self, if_stmt: &IfStmt) -> CodegenResult<()> {
+        if let Expr::Is { operand, target, .. } = &if_stmt.cond
+            && let Expr::Ident { name, .. } = &**operand
+        {
+            let subject_ty = checker::infer_expr(&self.ctx, operand);
+            let (then_ty, else_ty) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
+            let cond = self.gen_expr(&if_stmt.cond)?;
+            self.emit(format!("if ({cond}) {{"));
+            self.ctx.push_scope();
+            self.ctx.declare(name, then_ty);
+            self.gen_block(&if_stmt.then)?;
+            self.ctx.pop_scope();
+            match if_stmt.else_.as_deref() {
+                None => {
+                    self.emit("}");
+                    // then節が必ず終端する(return/break/continue)なら、else側の絞り込みを
+                    // 現在のスコープへ反映し、後続の同ブロック内の文が引き継げるようにする
+                    // (`if v is closed { break } total = total + v`でvが正しくintと
+                    // narrowされ__iarithを使うために必須)
+                    if block_always_terminates(&if_stmt.then) {
+                        self.ctx.declare(name, else_ty);
+                    }
+                }
+                Some(ElseClause::Block(block)) => {
+                    self.emit("} else {");
+                    self.ctx.push_scope();
+                    self.ctx.declare(name, else_ty);
+                    self.gen_block(block)?;
+                    self.ctx.pop_scope();
+                    self.emit("}");
+                }
+                // else ifチェーンはnarrowing対象外のまま(実際のexampleに存在しない組み合わせ)
+                Some(other) => self.gen_else(Some(other))?,
+            }
+            return Ok(());
+        }
         let cond = self.gen_expr(&if_stmt.cond)?;
         self.emit(format!("if ({cond}) {{"));
         self.gen_block(&if_stmt.then)?;
@@ -738,8 +783,65 @@ impl Codegen {
             }
             Expr::Unary { op, operand, .. } => Ok(format!("({op}{})", self.gen_expr(operand)?)),
             Expr::Call { .. } => self.gen_call(expr),
-            Expr::Is { pos, .. } => Err(format!("codegen: 'is' is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Match { pos, .. } => Err(format!("codegen: 'match' is not yet supported ({}:{})", pos.line, pos.col)),
+            // is式(milestone 7): 裸Identならそのまま参照して二重評価を避け、それ以外は
+            // 一度だけ評価して束縛するIIFE(TS版と同じ——struct形パターンはoperandを
+            // 複数回参照しうるため)
+            Expr::Is { operand, target, .. } => {
+                if let Expr::Ident { name, .. } = &**operand {
+                    Ok(gen_type_test(name, target))
+                } else {
+                    let operand_js = self.gen_expr(operand)?;
+                    Ok(format!("((__v) => {})({operand_js})", gen_type_test("__v", target)))
+                }
+            }
+            // match式(milestone 7): TS版と同じ三項演算子の連鎖に、subjectを渡すIIFEで包む
+            // (`(await (async (__m) => test1 ? body1 : ... : lastBody)(subject))`)。
+            // 各アームの本体は、subjectが裸Identの場合だけそのアームのパターン集合で
+            // 絞り込んだ型を一時的に同じ名前で再宣言してから生成する(checker::infer_exprの
+            // Matchアームと同じロジック)。**exhaustiveでない場合だけ**(Rust版だけの安全
+            // ガード——TS本体はexhaustiveness診断で「どのアームにも一致しない値」を到達
+            // 不能にするが、診断を出さないこのリゾルバでは実際に到達しうる)最後のアームにも
+            // 明確なテストを付け、どれにも一致しない場合の明確なランタイムpanicを追加する
+            Expr::Match { subject, arms, pos } => {
+                let subject_ty = checker::infer_expr(&self.ctx, subject);
+                let exhaustive = checker::match_is_exhaustive(&self.ctx, &subject_ty, arms);
+                let bare_ident = if let Expr::Ident { name, .. } = &**subject { Some(name.clone()) } else { None };
+                let subject_js = self.gen_expr(subject)?;
+
+                let mut parts: Vec<String> = Vec::with_capacity(arms.len());
+                for (i, arm) in arms.iter().enumerate() {
+                    let is_last = i == arms.len() - 1;
+                    let body_js = if let Some(name) = &bare_ident {
+                        let narrowed = checker::narrow_for_match_patterns(&self.ctx, &subject_ty, &arm.patterns);
+                        self.ctx.push_scope();
+                        self.ctx.declare(name, narrowed);
+                        let js = self.gen_expr(&arm.body)?;
+                        self.ctx.pop_scope();
+                        js
+                    } else {
+                        self.gen_expr(&arm.body)?
+                    };
+                    if is_last && exhaustive {
+                        parts.push(body_js);
+                    } else {
+                        let test = arm
+                            .patterns
+                            .iter()
+                            .map(|p| match p {
+                                MatchPattern::Wildcard { .. } => "true".to_string(),
+                                MatchPattern::Type(node) => gen_type_test("__m", node),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" || ");
+                        parts.push(format!("{test} ? {body_js} :"));
+                    }
+                }
+                if !exhaustive {
+                    let at = self.at(*pos);
+                    parts.push(format!("(() => {{ throw new __Panic({at} + \": no arm of this match matched\"); }})()"));
+                }
+                Ok(format!("(await (async (__m) => {})({subject_js}))", parts.join(" ")))
+            }
             // 裸のメンバーアクセス(呼び出しではない)。targetがstruct型かつnameが宣言済み
             // フィールドのときだけ素の`.name`を出す——パッケージ修飾(`math.add`)はまだ
             // 実装が無く「未解決の識別子」としてANYへ落ちるので、ここで弾かないと
@@ -1161,6 +1263,42 @@ fn fn_js_name(pkg: &str, name: &str) -> String {
     if pkg == "main" { name.to_string() } else { format!("{pkg}${name}") }
 }
 
+// is/matchのパターン(型)を実行時テストのJS式へ変換する(TS版codegen.tsのgenTypeTestの
+// 移植、milestone 7・判別可能union対応)。discriminant_tagは一切参照せず、ASTのTypeNodeから
+// 直接構造的なテストを組み立てる(struct形パターンは各フィールドを`ref.field`へ再帰)。
+// Union形パターン(`A | B`をそのままis/matchのパターンに書く形)はTS版と同じく"false"
+// (単一型のみが渡ってくる前提——このリゾルバでも到達しない想定だが、クラッシュを
+// 避けるため安全な既定値にしておく)
+fn gen_type_test(ref_js: &str, target: &TypeNode) -> String {
+    match target {
+        TypeNode::Literal { value, .. } => format!("({ref_js} === {value:?})"),
+        TypeNode::Array { .. } => format!("Array.isArray({ref_js})"),
+        TypeNode::Chan { .. } => format!("({ref_js} instanceof __Channel)"),
+        TypeNode::Union { .. } => "false".to_string(),
+        TypeNode::MapType { .. } => format!("({ref_js} instanceof Map)"),
+        TypeNode::FnType { .. } => format!("(typeof {ref_js} === \"function\")"),
+        TypeNode::StructType { fields, .. } => {
+            let obj_test =
+                format!("(typeof {ref_js} === \"object\" && {ref_js} !== null && !({ref_js} instanceof Error) && !Array.isArray({ref_js}))");
+            std::iter::once(obj_test)
+                .chain(fields.iter().map(|f| gen_type_test(&format!("{ref_js}.{}", f.name), &f.type_node)))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        }
+        TypeNode::Name { name, .. } => match name.as_str() {
+            "none" => format!("({ref_js} === null)"),
+            "closed" => format!("({ref_js} === __CLOSED)"),
+            "error" => format!("({ref_js} instanceof Error)"),
+            "int" => format!("Number.isInteger({ref_js})"),
+            "float" => format!("(typeof {ref_js} === \"number\")"),
+            "string" => format!("(typeof {ref_js} === \"string\")"),
+            "bool" => format!("(typeof {ref_js} === \"boolean\")"),
+            // ユーザー定義struct(pkg修飾された型名パターンも含む)は汎用オブジェクトテスト
+            _ => format!("(typeof {ref_js} === \"object\" && {ref_js} !== null && !({ref_js} instanceof Error) && !Array.isArray({ref_js}))"),
+        },
+    }
+}
+
 // パッケージ間のimport依存グラフを依存順(importされる側が先)にソートする(TS版
 // checkModulesの依存順ソート+循環検出に相当)。診断ではなく明確なErr——循環があると
 // 依存先のexportedシンボルがまだregistryに無い状態で参照してしまい、静かに未解決
@@ -1203,6 +1341,14 @@ fn visit_package(pkg: &str, deps: &HashMap<String, HashSet<String>>, state: &mut
     state.insert(pkg.to_string(), 2);
     order.push(pkg.to_string());
     Ok(())
+}
+
+// ブロックが必ず終端する(return/break/continueで終わる)かどうかの単純な判定
+// (milestone 7・if-isのnarrowing用)。TS版のblockTerminatesはif/elseの両分岐が終端するか
+// 等も見るフルのCFG解析だが、実際のexample(`if v is closed { break }`のような単純な
+// 単文ブロック)はこの単純化で十分カバーできるため、あえて最後の文だけを見る
+fn block_always_terminates(block: &Block) -> bool {
+    matches!(block.stmts.last(), Some(Stmt::Return { .. }) | Some(Stmt::Break { .. }) | Some(Stmt::Continue { .. }))
 }
 
 fn other_pos(stmt: &Stmt) -> Pos {
@@ -1960,5 +2106,82 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("package 'b' has no exported struct 'Bar'"), "got: {err}");
+    }
+
+    // ---- milestone 7: match/is式・判別可能union ----
+
+    #[test]
+    fn is式は裸identならそのままテストを組み立てる() {
+        let js = gen_body("fn main() {\n  x := 1\n  ok := x is int\n  print(ok)\n}");
+        assert!(js.contains("const ok = Number.isInteger(x);"), "got: {js}");
+    }
+
+    #[test]
+    fn is式は非identなら二重評価を避けるiifeで包む() {
+        let js = gen_body("fn f() int {\n  return 1\n}\nfn main() {\n  ok := f() is int\n  print(ok)\n}");
+        assert!(js.contains("((__v) => Number.isInteger(__v))((await f()))"), "got: {js}");
+    }
+
+    #[test]
+    fn is式のstruct形パターンはオブジェクト形テストとフィールドテストを組み立てる() {
+        let js = gen_body(
+            "type Resp = { kind: \"ok\" } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\"}\n  ok := r is { kind: \"ok\" }\n  print(ok)\n}",
+        );
+        assert!(
+            js.contains("const ok = (typeof r === \"object\" && r !== null && !(r instanceof Error) && !Array.isArray(r)) && (r.kind === \"ok\");"),
+            "got: {js}"
+        );
+    }
+
+    #[test]
+    fn union型aliasの名前でstruct_literalを構築できる() {
+        let js = gen_body("type Resp = { kind: \"ok\" } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\"}\n  print(r)\n}");
+        assert!(js.contains("const r = ({ kind: \"ok\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn matchはexhaustiveならts版と同じ三項演算子の連鎖になり最後のアームは無条件() {
+        let js = gen_body(
+            "type Status = \"active\" | \"banned\"\nfn label(s: Status) string {\n  return match s {\n    \"active\" => \"a\"\n    \"banned\" => \"b\"\n  }\n}\nfn main() {\n  print(label(\"active\"))\n}",
+        );
+        assert!(js.contains("(await (async (__m) => (__m === \"active\") ? \"a\" : \"b\")(s))"), "got: {js}");
+    }
+
+    #[test]
+    fn matchが非exhaustiveなら最後のアームにもテストを付け不一致時にpanicする() {
+        // code review的な観点(milestone 2〜6と同じ「TS本体は診断で到達不能」パターン):
+        // TS本体はexhaustiveness診断でこの入力自体を拒否するが、診断を出さないこの
+        // リゾルバでは実際に到達しうるため、Rust版だけの安全ガードとしてpanicを追加する
+        let js = gen_body(
+            "type Status = \"active\" | \"banned\" | \"pending\"\nfn label(s: Status) string {\n  return match s {\n    \"active\" => \"a\"\n  }\n}\nfn main() {\n  print(label(\"active\"))\n}",
+        );
+        assert!(js.contains("(__m === \"active\") ? \"a\" : (() => { throw new __Panic("), "got: {js}");
+        assert!(js.contains("no arm of this match matched"), "got: {js}");
+    }
+
+    #[test]
+    fn matchのnarrowingでフィールドアクセスがiarithを選ぶ() {
+        let js = gen_body(
+            "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn describe(r: Resp) int {\n  return match r {\n    { kind: \"ok\" } => r.value + 1\n    { kind: \"err\" } => 0\n  }\n}\nfn main() {\n  print(describe(Resp{kind: \"ok\", value: 1}))\n}",
+        );
+        assert!(js.contains("__iarith(r.value, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn if_isのnarrowingはthen節fallthrough節else節いずれでもiarithを選ぶ() {
+        let js_fallthrough =
+            gen_body("fn f(x: int | error) int {\n  if x is error {\n    return 0\n  }\n  return x + 1\n}\nfn main() {\n  print(1)\n}");
+        assert!(js_fallthrough.contains("__iarith(x, \"+\", 1,"), "got: {js_fallthrough}");
+
+        let js_else = gen_body(
+            "fn g(x: int | error) int {\n  if x is error {\n    return 0\n  } else {\n    return x + 1\n  }\n}\nfn main() {\n  print(1)\n}",
+        );
+        assert!(js_else.contains("__iarith(x, \"+\", 1,"), "got: {js_else}");
+    }
+
+    #[test]
+    fn 自己参照するunion型aliasは明確なエラーになる() {
+        let err = gen_js("type Tree = { kind: \"leaf\" } | { kind: \"node\", left: Tree, right: Tree }\nfn main() {}").unwrap_err();
+        assert!(err.contains("self-referential/cyclic type definitions"), "got: {err}");
     }
 }
