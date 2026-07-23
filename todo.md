@@ -1253,6 +1253,17 @@
           `channel_spec`/`collections`/`maps`/`concurrency`/`channels`/
           `modules_demo`/`db_error`+`mathutil/*`)も回帰無しを再確認。`tree.mesh`
           (自己参照union)は引き続き明確なErrのまま。
+        - **副産物: TS版自体のフォーマッタのバグを発見・修正**。CI(TS版の全example
+          往復整形テスト)で`examples/json_decode.mesh`が失敗——`src/formatter.ts`の
+          `printTypeDecl`が`decl.isError`(→`"error "`)だけを見て`decl.isJson`を
+          見ておらず、`json struct X {...}`を再整形すると普通の`struct X {...}`に
+          化けてしまい(`json`キーワードが消える)、再整形後のソースを実行すると
+          `decodeX`が合成されず壊れた挙動になっていた。`jsonKw`を追加して修正、
+          回帰テスト1件追加(`tests/formatter.test.ts`)。あわせて、cross-package
+          example(`json_models_demo.mesh`)の往復整形テストが依存パッケージ
+          (`examples/jsonmodels`)を一時ディレクトリへ複製していなかった問題も
+          (`modules_demo.mesh`/`mathutil`の既存の特別扱いと同じパターンで)修正。
+          TS版テストスイート484→485件、全件パス。
         - **milestone 9のスコープ外(意図的)**: `json.Value`を真に自己参照する
           構造的union型として実装すること(手書きデコーダが生の`json.Value`を
           `is`/`match`で直接構造分解するケース、`tree.mesh`と同じ理由で対象外)。

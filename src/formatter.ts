@@ -129,8 +129,9 @@ function printProgram(program: Program): string {
 function printTypeDecl(p: Printer, decl: TypeDecl) {
   const kw = decl.exported ? "export " : "";
   const errKw = decl.isError ? "error " : "";
+  const jsonKw = decl.isJson ? "json " : "";
   if (decl.node.kind === "structType") {
-    p.emit(`${kw}${errKw}struct ${decl.name} {`);
+    p.emit(`${kw}${errKw}${jsonKw}struct ${decl.name} {`);
     for (const f of decl.node.fields) {
       p.flushLeadingComments(f.pos.line, 1);
       const trailing = p.takeTrailingComment(f.pos.line);
