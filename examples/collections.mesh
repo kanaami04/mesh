@@ -1,0 +1,37 @@
+// 配列/map — mapリテラル・添字読み書き・range-forの3形態・配列/map対応の組み込み関数。
+// `is`/`match`(判別可能union)はまだ対象外のため使わない(examples/maps.meshは`is none`を
+// 使うため今回は変更せず、この新規ファイルで検証する)
+
+fn main() {
+	ages := map<string, int>{"alice": 30, "bob": 25}
+	ages["carol"] = 28
+	age := ages["alice"] or 0
+	print("alice is ${age}")
+	missing := ages["dave"] or -1
+	print("dave is ${missing}")
+	delete(ages, "bob")
+	print("${len(ages)} people")
+	for k, v := range ages {
+		print("${k}: ${v}")
+	}
+
+	nums := [30, 10, 20]
+	mut total := 0
+	for _, v := range nums {
+		total = total + v
+	}
+	print("total: ${total}")
+
+	push(nums, 40)
+	print("first: ${get(nums, 0)}")
+	print("has 10: ${contains(nums, 10)}")
+	print("index of 20: ${indexOf(nums, 20)}")
+	sorted := sort(nums)
+	for i, v := range sorted {
+		print("${i} -> ${v}")
+	}
+
+	for i := range 3 {
+		print("tick ${i}")
+	}
+}

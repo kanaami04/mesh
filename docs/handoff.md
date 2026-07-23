@@ -182,7 +182,24 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `__errTag`が付かないため`?`が失敗値を「成功」として素通りさせてしまう
   (独立検証で75点、80点未満でブロック対象外——PR #17の限界の新しい現れ方であり
   このPR自体の新しいバグではない、という判断)。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: milestone 4(配列/map。次いで並行処理 → モジュール、の順で
+- **checker+codegen milestone 4(配列/map)完了(2026-07-22)**。配列/mapリテラル・
+  添字読み書き・範囲for(3形態)・配列/map対応の組み込み(`push`/`get`/`contains`/
+  `indexOf`/`sort`/`len`/`delete`/`keys`/`values`)を実装。`filter`/`map`/`reduce`は
+  無名関数(`Expr::FnExpr`)のcodegenがまだ無く対象外のまま。**Rust版だけの安全ガード
+  3件**(milestone 2/3と同じ考え方——TS版では診断のおかげで到達不能な組み合わせを、
+  診断を出さないこの設計では明確なErrで守る): mapへの複合代入・mapへのIncDec・
+  明確な形のsubjectに対するrange-forのアリティ不一致。いずれもTS版のcodegen自体は
+  無条件分岐でこれらを素通しするが、TS本体の別の診断(`isNumeric`/`range-arity`)の
+  おかげで実際には到達しないコード——診断を出さないRust版では実際に到達しうるため
+  明確なErrにした。意図的なスコープ縮小として、`gen_lvalue`自体にはIndexアームを
+  追加せず(forヘッダ内の添字代入は明確なErrのまま——TS版の`genLValue`はここで
+  mapに`.set`を呼ばない壊れた形を素通しするが、これは意図的に移植しなかった)。
+  **`examples/collections.mesh`を新規作成し実行確認**(既存の`examples/maps.mesh`は
+  `is none`を使うため変更せず、そのままだと明確な「未対応」エラーになることを確認)——
+  生成JSを`bun`で走らせてTS版と標準出力が完全一致。現在テスト180件、
+  `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
+  一次情報源
+- **次にやるなら**: milestone 5(並行処理。次いでモジュール、の順で
   `examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/

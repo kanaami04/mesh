@@ -566,6 +566,69 @@
           `?`/`or`の安全性そのものに直結するため既知の限界として明記しておく
           (2026-07-22)。PR #17の3件と合わせて、将来struct literalの検証を
           入れる際にまとめて対応する候補
+  - [x] **checker+codegen milestone 4(配列/map)** ✅ 2026-07-22実装(kanayamaと確認済みの
+        順序——struct/メソッド → error/json → 配列/map → 並行処理 → モジュール——の
+        4番目)。配列リテラル・mapリテラル・添字アクセス(読み書き)・範囲for(3形態)・
+        配列/map対応の組み込み関数を実装。**`filter`/`map`/`reduce`は対象外のまま**
+        (無名関数〈`Expr::FnExpr`〉のcodegenがまだ無く引数を生成できないため)。
+        `match`/`is`式・判別可能union・`error type`(union形式)・`json struct`・
+        並行処理・パッケージ修飾は引き続き対象外。TS版の該当実装を2本のExplore
+        エージェント+1本のPlanエージェントで調査し、Plan Mode経由で承認を得たうえで実装。
+        - `checker.rs`: `infer_expr`に`Expr::ArrayLit`(型注釈があればそれ、無ければ
+          最初の要素の型を`widen_literal`したもの、空なら`Array(ANY)`)・`Expr::MapLit`
+          (key/valueは構文上常に必須)・`Expr::Index`(Mapなら`V | none`、Arrayなら
+          elemそのまま——`get()`と違い`a[i]`は範囲外panicの設計なので`| none`は付けない、
+          文字列ならSTRING)を追加。**`infer_call`/`infer_builtin_call`に`args: &[Expr]`を
+          通すよう変更**(`get`/`sort`/`keys`/`values`は引数依存の戻り値型を持つため——
+          これを直さないと例えば`sort(nums)`の戻り値型が引けず、後続の算術が`__iarith`を
+          経由しないTS版とのbyte単位の食い違いになる)。新設`declare_range_for_names`で
+          range-forのループ変数をsubjectの型(Array/Map/int/Any)に応じて宣言。
+        - `codegen.rs`: `Expr::ArrayLit`(素のJS配列リテラル、`elem_type`はcodegenでは
+          一切参照しない)・`Expr::MapLit`(`new Map([[k,v],...])`、空なら`new Map()`)・
+          `Expr::Index`(Mapなら`__mget`、それ以外は`__idx`——文字列もこのまま扱える)を追加。
+          `Stmt::Assign`/`Stmt::IncDec`は`Expr::Index`ターゲットを`gen_lvalue`に渡す前に
+          新設`gen_index_assign`/`gen_index_incdec`へ振り分け(Mapは`.set(k,v)`、Arrayは
+          `__idxset`/`__idx`)。`Stmt::RangeFor`を新設`gen_range_for`で実装
+          (Map→`for (const [k,v] of subject)`、単一名→`for (let i=0,__n=subject;...)`
+          〈ブランク名は`__i`にフォールバック——Cスタイルループ変数は空文字列にできないため〉、
+          それ以外→`for (const [i,v] of subject.entries())`)。`gen_builtin_call`に
+          `len`(Map→`.size`、それ以外→`.length`)・`delete`・`keys`/`values`を追加
+          (`push`/`get`/`contains`/`indexOf`/`sort`はmilestone 1時点で配列/mapが
+          無かった頃から先行して移植済みだったコードがそのまま使えた)。
+        - **Rust版だけの安全ガード3件(TS版では診断のおかげで到達不能な組み合わせを、
+          診断を出さないこの設計では明確なErrで守る——milestone 2/3と同じ考え方)**:
+          (1) mapへの複合代入(`m[k] += 1`)——「今の値」が`V | none`であり算術の対象に
+          ならない、(2) mapへのIncDec(`m[k]++`)——TS版のcodegen自体は実は無条件で
+          `__idx`/`__idxset`を使うが、`isNumeric`診断で`m[k]++`自体がTS本体では
+          そもそも到達しないコードだった、(3) 明確な形のsubject(Array/Map/int)に
+          対するrange-forのアリティ不一致——TS版のcodegenも無条件分岐なので、
+          Array+1名だと「数値と配列を比較し続けて0回で終わるループ」を、int+2名だと
+          `.entries is not a function`のクラッシュを生成してしまう(いずれもTS本体の
+          range-arity診断で到達不能)。**意図的なスコープ縮小**: `gen_lvalue`自体には
+          Indexアームを追加せず(forヘッダ内での添字代入は明確なErrのまま)——TS版の
+          `genLValue`はこの経路で無条件`target[index]`という壊れた形(mapに対しては
+          `.set`を呼ばない、ただの余計なプロパティ代入)を素通しするが、これは意図的に
+          移植しなかった。
+        - テスト: `checker.rs`に配列/mapリテラルの型推論・添字読みの3分岐・
+          `infer_call`のargs配線(get/sort/keys/values)・`declare_range_for_names`の
+          4分岐(前方/部分アリティ込み)を新規追加。`codegen.rs`に既存1件を置き換え+
+          新規10件(配列/mapリテラル生成・添字読み書き〈複合代入・IncDec込み〉・
+          map複合代入とmap IncDecの明確なエラー・範囲for 3形態〈ブランク名・
+          アリティ不一致込み〉・`len`のmap/array使い分け・`delete`/`keys`/`values`・
+          `get`/`sort`)を追加(162→180件、全件パス)。`cargo clippy --all-targets --
+          -D warnings`クリーン。
+        - **実行確認**: 新規`examples/collections.mesh`(mapリテラル+添字読み書き+
+          `or`フォールバック+`delete`+`len`+mapへの範囲for、配列リテラル+`push`/`get`/
+          `contains`/`indexOf`/`sort`+配列への範囲for〈2名・ブランク名〉+intへの範囲for)
+          をRust版で実行し、`bun run mesh run`(TS版)の出力とbyte-for-byte一致を確認。
+          既存の`examples/maps.mesh`は`is none`を使うため変更せず、そのままだと
+          `codegen: 'is' is not yet supported`で明確に失敗することを確認(クラッシュ
+          しない、誠実な「未対応」)。`hello.mesh`/`fizzbuzz.mesh`/`struct_methods.mesh`/
+          `error_propagation.mesh`も回帰無しを再確認。
+        - **milestone 4のスコープ外(意図的)**: `filter`/`map`/`reduce`(無名関数の
+          codegenが必要)・`match`/`is`式・判別可能union・`error type`(union形式)・
+          `json struct`・並行処理・パッケージ修飾・forヘッダ内での添字代入。次のmilestone
+          (並行処理)以降で順に対応する
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
