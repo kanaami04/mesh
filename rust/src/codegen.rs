@@ -741,7 +741,7 @@ impl Codegen {
     // F-9b: 複合代入(x += 1等)の右辺値を組み立てる。current_codeは代入先の「今の値」を
     // 読むコード片(二項演算式と同じくint_div/int_mod/int_arithフラグでpanic層のヘルパを挟む)
     fn gen_compound_value(&self, op: TokenType, target: &Expr, current_code: &str, value_expr: &Expr, rhs: &str, pos: Pos) -> CodegenResult<String> {
-        let info = checker::infer_binary(&self.ctx, op, target, value_expr);
+        let info = checker::infer_binary(&self.ctx, op, target, value_expr, pos)?;
         let at = self.at(pos);
         if info.int_div {
             return Ok(format!("__idiv({current_code}, {rhs}, {at})"));
@@ -888,7 +888,7 @@ impl Codegen {
             Expr::None { .. } => Ok("null".to_string()), // noneの実行時表現はnull
             Expr::Ident { name, .. } => Ok(name.clone()),
             Expr::Binary { op, left, right, pos } => {
-                let info = checker::infer_binary(&self.ctx, *op, left, right);
+                let info = checker::infer_binary(&self.ctx, *op, left, right, *pos)?;
                 let l = self.gen_expr(left)?;
                 let r = self.gen_expr(right)?;
                 let at = self.at(*pos);
@@ -2786,5 +2786,59 @@ mod tests {
         let src = "error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\" }\nfn main() {\n  e := DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}";
         let js = gen_body(src);
         assert!(js.contains("__errTag({ kind: \"notFound\", table: \"users\" })"), "got: {js}");
+    }
+
+    // ---- milestone 13: 算術演算子の妥当性検査(is_numericのUnion/ANY問題) ----
+
+    #[test]
+    fn 未絞り込みのchan受信結果への算術はerrになる() {
+        // 以前は静かに素通りしてJSの浮動小数点`/`を生成していた(本来Meshの切り捨て
+        // 除算`__idiv`が必要な`int`のはずが、`int | closed`という未絞り込みのunion型の
+        // ままだったため、is_numericのUnion非対応でチェックをすり抜けていた)
+        let err = gen_js(
+            "fn main() {\n  ch := chan<int>(1)\n  ch <- 7\n  x := <-ch\n  y := x / 2\n  print(y)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid operation"), "got: {err}");
+    }
+
+    #[test]
+    fn 未絞り込みのmap読み取り結果への算術はerrになる() {
+        let err = gen_js(
+            "fn main() {\n  m := map<string, int>{\"a\": 1}\n  x := m[\"a\"]\n  y := x + 1\n  print(y)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid operation"), "got: {err}");
+    }
+
+    #[test]
+    fn bool同士の引き算のような無効な算術はerrになる() {
+        let err = gen_js("fn main() {\n  y := true - false\n  print(y)\n}").unwrap_err();
+        assert!(err.contains("invalid operation"), "got: {err}");
+    }
+
+    #[test]
+    fn is_closedで絞り込んだ後のchan受信結果への算術は今まで通りidivを経由する() {
+        let js = gen_body(
+            "fn main() {\n  ch := chan<int>(1)\n  ch <- 7\n  v := <-ch\n  if v is closed {\n    return\n  }\n  y := v / 2\n  print(y)\n}",
+        );
+        assert!(js.contains("__idiv(v, 2,"), "got: {js}");
+    }
+
+    #[test]
+    fn orで絞り込んだ後のmap読み取り結果への算術は今まで通りiarithを経由する() {
+        let js = gen_body(
+            "fn main() {\n  m := map<string, int>{\"a\": 1}\n  x := m[\"a\"] or 0\n  y := x + 1\n  print(y)\n}",
+        );
+        assert!(js.contains("__iarith(x, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn any型が絡む算術は相手がstruct等の非数値型でも常に許可される() {
+        // 未宣言の識別子はANYへフォールバックする(infer_exprの既存挙動)。TS版と同じ
+        // 「is_numeric分岐の外側のANY安全弁」がここで効いていることの確認
+        // (無ければ`ANY + struct`が誤ってErrになってしまう)
+        let js = gen_body("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  print(undeclaredVar + u)\n}");
+        assert!(js.contains("(undeclaredVar + u)"), "got: {js}");
     }
 }

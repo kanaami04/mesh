@@ -1633,6 +1633,71 @@
           単なるスコープ判断、上記参照**)・`gen_lvalue`(代入先)のフィールド名検証・
           struct宣言時点の`__proto__`ガード(いずれもPR #17以来の既知の限界のうち、
           今回のスコープに含めなかった残り)。
+  - [x] **checker+codegen milestone 13(算術演算子の妥当性検査・is_numericの
+        Union/ANY問題)** ✅ 2026-07-24実装。milestone 12完了後、残る既知の限界の
+        うち「`is_numeric`のUnion/ANY対応」に着手した。当初は「union型への算術が
+        おかしくなる」という狭い問題だと見積もっていたが、TS版
+        `src/checker/expressions.ts`の`checkArithOp`を読み、実際にTS版へ複数
+        パターンを通して検証した結果、**Rust版には算術演算子(`+ - * / %`)の
+        妥当性検査が一切無い**という、より根本的な穴だと判明した——両辺が
+        「両方int/float」でも「両方stringで`+`」でもない組み合わせは、TS版なら
+        `invalid-operation`で拒否するところを、Rust版は無条件にANY型・フラグ無しへ
+        フォールバックし、生のJS演算子をそのまま出力してしまっていた。実機確認:
+        `x := <-ch; y := x / 2`(`x`は`int | closed`、未絞り込み)はTS版が
+        `invalid-operation`で拒否するが、Rust版は素通りしてJSの浮動小数点`/`を
+        生成(本来Meshの切り捨て除算`__idiv`が必要)。`true - false`(bool同士の
+        引き算)も同様にTS版は拒否・Rust版は`(a - b)`という無意味なJSを生成していた。
+        「union型への算術」(map読み取り`V | none`・channel受信/select結果
+        `T | closed`を`is`/`match`で絞り込む前に演算するケース、PR #19以来
+        繰り返し記録されてきた限界)は、この一般的な穴の一種類にすぎなかった。
+        - kanayamaと相談し、milestone 2以来一貫している「TS本体は診断、Rust版は
+          明確なErr」パターンをそのまま適用することで合意。スコープは**算術演算子
+          (`+ - * / %`)のみ**とし、比較演算子(`< <= > >=`)の`incomparable-types`
+          検査・`&&`/`||`の`not-bool`検査・`==`/`!=`絡みの検査(`use-is-none`/
+          `incomparable-types`)は別カテゴリの診断のため対象外(struct literal
+          検証のときにpkg修飾側を切り離したのと同じ考え方)。
+        - `checker.rs`: `check_arith_op`/`infer_binary`の戻り値を`BinaryInfo`から
+          `Result<BinaryInfo, String>`へ変更。TS版`checkArithOp`と同じロジック
+          (両方numeric・両方stringy+`+`・どちらかANYはそれぞれOk、それ以外は
+          `invalid-operation`相当のErr)を移植。**重要な点**: 「どちらかANYなら
+          常に許す」チェックがTS版と同じく2箇所ある(is_numeric分岐の中と外)——
+          is_numeric(ANY)は`true`なので、`ANY op 非数値非ANY型`(例:
+          `ANY + 構造体`)は最初のis_numeric分岐(両方numericの条件)を満たさず、
+          2つ目のANY安全弁で初めて拾われる。1段しか無いとこのケースが誤ってErrに
+          なってしまうところだった。`infer_expr`の`Expr::Binary`分岐自体は
+          「checkerは診断を出さず常に何かを返す」設計を維持するため、Errは
+          ANYへ飲み込む(milestone 12の`resolve_struct_lit_member`等を`infer_expr`
+          からは呼ばず、codegen側からだけ呼んだのと同じ構図)。
+        - `codegen.rs`: `Expr::Binary`のcodegenと`gen_compound_value`(`+=`等の
+          複合代入)の2箇所で`infer_binary`の呼び出しに`?`を追加。**複合代入の
+          Indexターゲット(`m[k] += v`等)は影響を受けない**——mapは
+          `gen_index_assign`の別経路で複合代入自体を既に明確なErrにしており
+          (TS版`compound-assign-on-map`診断と同じ理由、milestone 4以来)、配列は
+          添字読みがelem型を直接返すため(union化しない、`checker.rs`の
+          `Expr::Index`推論参照)そもそも対象外——今回の変更で影響を受けるのは
+          ident/構造体フィールドへの複合代入のみ。
+        - 新規ユニットテスト`checker.rs`4件(bool同士の算術・struct同士の算術・
+          未絞り込みunion型への算術がいずれもErrになること、ANYが絡む場合は
+          相手がstruct/unionでも常にOkのままなこと)+`codegen.rs`6件
+          (chan受信/map読み取りの未絞り込み算術がErr・bool算術がErr・`is closed`/
+          `or`で絞り込んだ後は今まで通り`__idiv`/`__iarith`を経由・ANYが絡む算術は
+          相手の型に関わらず許可される)。既存の`infer_binary`直接呼び出し
+          テスト6件は`.unwrap()`化。304→314件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example
+          (22本、自己参照型で対象外の`tree.mesh`を除く)を再実行しbyte-for-byte
+          一致で回帰無しを確認(milestone 12と同じ理由——既存の全exampleは既に
+          TS版のこの`checkArithOp`検査を通過しているプログラムのため、理論上も
+          回帰しないはず、実際に回帰無しだった)。実際に`<-ch`/map読み取り/
+          `true - false`の3パターンをRust版・TS版両方でコンパイルし、両者とも
+          同じ理由(`invalid-operation`)で拒否すること、エラーメッセージの
+          位置情報まで完全一致することを確認済み。
+        - **milestone 13のスコープ外(意図的)**: 比較演算子(`< <= > >=`)の
+          `incomparable-types`検査・`&&`/`||`の`not-bool`検査・`==`/`!=`絡みの
+          `use-is-none`/`incomparable-types`検査(いずれも別カテゴリの診断、
+          必要なら次のmilestone候補)。TS版がコンパイル時に検出するリテラル`0`
+          除算の`division-by-zero`診断(Rust版は既に実行時の`__idiv`/`__imod`が
+          ゼロ除算をpanicで検出しており、milestone 1由来——正しさの観点では
+          既に担保済みのため、コンパイル時の早期発見という利便性の差のみ)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
