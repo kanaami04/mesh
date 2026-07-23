@@ -481,10 +481,16 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   ANYへフォールバックし、診断を出さない設計を維持——codegen側だけがErrを外へ
   伝える)。スコープは算術演算子のみ(比較演算子`< <= > >=`の`incomparable-types`・
   `&&`/`||`の`not-bool`・`==`/`!=`絡みの検査は別カテゴリの診断として対象外)。
-  テスト304→314件(+10)、既存の全example(22本)がbyte-for-byte一致のまま回帰無し。
-  `<-ch`/map読み取り/`true - false`の3パターンをRust版・TS版両方でコンパイルし、
-  同じ理由・同じ位置情報で拒否されることまで確認済み。詳細はtodo.mdの当該項目が
-  一次情報源
+  **code reviewで見つかった最重要指摘**: unary`-`と`++`/`--`がTS版で算術演算子と
+  全く同じ`invalid-operation`診断を共有しているのに一切検査されておらず
+  (`x := <-ch; x++`・`bools[0]++`〈bool配列〉等が無診断で素通りしJSの暗黙型変換で
+  壊れた値になっていた)、「is_numericのUnion/ANY問題を閉じる」という今回の目的
+  そのものに直結する漏れだったため、`check_unary_minus`/`check_inc_dec`を追加し
+  スコープに含めた。ほかTS版の唯一の"hint"メッセージ(`+`かつ片側がstringのとき
+  「str()で変換を」)の移植漏れも修正。テスト304→322件(+18)、既存の全example
+  (22本)がbyte-for-byte一致のまま回帰無し。`<-ch`/map読み取り/`true - false`/
+  `bools[0]++`の各パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
+  位置情報で拒否されることまで確認済み。詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの13マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの

@@ -1666,16 +1666,32 @@
           2つ目のANY安全弁で初めて拾われる。1段しか無いとこのケースが誤ってErrに
           なってしまうところだった。`infer_expr`の`Expr::Binary`分岐自体は
           「checkerは診断を出さず常に何かを返す」設計を維持するため、Errは
-          ANYへ飲み込む(milestone 12の`resolve_struct_lit_member`等を`infer_expr`
-          からは呼ばず、codegen側からだけ呼んだのと同じ構図)。
+          ANYへ飲み込む。**訂正(2026-07-24、code-comments準拠エージェント指摘)**:
+          当初「milestone 12の`resolve_struct_lit_member`等を`infer_expr`からは
+          呼ばず、codegen側からだけ呼んだのと同じ構図」と説明していたが、これは
+          不正確——`resolve_struct_lit_member`等はそもそも`infer_expr`から一切
+          呼ばれておらず(`Expr::StructLit`分岐は別の常に成功する近似ロジックを使う)、
+          `infer_binary`は`infer_expr`内部から呼ばれる初めての「失敗しうる
+          checker関数」という、実は前例の無い新しいパターンだった。現状安全なのは、
+          生成JSに現れる`Expr::Binary`は必ずcodegenの`gen_expr`自身が直接その式を
+          訪れて`?`付きで`infer_binary`を呼び直すため(飲み込まれたErrが素通りする
+          経路が無い)であって、既存パターンを踏襲しているからではない
+          (`checker.rs`のコメントも訂正済み)。
         - `codegen.rs`: `Expr::Binary`のcodegenと`gen_compound_value`(`+=`等の
-          複合代入)の2箇所で`infer_binary`の呼び出しに`?`を追加。**複合代入の
-          Indexターゲット(`m[k] += v`等)は影響を受けない**——mapは
-          `gen_index_assign`の別経路で複合代入自体を既に明確なErrにしており
-          (TS版`compound-assign-on-map`診断と同じ理由、milestone 4以来)、配列は
-          添字読みがelem型を直接返すため(union化しない、`checker.rs`の
-          `Expr::Index`推論参照)そもそも対象外——今回の変更で影響を受けるのは
-          ident/構造体フィールドへの複合代入のみ。
+          複合代入)の2箇所で`infer_binary`の呼び出しに`?`を追加。複合代入の
+          Indexターゲット(`m[k] += v`等)のうちmapは`gen_index_assign`の別経路で
+          複合代入自体を既に明確なErrにしている(TS版`compound-assign-on-map`診断と
+          同じ理由、milestone 4以来)。**訂正(2026-07-24、git historyレビュー
+          エージェント指摘・実行確認済み)**: 「配列は添字読みがelem型を直接返す
+          ため今回の変更の影響を受けない」と説明していたが、これは`int[]`のような
+          単純な配列に限った話で不正確だった——`(int | none)[]`のように配列の
+          要素型自体がunionの場合、`Expr::Index`は(unionに包み直さず)そのunion型を
+          そのまま返すため、`x: (int | none)[] = [1, none]; x[0] += 1`のような
+          複合代入も新しく`invalid-operation`のErrになる(以前は無診断で素通り
+          していた)。これは望ましい追加のバグ修正であり(現状どのexample/testも
+          この構文を使っておらず退行なし)、影響を受けるのは「ident/構造体
+          フィールドへの複合代入」に限らず「複合代入する値の型が結局union型に
+          なる場合すべて」というのが正確な説明。
         - 新規ユニットテスト`checker.rs`4件(bool同士の算術・struct同士の算術・
           未絞り込みunion型への算術がいずれもErrになること、ANYが絡む場合は
           相手がstruct/unionでも常にOkのままなこと)+`codegen.rs`6件
@@ -1691,6 +1707,43 @@
           `true - false`の3パターンをRust版・TS版両方でコンパイルし、両者とも
           同じ理由(`invalid-operation`)で拒否すること、エラーメッセージの
           位置情報まで完全一致することを確認済み。
+        - **5エージェントのcode reviewで発見・即修正した3件**(いずれも実行確認済み):
+          1. TS版`checkArithOp`が唯一持つ"hint"メッセージ(`+`かつどちらかがstring
+             本体のとき「str()で変換を」という救済メッセージ、str()呼び忘れという
+             典型的なミス向け)が移植から丸ごと漏れていた——3エージェント独立指摘。
+             `check_arith_op`のErr組み立てに同じ条件分岐を追加して解消。
+          2. **unary`-`と`++`/`--`(IncDec)が、算術演算子(`+ - * / %`)と全く同じ
+             `invalid-operation`診断をTS版で共有しているにもかかわらず、一切
+             検査されていなかった**(git historyレビューエージェント発見・
+             最も重要な指摘)。実機確認: `x := <-ch; x++`(未絞り込み)・
+             `bools := [true, false]; bools[0]++`(bool配列)・
+             `x := m["a"]; y := -x`(未絞り込みmap読み取り)は、いずれもTS版が
+             `invalid-operation`で拒否するがRust版は無診断で素通りし、JSの
+             暗黙のbool→number変換等で意味不明な値を静かに生成していた——
+             今回のPRが「is_numericのUnion/ANY問題を閉じる」と謳っていた
+             まさにその根本原因(`isNumeric`ゲートの欠落)を共有する兄弟演算子
+             だったため、スコープに含めて修正。新設`check_unary_minus`/
+             `check_inc_dec`(TS版`case "unary"`/`case "incDec"`のisNumeric検査
+             部分の移植、`!`のnot-bool検査は比較/論理演算子と同じ別カテゴリの
+             ため対象外のまま)を、`Expr::Unary`のcodegen・`Stmt::IncDec`の
+             通常/for-header双方のcodegen・`gen_index_incdec`(配列要素の
+             インクリメント)の計4箇所へ配線。
+          3. **ドキュメント上の不正確な記述2件を訂正**(code-comments準拠・
+             past-PRコメントの両エージェントが独立発見): (a)「複合代入の
+             Indexターゲットは配列なら影響を受けない」という説明が、要素型
+             自体がunionの配列(`(int | none)[]`)には実は影響する(望ましい
+             追加のバグ修正)ことが分かり訂正、(b)「`infer_expr`が`infer_binary`
+             のErrを飲み込むのはmilestone 12の`resolve_struct_lit_member`等と
+             同じ構図」という説明が、その関数群はそもそも`infer_expr`から一切
+             呼ばれていないため不正確だったと分かり訂正(`checker.rs`のコメントも
+             あわせて訂正)。
+          新規ユニットテスト`checker.rs`3件(hintメッセージ・`check_unary_minus`・
+          `check_inc_dec`)+`codegen.rs`5件(hintメッセージ・未絞り込みunionへの
+          単項マイナス/incdecがErr・bool配列incdecがErr・絞り込み後は今まで通り
+          動くこと)。314→322件、全件パス。`cargo clippy --all-targets -- -D
+          warnings`クリーン。既存の全example(22本)を再度byte-for-byte確認
+          (回帰無し)、`bools[0]++`をRust版・TS版両方でコンパイルし同じ理由・
+          同じ位置情報で拒否することも確認済み。
         - **milestone 13のスコープ外(意図的)**: 比較演算子(`< <= > >=`)の
           `incomparable-types`検査・`&&`/`||`の`not-bool`検査・`==`/`!=`絡みの
           `use-is-none`/`incomparable-types`検査(いずれも別カテゴリの診断、

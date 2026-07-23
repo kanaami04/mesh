@@ -663,9 +663,18 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // (__iarithのオーバーフロー安全ガード選択等)が効かなくなる。ローカル変数が
         // 優先されるのはTS版の実際のスコープ規則(内側の宣言が外側を覆う)と同じ
         Expr::Ident { name, .. } => ctx.lookup(name).cloned().or_else(|| ctx.lookup_fn(name).cloned()).unwrap_or(ANY),
-        // milestone 13: infer_binaryはInvalid operationをErrで返すようになったが、
-        // infer_expr自身は診断を出さない設計を維持するためErrはANYへ飲み込む
-        // (codegen側だけがこのErrを外へ伝える——resolve_struct_lit_member等と同じ構図)
+        // milestone 13: infer_binaryはinvalid operationをErrで返すようになったが、
+        // infer_expr自身は診断を出さない設計を維持するためErrはANYへ飲み込む。
+        // **code review指摘で訂正**: milestone 12の`resolve_struct_lit_member`等は
+        // そもそも`infer_expr`から一切呼ばれない(`Expr::StructLit`分岐は別の・常に
+        // 成功する近似ロジックを使う)ため、実は同じ構図ではない——`infer_binary`は
+        // `infer_expr`内から呼ばれる初めての「失敗しうるchecker関数」。今のところ
+        // 安全なのは、生成JSに現れる`Expr::Binary`は必ずcodegen自身の`gen_expr`が
+        // 直接その式を訪れて`?`付きで同じ`infer_binary`を呼び直す(例:
+        // struct literalのフィールド値の型をここ経由で見た後、同じ式を
+        // `self.gen_expr`でも生成する、codegen.rs参照)ため——「ANYへ飲み込まれた
+        // Errが握り潰されたまま素通りする」経路が無いからであって、他のchecker関数と
+        // 同じ設計パターンを踏襲しているからではない
         Expr::Binary { op, left, right, pos } => infer_binary(ctx, *op, left, right, *pos).map(|i| i.result).unwrap_or(ANY),
         Expr::Unary { operand, .. } => infer_expr(ctx, operand),
         Expr::Call { callee, args, .. } => infer_call(ctx, callee, args),
@@ -1054,14 +1063,47 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type, pos: Pos) -> Result<
     if matches!(left, Type::Any) || matches!(right, Type::Any) {
         return Ok(no_flags(ANY));
     }
-    // 不正な演算(型不一致・未絞り込みのunion型への算術等)——TS版`invalid-operation`相当
+    // 不正な演算(型不一致・未絞り込みのunion型への算術等)——TS版`invalid-operation`相当。
+    // TS版はop==='+'かつどちらかがstring本体のとき「str()で変換を」というヒントを
+    // 追加する(str+非stringのtypoでstr()呼び忘れに気付けるように、TS本体のこの
+    // 診断で唯一のhintメッセージ)——code review指摘で発覚した移植漏れ、実行確認済み
+    let hint = if op == TokenType::Plus && (types::type_equals(left, &STRING) || types::type_equals(right, &STRING)) {
+        " (hint: use str() to convert values to string)"
+    } else {
+        ""
+    };
     Err(format!(
-        "checker: invalid operation: {} {op} {} ({}:{})",
+        "checker: invalid operation: {} {op} {}{hint} ({}:{})",
         types::type_to_string(left),
         types::type_to_string(right),
         pos.line,
         pos.col
     ))
+}
+
+// 単項`-`の妥当性検査。TS版`case "unary"`(src/checker/expressions.ts:292-301)の
+// isNumeric検査部分の移植——同じcaseにある`!`の検査(`not-bool`診断)は比較/論理演算子と
+// 同じ別カテゴリのため対象外のまま(§計画参照)。git historyレビューで指摘・実行確認済み:
+// unary`-`はcheck_arith_opと全く同じ`invalid-operation`診断を共有するため、今回の
+// 算術演算子の妥当性検査から漏らすと`y := -x`(xが未絞り込みのunion型等)が
+// 静かに素通りしてしまう
+pub fn check_unary_minus(operand: &Type, pos: Pos) -> Result<(), String> {
+    if types::is_numeric(operand) {
+        Ok(())
+    } else {
+        Err(format!("checker: unary '-' requires int or float, got {} ({}:{})", types::type_to_string(operand), pos.line, pos.col))
+    }
+}
+
+// `++`/`--`の妥当性検査。TS版`case "incDec"`(src/checker/statements.ts:286-294)の
+// isNumeric検査部分の移植(mutable-assignment検査は別の既存の仕組みなので対象外)。
+// unary`-`と同じ理由でcheck_arith_opと同じ診断を共有するため今回のスコープに含める
+pub fn check_inc_dec(op: TokenType, target: &Type, pos: Pos) -> Result<(), String> {
+    if types::is_numeric(target) {
+        Ok(())
+    } else {
+        Err(format!("checker: '{op}' requires int or float, got {} ({}:{})", types::type_to_string(target), pos.line, pos.col))
+    }
 }
 
 // 呼び出し式の型推論。自由関数(fn_decls)の戻り値型 → 組み込みの戻り値型の順で引く
@@ -1309,6 +1351,34 @@ mod tests {
         let (a, b, c) = (ident("a"), ident("b"), ident("c"));
         assert!(matches!(infer_binary(&ctx, TokenType::Plus, &a, &b, pos()).unwrap().result, Type::Any));
         assert!(matches!(infer_binary(&ctx, TokenType::Star, &a, &c, pos()).unwrap().result, Type::Any));
+    }
+
+    #[test]
+    fn 算術のinvalid_operationはplusかつ片側がstringならヒントが付く() {
+        // TS版`checkArithOp`が唯一持つhintメッセージ(str()忘れの典型ミス救済)。
+        // code review指摘で発覚した移植漏れ、実行確認済み
+        let err = check_arith_op(TokenType::Plus, &STRING, &INT, pos()).unwrap_err();
+        assert!(err.contains("hint: use str() to convert values to string"), "got: {err}");
+        let err2 = check_arith_op(TokenType::Minus, &STRING, &INT, pos()).unwrap_err();
+        assert!(!err2.contains("hint"), "got: {err2}"); // +以外はヒント無し
+    }
+
+    #[test]
+    fn check_unary_minusは数値以外にはerrになりanyには常に許可される() {
+        // git historyレビュー指摘・実行確認済み: unary`-`はcheck_arith_opと同じ
+        // invalid-operation診断を共有するのに以前は検査が一切無かった
+        assert!(check_unary_minus(&INT, pos()).is_ok());
+        assert!(check_unary_minus(&Type::Any, pos()).is_ok());
+        let err = check_unary_minus(&types::union_of(vec![INT, NONE]), pos()).unwrap_err();
+        assert!(err.contains("unary '-' requires int or float"), "got: {err}");
+    }
+
+    #[test]
+    fn check_inc_decは数値以外にはerrになりanyには常に許可される() {
+        assert!(check_inc_dec(TokenType::PlusPlus, &INT, pos()).is_ok());
+        assert!(check_inc_dec(TokenType::MinusMinus, &Type::Any, pos()).is_ok());
+        let err = check_inc_dec(TokenType::PlusPlus, &BOOL, pos()).unwrap_err();
+        assert!(err.contains("'++' requires int or float"), "got: {err}");
     }
 
     #[test]
