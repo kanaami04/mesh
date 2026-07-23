@@ -33,7 +33,9 @@ pub fn is_builtin(name: &str) -> bool {
 
 // TS版`CheckerCtx`のうち、milestone 2(struct/メソッド。パッケージはまだ無し)で使う部分だけを
 // 持つ。スコープスタック(narrowingは対象外)・トップレベル関数のシグネチャ表・struct型表・
-// メソッド表のみ
+// メソッド表のみ。Cloneはselectのアーム推論(infer_expr参照)が使い捨てのスクラッチctxを
+// 作るために必要——infer_exprは&CheckerCtx(不変参照)しか受け取らないため
+#[derive(Clone)]
 pub struct CheckerCtx {
     scopes: Vec<HashMap<String, Type>>,
     fn_decls: HashMap<String, Type>,
@@ -301,9 +303,72 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
             t if types::is_stringy(&t) => STRING,
             _ => ANY,
         },
-        // M4未対応の式(channel/並行処理等)はANYへ最善努力でフォールバックする。
-        // codegen側がこれらの構文自体を「まだ対応していません」と明確なエラーにするので、
-        // ここで型を誤魔化しても実害は無い
+        // chan<T>(cap): capacityの値そのものは型に影響しない
+        Expr::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node(ctx, elem))),
+        // <-ch は常に T | closed(mapの読みがV | noneになるのと同じ理由——closeされうる
+        // ことを型で強制する)。chanでなければ(診断は出さないこのリゾルバでは)ANYへ
+        // 最善努力でフォールバック
+        Expr::Recv { channel, .. } => match infer_expr(ctx, channel) {
+            Type::Chan(elem) => types::union_of(vec![*elem, types::CLOSED]),
+            _ => ANY,
+        },
+        // spawn/detachはcheckerの視点では同一(detachedを見ない——TS版のcheckerと同じ)。
+        // 戻り値がvoidの関数なら起動するだけ(受取口なし)、それ以外はchan<戻り値型>
+        // (呼び出し先が起動時点で1回だけ結果を送る受信専用チャネルとして扱われる)
+        Expr::Spawn { call, .. } => {
+            let ret = infer_expr(ctx, call);
+            if types::type_equals(&ret, &VOID) { VOID } else { Type::Chan(Box::new(ret)) }
+        }
+        // selectは各アーム(+default)のunion(TS版のmatch-select.tsと同じ)。TS版はアームごとに
+        // スコープをpushして束縛名を宣言してからbodyを推論する。infer_exprは&CheckerCtx
+        // (不変参照)しか受け取らず、共有ctxへスコープをpushすることはできないため、
+        // アームごとに使い捨てのスクラッチctx(clone)を作って束縛名を正しく宣言してから
+        // そのスクラッチ上でbodyを推論する(このスクラッチはこの1回の推論だけに使い、
+        // すぐ捨てる——gen_select〈codegen側〉が&mut self.ctxで行うpush_scope/declare/
+        // pop_scopeと結果的に同じ効果になる)。
+        // code review指摘: 以前は束縛名を宣言せず無条件にinfer_expr(ctx, ...)へ渡していた——
+        // 「未解決の参照はANYになるだけで無害」という想定だったが、これは2つの意味で
+        // 誤りだった。(1) 束縛名がbody内でそのまま参照される典型的なイディオム
+        // (`v := <-ch => v`)では、その参照自体が常にANYになり、union_ofがANYを含む
+        // union を丸ごとANYへ潰してしまう——結果としてselect式全体の型が(本来の
+        // `T | closed`ではなく)ANYになり、後続コードでのmap/chanへの安全ガード
+        // (Union添字ガード・非chanへのrecvガード等、いずれもANYは素通しする設計)を
+        // 静かにすり抜けてしまう。(2) 束縛名が外側スコープの型が違う変数をshadowして
+        // いる場合、bodyの中の参照が外側の(誤った)型に解決されてしまう(例:
+        // `v := 42; ... select { v := <-ch => v }`で`v`が誤ってintと推論され、
+        // 後続の算術が実際はstringの値に対して`__iarith`を選び、紛らわしい実行時
+        // パニックになる)。どちらも実際に再現確認済み
+        Expr::Select { arms, default_arm, .. } => {
+            let mut arm_types: Vec<Type> = arms
+                .iter()
+                .map(|a| {
+                    let elem_ty = match infer_expr(ctx, &a.channel) {
+                        Type::Chan(elem) => types::union_of(vec![*elem, types::CLOSED]),
+                        _ => ANY,
+                    };
+                    let mut scratch = ctx.clone();
+                    scratch.declare(&a.name, elem_ty);
+                    infer_expr(&scratch, &a.body)
+                })
+                .collect();
+            if let Some(def) = default_arm {
+                arm_types.push(infer_expr(ctx, def));
+            }
+            if arm_types.is_empty() {
+                ANY
+            } else {
+                let void_count = arm_types.iter().filter(|t| types::type_equals(t, &VOID)).count();
+                if void_count == arm_types.len() {
+                    VOID
+                } else if void_count > 0 {
+                    ANY // TS版のmixed-void-arms診断に相当。診断を出さないのでANYへ寛容フォールバック
+                } else {
+                    types::union_of(arm_types)
+                }
+            }
+        }
+        // M5未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
+        // 「まだ対応していません」と明確なエラーにするので、ここで型を誤魔化しても実害は無い
         _ => ANY,
     }
 }
@@ -506,6 +571,7 @@ fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Typ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::SelectArm;
     use crate::token::Pos;
 
     fn pos() -> Pos {
@@ -856,5 +922,98 @@ mod tests {
         declare_range_for_names(&mut ctx, &ANY, &["a".to_string(), "b".to_string()]);
         assert!(matches!(ctx.lookup("a"), Some(Type::Any)));
         assert!(matches!(ctx.lookup("b"), Some(Type::Any)));
+    }
+
+    fn int_type_node() -> TypeNode {
+        TypeNode::Name { name: "int".into(), pkg: None, pos: pos() }
+    }
+
+    fn ident(name: &str) -> Expr {
+        Expr::Ident { name: name.into(), pos: pos() }
+    }
+
+    #[test]
+    fn infer_exprはchan生成の型をcapacityによらず推論する() {
+        let ctx = CheckerCtx::new();
+        let none_cap = Expr::Chan { elem: int_type_node(), capacity: Box::new(Expr::None { pos: pos() }), pos: pos() };
+        let num_cap = Expr::Chan { elem: int_type_node(), capacity: Box::new(int_lit("5")), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &none_cap), &Type::Chan(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &num_cap), &Type::Chan(Box::new(INT))));
+    }
+
+    #[test]
+    fn infer_exprのrecvはt_or_closedになりchan以外はanyにフォールバックする() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("ch", Type::Chan(Box::new(INT)));
+        ctx.declare("notch", INT);
+        let recv_ch = Expr::Recv { channel: Box::new(ident("ch")), pos: pos() };
+        let recv_notch = Expr::Recv { channel: Box::new(ident("notch")), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &recv_ch), &types::union_of(vec![INT, types::CLOSED])));
+        assert!(matches!(infer_expr(&ctx, &recv_notch), Type::Any));
+    }
+
+    #[test]
+    fn infer_exprのspawnはvoid戻り値ならvoid_それ以外はchanになりdetachedを見ない() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
+        ctx.declare_fn("compute", Type::Fn { params: vec![], ret: Box::new(INT) });
+        let call = |name: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![], pos: pos() };
+        let spawn_void = Expr::Spawn { call: Box::new(call("log")), detached: false, pos: pos() };
+        let detach_void = Expr::Spawn { call: Box::new(call("log")), detached: true, pos: pos() };
+        let spawn_int = Expr::Spawn { call: Box::new(call("compute")), detached: false, pos: pos() };
+        let detach_int = Expr::Spawn { call: Box::new(call("compute")), detached: true, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &spawn_void), &types::VOID));
+        assert!(types::type_equals(&infer_expr(&ctx, &detach_void), &types::VOID));
+        assert!(types::type_equals(&infer_expr(&ctx, &spawn_int), &Type::Chan(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &detach_int), &Type::Chan(Box::new(INT))));
+    }
+
+    #[test]
+    fn infer_exprのselectはアームとdefaultのunionになり全void_混在も扱う() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
+        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos() };
+        let arm = |body: Expr| SelectArm { name: "v".into(), channel: ident("ch"), body, pos: pos() };
+
+        let all_int = Expr::Select {
+            arms: vec![arm(int_lit("1")), arm(int_lit("2"))],
+            default_arm: Some(Box::new(int_lit("3"))),
+            pos: pos(),
+        };
+        assert!(types::type_equals(&infer_expr(&ctx, &all_int), &INT));
+
+        let all_void = Expr::Select { arms: vec![arm(void_call()), arm(void_call())], default_arm: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &all_void), &types::VOID));
+
+        let mixed = Expr::Select { arms: vec![arm(int_lit("1")), arm(void_call())], default_arm: None, pos: pos() };
+        assert!(matches!(infer_expr(&ctx, &mixed), Type::Any));
+    }
+
+    #[test]
+    fn infer_exprのselectはアーム束縛名を正しくelem_or_closedとして推論する() {
+        // code review指摘: 以前は束縛名を宣言せずにbodyを推論していたため、
+        // `v := <-ch => v`のようにbodyが束縛名をそのまま参照するとその参照が
+        // 常にANYになり、select式全体の型もANYへ潰れていた(Union添字ガード等の
+        // 「確実に非chan/非mapだと分かる場合だけ弾く」ガードをすり抜けてしまう)。
+        // 束縛名を正しくchanのelem型(| closed)として推論できることを確認する
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("ch", Type::Chan(Box::new(INT)));
+        let arm = SelectArm { name: "v".into(), channel: ident("ch"), body: ident("v"), pos: pos() };
+        let select = Expr::Select { arms: vec![arm], default_arm: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &select), &types::union_of(vec![INT, types::CLOSED])));
+    }
+
+    #[test]
+    fn infer_exprのselectはアーム束縛名が外側の同名変数をshadowしても外側の型を漏らさない() {
+        // code review指摘: 束縛名が外側スコープの型が違う変数をshadowしている場合、
+        // 以前は外側の(誤った)型がbodyの推論に漏れてきていた(`v := 42; ... select {
+        // v := <-ch => v }`でchの中身がintでなくても`v`がintと誤推論される)
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("v", INT); // 外側スコープのvはint
+        ctx.declare("ch", Type::Chan(Box::new(STRING)));
+        let arm = SelectArm { name: "v".into(), channel: ident("ch"), body: ident("v"), pos: pos() };
+        let select = Expr::Select { arms: vec![arm], default_arm: None, pos: pos() };
+        // 束縛したvの型(string | closed)が推論されるべきで、外側のint型が漏れてはいけない
+        assert!(types::type_equals(&infer_expr(&ctx, &select), &types::union_of(vec![STRING, types::CLOSED])));
     }
 }

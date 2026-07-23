@@ -210,8 +210,40 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   につき既知の限界として明記するに留めた。現在テスト182件、
   `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
   一次情報源
-- **次にやるなら**: milestone 5(並行処理。次いでモジュール、の順で
-  `examples/*.mesh`を1本ずつ動かす計画。todo.md参照)
+- **checker+codegen milestone 5(並行処理)完了(2026-07-23)**。`chan`/`spawn`/`detach`/
+  `wait`/`select`/`<-`(recv)/`ch <- v`(send)を実装。パーサー・型システム
+  (`Type::Chan`/`Type::Closed`)・ランタイム(`__Channel`/`__recv`/`__select`/`__spawn`/
+  `__detach`/`__waitStack`)は既存の仕組み(TS版`runtime.ts`を`include_str!`で丸ごと
+  埋め込み)で既に揃っていたため、`checker.rs`の式推論と`codegen.rs`のみが対象。
+  `gen_fn_decl`を`prop_used`/`spawn_used`の2フラグ合成に書き換え(neither/propのみ/
+  spawnのみ/両方の4通りでtry/catch/finallyを正しく組み立てる——TS版`genFnBody`の
+  prop/spawn/defer 3フラグ合成と同じ設計。`defer`は`Stmt::DeferStmt`が常にErrを返す
+  ため対象外のまま)。`gen_call`のメソッド呼び出し判定を`resolve_method_target`
+  ヘルパへ切り出し`gen_spawn`と共有(TS版はこの判定を2箇所に重複して持つ)。**Rust版
+  だけの安全ガード**(TS版の`not-a-channel`診断に相当): send/recv/select各アームの
+  channelが確実に非chan/非anyだと分かる場合は明確なErr——milestone 4のIndexの前例
+  (実装コストが高く見送った)とは違い今回は低コストなので新規構文から最初に付けた。
+  新規`examples/concurrency.mesh`を作成し実行確認、既存`examples/channels.mesh`も
+  今回からフルに動くことを確認、`examples/channel_spec.mesh`(`is closed`使用)は
+  引き続き明確な「未対応」エラーになることを確認。詳細はtodo.mdの当該項目が
+  一次情報源
+- **PR #20の5エージェントcode reviewで1件のバグを発見・PR内で修正済み(2026-07-23)**:
+  過去PRコメントレビュー・git履歴レビュー・コードコメント準拠レビューの3エージェントが
+  独立に(別々の切り口・再現コードで)同じ根本原因に到達したバグ——`checker.rs`の
+  `Expr::Select`アームが束縛名をスコープに宣言せずbodyを推論していたため、
+  (1) `v := <-ch => v`のような典型的なイディオムでselect式全体の型が誤ってANYに
+  潰れ、既存/このPR自身の安全ガードをすり抜ける、(2) 束縛名が外側の型が違う変数を
+  shadowすると外側の型が誤って漏れ、紛らわしい実行時パニックになる、という2つの
+  実害を確認。`CheckerCtx`に`Clone`を追加し、アームごとに使い捨てスクラッチctxで
+  束縛名を正しく宣言してから推論する形で修正(codegen側の`gen_select`は元々
+  `&mut self.ctx`で正しく束縛していたため無修正)。他4件(range-forでのchan・
+  `T|closed`への算術・chanへの添字・spawnでの組み込み関数呼び出し)は独立検証で
+  80点未満(既存のPR #19限界の新しい現れ方、またはmilestone 1由来の既存の穴)
+  につき既知の限界として明記するに留めた。現在テスト204件、
+  `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
+  一次情報源
+- **次にやるなら**: milestone 6(モジュール。`examples/*.mesh`を1本ずつ動かす計画。
+  todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

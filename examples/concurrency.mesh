@@ -1,0 +1,78 @@
+// milestone 5: 並行処理(chan/spawn/detach/wait/select/recv/send)。受信/select束縛値には
+// 算術をしない(real TSチェッカーはT|closedへの算術をis絞り込み無しに許さず、絞り込みは
+// まだ移植していないため——print/文字列補間のみ使う)
+
+struct Worker {
+	id: int
+}
+
+fn (w: Worker) greet(msg: string) string {
+	sleep(5)
+	return "worker ${w.id} says: ${msg}"
+}
+
+fn compute(id: int, ch: chan<int>) {
+	sleep(10 * id)
+	ch <- id * 10
+}
+
+fn announce(msg: string, ch: chan<string>, ms: int) {
+	sleep(ms)
+	ch <- msg
+}
+
+fn announceDetached(msg: string) {
+	sleep(5)
+	print("detached: ${msg}")
+}
+
+fn main() {
+	// wait{}: 中でspawnしたタスクを全部待つ明示スコープ
+	results := chan<int>(none)
+	wait {
+		for i := 1; i <= 3; i++ {
+			spawn compute(i, results)
+		}
+		for i := 0; i < 3; i++ {
+			v := <-results
+			print("got: ${v}")
+		}
+	}
+
+	// 容量指定チャネル(本物のブロッキング送信)
+	bounded := chan<string>(2)
+	spawn announce("first", bounded, 10)
+	spawn announce("second", bounded, 20)
+	print(<-bounded)
+	print(<-bounded)
+
+	// メソッド呼び出しのspawn(受取口はchan<string>)
+	w := Worker{id: 7}
+	greeting := spawn w.greet("hello")
+	print(<-greeting)
+
+	// detach: 待たれない起動(戻り値の受取口は無い)
+	detach announceDetached("bye")
+
+	// select: 準備できた方を選ぶ(defaultなし。bには送信者がいないのでaが必ず選ばれる)
+	a := chan<string>(none)
+	b := chan<string>(none)
+	spawn announce("from a", a, 10)
+	msg := select {
+		v := <-a => "a says: ${v}"
+		v := <-b => "b says: ${v}"
+	}
+	print(msg)
+
+	// select: defaultあり(非ブロッキング、どちらのチャネルにも送信者がいない)
+	empty := chan<int>(none)
+	other := chan<int>(none)
+	r := select {
+		v := <-empty => "unexpected: ${v}"
+		v := <-other => "unexpected: ${v}"
+		_ => "nothing ready"
+	}
+	print(r)
+
+	sleep(50) // detachしたタスクの出力がプロセス終了前に確実に出るように
+}
