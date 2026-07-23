@@ -1313,6 +1313,114 @@
           `mesh/http`(無関係、対象外のまま)。cross-file/cross-packageの
           json struct同士のネスト参照(TS版自体がv1スコープ外)。
           `filter`/`map`/`reduce`・`defer`。
+  - [x] **checker+codegen milestone 10(filter/map/reduce)** ✅ 2026-07-23実装。
+        milestone 9完了後、kanayamaと相談し次の対象として選んだ(todo.mdの既知の
+        未対応機能のうち`defer`は今回のスコープ外——`filter`/`map`/`reduce`とは
+        別の独立した機能のため次のmilestone以降に回す)。TS版`src/codegen.ts`
+        (`fnExpr`ケース・`genFnBody`のpropStack/spawnStack設計)・
+        `src/checker/builtins.ts`(filter/map/reduceの型推論)を直接読んで調査。
+        - **これまでの9マイルストーンと違う点**: `filter`/`map`/`reduce`自体の
+          codegen(`(await __filter(...))`等——ランタイムヘルパーはH-2実装時に
+          runtime.ts全体を移植済みで既に揃っていた)は3行で済んだが、その引数と
+          なる**無名関数式(`Expr::FnExpr`)のcodegenがそれまで一切実装されて
+          おらず**(milestone 4以来ずっと明確なErrスタブ)、これを実装するのが
+          今回の本題だった。
+        - **`prop_used`/`spawn_used`を単一フラグからスタックへ変更**: 無名関数は
+          他の関数の中にネストしうる(`g := fn() int { return f()? }`のように
+          無名関数自身が`?`/`spawn`を使うことがあり、外側の関数の使用状況とは
+          独立に判定する必要がある)ため、TS版の`propStack`/`spawnStack`と同じ
+          設計に合わせ`Vec<bool>`のスタックにし、`gen_fn_body`という呼び出し
+          単位でpush/pop。これに伴い、FnDecl/Expr::FnExpr共通の「本体をいったん
+          別バッファに生成し、`?`/`spawn`の使用有無で事後にtry/catch/finally包みを
+          決める」ロジックを`gen_fn_decl`から`gen_fn_body`という共有ヘルパーへ
+          切り出した(`defer`は`Stmt::DeferStmt`が常にErrを返すため今回も対象外の
+          ままでよい)。
+        - `checker.rs`: `infer_expr`に`Expr::FnExpr`(TS版`fnType(ctx, params,
+          ret)`相当——`Type::Fn{params, ret}`を返すだけで本体は検査しない、
+          TS版`checkFn`に相当する処理は診断を出さない設計上不要)を追加(これで
+          `infer_expr`の`match`が全`Expr`variantを尽くす形になり、既存の
+          `_ => ANY`最終フォールバックが到達不能になったため削除)。
+          `infer_builtin_call`に`filter`(対象配列と同じ型をそのまま返す)・
+          `map`(コールバックの戻り値型の配列)・`reduce`(コールバックの第1引数
+          〈累積値〉の型、コールバックの型が確実に分からなければ初期値の型、
+          それも無ければANY)を追加(TS版`builtins.ts`と同じロジック、診断部分は
+          省略)。
+        - `codegen.rs`: `Expr::FnExpr`のcodegen(TS版と同じトリック——
+          indentを0にリセットして隔離バッファへ生成し、出来上がった各行の
+          先頭に呼び出し元の実際のindentを後付けで足す。パラメータは
+          `push_scope`/`declare`してから本体を生成し`pop_scope`)。
+          `filter`/`map`/`reduce`の組み込み呼び出しcodegen(`(await
+          __filter(arr, pred))`等)。組み込みの引数個数安全ガード
+          (PR #19由来の「パニックさせない」設計)に`filter`/`map`→2・
+          `reduce`→3を追加(無いとアリティ不足でpanicする)。
+        - テスト: `checker.rs`に2件(`Expr::FnExpr`のfn型推論・
+          filter/map/reduceの戻り値型推論)、`codegen.rs`に4件(無名関数式の
+          即時評価アロー関数生成・filter/map/reduceのランタイムヘルパー呼び出し・
+          無名関数内の`?`使用が外側の関数を汚さない・無名関数内の`spawn`使用が
+          外側へ漏れない)を追加。266→272件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: `tests/e2e.test.ts`の実際のシナリオ(名前付き関数を値として
+          渡す・インラインクロージャで外側のmut変数を捕捉・mapで要素の型を変える・
+          reduceの2用途〈数値合計・文字列畳み込み〉・filter→map→reduceの
+          パイプライン合成)を元に新規`examples/filter_map_reduce.mesh`を作成し、
+          Rust版で実行して`bun run mesh run`(TS版)の出力とbyte-for-byte一致を
+          確認。既存の全example(`hello`/`fizzbuzz`/`struct_methods`/
+          `error_propagation`/`errors`/`discriminated_union`/`status`/`users`/
+          `channel_spec`/`collections`/`maps`/`concurrency`/`channels`/
+          `modules_demo`/`db_error`/`json_decode`/`json_models_demo`+
+          `mathutil/*`)も回帰無しを再確認。`tree.mesh`の明確なErrも回帰無し。
+        - **PR #25コードレビュー(5エージェント)で発見・実行確認して即修正した4件**
+          (score付けを待たず、milestone 4〜9と同じ「実行して再現確認済みのバグは
+          即修正」の前例に従った、うち3件が独立に複数エージェントから指摘された):
+          1. **裸の識別子がトップレベル関数名を「値として」参照する場合に型が
+             ANYへ落ちる**(`evens := filter(nums, isEven)`のように名前付き関数を
+             コールバックとして渡す形——milestone 10で初めて到達可能になった経路)。
+             `CheckerCtx`はローカル変数用の`scopes`とトップレベル関数用の
+             `fn_decls`を別テーブルで持つが、`infer_expr`の裸`Expr::Ident`分岐は
+             `scopes`(`ctx.lookup`)しか見ておらず、`fn_decls`へのフォールバックが
+             無かった。`ctx.lookup(name).cloned().or_else(|| ctx.lookup_fn(name)
+             .cloned())`に修正(ローカル変数がトップレベル関数名を覆う場合は
+             ローカル優先、TS版の実際のスコープ規則と同じ)。
+          2. **ローカル変数に代入した無名関数を直接呼び出す場合も同じ理由で戻り値型が
+             ANYへ落ちる**(`inc := fn(x: int) int {...}; inc(5) * 2`——milestone 10で
+             `Expr::FnExpr`をローカル変数へ代入できるようになって初めて到達可能に
+             なった経路、1件目とは別の呼び出し式側の分岐)。`infer_call`のIdent呼び出し
+             分岐が`fn_decls`(`ctx.lookup_fn`)しか見ておらず、ローカルスコープに
+             保持されたfn値を見ていなかった。同じ優先順位(ローカル→fn_decls→組み込み)
+             で修正。1件目と2件目はいずれも「`__iarith`等の型依存の安全ガードが
+             選ばれず、整数オーバーフローを静かに素通りしてしまう」という実害を
+             実際にオーバーフローする入力で再現確認済み(3エージェント中2件が
+             独立に指摘)。
+          3. **入れ子になった`Expr::FnExpr`の再インデントが崩れる**(内側の無名関数の
+             出力〈複数行の文字列〉を外側が`body_lines`の1要素として扱うため、
+             2行目以降に外側のpadが付かない)。TS版`codegen.ts`のfnExprケースと
+             同じく、一旦全体を1つの文字列に結合してから改めて改行で分割し全ての
+             物理行へpadを付け直す形に修正(実行結果自体はJSの空白が意味を持たない
+             ため正しかったが、この移植が一貫して検証基準にしてきた「TS版とbyte-
+             for-byte一致」から外れていた、2エージェント独立指摘)。
+          4. **`toInt`が常に失敗する既存のバグを発見**(milestone 10自体とは無関係だが
+             このPRのレビュー中に発覚・実行確認): `codegen.rs`の`prelude()`が
+             `runtime.ts`のテンプレートリテラルの中身を単純な部分文字列として
+             取り出すだけで、JSのテンプレートリテラル自身が持つエスケープ解決
+             (`\\`→`\`)を一切評価していなかった。`runtime.ts`の`__toInt`は
+             (外側のテンプレートリテラルが1段エスケープを解決する前提で)正規表現を
+             `\\d+`と2つ重ねて書いているため、TS版は実際に評価されて`\d+`になるが、
+             単純抽出しかしないRust版はソースの`\\d+`をそのまま出力し、
+             `\\d`(バックスラッシュ文字自体を要求する、実質何にもマッチしない
+             正規表現)になって`toInt`がどんな入力に対しても常に失敗していた
+             (`toInt`を使う既存exampleが無かったため今まで発覚しなかった)。
+             `prelude()`の戻り値を借用から所有(`String`)に変え、抽出後に`\\`→`\`
+             を1回置換して修正(runtime.ts全体を確認し、他のエスケープ〈`` \` ``や
+             `\$`〉はこのテンプレートリテラル内に存在しないことも確認済み)。
+          いずれも回帰テスト追加(`checker.rs`+2、`codegen.rs`+2)、
+          `examples/filter_map_reduce.mesh`に3件の回帰確認セクションを追加、
+          272→276件、`cargo clippy --all-targets -- -D warnings`クリーン、
+          既存の全exampleがbyte-for-byte一致のまま回帰無しを再確認済み。
+        - **milestone 10のスコープ外(意図的)**: `defer`(独立した別機能、次の
+          milestone以降で対応)。ジェネリック関数(`fn myFilter<T>(...)`のような
+          利用者定義の総称関数、既にF-1後半として別スコープで管理されている
+          既知の未対応機能——`filter`/`map`/`reduce`は組み込み関数であり
+          ジェネリクスとは無関係)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

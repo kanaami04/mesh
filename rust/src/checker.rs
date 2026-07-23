@@ -440,7 +440,17 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         Expr::None { .. } => NONE,
         // 補間される式はどの型でもよい(printと同じ)。結果は常にstring
         Expr::Interp { .. } => STRING,
-        Expr::Ident { name, .. } => ctx.lookup(name).cloned().unwrap_or(ANY),
+        // 裸の識別子がトップレベル関数名を指す場合(呼び出しではなく値として参照——
+        // `map(nums, isEven)`のように既存の名前付き関数をコールバックとして渡す形、
+        // milestone 10のcode reviewで発覚・実行確認済み)、ローカルスコープに無ければ
+        // fn_decls(トップレベル関数のシグネチャ表)も試す。TS版はローカル変数も
+        // トップレベル関数名も同じスコープスタックへ`declareBinding`するため
+        // 区別が要らないが、Rust版はローカル変数用のscopesとトップレベル関数用の
+        // fn_declsを別テーブルで持つため、ここでフォールバックしないと関数を値として
+        // 渡した場合の型が常にANYへ落ち、map/reduceのコールバック戻り値型推論
+        // (__iarithのオーバーフロー安全ガード選択等)が効かなくなる。ローカル変数が
+        // 優先されるのはTS版の実際のスコープ規則(内側の宣言が外側を覆う)と同じ
+        Expr::Ident { name, .. } => ctx.lookup(name).cloned().or_else(|| ctx.lookup_fn(name).cloned()).unwrap_or(ANY),
         Expr::Binary { op, left, right, .. } => infer_binary(ctx, *op, left, right).result,
         Expr::Unary { operand, .. } => infer_expr(ctx, operand),
         Expr::Call { callee, args, .. } => infer_call(ctx, callee, args),
@@ -599,9 +609,12 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
                 }
             }
         }
-        // M7未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
-        // 「まだ対応していません」と明確なエラーにするので、ここで型を誤魔化しても実害は無い
-        _ => ANY,
+        // 無名関数式(milestone 10): TS版のfnExprケースと同じ(fnType(ctx, params, ret)相当)。
+        // 本体は検査しない(診断を出さない設計、TS版のcheckFnに相当する処理は不要——
+        // codegenが必要になった時点でinfer_expr/gen_exprを都度呼ぶだけで足りる)
+        Expr::FnExpr { params, ret, .. } => {
+            Type::Fn { params: params.iter().map(|p| resolve_type_node(ctx, &p.type_node)).collect(), ret: Box::new(resolve_return_type(ctx, ret)) }
+        }
     }
 }
 
@@ -825,6 +838,16 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type) -> BinaryInfo {
 // __iarith経由にならずTS版とbyte単位で食い違う出力になる)
 fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     if let Expr::Ident { name, .. } = callee {
+        // ローカル変数がfn値(無名関数式、milestone 10)を保持している場合を先に確認する
+        // (code review発覚・実行確認済みの回帰: `inc := fn(x: int) int {...}; inc(5) * 2`の
+        // ように、ローカル変数へ代入した無名関数を呼び出すと戻り値型が常にANYへ落ち、
+        // __iarith等の型依存判断が効かなくなっていた——fn_declsはトップレベル関数専用の
+        // 別テーブルで、ローカルスコープに保持されたfn値までは見ないため)。ローカルが
+        // トップレベル関数名を覆う場合もこの優先順位で正しく扱われる(TS版の実際の
+        // スコープ規則と同じ)
+        if let Some(Type::Fn { ret, .. }) = ctx.lookup(name) {
+            return (**ret).clone();
+        }
         if let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name) {
             return (**ret).clone();
         }
@@ -856,8 +879,6 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
 
 // codegenが実際に生成できる組み込みの戻り値型を解決する(TS版`checker/builtins.ts`の
 // `inferBuiltinCall`を移植。診断は出さないので検査ロジックは持たず、型の解決だけ行う)。
-// `filter`/`map`/`reduce`は無名関数(Expr::FnExpr)のcodegenが無くまだ呼び出せないため、
-// ここでも対象外のまま(ANYへのフォールバックで実害は無い)
 fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Type> {
     Some(match name {
         "print" | "sleep" | "push" | "close" | "delete" => VOID,
@@ -887,6 +908,22 @@ fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Typ
         "values" => match args.first().map(|a| infer_expr(ctx, a)) {
             Some(Type::Map { value, .. }) => Type::Array(value),
             _ => Type::Array(Box::new(ANY)),
+        },
+        // 高階関数(milestone 10、F-8旧transform)。無名関数(Expr::FnExpr)を第2引数に
+        // 取る——filterは対象配列と同じ型をそのまま返す、mapはコールバックの戻り値型の
+        // 配列、reduceはコールバックの第1引数(累積値)の型(コールバックの型が確実に
+        // 分からなければ初期値の型、それも無ければANY)
+        "filter" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(t @ Type::Array(_)) => t,
+            _ => ANY,
+        },
+        "map" => match args.get(1).map(|a| infer_expr(ctx, a)) {
+            Some(Type::Fn { ret, .. }) => Type::Array(ret),
+            _ => Type::Array(Box::new(ANY)),
+        },
+        "reduce" => match args.get(1).map(|a| infer_expr(ctx, a)) {
+            Some(Type::Fn { params, .. }) if params.len() == 2 => params.into_iter().next().expect("checked len == 2 above"),
+            _ => args.get(2).map(|a| infer_expr(ctx, a)).unwrap_or(ANY),
         },
         _ => return None,
     })
@@ -998,6 +1035,35 @@ mod tests {
     }
 
     #[test]
+    fn infer_callはローカル変数が保持する無名関数の戻り値型も引く() {
+        // code review発覚・実行確認済みの回帰: `inc := fn(x: int) int {...}; inc(5) * 2`の
+        // ようにローカル変数へ代入した無名関数を呼び出すと、fn_decls(トップレベル関数専用)
+        // しか見ていなかったため戻り値型が常にANYへ落ち、__iarith等の型依存判断が
+        // 効かなくなっていた
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("inc", Type::Fn { params: vec![INT], ret: Box::new(INT) });
+        let call_ret = infer_call(&ctx, &Expr::Ident { name: "inc".into(), pos: pos() }, &[]);
+        assert!(types::type_equals(&call_ret, &INT), "got {call_ret:?}");
+    }
+
+    #[test]
+    fn infer_exprは呼び出しでない裸の識別子がトップレベル関数名ならfn型を引く() {
+        // code review発覚・実行確認済みの回帰: ローカルスコープにしか無ければANYへ
+        // 落ちていたため、map(nums, isEven)のように名前付き関数を値として渡すと
+        // コールバックの戻り値型が常にANYになり、map()の戻り値要素型推論
+        // (ひいては__iarithのオーバーフロー安全ガード選択)が効かなくなっていた
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("isEven", Type::Fn { params: vec![INT], ret: Box::new(BOOL) });
+        let ident_ty = infer_expr(&ctx, &Expr::Ident { name: "isEven".into(), pos: pos() });
+        assert!(matches!(&ident_ty, Type::Fn { ret, .. } if types::type_equals(ret, &BOOL)), "got {ident_ty:?}");
+
+        // ローカル変数がトップレベル関数名を覆う場合はローカルが優先される
+        let mut shadowed = ctx.clone();
+        shadowed.declare("isEven", INT);
+        assert!(types::type_equals(&infer_expr(&shadowed, &Expr::Ident { name: "isEven".into(), pos: pos() }), &INT));
+    }
+
+    #[test]
     fn infer_callは組み込みの戻り値型も引く() {
         let ctx = CheckerCtx::new();
         let round_call = infer_call(&ctx, &Expr::Ident { name: "round".into(), pos: pos() }, &[]);
@@ -1006,7 +1072,49 @@ mod tests {
         assert!(types::type_equals(&to_int_call, &types::union_of(vec![INT, ERROR])));
     }
 
-    use crate::ast::StructFieldNode;
+    use crate::ast::{Param, StructFieldNode};
+
+    fn fn_expr(params: &[(&str, TypeNode)], ret: Option<TypeNode>) -> Expr {
+        Expr::FnExpr {
+            params: params.iter().map(|(n, t)| Param { name: n.to_string(), type_node: t.clone(), pos: pos() }).collect(),
+            ret,
+            body: crate::ast::Block { stmts: vec![] },
+            pos: pos(),
+        }
+    }
+
+    #[test]
+    fn infer_exprのfnexprはパラメータ_戻り値型からfn型を作る() {
+        let ctx = CheckerCtx::new();
+        let f = fn_expr(&[("n", name_type("int"))], Some(name_type("bool")));
+        let Type::Fn { params, ret } = infer_expr(&ctx, &f) else { panic!("expected Fn type") };
+        assert_eq!(params.len(), 1);
+        assert!(types::type_equals(&params[0], &INT));
+        assert!(types::type_equals(&ret, &BOOL));
+
+        // 戻り値注釈が無ければvoid(TS版fnTypeと同じ)
+        let void_f = fn_expr(&[], None);
+        let Type::Fn { ret: void_ret, .. } = infer_expr(&ctx, &void_f) else { panic!("expected Fn type") };
+        assert!(types::type_equals(&void_ret, &VOID));
+    }
+
+    #[test]
+    fn infer_callはfilter_map_reduceの戻り値型をコールバックから引く() {
+        let ctx = CheckerCtx::new();
+        let arr = Expr::ArrayLit { elems: vec![int_lit("1")], elem_type: None, pos: pos() };
+
+        let filter_pred = fn_expr(&[("n", name_type("int"))], Some(name_type("bool")));
+        let filter_ty = infer_call(&ctx, &Expr::Ident { name: "filter".into(), pos: pos() }, &[arr.clone(), filter_pred]);
+        assert!(matches!(&filter_ty, Type::Array(elem) if types::type_equals(elem, &INT)), "got {filter_ty:?}");
+
+        let mapper = fn_expr(&[("n", name_type("int"))], Some(name_type("string")));
+        let map_ty = infer_call(&ctx, &Expr::Ident { name: "map".into(), pos: pos() }, &[arr.clone(), mapper]);
+        assert!(matches!(&map_ty, Type::Array(elem) if types::type_equals(elem, &STRING)), "got {map_ty:?}");
+
+        let reducer = fn_expr(&[("acc", name_type("int")), ("n", name_type("int"))], Some(name_type("int")));
+        let reduce_ty = infer_call(&ctx, &Expr::Ident { name: "reduce".into(), pos: pos() }, &[arr, reducer, int_lit("0")]);
+        assert!(types::type_equals(&reduce_ty, &INT), "got {reduce_ty:?}");
+    }
 
     fn name_type(n: &str) -> TypeNode {
         TypeNode::Name { name: n.to_string(), pkg: None, pos: pos() }

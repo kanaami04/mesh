@@ -1,0 +1,65 @@
+// filter/map/reduce(milestone 10) — 無名関数式(Expr::FnExpr)を初めて使う高階関数一式。
+// 名前付き関数を値として渡す形・インラインクロージャで外側のmut変数を捕捉する形・
+// mapで要素の型を変える形・reduceの2用途(数値合計・文字列畳み込み)・
+// filter→map→reduceのパイプライン合成、を一通り確認する
+
+fn isEven(n: int) bool {
+	return n % 2 == 0
+}
+
+fn double(n: int) int {
+	return n * 2
+}
+
+fn sum(acc: int, n: int) int {
+	return acc + n
+}
+
+fn main() {
+	nums := [1, 2, 3, 4, 5, 6]
+
+	// 名前付き関数を値として渡す(呼び出しではなく参照)
+	evens := filter(nums, isEven)
+	print(evens)
+	print(nums) // filterは非破壊
+
+	// インラインクロージャは外側のmut変数を捕捉できる(再代入後の値も見える)
+	mut threshold := 3
+	big := filter(nums, fn(n: int) bool { return n > threshold })
+	print(big)
+	threshold = 1
+	print(filter(nums, fn(n: int) bool { return n > threshold }))
+
+	// mapは要素の型を変えられる(int[] → string[])
+	labels := map(nums, fn(n: int) string { return "n${n}" })
+	print(labels)
+
+	// reduceは数値合計にも文字列畳み込みにも使える
+	total := reduce(nums, fn(acc: int, n: int) int { return acc + n }, 0)
+	print(total)
+	joined := reduce(nums, fn(acc: string, n: int) string { return acc + str(n) }, "")
+	print(joined)
+
+	// filter→map→reduceのパイプライン合成: (2+4+6)*2 = 24
+	result := reduce(map(filter(nums, isEven), double), sum, 0)
+	print(result)
+
+	// ローカル変数へ代入した無名関数を直接呼び出す(inc(5)の戻り値型がintと
+	// 正しく推論され__iarithが選ばれることを確認する回帰)
+	inc := fn(x: int) int { return x + 1 }
+	print(inc(5) * 2)
+
+	// 入れ子になった無名関数式(内側のmapのコールバックが正しく再インデントされる
+	// ことを確認する回帰)
+	nested := map(nums, fn(n: int) int {
+		doubled := map([n], fn(m: int) int { return m * 2 })
+		return doubled[0]
+	})
+	print(nested)
+
+	// toInt(このマイルストーンのレビューで発覚したruntime.tsのテンプレートリテラル
+	// エスケープ未評価バグの回帰確認——filter/map/reduce自体とは無関係だが同じPRで
+	// 見つかり修正した)
+	parsed := toInt("42") or _ => -1
+	print(parsed)
+}
