@@ -14,7 +14,7 @@
 // Rust版も同じ`src/runtime.ts`を`include_str!`で読み込んで埋め込む(ランタイムの二重管理・
 // 意味のズレを避ける。TS/Rustどちらのコンパイラが吐いたJSも同じランタイムで動く)
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Receiver, Stmt, TypeNode};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Receiver, SelectArm, Stmt, TypeNode};
 use crate::checker::{self, CheckerCtx};
 use crate::token::{Pos, TokenType};
 use crate::types::{self, INT, Type};
@@ -47,11 +47,15 @@ struct Codegen {
     // TS版のpropStackに相当——Expr::FnExprは未対応なので関数本体生成はネストせず、
     // スタックではなく単一のフラグで足りる)
     prop_used: bool,
+    // 今生成中の関数本体のどこかで(detachではない)spawnが使われたか。TS版のspawnStackに
+    // 相当——prop_usedと同じ理由で単一のフラグで足りる。関数ごとのリセットを忘れると
+    // 前の関数のspawn使用が次の関数に漏れて無駄なwait枠を生成してしまうので要注意
+    spawn_used: bool,
 }
 
 impl Codegen {
     fn new(file: &str) -> Self {
-        Codegen { out: Vec::new(), indent: 0, file: file.to_string(), ctx: CheckerCtx::new(), prop_used: false }
+        Codegen { out: Vec::new(), indent: 0, file: file.to_string(), ctx: CheckerCtx::new(), prop_used: false, spawn_used: false }
     }
 
     fn emit(&mut self, line: impl Into<String>) {
@@ -150,31 +154,46 @@ impl Codegen {
             self.ctx.declare(&p.name, checker::resolve_type_node(&self.ctx, &p.type_node));
         }
 
-        // `?`が本体のどこかに現れたかどうかは生成してみるまで分からない(if/forの中に
-        // ネストしていてもよい)ので、本体をいったん別バッファに生成してから、
-        // try/catchで包むかどうかを事後に決める(TS版genFnBodyのpropStackと同じ設計。
-        // Rustでは所有権の都合上mem::take/replaceで代用する)。Expr::FnExprはcodegenが
-        // まだ対応していないため関数本体の生成がネストすることは無く、
-        // このフラグは関数1つぶんで使い切り(TS版のようなスタックは不要)
+        // `?`/(detachでない)spawnが本体のどこかに現れたかどうかは生成してみるまで
+        // 分からない(if/forの中にネストしていてもよい)ので、本体をいったん別バッファに
+        // 生成してから、try/catch(?用)・finally(spawn用)で包むかどうかを事後に決める
+        // (TS版genFnBodyのpropStack/spawnStackと同じ設計。Rustでは所有権の都合上
+        // mem::take/replaceで代用する)。Expr::FnExprはcodegenがまだ対応していないため
+        // 関数本体の生成がネストすることは無く、このフラグは関数1つぶんで使い切り
+        // (TS版のようなスタックは不要)。`defer`(TS版usesDefer相当)は`Stmt::DeferStmt`が
+        // 常にErrを返すため絶対に発生せず、今回は対象外のままでよい
         self.prop_used = false;
+        self.spawn_used = false;
         let saved_out = std::mem::take(&mut self.out);
         self.indent += 1;
         let body_result = self.gen_stmts(&fn_decl.body.stmts);
-        // indentはまだ+1のまま——try/catchの枠自体もこの深さ(関数の中、本体と同じ階層)に出す
+        // indentはまだ+1のまま——try/catch/finallyの枠自体もこの深さ(関数の中、本体と同じ階層)に出す
         let body_lines = std::mem::replace(&mut self.out, saved_out);
         let used_prop = self.prop_used;
+        let used_spawn = self.spawn_used;
         self.ctx.pop_scope();
 
-        if used_prop {
+        if used_prop || used_spawn {
+            if used_spawn {
+                self.emit("__waitStack.push([]);");
+            }
             self.emit("try {");
             for line in &body_lines {
                 self.out.push(format!("  {line}")); // 本体行(indent+1で生成済み)をさらに1段深くする
             }
-            self.emit("} catch (e) {");
-            self.indent += 1;
-            self.emit("if (e instanceof __Propagate) return e.value;");
-            self.emit("throw e;");
-            self.indent -= 1;
+            if used_prop {
+                self.emit("} catch (e) {");
+                self.indent += 1;
+                self.emit("if (e instanceof __Propagate) return e.value;");
+                self.emit("throw e;");
+                self.indent -= 1;
+            }
+            if used_spawn {
+                self.emit("} finally {");
+                self.indent += 1;
+                self.emit("await Promise.all(__waitStack.pop());");
+                self.indent -= 1;
+            }
             self.emit("}");
         } else {
             self.out.extend(body_lines);
@@ -285,8 +304,36 @@ impl Codegen {
                 self.emit("continue;");
                 Ok(())
             }
-            Stmt::Wait { pos, .. } => Err(format!("codegen: 'wait' is not yet supported ({}:{})", pos.line, pos.col)),
-            Stmt::Send { pos, .. } => Err(format!("codegen: channel send is not yet supported ({}:{})", pos.line, pos.col)),
+            // wait{}: 中でspawnされたタスクを全部待つ明示スコープ。TS版codegen.ts:322-332と
+            // 同一構造で、中身にspawnがあるかどうかを見ずに無条件で包む(関数丸ごとの暗黙wait枠
+            // 〈gen_fn_decl〉とは独立——__waitStackは本物のスタックなのでネストしても正しく動く)
+            Stmt::Wait { body, .. } => {
+                self.emit("__waitStack.push([]);");
+                self.emit("try {");
+                self.gen_block(body)?;
+                self.emit("} finally {");
+                self.indent += 1;
+                self.emit("await Promise.all(__waitStack.pop());");
+                self.indent -= 1;
+                self.emit("}");
+                Ok(())
+            }
+            // ch <- v。TS版のnot-a-channel診断に相当するRust版だけの安全ガード——診断を
+            // 出さないこのリゾルバでは非chanへのsendが実際に到達しうるため(milestone 2〜4と
+            // 同じ考え方)。確実に非chan/非anyだと分かる場合だけ弾く
+            Stmt::Send { channel, value, pos } => {
+                let ch_ty = checker::infer_expr(&self.ctx, channel);
+                if !matches!(ch_ty, Type::Chan(_) | Type::Any) {
+                    return Err(format!(
+                        "codegen: cannot send to non-channel type '{}' ({}:{})",
+                        types::type_to_string(&ch_ty), pos.line, pos.col
+                    ));
+                }
+                let ch_js = self.gen_expr(channel)?;
+                let val_js = self.gen_expr(value)?;
+                self.emit(format!("(await {ch_js}.send({val_js}));"));
+                Ok(())
+            }
             Stmt::RangeFor { names, subject, body, pos } => self.gen_range_for(names, subject, body, *pos),
             Stmt::DeferStmt { pos, .. } => Err(format!("codegen: 'defer' is not yet supported ({}:{})", pos.line, pos.col)),
         }
@@ -607,10 +654,26 @@ impl Codegen {
                 let is_error_instance = matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. }));
                 Ok(if is_error_instance { format!("__errTag({obj})") } else { format!("({obj})") })
             }
-            Expr::Recv { pos, .. } => Err(format!("codegen: channel receive is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Chan { pos, .. } => Err(format!("codegen: channels are not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Spawn { pos, .. } => Err(format!("codegen: spawn/detach are not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Select { pos, .. } => Err(format!("codegen: 'select' is not yet supported ({}:{})", pos.line, pos.col)),
+            // <-ch。Sendと同じ理由のRust版だけの安全ガード(確実に非chan/非anyだと
+            // 分かる場合だけ弾く)
+            Expr::Recv { channel, pos } => {
+                let ch_ty = checker::infer_expr(&self.ctx, channel);
+                if !matches!(ch_ty, Type::Chan(_) | Type::Any) {
+                    return Err(format!(
+                        "codegen: cannot receive from non-channel type '{}' ({}:{})",
+                        types::type_to_string(&ch_ty), pos.line, pos.col
+                    ));
+                }
+                Ok(format!("(await __recv({}))", self.gen_expr(channel)?))
+            }
+            // chan<T>(cap): F-11によりcapacityは常に必須。'none'(無制限)は__Channelを
+            // 引数無しで呼ぶことに落とす(引数省略時はInfinity扱い。runtime.ts参照)
+            Expr::Chan { capacity, .. } => match &**capacity {
+                Expr::None { .. } => Ok("new __Channel()".to_string()),
+                other => Ok(format!("new __Channel({})", self.gen_expr(other)?)),
+            },
+            Expr::Spawn { call, detached, pos } => self.gen_spawn(call, *detached, *pos),
+            Expr::Select { arms, default_arm, pos } => self.gen_select(arms, default_arm.as_deref(), *pos),
             // f()? / f() ? "context" — 失敗(none/error/構造化error)なら呼び出し元へ即座に
             // 伝播する。関数本体側の対応(try/catchで包むか)はgen_fn_declが本体生成後に決める
             Expr::Prop { operand, context, pos } => {
@@ -702,21 +765,10 @@ impl Codegen {
             return self.gen_builtin_call(name, args, &js_args, *pos);
         }
 
-        // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)。
-        // TS版calls.ts/codegen.tsと同じ「フィールドが勝つ」順序——targetがstruct型で
-        // nameが宣言済みフィールドでなければメソッドと判定する
-        if let Expr::Member { target, name, .. } = &**callee
-            && let Type::Struct { fields, name: struct_name, .. } = checker::infer_expr(&self.ctx, target)
-            && !fields.iter().any(|f| &f.name == name)
-        {
-            if self.ctx.lookup_method(&struct_name, name).is_none() {
-                // structではあるがfieldにもmethodにも無い名前——実行時に
-                // `undefined is not a function`でクラッシュさせず、ここで明確なErrにする
-                return Err(format!("codegen: '{struct_name}' has no method '{name}' ({}:{})", pos.line, pos.col));
-            }
+        // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)
+        if let Some((target, js_name)) = self.resolve_method_target(callee, *pos)? {
             let recv_js = self.gen_expr(target)?;
             let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
-            let js_name = method_js_name(&struct_name, name);
             let all_args = std::iter::once(recv_js).chain(args_js).collect::<Vec<_>>().join(", ");
             return Ok(format!("(await {js_name}({all_args}))"));
         }
@@ -725,6 +777,102 @@ impl Codegen {
         let callee_js = self.gen_expr(callee)?;
         let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
         Ok(format!("(await {callee_js}({}))", args_js.join(", ")))
+    }
+
+    // Member呼び出しがフィールドでなくメソッドかどうかを判定する共通ヘルパ。gen_call・
+    // gen_spawn(spawn/detachの呼び出し先解決)で同じ判定ロジックを共有する(TS版は
+    // genCall/genExprの"spawn"ケースに同じ判定を2回書いているが、Rust版は1箇所にまとめる)。
+    // TS版calls.ts/codegen.tsと同じ「フィールドが勝つ」順序——targetがstruct型で
+    // nameが宣言済みフィールドでなければメソッドと判定する。Someなら(レシーバ式,
+    // メソッドのJS関数名)、Noneなら「フィールドまたは自由関数」呼び出し
+    fn resolve_method_target<'e>(&self, callee: &'e Expr, call_pos: Pos) -> CodegenResult<Option<(&'e Expr, String)>> {
+        let Expr::Member { target, name, .. } = callee else { return Ok(None) };
+        let Type::Struct { fields, name: struct_name, .. } = checker::infer_expr(&self.ctx, target) else {
+            return Ok(None);
+        };
+        if fields.iter().any(|f| &f.name == name) {
+            return Ok(None); // フィールドが勝つ
+        }
+        if self.ctx.lookup_method(&struct_name, name).is_none() {
+            // structではあるがfieldにもmethodにも無い名前——実行時に
+            // `undefined is not a function`でクラッシュさせず、ここで明確なErrにする
+            return Err(format!("codegen: '{struct_name}' has no method '{name}' ({}:{})", call_pos.line, call_pos.col));
+        }
+        Ok(Some((target, method_js_name(&struct_name, name))))
+    }
+
+    // spawn f(...) / detach f(...)。引数はspawn時点で評価する(Goと同じ)。呼び出し先は
+    // 素の関数値として__spawn/__detachへ渡す(即座には呼ばない——ランタイム側が呼ぶ)。
+    // メソッド呼び出し(spawn recv.method())はgen_callと同じ判定でレシーバを引数列の
+    // 先頭に回す——この特別扱いを忘れると`recv.method`という素のプロパティ参照を渡して
+    // しまい実行時`f is not a function`でクラッシュする(TS版が過去にcode reviewで発見して
+    // 直したバグ、TS版codegen.tsのコメント参照)ので、gen_call同様resolve_method_targetを再利用する
+    fn gen_spawn(&mut self, call: &Expr, detached: bool, pos: Pos) -> CodegenResult<String> {
+        let Expr::Call { callee, args, .. } = call else {
+            unreachable!("parser guarantees spawn/detach always wraps Expr::Call")
+        };
+        let (callee_js, all_args_js) = match self.resolve_method_target(callee, pos)? {
+            Some((target, js_name)) => {
+                let recv_js = self.gen_expr(target)?;
+                let mut all = vec![recv_js];
+                for a in args {
+                    all.push(self.gen_expr(a)?);
+                }
+                (js_name, all)
+            }
+            None => {
+                let callee_js = self.gen_expr(callee)?;
+                let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
+                (callee_js, args_js)
+            }
+        };
+        let args_array = format!("[{}]", all_args_js.join(", "));
+        if detached {
+            Ok(format!("__detach({callee_js}, {args_array})"))
+        } else {
+            self.spawn_used = true; // TS版spawnStack[..] = trueに相当。gen_fn_declが関数丸ごとのwait枠を付けるかの判定に使う
+            Ok(format!("__spawn({callee_js}, {args_array})"))
+        }
+    }
+
+    // select { name := <-ch => body ...  _ => defaultBody }。全ての「準備できるまで待って
+    // 選ぶ」ロジックはランタイムの__selectへ委譲する——codegenはchannel式・ハンドラ・
+    // defaultの3つの配列/値を組み立てるだけ。各アームの束縛名は`elem型 | closed`として
+    // 正しくスコープに宣言してからbodyを生成する(OrElseの束縛パターンと同じ——外側の
+    // 同名変数〈型が違う〉をshadowする際に誤って型依存のcodegen判断〈__iarith等〉を
+    // 誤らせないため)
+    fn gen_select(&mut self, arms: &[SelectArm], default_arm: Option<&Expr>, pos: Pos) -> CodegenResult<String> {
+        let _ = pos; // 現状は使わない(将来の診断用に受け取っておく)
+        let mut channels = Vec::with_capacity(arms.len());
+        let mut handlers = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let ch_ty = checker::infer_expr(&self.ctx, &arm.channel);
+            if !matches!(ch_ty, Type::Chan(_) | Type::Any) {
+                return Err(format!(
+                    "codegen: select arm requires a channel, got '{}' ({}:{})",
+                    types::type_to_string(&ch_ty), arm.pos.line, arm.pos.col
+                ));
+            }
+            let channel_js = self.gen_expr(&arm.channel)?;
+            let bind_ty = match ch_ty {
+                Type::Chan(elem) => types::union_of(vec![*elem, types::CLOSED]),
+                _ => Type::Any,
+            };
+            self.ctx.push_scope();
+            self.ctx.declare(&arm.name, bind_ty); // パーサ保証によりarm.nameは絶対に"_"ではない
+            let body_js = self.gen_expr(&arm.body)?;
+            self.ctx.pop_scope();
+            channels.push(channel_js);
+            handlers.push(format!("(async ({}) => {body_js})", arm.name));
+        }
+        // 空アーム+defaultなしは構文上は許されてしまう(パーサーはempty selectを拒否しない)が、
+        // 診断は出さない設計なので__selectへ空配列を渡し、Goのselect{}と同じ「永久に完了
+        // しないPromise」にフォールバックさせる(パニックはしない、対応不要)
+        let default_js = match default_arm {
+            Some(body) => format!("(async () => {})", self.gen_expr(body)?),
+            None => "null".to_string(),
+        };
+        Ok(format!("(await __select([{}], [{}], {default_js}))", channels.join(", "), handlers.join(", ")))
     }
 
     fn gen_builtin_call(&self, name: &str, arg_exprs: &[Expr], args: &[String], pos: Pos) -> CodegenResult<String> {
@@ -1248,5 +1396,130 @@ mod tests {
         let js = gen_body("fn main() {\n  xs := [3, 1, 2]\n  x := get(xs, 0)\n  s := sort(xs)\n}");
         assert!(js.contains("const x = __get(xs, 0);"), "got: {js}");
         assert!(js.contains("const s = __sorted(xs);"), "got: {js}");
+    }
+
+    #[test]
+    fn chan生成はcapacityでnew_channelの引数が変わる() {
+        let js = gen_body("fn main() {\n  a := chan<int>(none)\n  b := chan<int>(5)\n}");
+        assert!(js.contains("const a = new __Channel();"), "got: {js}");
+        assert!(js.contains("const b = new __Channel(5);"), "got: {js}");
+    }
+
+    #[test]
+    fn recvはrecvヘルパを呼ぶjsになる() {
+        let js = gen_body("fn main() {\n  ch := chan<int>(none)\n  v := <-ch\n  print(v)\n}");
+        assert!(js.contains("const v = (await __recv(ch));"), "got: {js}");
+    }
+
+    #[test]
+    fn sendはawaitch_sendになる() {
+        let js = gen_body("fn main() {\n  ch := chan<int>(none)\n  ch <- 1\n}");
+        assert!(js.contains("(await ch.send(1));"), "got: {js}");
+    }
+
+    #[test]
+    fn 非chanへのsend_recvは明確なエラーになる() {
+        let err1 = gen_js("fn main() {\n  x := 1\n  x <- 1\n}").unwrap_err();
+        assert!(err1.contains("cannot send to non-channel"), "got: {err1}");
+        let err2 = gen_js("fn main() {\n  x := 1\n  v := <-x\n  print(v)\n}").unwrap_err();
+        assert!(err2.contains("cannot receive from non-channel"), "got: {err2}");
+    }
+
+    #[test]
+    fn spawn自由関数はspawnヘルパになり関数丸ごとwait枠が付く() {
+        let js = gen_body("fn f(x: int) {\n  print(x)\n}\nfn main() {\n  spawn f(1)\n}");
+        assert!(js.contains("__spawn(f, [1]);"), "got: {js}");
+        assert!(js.contains("__waitStack.push([]);"), "got: {js}");
+        assert!(js.contains("} finally {"), "got: {js}");
+        assert!(js.contains("await Promise.all(__waitStack.pop());"), "got: {js}");
+    }
+
+    #[test]
+    fn detachはdetachヘルパになりwaitstackを使わない() {
+        let js = gen_body("fn f(x: int) {\n  print(x)\n}\nfn main() {\n  detach f(1)\n}");
+        assert!(js.contains("__detach(f, [1]);"), "got: {js}");
+        assert!(!js.contains("__waitStack"), "got: {js}");
+    }
+
+    #[test]
+    fn spawnのメソッド呼び出しはレシーバを引数先頭に回す() {
+        let js = gen_body(
+            "struct W {\n  id: int\n}\nfn (w: W) greet() string {\n  return \"hi\"\n}\nfn main() {\n  w := W{id: 1}\n  spawn w.greet()\n}",
+        );
+        assert!(js.contains("__spawn(__m_W_greet, [w]);"), "got: {js}");
+    }
+
+    #[test]
+    fn spawnで存在しないメソッドは明確なエラーになる() {
+        let err = gen_js("struct W {\n  id: int\n}\nfn main() {\n  w := W{id: 1}\n  spawn w.bogus()\n}").unwrap_err();
+        assert!(err.contains("has no method"), "got: {err}");
+    }
+
+    #[test]
+    fn selectはchannels_handlers_defaultの3配列になる() {
+        let js = gen_body(
+            "fn main() {\n  a := chan<int>(none)\n  b := chan<int>(none)\n  r := select {\n    v := <-a => v\n    v := <-b => v\n    _ => 0\n  }\n  print(r)\n}",
+        );
+        assert!(
+            js.contains("__select([a, b], [(async (v) => v), (async (v) => v)], (async () => 0))"),
+            "got: {js}"
+        );
+    }
+
+    #[test]
+    fn defaultなしのselectはnullになる() {
+        let js = gen_body("fn main() {\n  a := chan<int>(none)\n  r := select {\n    v := <-a => v\n  }\n  print(r)\n}");
+        assert!(js.contains("], null))"), "got: {js}");
+    }
+
+    #[test]
+    fn select以外の型のアームchannelは明確なエラーになる() {
+        let err = gen_js("fn main() {\n  x := 1\n  r := select {\n    v := <-x => v\n  }\n  print(r)\n}").unwrap_err();
+        assert!(err.contains("select arm requires a channel"), "got: {err}");
+    }
+
+    #[test]
+    fn wait文はwaitstackで包む() {
+        let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  wait {\n    spawn f()\n  }\n}");
+        assert!(js.contains("__waitStack.push([]);"), "got: {js}");
+        assert!(js.contains("try {"), "got: {js}");
+        assert!(js.contains("__spawn(f, []);"), "got: {js}");
+        assert!(js.contains("} finally {"), "got: {js}");
+        assert!(js.contains("await Promise.all(__waitStack.pop());"), "got: {js}");
+    }
+
+    #[test]
+    fn 明示的waitの中のspawnでも関数丸ごとの暗黙wait枠が付く() {
+        // TS版と同じ「フラットなフラグ」挙動: spawnが明示的wait{}の中だけにあっても
+        // 関数側のspawn_usedは立つため、__waitStack.push([]);が2回(外側の暗黙+内側の
+        // 明示)現れる(内側は空のPromise.all([])という無害な冗長さになるだけ)
+        let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  wait {\n    spawn f()\n  }\n}");
+        let push_count = js.matches("__waitStack.push([]);").count();
+        assert_eq!(push_count, 2, "got: {js}");
+    }
+
+    #[test]
+    fn propとspawnを両方使う関数はtry_catch_finallyの順で包む() {
+        let js = gen_body(
+            "fn f() int | error {\n  return 1\n}\nfn g() {\n  print(1)\n}\nfn main() {\n  x := f()?\n  spawn g()\n  print(x)\n}",
+        );
+        assert!(js.contains("__waitStack.push([]);"), "got: {js}");
+        assert!(js.contains("try {"), "got: {js}");
+        assert!(js.contains("} catch (e) {"), "got: {js}");
+        assert!(js.contains("if (e instanceof __Propagate) return e.value;"), "got: {js}");
+        assert!(js.contains("} finally {"), "got: {js}");
+        assert!(js.contains("await Promise.all(__waitStack.pop());"), "got: {js}");
+        let catch_pos = js.find("} catch (e) {").unwrap();
+        let finally_pos = js.find("} finally {").unwrap();
+        assert!(catch_pos < finally_pos, "got: {js}");
+    }
+
+    #[test]
+    fn spawn_usedは関数ごとにリセットされ次の関数へ漏れない() {
+        let js = gen_body(
+            "fn f() {\n  print(1)\n}\nfn hasSpawn() {\n  spawn f()\n}\nfn noSpawn() {\n  print(2)\n}\nfn main() {\n  hasSpawn()\n  noSpawn()\n}",
+        );
+        let no_spawn_body = js.split("async function noSpawn").nth(1).unwrap().split("async function main").next().unwrap();
+        assert!(!no_spawn_body.contains("__waitStack"), "got: {no_spawn_body}");
     }
 }

@@ -301,9 +301,50 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
             t if types::is_stringy(&t) => STRING,
             _ => ANY,
         },
-        // M4未対応の式(channel/並行処理等)はANYへ最善努力でフォールバックする。
-        // codegen側がこれらの構文自体を「まだ対応していません」と明確なエラーにするので、
-        // ここで型を誤魔化しても実害は無い
+        // chan<T>(cap): capacityの値そのものは型に影響しない
+        Expr::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node(ctx, elem))),
+        // <-ch は常に T | closed(mapの読みがV | noneになるのと同じ理由——closeされうる
+        // ことを型で強制する)。chanでなければ(診断は出さないこのリゾルバでは)ANYへ
+        // 最善努力でフォールバック
+        Expr::Recv { channel, .. } => match infer_expr(ctx, channel) {
+            Type::Chan(elem) => types::union_of(vec![*elem, types::CLOSED]),
+            _ => ANY,
+        },
+        // spawn/detachはcheckerの視点では同一(detachedを見ない——TS版のcheckerと同じ)。
+        // 戻り値がvoidの関数なら起動するだけ(受取口なし)、それ以外はchan<戻り値型>
+        // (呼び出し先が起動時点で1回だけ結果を送る受信専用チャネルとして扱われる)
+        Expr::Spawn { call, .. } => {
+            let ret = infer_expr(ctx, call);
+            if types::type_equals(&ret, &VOID) { VOID } else { Type::Chan(Box::new(ret)) }
+        }
+        // selectは各アーム(+default)のunion(TS版のmatch-select.tsと同じ)。TS版は
+        // アームごとにスコープをpushして束縛名を宣言してからbodyを推論するが、
+        // infer_exprは&CheckerCtx(不変参照)しか受け取らずスコープをpushできない。
+        // match/isによる絞り込みがまだ無いこの移植の範囲内では、束縛変数に対する
+        // 型依存の処理(算術等)を要する正当なMeshプログラムはそもそも書けないため、
+        // 束縛名を宣言せずにbodyを推論しても実害は無い(未解決の参照はIdent推論の
+        // 既存フォールバックでANYになるだけ——codegen側は&mut self.ctxを持つので
+        // 正しく束縛する。gen_select参照)
+        Expr::Select { arms, default_arm, .. } => {
+            let mut arm_types: Vec<Type> = arms.iter().map(|a| infer_expr(ctx, &a.body)).collect();
+            if let Some(def) = default_arm {
+                arm_types.push(infer_expr(ctx, def));
+            }
+            if arm_types.is_empty() {
+                ANY
+            } else {
+                let void_count = arm_types.iter().filter(|t| types::type_equals(t, &VOID)).count();
+                if void_count == arm_types.len() {
+                    VOID
+                } else if void_count > 0 {
+                    ANY // TS版のmixed-void-arms診断に相当。診断を出さないのでANYへ寛容フォールバック
+                } else {
+                    types::union_of(arm_types)
+                }
+            }
+        }
+        // M5未対応の式はANYへ最善努力でフォールバックする。codegen側がこれらの構文自体を
+        // 「まだ対応していません」と明確なエラーにするので、ここで型を誤魔化しても実害は無い
         _ => ANY,
     }
 }
@@ -506,6 +547,7 @@ fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Typ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::SelectArm;
     use crate::token::Pos;
 
     fn pos() -> Pos {
@@ -856,5 +898,70 @@ mod tests {
         declare_range_for_names(&mut ctx, &ANY, &["a".to_string(), "b".to_string()]);
         assert!(matches!(ctx.lookup("a"), Some(Type::Any)));
         assert!(matches!(ctx.lookup("b"), Some(Type::Any)));
+    }
+
+    fn int_type_node() -> TypeNode {
+        TypeNode::Name { name: "int".into(), pkg: None, pos: pos() }
+    }
+
+    fn ident(name: &str) -> Expr {
+        Expr::Ident { name: name.into(), pos: pos() }
+    }
+
+    #[test]
+    fn infer_exprはchan生成の型をcapacityによらず推論する() {
+        let ctx = CheckerCtx::new();
+        let none_cap = Expr::Chan { elem: int_type_node(), capacity: Box::new(Expr::None { pos: pos() }), pos: pos() };
+        let num_cap = Expr::Chan { elem: int_type_node(), capacity: Box::new(int_lit("5")), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &none_cap), &Type::Chan(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &num_cap), &Type::Chan(Box::new(INT))));
+    }
+
+    #[test]
+    fn infer_exprのrecvはt_or_closedになりchan以外はanyにフォールバックする() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("ch", Type::Chan(Box::new(INT)));
+        ctx.declare("notch", INT);
+        let recv_ch = Expr::Recv { channel: Box::new(ident("ch")), pos: pos() };
+        let recv_notch = Expr::Recv { channel: Box::new(ident("notch")), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &recv_ch), &types::union_of(vec![INT, types::CLOSED])));
+        assert!(matches!(infer_expr(&ctx, &recv_notch), Type::Any));
+    }
+
+    #[test]
+    fn infer_exprのspawnはvoid戻り値ならvoid_それ以外はchanになりdetachedを見ない() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
+        ctx.declare_fn("compute", Type::Fn { params: vec![], ret: Box::new(INT) });
+        let call = |name: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![], pos: pos() };
+        let spawn_void = Expr::Spawn { call: Box::new(call("log")), detached: false, pos: pos() };
+        let detach_void = Expr::Spawn { call: Box::new(call("log")), detached: true, pos: pos() };
+        let spawn_int = Expr::Spawn { call: Box::new(call("compute")), detached: false, pos: pos() };
+        let detach_int = Expr::Spawn { call: Box::new(call("compute")), detached: true, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &spawn_void), &types::VOID));
+        assert!(types::type_equals(&infer_expr(&ctx, &detach_void), &types::VOID));
+        assert!(types::type_equals(&infer_expr(&ctx, &spawn_int), &Type::Chan(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &detach_int), &Type::Chan(Box::new(INT))));
+    }
+
+    #[test]
+    fn infer_exprのselectはアームとdefaultのunionになり全void_混在も扱う() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
+        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos() };
+        let arm = |body: Expr| SelectArm { name: "v".into(), channel: ident("ch"), body, pos: pos() };
+
+        let all_int = Expr::Select {
+            arms: vec![arm(int_lit("1")), arm(int_lit("2"))],
+            default_arm: Some(Box::new(int_lit("3"))),
+            pos: pos(),
+        };
+        assert!(types::type_equals(&infer_expr(&ctx, &all_int), &INT));
+
+        let all_void = Expr::Select { arms: vec![arm(void_call()), arm(void_call())], default_arm: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &all_void), &types::VOID));
+
+        let mixed = Expr::Select { arms: vec![arm(int_lit("1")), arm(void_call())], default_arm: None, pos: pos() };
+        assert!(matches!(infer_expr(&ctx, &mixed), Type::Any));
     }
 }

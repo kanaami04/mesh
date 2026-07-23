@@ -671,6 +671,76 @@
               診断に相当するものが無い)ため、例えば`for i, v := range someStruct`が
               明確なエラーにならず`.entries is not a function`でクラッシュしうる。
               ANYの限界(既知・対象外)より広い穴だが、今回は未修正
+  - [x] **checker+codegen milestone 5(並行処理)** ✅ 2026-07-23実装(kanayamaと確認済みの
+        順序——struct/メソッド → error/json → 配列/map → 並行処理 → モジュール——の
+        5番目)。`chan`/`spawn`/`detach`/`wait`/`select`/`<-`(recv)/`ch <- v`(send)を実装。
+        パーサー・型システム(`Type::Chan`/`Type::Closed`)・ランタイム(`class __Channel`・
+        `__recv`/`__select`/`__spawn`/`__detach`/`__waitStack`)は既存の仕組み
+        (`include_str!`でTS版`runtime.ts`を丸ごと埋め込み)で既に揃っていたため、
+        `checker.rs`の式推論と`codegen.rs`のみが対象。TS版の該当実装
+        (`src/checker/expressions.ts`・`src/checker/match-select.ts`・`src/codegen.ts`)を
+        2本のExploreエージェント+1本のPlanエージェントで調査・設計検証のうえ実装。
+        - `checker.rs`: `infer_expr`に`Expr::Chan`(`Type::Chan(elem)`、capacityは型に
+          影響しない)・`Expr::Recv`(`T | closed`、chan以外はANY)・`Expr::Spawn`
+          (`detached`は見ない——戻り値がvoidならvoid、それ以外は`chan<戻り値型>`)・
+          `Expr::Select`(全アーム+defaultのunion、全void→void、混在→ANY〈TS版の
+          `mixed-void-arms`診断に相当〉)を追加。selectのアーム束縛名は
+          `infer_expr(ctx: &CheckerCtx, ...)`が不変参照しか取らずスコープをpushできない
+          ため宣言しない(`match`/`is`絞り込みが未実装のこの移植の範囲内では、束縛変数への
+          型依存処理〈算術等〉を要する正当なMeshプログラムがそもそも書けないため無害。
+          未解決の参照はIdent推論の既存フォールバックでANYになるだけ)。
+        - `codegen.rs`: 新規`spawn_used: bool`フィールド(`prop_used`と同じ単一フラグ
+          パターン——`Expr::FnExpr`未対応のため関数本体生成はネストせずスタック不要)。
+          `gen_fn_decl`を`used_prop`/`used_spawn`の2フラグ合成に書き換え——
+          両方falseなら従来通り無包装、`used_prop`のみなら従来通りtry/catch、
+          `used_spawn`のみなら`__waitStack.push([]); try {} finally { await
+          Promise.all(...) }`、両方trueならtry/catch/finallyを1つのtry文にまとめる
+          (TS版`genFnBody`のprop/spawn/defer 3フラグ合成と同じ設計。`defer`
+          〈TS版usesDefer相当〉は`Stmt::DeferStmt`が常にErrを返すため対象外のまま)。
+          `Stmt::Wait`は中身のspawn有無を見ずに常に`__waitStack.push([]); try {} finally
+          { await Promise.all(...) }`で包む(TS版と同じ無条件——関数丸ごとの暗黙wait枠とは
+          独立、`__waitStack`は本物のスタックなのでネストしても正しく動く)。`Expr::Chan`は
+          capacityが`Expr::None`なら`new __Channel()`、それ以外は`new __Channel(cap)`。
+          `Expr::Spawn`/`Expr::Detach`は新設`gen_spawn`で処理——メソッド呼び出し
+          (`spawn recv.method()`)の判定を新設`resolve_method_target`ヘルパへ切り出し、
+          既存`gen_call`もこのヘルパを使うようリファクタ(挙動は変えない。TS版が
+          `genCall`/`spawn`ケースの2箇所に同じ判定を重複して持つのに対し、Rust版は
+          1箇所にまとめた)。`Expr::Select`は新設`gen_select`——各アームの束縛名は
+          (checker側とは違い)`&mut self.ctx`があるので`OrElse`の既存束縛パターンを
+          再利用して`elem型 | closed`として正しくスコープに宣言してからbodyを生成する
+          (外側の同名変数〈型が違う〉をshadowする際に誤って`__iarith`等を選んでしまう
+          経路を防ぐため——checker.rs側の簡略化とは対称的に、codegen側は手を抜かない)。
+          `channels`/`handlers`(`(async (name) => body)`)/defaultの3引数を組み立てて
+          `__select(...)`に渡す(準備待ち・公平選択のロジックは100%ランタイム側)。
+        - **Rust版だけの安全ガード(TS版の`not-a-channel`診断に相当)**: `Stmt::Send`・
+          `Expr::Recv`・`gen_select`の各アームchannelで、型が確実に`Type::Chan`/`Type::Any`
+          のいずれでもないと分かる場合は明確なErr(`delete()`ガードと同じ考え方——ANYは
+          許容、確実に非chanと分かる場合だけ弾く)。milestone 4のIndexの前例(scoreが
+          低く実装コストが高いため見送った)とは異なり、今回はコストが低く
+          (`matches!`1個を3箇所にコピーするだけ)、かつ新規構文なので前例通り
+          最初からガード付きで出す方が一貫している、とPlanエージェントの検討を踏まえ判断。
+        - テスト: `checker.rs`に4件追加(chan生成・recvのT|closed化・spawnのvoid/chan分岐
+          〈detachedの値では変わらないこと込み〉・selectの全アーム+defaultのunion
+          〈全void/混在込み〉)。`codegen.rs`に15件追加(chan生成2形態・recv・send・
+          非chanへのsend/recvの明確なエラー・spawn自由関数・detach・spawnのメソッド
+          呼び出し・存在しないメソッドの明確なエラー・select〈default有無・非chanアームの
+          明確なエラー〉・明示的wait・明示的waitの中だけにspawnがあっても関数丸ごとの
+          暗黙wait枠が付くこと〈TS版と同じ「フラットなフラグ」挙動〉・`?`と`spawn`の
+          組み合わせ〈try/catch/finallyの順序込み〉・spawn_usedが関数ごとにリセットされ
+          漏れないこと)。162→201件、全件パス。`cargo clippy --all-targets --
+          -D warnings`クリーン。
+        - **実行確認**: 新規`examples/concurrency.mesh`(chan/spawn/detach/wait/select/
+          recv/sendを一通り使用。受信/select束縛値には算術をせずprint/文字列補間のみ
+          ——real TSチェッカーが`T|closed`への算術を`is`絞り込み無しに許さないため)を
+          Rust版で実行し`bun run mesh run`(TS版)とbyte-for-byte一致を確認。既存の
+          `examples/channels.mesh`(`is`未使用)も今回からフルに動くことを確認。既存の
+          `examples/channel_spec.mesh`(`is closed`使用)は引き続き
+          `codegen: 'is' is not yet supported`で明確に失敗することを確認(クラッシュ
+          しない、対応不要)。`hello`/`fizzbuzz`/`struct_methods`/`error_propagation`/
+          `collections`/`maps`も回帰無しを再確認。
+        - **milestone 5のスコープ外(意図的)**: `match`/`is`式・判別可能union・
+          `error type`(union形式)・`json struct`・`filter`/`map`/`reduce`・`defer`・
+          パッケージ修飾。次のmilestone(モジュール)以降で順に対応する
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
