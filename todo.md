@@ -803,6 +803,115 @@
             spawn/detach自体が無条件Errだったためこのバグは到達不可能だった
             ——このPRで初めて到達可能になった。80点未満で僅差だが、既存の
             「pre-existing issue」判定基準に沿って今回は未修正
+  - [x] **checker+codegen milestone 6(モジュール)** ✅ 2026-07-23実装(kanayamaと確認済みの
+        順序——struct/メソッド → error/json → 配列/map → 並行処理 → モジュール——の
+        最後、6番目)。**複数ファイルコンパイル・`import`・パッケージ修飾参照**
+        (`mathutil.Point`・`mathutil.add(...)`等)を実装。これまでの5マイルストーンは
+        既存の単一ファイル前提の構造に「足していく」形だったが、今回は初めて構造そのもの
+        (`main.rs`の単一ファイル前提・`CheckerCtx`の単一名前空間)を拡張する必要がある、
+        この移植で最大の構造変更。TS版の該当実装(`src/cli.ts`のロード処理・
+        `src/compiler.ts`・`src/checker/modules.ts`・`src/codegen.ts`の命名規則)を
+        1本のExploreエージェントで調査し設計した(Planエージェント呼び出しは今回ユーザーの
+        判断で見送り、既存調査結果をもとに直接設計・実装)。
+        - **新規`rust/src/modules.rs`**: TS版`cli.ts`の`loadModules`/`loadDependencies`の
+          移植。`load_modules(entry_file)`——mainパッケージ=エントリファイル1本のみ
+          (同じディレクトリの他の.meshファイルは含めない。TS版の設計を直接確認して
+          明確化した点)、各`import "x"`は`root/x/`ディレクトリの全.meshファイルを
+          1パッケージとして読み込む。ファイルI/O層の処理なので診断ではなく明確なErr
+          (存在しないディレクトリ・空パッケージ・ネストしたパス)。単体テスト5件。
+        - **`checker.rs`**: `CheckerCtx`に`PackageSymbols`(types/fns/consts)のレジストリ・
+          現在処理中パッケージ名(`pkg`)・importエイリアス集合(`import_aliases`)を追加。
+          `begin_package(pkg, aliases)`でパッケージ切り替え時にfn_decls/struct_typesだけ
+          リセット(method_table/registryは全パッケージ共有、リセットしない)。新設
+          `qualify_struct_name(pkg, name)`(mainは無修飾、それ以外は`pkg.name`——TS版
+          `types-resolve.ts`と同じ)を`resolve_struct_decls`でstructの内部識別名に適用
+          (struct_typesのキー自体は素の名前のまま——パッケージ内部からは無修飾で引ける)。
+          **パッケージ間でのstruct循環は構造的に起こり得ない**(パッケージレベルの
+          import循環が依存順ソートの時点でErrになるため)ので、milestone 2の固定点反復は
+          パッケージ内だけで従来通り動かせばよい。`resolve_type_node`/`infer_expr`の
+          `TypeNode::Name`/`Expr::StructLit`に`pkg: Some(alias)`分岐を追加(レジストリから
+          引く)。`infer_call`にパッケージ修飾の自由関数呼び出し判定を追加(ローカル変数
+          によるshadowが優先——TS版`tryPackageMember`と同じ優先順位)。単体テスト4件追加。
+        - **`codegen.rs`**: `generate(program, file)`(既存API)を1パッケージ("main")だけの
+          `ModuleUnit`リストを作って新設`generate_modules(&[ModuleUnit])`を呼ぶ薄い
+          ラッパーに変更——既存220件近いテストが無変更で通ることで無回帰を保証。
+          `generate_all`を`generate_all_modules`(パッケージごとにファイルをまとめ、import
+          依存グラフを依存順〈importされる側が先〉にトポロジカルソート——循環は明確な
+          `Err`)+`generate_package`(1パッケージぶんの処理: struct解決→fn/メソッド
+          シグネチャ登録〈同一パッケージの全ファイルぶん、前方参照対応〉→exportedシンボルを
+          レジストリへ確定登録→本体生成〈ファイルごとに`self.file`を切り替え、パニック
+          位置情報が生成元ファイルを正しく指すようにする〉)に分割。新設`fn_js_name(pkg, name)`
+          (mainは無修飾、それ以外は`{pkg}${name}`——TS版`fnJsName`と同じ)をトップレベル
+          自由関数・メソッド以外のfn/constの命名に使用(既存`method_js_name`の
+          `.replace('.', "$")`は元々パッケージ未対応時から先取り実装されていたコードで、
+          今回で初めて「効く」ようになった)。`gen_call`にパッケージ修飾の自由関数呼び出し
+          判定を追加(未export/存在しない関数は明確なErr)。新設`resolve_free_fn_value`
+          (自パッケージの既知のトップレベル関数ならpkg接頭辞付きの名前、それ以外はgen_exprへ
+          素通し)を`gen_call`/`gen_spawn`の自由関数フォールバックで共有。`Expr::StructLit`の
+          `pkg: Some(_)`分岐をレジストリ参照に置き換え(未export/存在しないstructは明確な
+          Err)。単体テスト7件追加(パッケージ修飾呼び出し・同一パッケージ複数ファイル・
+          struct literal/型注釈/メソッド・未export関数の明確なErr・ローカル変数shadow・
+          未登録パッケージの明確なErr・import循環の明確なErr)。
+        - **意図的なスコープ縮小**(`modules_demo.mesh`+`mathutil/*.mesh`を動かすのに
+          不要なもの): 未exportシンボルの「見えない」という*挙動*はレジストリに載らない
+          ことで自然に得られるが、専用の「not exported」診断文言は出さない(ANY/未解決
+          フォールバックかcodegenの汎用Errになるだけ)。パッケージ名の妥当性検査・stdlib名
+          衝突検査・エイリアス衝突検査・「型を関数として呼んだ」等の誤用診断は診断専用の
+          ため対象外。パッケージ修飾された「呼び出しを伴わない」値参照(裸の
+          `mathutil.SomeConst`や関数値としての参照)・パッケージ修飾レシーバ(拡張メソッド
+          的な書き方)は今回の検証対象のいずれも使わないため対象外のまま(既存の
+          `Expr::Member`/`receiver_struct_name`の即Errにフォールバックする)。exportedな
+          constのレジストリ登録も同じ理由で対象外(`PackageSymbols.consts`は常に空——
+          将来pkg修飾constの読み出しに対応する際に埋める)。`mesh test`相当や
+          `_test.mesh`除外もRust版にはまだ`run`/`build`以外のCLIサブコマンドが無いため対象外。
+        - **PR #21の5エージェントcode reviewで4件のバグを発見・PR内で修正済み
+          (2026-07-23、いずれも独立に実際のビルド+実行で再現確認済み)**:
+          (1) `spawn`/`detach`でパッケージ修飾された自由関数(`spawn mathutil.add(...)`)を
+          呼ぶと、`gen_call`は解決できるのに`gen_spawn`が使う`resolve_free_fn_value`には
+          同じ分岐が無く、素の関数値を得られず「package/member access is not yet
+          supported」という紛らわしいエラーになっていた——`resolve_free_fn_value`に
+          `gen_call`と同じパッケージ修飾判定を追加して修正。
+          (2) pkg修飾された型注釈(`otherpkg.Point`)の循環検出(`collect_referenced_names`)が
+          素の名前だけを見ていたため、同一パッケージ内にたまたま同じ素の名前のstructが
+          あると無関係な相互参照だと誤認し、実際には循環していないのに
+          「self-referential/cyclic struct」という誤ったエラーになっていた——
+          `TypeNode::Name`の`pkg: Some(_)`分岐(他パッケージへの参照)を循環検出の
+          収集対象から除外して修正。
+          (3) 2つのパッケージ(または同一パッケージの2ファイル)が同じ名前のトップレベル
+          constを宣言すると、トップレベル関数/メソッドと違いconstのJS名にはpkg接頭辞を
+          付けていないため、生成JSの同じフラットスコープに同名の`const`宣言が2つ現れ、
+          実行時クラッシュではなく**JS自体が構文エラーでパースできず起動不能になる**
+          (delete()クラッシュ等より悪い壊れ方)——新規`declared_consts`集合で全パッケージに
+          わたるトップレベルconst名の重複を検出し、明確なErrにして修正(constへの
+          pkg接頭辞付けそのものは、参照側の配線まで必要になり今回のスコープを超えるため
+          見送り、検出だけで対処)。
+          (4) 「パッケージ間でのstruct循環は構造的に起こり得ない」という設計上の前提が、
+          実際には`resolve_type_node`/`infer_expr`のpkg修飾分岐がそのエイリアスが本当に
+          importされているか(`is_package_alias`)を確認せずレジストリを直接引いていた
+          ため成り立っていなかった——2つのパッケージが互いの型を(import文を宣言せずに)
+          参照し合うと、依存グラフ(import文だけを見て構築される)がその循環を検出
+          できず、どちらが先に処理されるか(HashSetの反復順に依存)によって結果が
+          非決定的に変わってしまう。`infer_call`の自由関数呼び出し判定は既に
+          `is_package_alias`を確認していたので、型注釈・struct literal(checker.rs・
+          codegen.rs双方)にも同じ確認を追加して修正——これによりパッケージ間の型参照は
+          必ずimport文を経由するようになり、前提の正しさが回復した。
+          回帰テスト6件追加、既存の軽微なコメントの誤り2件(`begin_package`が単一
+          パッケージでも実際には毎回呼ばれる点/`fn_js_name`がconstには適用されない点)も
+          修正。220→226件、全件パス、`cargo clippy`クリーンを確認済み。
+        - テスト: `modules.rs`5件+`checker.rs`4件+`codegen.rs`7件を追加(milestone本体)、
+          上記code review対応で6件追加。201→226件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実行確認**: 新設のマルチファイルエントリポイント(`main.rs`→`modules::load_modules`
+          →`codegen::generate_modules`)経由で既存の`examples/modules_demo.mesh`+
+          `examples/mathutil/{ops,point}.mesh`をコンパイル・実行し、`bun run mesh run`
+          (TS版)の出力とbyte-for-byte一致を確認(`mathutil.add`/`mathutil.quadruple`
+          呼び出し・`mathutil.Point{x,y}`構築・`mathutil.Point`型注釈・
+          `p.magnitudeSq()`メソッド呼び出し・`mathutil.origin()`呼び出しを一通り確認)。
+          生成JSのパニック位置情報が各関数の実際のソースファイル
+          (`examples/mathutil/ops.mesh:5:11`等)を正しく指すことも確認。既存の全example
+          (`hello`/`fizzbuzz`/`struct_methods`/`error_propagation`/`collections`/`maps`/
+          `concurrency`/`channels`/`channel_spec`)も新しいマルチファイルエントリポイント
+          経由で回帰無しを再確認。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
