@@ -464,17 +464,43 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   常にunion自身)だったと判明し、todo.mdの記載を訂正した。テスト284→304件(+20)。
   既存の全example(21本、自己参照型で対象外の`tree.mesh`を除く)がbyte-for-byte
   一致のまま回帰無し。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの12マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 13(算術演算子の妥当性検査・is_numericのUnion/ANY
+  問題)完了(2026-07-24)**。12マイルストーン完了後、残る既知の限界のうち
+  「`is_numeric`のUnion/ANY対応」に着手。当初は「union型への算術がおかしくなる」
+  という狭い問題だと見積もっていたが、TS版`checkArithOp`を読み実際にTS版へ複数
+  パターンを通して検証した結果、**Rust版には算術演算子(`+ - * / %`)の妥当性検査が
+  一切無い**という、より根本的な穴だと判明した——両辺が「両方int/float」でも
+  「両方stringで`+`」でもない組み合わせは、TS版なら`invalid-operation`で拒否する
+  ところを、Rust版は無条件にANYへフォールバックし生のJS演算子を出力していた
+  (`x := <-ch; y := x / 2`が浮動小数点`/`になる、`true - false`が意味不明な
+  JSになる、等)。「union型への算術」(PR #19以来の限界)はこの一般的な穴の一種類に
+  すぎなかった。milestone 2以来一貫している「TS本体は診断、Rust版は明確なErr」
+  パターンをそのまま適用し、`check_arith_op`/`infer_binary`の戻り値を
+  `Result<BinaryInfo, String>`へ変更。TS版と同じ「ANY安全弁がis_numeric分岐の
+  中と外の2箇所にある」構造まで含めて移植(`infer_expr`自体はErrを飲み込み
+  ANYへフォールバックし、診断を出さない設計を維持——codegen側だけがErrを外へ
+  伝える)。スコープは算術演算子のみ(比較演算子`< <= > >=`の`incomparable-types`・
+  `&&`/`||`の`not-bool`・`==`/`!=`絡みの検査は別カテゴリの診断として対象外)。
+  **code reviewで見つかった最重要指摘**: unary`-`と`++`/`--`がTS版で算術演算子と
+  全く同じ`invalid-operation`診断を共有しているのに一切検査されておらず
+  (`x := <-ch; x++`・`bools[0]++`〈bool配列〉等が無診断で素通りしJSの暗黙型変換で
+  壊れた値になっていた)、「is_numericのUnion/ANY問題を閉じる」という今回の目的
+  そのものに直結する漏れだったため、`check_unary_minus`/`check_inc_dec`を追加し
+  スコープに含めた。ほかTS版の唯一の"hint"メッセージ(`+`かつ片側がstringのとき
+  「str()で変換を」)の移植漏れも修正。テスト304→322件(+18)、既存の全example
+  (22本)がbyte-for-byte一致のまま回帰無し。`<-ch`/map読み取り/`true - false`/
+  `bools[0]++`の各パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
+  位置情報で拒否されることまで確認済み。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの13マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
-  フィールド検証)が全て完了——TS版リファレンス実装の主要機能をRust版がひととおり
-  移植し終えた。既知の限界の整理で挙がったもう一つの高レバレッジな根本原因
-  `is_numeric`のUnion/ANY対応(算術演算がunion経由の値に対して安全ガードを
-  選ばない)が次の有力候補。その他の細かな既知の限界・意図的なスコープ縮小
-  (自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック関数・
+  フィールド検証 → 算術演算子の妥当性検査)が全て完了——TS版リファレンス実装の
+  主要機能をRust版がひととおり移植し終えた。細かな既知の限界・意図的なスコープ
+  縮小(自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック関数・
   `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
-  `gen_lvalue`の代入先フィールド名検証・struct宣言時点の`__proto__`ガード 等)は
-  引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
+  `gen_lvalue`の代入先フィールド名検証・struct宣言時点の`__proto__`ガード・
+  比較演算子/`&&`/`||`/`==`/`!=`の妥当性検査 等)は引き続きtodo.mdに記録済みの
+  通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
