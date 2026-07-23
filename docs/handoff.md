@@ -440,14 +440,41 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   経由の呼び出しではレシーバが固定されない)を確認したが、Rust版だけの新しい
   退行ではないため記録に留めた。テスト276→284件(+8)、TS版テストスイート
   486→490件。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの11マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 12(struct literalのフィールド検証)完了(2026-07-24)**。
+  11マイルストーン完了後、kanayamaと既知の限界を整理し、最も古く(PR #17以来)・
+  影響範囲が広い「struct literalのフィールドが宣言済みの形と一切照合されない」穴を
+  選んで着手(`is_numeric`のUnion/ANY対応と2択で提示し、こちらを先に選択)。TS版
+  `structLit`ケースを読むと、単純なフィールド名照合だけでなく**判別可能unionの
+  構築時disambiguation**(タグ値でメンバーを特定)も含む、想定より大きい機能だった。
+  F-7判別可能unionのタグ計算(`find_discriminant_tag`、milestone 7では「codegenが
+  参照しないため計算しない」という意図的な先送りだった)を今回初めて実装し
+  `resolve_type_decls`から呼ぶ形にした——struct literalの正しいdisambiguationには
+  タグ名そのものが要るため。新設`resolve_struct_lit_member`(タグdisambiguation/
+  単一候補/名前付きstruct同士のフィールド集合解決の3分岐)・
+  `validate_struct_lit_fields`(重複/未知/型不一致/欠落、型互換性は既存の
+  `types::assignable`を再利用)を`codegen.rs`の`Expr::StructLit`から呼ぶ。
+  **検証で発覚**: 既存のmilestone 8回帰テストが`Result{value: 42}`(union自身の
+  名前で名前付きメンバーを構築)という、実際にTS版でも`discriminated-union-tag-missing`
+  で拒否されるコードを使っていた(無名メンバー2個がunion自身にタグを要求するため、
+  名前付きメンバーはタグ経由のdisambiguationの対象外になる)——具体的な struct 名
+  (`Success{value: 42}`)を使う形にテストを修正(退行ではなく、milestone 12の検証が
+  TS非互換な既存テストを正しく検出した形)。あわせて過去に「Rust側だけの穴」と
+  記録していた「union経由で構築した直後のフィールドアクセスがANYになる」という
+  項目も、実際はTS版自身の意図的な設計(式全体の型は絞り込んだメンバーではなく
+  常にunion自身)だったと判明し、todo.mdの記載を訂正した。テスト284→304件(+20)。
+  既存の全example(21本、自己参照型で対象外の`tree.mesh`を除く)がbyte-for-byte
+  一致のまま回帰無し。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの12マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
-  〈union形式〉→ json struct → filter/map/reduce → defer)が全て完了——TS版
-  リファレンス実装の主要機能をRust版がひととおり移植し終えた。細かな既知の限界・
-  意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上のdestructure・
-  ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct
-  参照 等)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して
-  決める
+  〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
+  フィールド検証)が全て完了——TS版リファレンス実装の主要機能をRust版がひととおり
+  移植し終えた。既知の限界の整理で挙がったもう一つの高レバレッジな根本原因
+  `is_numeric`のUnion/ANY対応(算術演算がunion経由の値に対して安全ガードを
+  選ばない)が次の有力候補。その他の細かな既知の限界・意図的なスコープ縮小
+  (自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック関数・
+  `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
+  `gen_lvalue`の代入先フィールド名検証・struct宣言時点の`__proto__`ガード 等)は
+  引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

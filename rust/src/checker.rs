@@ -15,8 +15,8 @@
 // このリゾルバの対象外(フルchecker移植の段階で改めて対応する)。未解決の名前・型は
 // `Type::Any`へフォールバックし、コンパイラ自体をpanicさせない
 
-use crate::ast::{Expr, MatchArm, MatchPattern, TypeDecl, TypeNode};
-use crate::token::TokenType;
+use crate::ast::{Expr, MatchArm, MatchPattern, StructLitField, TypeDecl, TypeNode};
+use crate::token::{Pos, TokenType};
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
 use std::collections::{HashMap, HashSet};
 
@@ -297,13 +297,16 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
                     let name = qualify_struct_name(ctx.pkg(), &decl.name);
                     ctx.declare_struct(&decl.name, Type::Struct { name, fields: resolved_fields, is_error_type: decl.is_error });
                 }
-                // union型alias(`type Status = "active" | "banned"`等)。discriminant_tagは
-                // 計算しない——is/matchのcodegenはASTのTypeNodeから直接テストを組み立てる
-                // (TS版genTypeTestと同じ)ため、コード生成には不要(§計画参照)。
+                // union型alias(`type Status = "active" | "banned"`等)。is/matchのcodegenは
+                // ASTのTypeNodeから直接テストを組み立てる(TS版genTypeTestと同じ)ため
+                // discriminant_tag自体はcodegenのそちらの経路には不要だが、milestone 12の
+                // struct literal構築時disambiguation(F-7)がタグ名を要求するため、ここで
+                // 計算して`Type::Union.discriminant_tag`に持たせる(§計画参照)。
                 // `error type X = A | B`(milestone 8)ならタグ付けも行う
                 TypeNode::Union { members, .. } => {
                     let resolved = resolve_type_node(ctx, &decl.node);
                     let resolved = if decl.is_error { tag_error_union(&decl.name, members, resolved)? } else { resolved };
+                    let resolved = compute_discriminant_tag(&decl.name, resolved)?;
                     ctx.declare_union(&decl.name, resolved);
                 }
                 _ => {}
@@ -338,6 +341,214 @@ fn tag_error_union(name: &str, source_members: &[TypeNode], resolved: Type) -> R
         Type::Union { members, discriminant_tag } => Type::Union { members: members.into_iter().map(tag).collect(), discriminant_tag },
         other => tag(other),
     })
+}
+
+fn is_anonymous_struct(t: &Type) -> bool {
+    matches!(t, Type::Struct { name, .. } if name == types::ANONYMOUS_STRUCT_NAME)
+}
+
+// F-7: 判別可能union(無名`{...}`メンバーが2個以上)は必ずタグフィールド名(discriminant_tag)を
+// 持つ。TS版`resolveAlias`同様、無名メンバーが1個以下ならタグは不要(そのまま素通し)——
+// 名前付きstruct同士のunion(`type Shape = Circle | Square`)はそれぞれ自分の名前で構築される
+// ため対象外。無名メンバーが2個以上あるのに有効な共有タグが見つからない場合はTS版
+// `discriminated-union-tag-required`相当の明確なErrにする(このリゾルバは診断を出さない
+// 設計のため)
+fn compute_discriminant_tag(name: &str, resolved: Type) -> Result<Type, String> {
+    match resolved {
+        Type::Union { members, discriminant_tag } => {
+            let anonymous: Vec<Type> = members.iter().filter(|m| is_anonymous_struct(m)).cloned().collect();
+            if anonymous.len() >= 2 {
+                match find_discriminant_tag(&anonymous) {
+                    Some(tag) => Ok(Type::Union { members, discriminant_tag: Some(tag) }),
+                    None => Err(format!(
+                        "checker: discriminated union '{name}' needs a tag field — every struct member must share \
+                         one field with a distinct string-literal value (e.g. kind: \"...\") so a member can be \
+                         identified from its tag alone, without comparing against the other members (F-7)"
+                    )),
+                }
+            } else {
+                Ok(Type::Union { members, discriminant_tag })
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+// F-7: 判別可能unionのタグフィールド名を求める(TS版`findDiscriminantTag`の移植)。
+// 「全メンバーに存在し、リテラル型で、値が互いに異なる」フィールドが1つでもあればそれを
+// 使う(複数の候補があっても最初に見つかったものでよい)。無ければNone
+fn find_discriminant_tag(members: &[Type]) -> Option<String> {
+    let Type::Struct { fields: first_fields, .. } = members.first()? else { return None };
+    'outer: for candidate in first_fields {
+        let mut values: Vec<&String> = Vec::with_capacity(members.len());
+        for m in members {
+            let Type::Struct { fields, .. } = m else { continue 'outer };
+            let Some(field) = fields.iter().find(|f| f.name == candidate.name) else { continue 'outer };
+            let Type::Literal(value) = &field.type_ else { continue 'outer };
+            values.push(value);
+        }
+        let unique: HashSet<&String> = values.iter().copied().collect();
+        if unique.len() == members.len() {
+            return Some(candidate.name.clone());
+        }
+    }
+    None
+}
+
+// TS版`structLit`ケース(src/checker/expressions.ts:398-473)の判別可能union
+// disambiguationの移植。baseがUnionでなければそのまま返す(単純structの構築)。
+// `field_types`は各フィールド値を1回だけ推論した結果(呼び出し側で計算済み・
+// 名前付きstruct同士のunionのタイブレークにも使い回す——TS版と同じく二重評価しない)
+pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[StructLitField], field_types: &[Type], pos: Pos) -> Result<Type, String> {
+    let Type::Union { members, discriminant_tag } = base else {
+        return Ok(base.clone());
+    };
+    let struct_members: Vec<&Type> = members.iter().filter(|m| matches!(m, Type::Struct { .. })).collect();
+    let anonymous_members: Vec<&Type> = struct_members.iter().filter(|m| is_anonymous_struct(m)).copied().collect();
+
+    if anonymous_members.len() >= 2 {
+        // 型宣言自体がタグ不足で既にresolve_type_declsの時点でErrになっているはずなので、
+        // ここに到達するのは理論上は無い(安全のための到達不能ガード)
+        let Some(tag_name) = discriminant_tag else {
+            return Err(format!("checker: discriminated union '{display_name}' has no tag field ({}:{})", pos.line, pos.col));
+        };
+        let tag_value = fields
+            .iter()
+            .zip(field_types)
+            .find(|(f, _)| &f.name == tag_name)
+            .and_then(|(_, ty)| if let Type::Literal(v) = ty { Some(v) } else { None });
+        let Some(tag_value) = tag_value else {
+            return Err(format!(
+                "checker: '{display_name}{{...}}' needs its tag field '{tag_name}' set to select a member \
+                 (e.g. {display_name}{{ {tag_name}: \"...\", ... }}) ({}:{})",
+                pos.line, pos.col
+            ));
+        };
+        let matched = anonymous_members.iter().find(|m| {
+            let Type::Struct { fields, .. } = m else { return false };
+            fields.iter().any(|f| &f.name == tag_name && matches!(&f.type_, Type::Literal(v) if v == tag_value))
+        });
+        match matched {
+            Some(m) => Ok((*m).clone()),
+            None => {
+                let valid_values: Vec<String> = anonymous_members
+                    .iter()
+                    .filter_map(|m| {
+                        let Type::Struct { fields, .. } = m else { return None };
+                        fields.iter().find(|f| &f.name == tag_name).and_then(|f| match &f.type_ {
+                            Type::Literal(v) => Some(format!("{v:?}")),
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                Err(format!(
+                    "checker: no member of '{display_name}' has {tag_name}: {tag_value:?} (valid {tag_name} values: {}) ({}:{})",
+                    valid_values.join(" | "),
+                    pos.line,
+                    pos.col
+                ))
+            }
+        }
+    } else if struct_members.len() <= 1 {
+        struct_members.first().map(|m| (*m).clone()).ok_or_else(|| format!("checker: '{display_name}' is not a struct ({}:{})", pos.line, pos.col))
+    } else {
+        // 名前付きstruct同士のunion(無名メンバーは1個以下): 従来どおりフィールド集合で解決
+        let mut field_names: Vec<&str> = Vec::new();
+        for f in fields {
+            if !field_names.contains(&f.name.as_str()) {
+                field_names.push(&f.name);
+            }
+        }
+        let mut candidates: Vec<&Type> = struct_members
+            .iter()
+            .filter(|m| {
+                let Type::Struct { fields: mf, .. } = m else { return false };
+                let mut member_names: Vec<&str> = Vec::new();
+                for f in mf {
+                    if !member_names.contains(&f.name.as_str()) {
+                        member_names.push(&f.name);
+                    }
+                }
+                member_names.len() == field_names.len() && field_names.iter().all(|n| member_names.contains(n))
+            })
+            .copied()
+            .collect();
+        if candidates.len() > 1 {
+            candidates.retain(|m| {
+                let Type::Struct { fields: mf, .. } = m else { return false };
+                fields
+                    .iter()
+                    .zip(field_types)
+                    .all(|(f, ty)| mf.iter().find(|d| d.name == f.name).map(|d| types::assignable(ty, &d.type_)).unwrap_or(false))
+            });
+        }
+        match candidates.len() {
+            1 => Ok(candidates[0].clone()),
+            0 => {
+                let shapes: Vec<String> = struct_members
+                    .iter()
+                    .map(|m| {
+                        let Type::Struct { fields: mf, .. } = m else { return String::new() };
+                        format!("{{ {} }}", mf.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", "))
+                    })
+                    .collect();
+                Err(format!(
+                    "checker: no member of '{display_name}' matches the field(s) {{{}}} (union members: {}) ({}:{})",
+                    field_names.join(", "),
+                    shapes.join(" | "),
+                    pos.line,
+                    pos.col
+                ))
+            }
+            _ => Err(format!(
+                "checker: ambiguous — multiple members of '{display_name}' match the field(s) {{{}}} ({}:{})",
+                field_names.join(", "),
+                pos.line,
+                pos.col
+            )),
+        }
+    }
+}
+
+// TS版`structLit`ケースのフィールド検証部分(src/checker/expressions.ts:483-518)の移植。
+// resolve_struct_lit_memberで特定した具体的なstruct型に対して、重複フィールド・未知の
+// フィールド(typo検出、PR #17以来の既知の穴)・フィールド値の型不一致・必須フィールドの
+// 欠落(v1は全フィールド必須、デフォルト値は無い)を検証する
+pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[StructLitField], field_types: &[Type], pos: Pos) -> Result<(), String> {
+    let Type::Struct { fields: decl_fields, .. } = member else {
+        return Err(format!("checker: '{display_name}' is not a struct ({}:{})", pos.line, pos.col));
+    };
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (f, ty) in fields.iter().zip(field_types) {
+        if !seen.insert(f.name.as_str()) {
+            return Err(format!("checker: duplicate field '{}' ({}:{})", f.name, f.pos.line, f.pos.col));
+        }
+        let Some(decl) = decl_fields.iter().find(|d| d.name == f.name) else {
+            return Err(format!(
+                "checker: {display_name} has no field '{}' (fields: {}) ({}:{})",
+                f.name,
+                decl_fields.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", "),
+                f.pos.line,
+                f.pos.col
+            ));
+        };
+        if !types::assignable(ty, &decl.type_) {
+            let value_pos = f.value.pos();
+            return Err(format!(
+                "checker: field '{}': cannot use {} as {} ({}:{})",
+                f.name,
+                types::type_to_string(ty),
+                types::type_to_string(&decl.type_),
+                value_pos.line,
+                value_pos.col
+            ));
+        }
+    }
+    let missing: Vec<&str> = decl_fields.iter().map(|d| d.name.as_str()).filter(|n| !seen.contains(n)).collect();
+    if !missing.is_empty() {
+        return Err(format!("checker: missing field(s) in {display_name}: {} ({}:{})", missing.join(", "), pos.line, pos.col));
+    }
+    Ok(())
 }
 
 // struct型の内部識別名にパッケージを織り込む(TS版`types-resolve.ts`と同じ、ドット区切り)。
@@ -1764,5 +1975,178 @@ mod tests {
 
         let mixed = Expr::Match { subject: Box::new(ident("x")), arms: vec![arm(int_lit("1")), arm(void_call())], pos: pos() };
         assert!(matches!(infer_expr(&ctx, &mixed), Type::Any));
+    }
+
+    // ---- milestone 12: struct literalのフィールド検証(F-7タグ計算+disambiguation+検証) ----
+
+    fn anon_struct(fields: &[(&str, Type)]) -> Type {
+        Type::Struct {
+            name: types::ANONYMOUS_STRUCT_NAME.to_string(),
+            fields: fields.iter().map(|(n, t)| types::StructField { name: n.to_string(), type_: t.clone() }).collect(),
+            is_error_type: false,
+        }
+    }
+
+    fn field(name: &str, value: Expr) -> StructLitField {
+        StructLitField { name: name.to_string(), value, pos: pos() }
+    }
+
+    #[test]
+    fn find_discriminant_tagは全メンバーに存在し値が異なるリテラルフィールドを見つける() {
+        let a = anon_struct(&[("kind", Type::Literal("ok".into())), ("value", INT)]);
+        let b = anon_struct(&[("kind", Type::Literal("err".into()))]);
+        assert_eq!(find_discriminant_tag(&[a, b]), Some("kind".to_string()));
+    }
+
+    #[test]
+    fn find_discriminant_tagはタグ候補が無ければnone() {
+        // "kind"フィールドの値が両メンバーとも同じ("ok")なので判別に使えない。
+        // 他に共通フィールドが無いのでタグ無し
+        let a = anon_struct(&[("kind", Type::Literal("ok".into()))]);
+        let b = anon_struct(&[("kind", Type::Literal("ok".into())), ("extra", INT)]);
+        assert_eq!(find_discriminant_tag(&[a, b]), None);
+    }
+
+    #[test]
+    fn find_discriminant_tagは複数候補があれば最初に見つかったものを採用する() {
+        let a = anon_struct(&[("kind", Type::Literal("a".into())), ("tag2", Type::Literal("x".into()))]);
+        let b = anon_struct(&[("kind", Type::Literal("b".into())), ("tag2", Type::Literal("y".into()))]);
+        assert_eq!(find_discriminant_tag(&[a, b]), Some("kind".to_string()));
+    }
+
+    #[test]
+    fn resolve_type_declsは無名メンバー2個以上の判別可能unionにタグを計算する() {
+        let types = vec![union_decl(
+            "Resp",
+            vec![
+                struct_type_node(&[("kind", literal_type("ok")), ("value", name_type("int"))]),
+                struct_type_node(&[("kind", literal_type("err"))]),
+            ],
+        )];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Union { discriminant_tag, .. }) = ctx.lookup_union("Resp") else { panic!("expected union") };
+        assert_eq!(discriminant_tag.as_deref(), Some("kind"));
+    }
+
+    #[test]
+    fn resolve_type_declsは共有タグが無い判別可能unionはerrになる() {
+        // F-7: discriminated-union-tag-required相当。両メンバーに共通のリテラル値フィールドが無い
+        let types = vec![union_decl(
+            "Bad",
+            vec![struct_type_node(&[("a", name_type("int"))]), struct_type_node(&[("b", name_type("int"))])],
+        )];
+        let mut ctx = CheckerCtx::new();
+        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberは単純structならそのまま返す() {
+        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let result = resolve_struct_lit_member(&user, "User", &[], &[], pos()).unwrap();
+        assert!(types::type_equals(&result, &user));
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberは判別可能unionをタグの値で特定する() {
+        let ok = anon_struct(&[("kind", Type::Literal("ok".into())), ("value", INT)]);
+        let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
+        let resp = Type::Union { members: vec![ok.clone(), err], discriminant_tag: Some("kind".into()) };
+
+        let fields = [field("kind", Expr::String { value: "ok".into(), pos: pos() }), field("value", int_lit("1"))];
+        let field_types = [Type::Literal("ok".into()), INT];
+        let matched = resolve_struct_lit_member(&resp, "Resp", &fields, &field_types, pos()).unwrap();
+        assert!(types::type_equals(&matched, &ok));
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberはタグ値が一致しなければerrになる() {
+        // 以前(milestone 11以前)は静かに素通りしていた穴——PR #17以来の既知の限界
+        let ok = anon_struct(&[("kind", Type::Literal("ok".into()))]);
+        let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
+        let resp = Type::Union { members: vec![ok, err], discriminant_tag: Some("kind".into()) };
+
+        let fields = [field("kind", Expr::String { value: "unknown".into(), pos: pos() })];
+        let field_types = [Type::Literal("unknown".into())];
+        assert!(resolve_struct_lit_member(&resp, "Resp", &fields, &field_types, pos()).is_err());
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberはタグフィールド自体が無ければerrになる() {
+        let ok = anon_struct(&[("kind", Type::Literal("ok".into()))]);
+        let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
+        let resp = Type::Union { members: vec![ok, err], discriminant_tag: Some("kind".into()) };
+
+        let fields = [field("value", int_lit("1"))];
+        let field_types = [INT];
+        assert!(resolve_struct_lit_member(&resp, "Resp", &fields, &field_types, pos()).is_err());
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberは名前付きstruct同士のunionをフィールド集合で解決する() {
+        let circle = Type::Struct { name: "Circle".into(), fields: vec![types::StructField { name: "radius".into(), type_: INT }], is_error_type: false };
+        let square = Type::Struct { name: "Square".into(), fields: vec![types::StructField { name: "side".into(), type_: INT }], is_error_type: false };
+        let shape = Type::Union { members: vec![circle.clone(), square], discriminant_tag: None };
+
+        let fields = [field("radius", int_lit("3"))];
+        let field_types = [INT];
+        let matched = resolve_struct_lit_member(&shape, "Shape", &fields, &field_types, pos()).unwrap();
+        assert!(types::type_equals(&matched, &circle));
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberは名前付きstruct同士のunionでフィールド集合が一致しなければerrになる() {
+        let circle = Type::Struct { name: "Circle".into(), fields: vec![types::StructField { name: "radius".into(), type_: INT }], is_error_type: false };
+        let square = Type::Struct { name: "Square".into(), fields: vec![types::StructField { name: "side".into(), type_: INT }], is_error_type: false };
+        let shape = Type::Union { members: vec![circle, square], discriminant_tag: None };
+
+        let fields = [field("height", int_lit("3"))];
+        let field_types = [INT];
+        assert!(resolve_struct_lit_member(&shape, "Shape", &fields, &field_types, pos()).is_err());
+    }
+
+    #[test]
+    fn resolve_struct_lit_memberは名前付きstruct同士のunionで複数候補が値でも絞れなければambiguousになる() {
+        let a = Type::Struct { name: "A".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false };
+        let b = Type::Struct { name: "B".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false };
+        let union = Type::Union { members: vec![a, b], discriminant_tag: None };
+
+        let fields = [field("x", int_lit("1"))];
+        let field_types = [INT];
+        assert!(resolve_struct_lit_member(&union, "AB", &fields, &field_types, pos()).is_err());
+    }
+
+    #[test]
+    fn validate_struct_lit_fieldsは重複_未知_型不一致_欠落を検出する() {
+        let user = Type::Struct {
+            name: "User".into(),
+            fields: vec![types::StructField { name: "name".into(), type_: STRING }, types::StructField { name: "age".into(), type_: INT }],
+            is_error_type: false,
+        };
+
+        // 正常系
+        let ok_fields = [field("name", Expr::String { value: "a".into(), pos: pos() }), field("age", int_lit("1"))];
+        let ok_types = [Type::Literal("a".into()), INT];
+        assert!(validate_struct_lit_fields(&user, "User", &ok_fields, &ok_types, pos()).is_ok());
+
+        // 重複フィールド
+        let dup_fields = [field("name", Expr::String { value: "a".into(), pos: pos() }), field("name", Expr::String { value: "b".into(), pos: pos() })];
+        let dup_types = [Type::Literal("a".into()), Type::Literal("b".into())];
+        assert!(validate_struct_lit_fields(&user, "User", &dup_fields, &dup_types, pos()).is_err());
+
+        // 未知のフィールド(typo)
+        let unknown_fields = [field("nmae", Expr::String { value: "a".into(), pos: pos() })];
+        let unknown_types = [Type::Literal("a".into())];
+        assert!(validate_struct_lit_fields(&user, "User", &unknown_fields, &unknown_types, pos()).is_err());
+
+        // 型不一致
+        let mismatch_fields = [field("name", int_lit("1")), field("age", int_lit("1"))];
+        let mismatch_types = [INT, INT];
+        assert!(validate_struct_lit_fields(&user, "User", &mismatch_fields, &mismatch_types, pos()).is_err());
+
+        // 欠落フィールド
+        let missing_fields = [field("name", Expr::String { value: "a".into(), pos: pos() })];
+        let missing_types = [Type::Literal("a".into())];
+        assert!(validate_struct_lit_fields(&user, "User", &missing_fields, &missing_types, pos()).is_err());
     }
 }
