@@ -47,6 +47,12 @@ fn load_dependencies(root: &Path, initial_queue: Vec<String>) -> Result<Vec<Modu
         if !loaded.insert(path.clone()) {
             continue;
         }
+        // 組み込みパッケージ(milestone 9・`mesh/json`)は`.mesh`ソースを持たない——
+        // ディスク上のディレクトリを探しに行かず、依存キューにも何も積まない
+        // (checker/codegen側で直接手組みのPackageSymbolsとして登録する、stdlib.ts参照)
+        if path == "mesh/json" {
+            continue;
+        }
         if path.contains('/') {
             return Err(format!(
                 "error: nested package paths ('{path}') are not supported yet — packages are single directories under the project root"
@@ -109,6 +115,17 @@ mod tests {
         assert_eq!(modules.len(), 3, "main1件+mathutilの2ファイル");
         let mathutil_files: Vec<_> = modules.iter().filter(|m| m.pkg == "mathutil").collect();
         assert_eq!(mathutil_files.len(), 2);
+    }
+
+    #[test]
+    fn load_modulesは組み込みパッケージmesh_jsonをファイルシステムを見ずに解決する() {
+        // 回帰防止: "mesh/json"は'/'を含むため、組み込みパッケージの早期continueが
+        // 無いと「ネストしたパッケージパスは非対応」という誤ったエラーになっていた
+        let root = temp_dir("builtin_json_pkg");
+        fs::write(root.join("main.mesh"), "import \"mesh/json\"\nfn main() {}\n").unwrap();
+        let modules = load_modules(&root.join("main.mesh")).unwrap();
+        assert_eq!(modules.len(), 1, "mesh/jsonはModuleSourceを持たない");
+        assert_eq!(modules[0].pkg, "main");
     }
 
     #[test]

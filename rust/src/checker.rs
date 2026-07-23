@@ -269,10 +269,13 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
     // code review(milestone 3で発覚): 以前は`!t.is_error`も条件に含めていたため、
     // `error struct X {...}`宣言がここで丸ごと無視され、is_error_typeタグが一切効かない
     // バグになっていた。error structもここで解決し(下のstruct構築コードが既に
-    // `is_error_type: decl.is_error`を渡しているので、それ以外の変更は不要)、
-    // json structだけを引き続き対象外にする(decode<X>自動生成はモジュールmilestoneまで先送り)
-    let type_decls: Vec<&TypeDecl> =
-        types.iter().filter(|t| !t.is_json && matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. })).collect();
+    // `is_error_type: decl.is_error`を渡しているので、それ以外の変更は不要)。
+    // json struct(milestone 9)もTS版と同じく普通のstructとして解決する——`is_json`は
+    // decode<X>自動生成(json_decode.rs)の対象を決めるだけのフラグで、struct自体の
+    // 型解決(構築・フィールドアクセス)には一切影響しない(TS版のresolveAlias/
+    // resolveTypeがisJsonを一切参照しないことを確認済み)。以前ここで除外していたのは
+    // 「decode<X>合成がまだ無い」ための暫定処置だった
+    let type_decls: Vec<&TypeDecl> = types.iter().filter(|t| matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. })).collect();
     let names: HashSet<&str> = type_decls.iter().map(|t| t.name.as_str()).collect();
 
     if let Some(cycle_name) = find_type_decl_cycle(&type_decls, &names) {

@@ -1,0 +1,80 @@
+// json struct(milestone 9) — decode<X>(v: json.Value) X | error の自動生成を一巡する。
+// フラットなstruct・欠落/型違い/非objectフィールドのエラー・ネストしたjson struct+配列+
+// optionalフィールドの組み合わせ・配列-of-ネストstruct+optional配列・
+// 整数フィールドへの小数値の拒否、を一通り確認する
+
+import "mesh/json"
+
+json struct User {
+	name: string
+	age: int
+}
+
+json struct Address {
+	city: string
+	zip: string
+}
+
+json struct Person {
+	name: string
+	address: Address
+	tags: string[]
+	nickname: string | none
+}
+
+json struct Item {
+	sku: string
+	qty: int
+}
+
+json struct Cart {
+	items: Item[]
+	notes: string[] | none
+}
+
+fn main() {
+	v := json.parse("{\"name\": \"alice\", \"age\": 30}") or _ => json.Value{kind: "null"}
+	u := decodeUser(v)
+	if u is error { print("failed"); return }
+	print(u.name, u.age)
+
+	missing := json.parse("{\"name\": \"bob\"}") or _ => json.Value{kind: "null"}
+	u1 := decodeUser(missing)
+	if u1 is error { print(u1) }
+
+	wrongType := json.parse("{\"name\": \"bob\", \"age\": \"nope\"}") or _ => json.Value{kind: "null"}
+	u2 := decodeUser(wrongType)
+	if u2 is error { print(u2) }
+
+	notObj := json.parse("[1,2,3]") or _ => json.Value{kind: "null"}
+	u3 := decodeUser(notObj)
+	if u3 is error { print(u3) }
+
+	text := "{\"name\": \"alice\", \"address\": {\"city\": \"Tokyo\", \"zip\": \"100-0001\"}, \"tags\": [\"a\", \"b\"], \"nickname\": \"al\"}"
+	pv := json.parse(text) or _ => json.Value{kind: "null"}
+	p := decodePerson(pv)
+	if p is error { print("failed: " + str(p)); return }
+	print(p.name, p.address.city, p.address.zip, p.tags, p.nickname)
+
+	textNoNick := "{\"name\": \"bob\", \"address\": {\"city\": \"Osaka\", \"zip\": \"500-0001\"}, \"tags\": []}"
+	pv2 := json.parse(textNoNick) or _ => json.Value{kind: "null"}
+	p2 := decodePerson(pv2)
+	if p2 is error { print("failed2: " + str(p2)); return }
+	print(p2.name, p2.nickname, len(p2.tags))
+
+	cartText := "{\"items\": [{\"sku\": \"a1\", \"qty\": 2}, {\"sku\": \"b2\", \"qty\": 5}], \"notes\": [\"fragile\"]}"
+	cv := json.parse(cartText) or _ => json.Value{kind: "null"}
+	c := decodeCart(cv)
+	if c is error { print("failed: " + str(c)); return }
+	print(len(c.items), c.items[0].sku, c.items[1].qty, c.notes)
+
+	cartTextNoNotes := "{\"items\": []}"
+	cv2 := json.parse(cartTextNoNotes) or _ => json.Value{kind: "null"}
+	c2 := decodeCart(cv2)
+	if c2 is error { print("failed2: " + str(c2)); return }
+	print(len(c2.items), c2.notes)
+
+	badAge := json.parse("{\"name\": \"a\", \"age\": 30.5}") or _ => json.Value{kind: "null"}
+	u4 := decodeUser(badAge)
+	if u4 is error { print(u4) }
+}

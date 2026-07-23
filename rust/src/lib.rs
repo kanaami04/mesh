@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod checker;
 pub mod codegen;
+pub mod json_decode;
 pub mod lexer;
 pub mod modules;
 pub mod parser;

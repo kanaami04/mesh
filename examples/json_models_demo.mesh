@@ -1,0 +1,12 @@
+// json struct(milestone 9) — exportされたjson structのdecode関数を他パッケージから呼べる
+// ことを確認する(examples/jsonmodels/models.meshがexport json struct Userを宣言)
+
+import "mesh/json"
+import "jsonmodels"
+
+fn main() {
+	v := json.parse("{\"name\": \"alice\"}") or _ => json.Value{kind: "null"}
+	u := jsonmodels.decodeUser(v)
+	if u is error { print("failed"); return }
+	print(u.name)
+}

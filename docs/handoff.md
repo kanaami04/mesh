@@ -343,10 +343,34 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   実行確認済み)。いずれも修正しexport登録をunion型aliasにも対応、
   新設`type_is_error_instance`ヘルパへ集約。テスト246→253件(+7)。
   詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの8マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 9(json struct)完了(2026-07-23)**。これまでの
+  8マイルストーンと質的に違う点: checker/codegenの「解析」だけでなく、
+  `json struct X {...}`宣言から`decode<X>(v: json.Value) X | error`という新しい
+  Mesh関数を**構文レベルのAST(Stmt/Expr)として合成しprogram.fnsへ追加する新しい
+  パイプライン段階**が必要(TS版`compiler.ts`が`parse`直後・`check`前に挟むのと
+  同じ)。新設`rust/src/json_decode.rs`(TS版`json-decode.ts`313行の忠実な移植)+
+  新設`json_stdlib_symbols()`(`mesh/json`という`.mesh`ソースを持たない組み込み
+  パッケージ、TS版`stdlib.ts`相当)。**ランタイムJS側は既に完全に揃っていた**
+  (H-2実装時にruntime.ts全体が移植済みで`json$parse`等が既に実装済み)ため、
+  codegen自体への変更は「registryへの1回の登録」+`modules.rs`への`mesh/json`
+  早期continueだけで済んだ。`json.Value`(TS版では真に自己参照する判別可能union)は
+  milestone 2以来の自己参照型の壁(`tree.mesh`と同じ)にぶつかるため、不透明な殻
+  structとして扱う意図的なスコープ縮小を選択——`json struct`の自動生成コードは
+  `json.field`/`json.asString`等の不透明なヘルパー越しにしかValueへ触れないため
+  実害が無いことをTS版のテストで確認済み(生のValueを`is`/`match`で直接構造分解
+  する手書きデコーダだけがスコープ外)。**副産物として既存バグを発見・修正**:
+  `is_json`宣言がstruct自体の型解決から丸ごと除外されていた(json struct未実装
+  時のプレースホルダ)ため、手書きの`X{...}`構築でフィールドが空の殻へ静かに
+  フォールバックする潜在バグがあった——TS版がisJsonをstruct型解決に一切使わない
+  ことを確認し、除外を撤去。新規`examples/json_decode.mesh`
+  (`tests/e2e.test.ts:2738-2859`のシナリオ一式)+`examples/json_models_demo.mesh`
+  (cross-package export)でTS版とbyte-for-byte一致を確認、既存の全example・
+  `tree.mesh`の明確なErrも回帰無し。テスト253→264件(+11)。詳細はtodo.mdの
+  当該項目が一次情報源
+- **次にやるなら**: 確認済みの9マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
-  〈union形式〉)が全て完了。次の対象はkanayamaと相談して決める(`json struct`
-  〈`mesh/json`スタブ実装込みの独立した大きめmilestone〉・`filter`/`map`/`reduce`・
+  〈union形式〉→ json struct)が全て完了。次の対象はkanayamaと相談して決める
+  (`filter`/`map`/`reduce`・
   `defer`が主な既知の未対応機能。todo.md参照)
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/

@@ -106,6 +106,11 @@ impl Codegen {
     // TS版compileModulesと同じ)、import依存グラフの依存順(importされる側が先)にソート
     // してから1パッケージずつ処理する
     fn generate_all_modules(&mut self, modules: &[ModuleUnit]) -> CodegenResult<String> {
+        // 組み込みパッケージ(milestone 9・`mesh/json`)を、ユーザーパッケージの処理が
+        // 始まる前に登録しておく(依存グラフのソート対象には現れない——
+        // topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
+        self.ctx.register_package("json", json_stdlib_symbols());
+
         let mut packages: Vec<(String, Vec<&ModuleUnit>)> = Vec::new();
         for m in modules {
             match packages.iter_mut().find(|(pkg, _)| pkg == &m.pkg) {
@@ -142,14 +147,13 @@ impl Codegen {
         }
         self.ctx.begin_package(pkg, import_aliases);
 
-        // plain struct宣言 + error struct宣言(milestone 3で対応)+ 判別可能union型alias
-        // (`type X = A | B`、milestone 7)+ error typeのunion形式(`error type X = A | B`、
-        // milestone 8)まで。json struct(decode<X>自動生成)だけが引き続き対象外
+        // plain struct宣言(json struct、milestone 9含む——is_jsonはdecode<X>自動生成
+        // 〈json_decode.rs、main.rsでparse直後に済ませてある〉の対象を決めるだけで、
+        // struct自体の型解決には影響しない)+ error struct宣言(milestone 3)+
+        // 判別可能union型alias(`type X = A | B`、milestone 7)+ error typeのunion形式
+        // (`error type X = A | B`、milestone 8)まで
         let all_types: Vec<TypeDecl> = files.iter().flat_map(|f| f.program.types.iter().cloned()).collect();
         for t in &all_types {
-            if t.is_json {
-                return Err(format!("codegen: json struct declarations are not yet supported (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
-            }
             if !matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) {
                 return Err(format!("codegen: only plain struct declarations and union type aliases are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
             }
@@ -1265,6 +1269,41 @@ fn type_is_error_instance(ty: &Type) -> bool {
     }
 }
 
+// mesh/json(組み込みパッケージ、milestone 9)のシグネチャ定義。`.mesh`ソースを持たない——
+// TS版`stdlib.ts`のBUILTIN_PACKAGESに相当し、この定義から直接`checker::PackageSymbols`へ
+// 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
+// 実装済み(H-2実装時にruntime.ts全体を移植済みのため、ここではシグネチャの登録だけでよい)。
+// json.Valueは真に自己参照する判別可能union(TS版はarr/objメンバーがValue自身を配列/map
+// 越しに参照する共有可変オブジェクトとして手組みする)——milestone 2以来一貫して
+// 「対応不可、明確なErr」としてきた自己参照型の壁そのもの(examples/tree.mesh参照)なので、
+// 不透明な殻structとして扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明な
+// ヘルパー越しにしかValueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に
+// 分解する手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
+fn json_stdlib_symbols() -> checker::PackageSymbols {
+    fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn { params, ret: Box::new(ret) }
+    }
+
+    let value_ty = Type::Struct { name: "json.Value".to_string(), fields: vec![], is_error_type: false };
+    let array_of_value = Type::Array(Box::new(value_ty.clone()));
+
+    let mut types = HashMap::new();
+    types.insert("Value".to_string(), value_ty.clone());
+
+    let mut fns = HashMap::new();
+    fns.insert("parse".to_string(), fn_ty(vec![types::STRING], types::union_of(vec![value_ty.clone(), types::ERROR])));
+    fns.insert("stringify".to_string(), fn_ty(vec![value_ty.clone()], types::STRING));
+    fns.insert("field".to_string(), fn_ty(vec![value_ty.clone(), types::STRING], types::union_of(vec![value_ty.clone(), types::ERROR])));
+    fns.insert("optField".to_string(), fn_ty(vec![value_ty.clone(), types::STRING], types::union_of(vec![value_ty.clone(), types::NONE])));
+    fns.insert("asString".to_string(), fn_ty(vec![value_ty.clone()], types::union_of(vec![types::STRING, types::ERROR])));
+    fns.insert("asInt".to_string(), fn_ty(vec![value_ty.clone()], types::union_of(vec![INT, types::ERROR])));
+    fns.insert("asFloat".to_string(), fn_ty(vec![value_ty.clone()], types::union_of(vec![types::FLOAT, types::ERROR])));
+    fns.insert("asBool".to_string(), fn_ty(vec![value_ty.clone()], types::union_of(vec![types::BOOL, types::ERROR])));
+    fns.insert("asArray".to_string(), fn_ty(vec![value_ty], types::union_of(vec![array_of_value, types::ERROR])));
+
+    checker::PackageSymbols { types, fns, consts: HashMap::new() }
+}
+
 fn receiver_struct_name(recv: &Receiver) -> CodegenResult<String> {
     match &recv.type_node {
         TypeNode::Name { name, pkg: None, .. } => Ok(name.clone()),
@@ -1636,9 +1675,15 @@ mod tests {
     }
 
     #[test]
-    fn json_structはまだ未対応として明確なエラーになる() {
-        let err = gen_js("json struct Data {\n  n: int\n}\nfn main() {}").unwrap_err();
-        assert!(err.contains("not yet supported"), "got: {err}");
+    fn json_structは普通のstructとして解決・構築できる() {
+        // milestone 9: is_jsonはdecode<X>自動生成(json_decode.rs、main.rsでparse直後に
+        // 済ませる)の対象を決めるだけで、struct自体の型解決には影響しない
+        // (TS版resolveAlias/resolveTypeがisJsonを一切参照しないことに合わせた)。
+        // gen_js/gen_bodyは合成ステップを経ないが、それでもData自体は普通のstructとして
+        // 解決・構築でき、フィールドアクセスも正しい型で推論される(__iarithが選ばれる)
+        let js = gen_body("json struct Data {\n  n: int\n}\nfn main() {\n  d := Data{n: 1}\n  print(d.n + 1)\n}");
+        assert!(js.contains("const d = ({ n: 1 });"), "got: {js}");
+        assert!(js.contains("__iarith(d.n, \"+\", 1,"), "got: {js}");
     }
 
     #[test]
@@ -1982,6 +2027,34 @@ mod tests {
         ]);
         assert!(js.contains("const x = (await mathutil$add(1, 2));"), "got: {js}");
         assert!(js.contains("async function mathutil$add(a, b)"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_json組み込みパッケージの関数呼び出しとvalue構築が解決できる() {
+        // milestone 9: mesh/jsonは.messソースを持たない組み込みパッケージ(json_stdlib_symbols)。
+        // gen_body(単一"main"パッケージ)経由でも他パッケージ同様に解決できることを確認する
+        // (decode<X>合成〈json_decode.rs〉自体はmain.rsの仕事なので、ここでは合成後の
+        // コードが実際に使う経路——関数呼び出し・struct literal構築——だけを確認する)
+        let js = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  print(json.stringify(v))\n}",
+        );
+        assert!(js.contains("(await json$parse(\"1\"))"), "got: {js}");
+        assert!(js.contains("({ kind: \"null\" })"), "got: {js}"); // Valueはis_error_type無し、errTagで包まれない
+        assert!(js.contains("(await json$stringify(v))"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_jsonとユーザーパッケージのimportが共存できる() {
+        let js = gen_modules_body(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"mesh/json\"\nimport \"mathutil\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  print(mathutil.add(1, 2), json.stringify(v))\n}",
+            ),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
+        assert!(js.contains("(await json$stringify(v))"), "got: {js}");
     }
 
     #[test]
