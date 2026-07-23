@@ -1479,6 +1479,26 @@ mod tests {
     }
 
     #[test]
+    fn selectの結果を使った添字_recvにも正しい型で安全ガードが効く() {
+        // code review指摘: 以前はselectのアーム束縛名がスコープに宣言されず(checker.rs参照)、
+        // bodyがその束縛名をそのまま返すとselect式全体の型が常にANYへ潰れていた——ANYは
+        // 「確実に非map/非chanと分かる場合だけ弾く」設計の安全ガードを常に素通しするため、
+        // select結果への添字/recvが本来効くべきガードをすり抜けていた。アーム束縛名が
+        // 正しく型付けされ、ガードが機能することを確認する
+        let err1 = gen_js(
+            "fn main() {\n  a := chan<int[]>(none)\n  b := chan<int[]>(none)\n  close(b)\n  msg := select {\n    v := <-a => v\n    v := <-b => v\n  }\n  print(msg[0])\n}",
+        )
+        .unwrap_err();
+        assert!(err1.contains("cannot index into"), "got: {err1}");
+
+        let err2 = gen_js(
+            "fn main() {\n  a := chan<chan<int>>(none)\n  b := chan<chan<int>>(none)\n  close(b)\n  msg := select {\n    v := <-a => v\n    v := <-b => v\n  }\n  x := <-msg\n  print(x)\n}",
+        )
+        .unwrap_err();
+        assert!(err2.contains("cannot receive from non-channel"), "got: {err2}");
+    }
+
+    #[test]
     fn wait文はwaitstackで包む() {
         let js = gen_body("fn f() {\n  print(1)\n}\nfn main() {\n  wait {\n    spawn f()\n  }\n}");
         assert!(js.contains("__waitStack.push([]);"), "got: {js}");

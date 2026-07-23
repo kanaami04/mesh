@@ -727,8 +727,8 @@
           明確なエラー〉・明示的wait・明示的waitの中だけにspawnがあっても関数丸ごとの
           暗黙wait枠が付くこと〈TS版と同じ「フラットなフラグ」挙動〉・`?`と`spawn`の
           組み合わせ〈try/catch/finallyの順序込み〉・spawn_usedが関数ごとにリセットされ
-          漏れないこと)。162→201件、全件パス。`cargo clippy --all-targets --
-          -D warnings`クリーン。
+          漏れないこと)。162→201件(後述のcode review指摘の修正で204件)、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
         - **実行確認**: 新規`examples/concurrency.mesh`(chan/spawn/detach/wait/select/
           recv/sendを一通り使用。受信/select束縛値には算術をせずprint/文字列補間のみ
           ——real TSチェッカーが`T|closed`への算術を`is`絞り込み無しに許さないため)を
@@ -741,6 +741,68 @@
         - **milestone 5のスコープ外(意図的)**: `match`/`is`式・判別可能union・
           `error type`(union形式)・`json struct`・`filter`/`map`/`reduce`・`defer`・
           パッケージ修飾。次のmilestone(モジュール)以降で順に対応する
+        - **PR #20の5エージェントcode reviewで1件のバグを発見・PR内で修正済み
+          (2026-07-23、3エージェントが独立に別々の切り口・再現コードで発見——
+          過去PRコメントレビュー・git履歴レビュー・コードコメント準拠レビューの
+          いずれもが同じ根本原因に到達したため、Haikuスコアリングを待たず確定的な
+          バグとして即修正)**: `checker.rs`の`Expr::Select`アームが、束縛名を
+          スコープに宣言せず無条件に`infer_expr(ctx, &a.body)`へ渡していたため、
+          (1) `v := <-ch => v`のような典型的なイディオム(bodyが束縛名をそのまま
+          返す)では、その参照が常にANYになり(未宣言のIdentはANYへフォールバックする
+          既存挙動)、`union_of`がANYを含むunionを丸ごとANYへ潰すため、select式
+          全体の型が正しい`T | closed`ではなくANYになってしまい、後続コードでの
+          安全ガード(milestone 4のUnion添字ガード・このPR自身の非chan-recvガード
+          等、いずれも「ANYは確実に危険だと分からないので通す」設計)を静かに
+          すり抜けてしまう、(2) 束縛名が外側スコープの型が違う変数をshadowして
+          いる場合、bodyの中の参照が外側の(誤った)型に解決されてしまう
+          (`v := 42; ... select { v := <-ch => v }`で`v`が誤ってintと推論され、
+          実際は文字列の値に対して`__iarith`を選んでしまい紛らわしい実行時
+          パニックになる)。`CheckerCtx`に`#[derive(Clone)]`を追加し、アームごとに
+          使い捨てのスクラッチctx(clone)を作って束縛名をchanのelem型(`| closed`)
+          として正しく宣言してからそのスクラッチ上でbodyを推論する形で修正
+          (codegen側の`gen_select`は元々`&mut self.ctx`で正しく束縛していたため
+          修正不要——チェッカー側だけの穴だった)。回帰テスト3件追加
+          (`infer_exprのselectはアーム束縛名を正しくelem_or_closedとして推論する`・
+          `...shadowしても外側の型を漏らさない`・
+          `selectの結果を使った添字_recvにも正しい型で安全ガードが効く`)、
+          201→204件、`cargo clippy`クリーンを確認済み。
+        - 以下4件は独立検証で80点未満(既存の「診断を出さないリゾルバ」設計の
+          限界の再確認、または既に受け入れ済みのPR #19の限界の新しい現れ方であり、
+          このPR自体が新しい誤ったロジックを持ち込んだわけではないため)修正せず
+          既知の限界として明記するに留める(2026-07-23判断):
+          - **(70点)** range-forのアリティガード(milestone 4で追加、Array/Map/int
+            の3形態にのみ反応)は`Type::Chan`にも反応しない——`for i, v := range ch`
+            は`ch.entries is not a function`でクラッシュし、`for i := range ch`は
+            数値とchanオブジェクトの比較が常にfalseになり0回で終わる(エラーにも
+            クラッシュにもならず静かに空振りする)。PR #19で既に文書化済みの
+            「range-forのアリティガードがstring/bool/struct等をカバーしない」
+            限界に`Chan`が新たに加わった形——Goに慣れたユーザーが直感的に書きそうな
+            `for v := range ch`が該当するため今回の方が踏まれやすい可能性はあるが、
+            既存の限界と同じ根本原因・同じ受け入れ基準
+          - **(25点)** `<-ch`/selectの結果(`T | closed`というUnion型)への算術が
+            `check_arith_op`の`is_numeric`チェック(Union非対応)を通らず、静かに
+            `__idiv`等を経由しない生の`/`等になる(例: `x := <-ch; y := x / 2`で
+            `x`が実際は7でも`3.5`になり、Meshの切り捨て除算にならない)。この
+            `is_numeric`のUnion非対応自体はmilestone 1由来の既存の穴(mapの
+            `V | none`読みでも同じことが起きる)で、このPRの新しいロジックでは
+            ない——ただしmapには`or`という逃げ道があるのに対し、`is`絞り込みが
+            未実装のchannel/selectには逃げ道が無く、より踏まれやすい経路になった
+          - **(0点)** `gen_index_assign`/`gen_index_incdec`(milestone 4のUnion
+            ガード込み)は`Type::Chan`への添字にも反応しない——`ch[0] = 5`が
+            クラッシュもエラーも無く、chanオブジェクトへの無意味なアドホックな
+            プロパティ書き込みとして静かに空振りする。PR #19で既に文書化済みの
+            「`gen_lvalue`のMemberは許可リスト方式だが`gen_index_assign`/
+            `gen_index_incdec`は拒否リスト方式であり非対称」という限界に`Chan`が
+            加わっただけで、新しいロジックではない
+          - **(75点)** `spawn`/`detach`の呼び出し先が組み込み関数(例:
+            `spawn print("hi")`)だと、`gen_call`が持つ組み込み関数の特別扱いが
+            `gen_spawn`には無いため、存在しない`print`という素の識別子を参照する
+            JS(`__spawn(print, ["hi"])`)を生成し実行時に`ReferenceError`で
+            クラッシュする。TS版の`codegen.ts`自体にも同じ穴があり(Rust版は
+            忠実に移植した形)、新しいロジックではないが、milestone 5以前は
+            spawn/detach自体が無条件Errだったためこのバグは到達不可能だった
+            ——このPRで初めて到達可能になった。80点未満で僅差だが、既存の
+            「pre-existing issue」判定基準に沿って今回は未修正
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

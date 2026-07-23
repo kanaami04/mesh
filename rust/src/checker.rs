@@ -33,7 +33,9 @@ pub fn is_builtin(name: &str) -> bool {
 
 // TS版`CheckerCtx`のうち、milestone 2(struct/メソッド。パッケージはまだ無し)で使う部分だけを
 // 持つ。スコープスタック(narrowingは対象外)・トップレベル関数のシグネチャ表・struct型表・
-// メソッド表のみ
+// メソッド表のみ。Cloneはselectのアーム推論(infer_expr参照)が使い捨てのスクラッチctxを
+// 作るために必要——infer_exprは&CheckerCtx(不変参照)しか受け取らないため
+#[derive(Clone)]
 pub struct CheckerCtx {
     scopes: Vec<HashMap<String, Type>>,
     fn_decls: HashMap<String, Type>,
@@ -317,16 +319,38 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
             let ret = infer_expr(ctx, call);
             if types::type_equals(&ret, &VOID) { VOID } else { Type::Chan(Box::new(ret)) }
         }
-        // selectは各アーム(+default)のunion(TS版のmatch-select.tsと同じ)。TS版は
-        // アームごとにスコープをpushして束縛名を宣言してからbodyを推論するが、
-        // infer_exprは&CheckerCtx(不変参照)しか受け取らずスコープをpushできない。
-        // match/isによる絞り込みがまだ無いこの移植の範囲内では、束縛変数に対する
-        // 型依存の処理(算術等)を要する正当なMeshプログラムはそもそも書けないため、
-        // 束縛名を宣言せずにbodyを推論しても実害は無い(未解決の参照はIdent推論の
-        // 既存フォールバックでANYになるだけ——codegen側は&mut self.ctxを持つので
-        // 正しく束縛する。gen_select参照)
+        // selectは各アーム(+default)のunion(TS版のmatch-select.tsと同じ)。TS版はアームごとに
+        // スコープをpushして束縛名を宣言してからbodyを推論する。infer_exprは&CheckerCtx
+        // (不変参照)しか受け取らず、共有ctxへスコープをpushすることはできないため、
+        // アームごとに使い捨てのスクラッチctx(clone)を作って束縛名を正しく宣言してから
+        // そのスクラッチ上でbodyを推論する(このスクラッチはこの1回の推論だけに使い、
+        // すぐ捨てる——gen_select〈codegen側〉が&mut self.ctxで行うpush_scope/declare/
+        // pop_scopeと結果的に同じ効果になる)。
+        // code review指摘: 以前は束縛名を宣言せず無条件にinfer_expr(ctx, ...)へ渡していた——
+        // 「未解決の参照はANYになるだけで無害」という想定だったが、これは2つの意味で
+        // 誤りだった。(1) 束縛名がbody内でそのまま参照される典型的なイディオム
+        // (`v := <-ch => v`)では、その参照自体が常にANYになり、union_ofがANYを含む
+        // union を丸ごとANYへ潰してしまう——結果としてselect式全体の型が(本来の
+        // `T | closed`ではなく)ANYになり、後続コードでのmap/chanへの安全ガード
+        // (Union添字ガード・非chanへのrecvガード等、いずれもANYは素通しする設計)を
+        // 静かにすり抜けてしまう。(2) 束縛名が外側スコープの型が違う変数をshadowして
+        // いる場合、bodyの中の参照が外側の(誤った)型に解決されてしまう(例:
+        // `v := 42; ... select { v := <-ch => v }`で`v`が誤ってintと推論され、
+        // 後続の算術が実際はstringの値に対して`__iarith`を選び、紛らわしい実行時
+        // パニックになる)。どちらも実際に再現確認済み
         Expr::Select { arms, default_arm, .. } => {
-            let mut arm_types: Vec<Type> = arms.iter().map(|a| infer_expr(ctx, &a.body)).collect();
+            let mut arm_types: Vec<Type> = arms
+                .iter()
+                .map(|a| {
+                    let elem_ty = match infer_expr(ctx, &a.channel) {
+                        Type::Chan(elem) => types::union_of(vec![*elem, types::CLOSED]),
+                        _ => ANY,
+                    };
+                    let mut scratch = ctx.clone();
+                    scratch.declare(&a.name, elem_ty);
+                    infer_expr(&scratch, &a.body)
+                })
+                .collect();
             if let Some(def) = default_arm {
                 arm_types.push(infer_expr(ctx, def));
             }
@@ -963,5 +987,33 @@ mod tests {
 
         let mixed = Expr::Select { arms: vec![arm(int_lit("1")), arm(void_call())], default_arm: None, pos: pos() };
         assert!(matches!(infer_expr(&ctx, &mixed), Type::Any));
+    }
+
+    #[test]
+    fn infer_exprのselectはアーム束縛名を正しくelem_or_closedとして推論する() {
+        // code review指摘: 以前は束縛名を宣言せずにbodyを推論していたため、
+        // `v := <-ch => v`のようにbodyが束縛名をそのまま参照するとその参照が
+        // 常にANYになり、select式全体の型もANYへ潰れていた(Union添字ガード等の
+        // 「確実に非chan/非mapだと分かる場合だけ弾く」ガードをすり抜けてしまう)。
+        // 束縛名を正しくchanのelem型(| closed)として推論できることを確認する
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("ch", Type::Chan(Box::new(INT)));
+        let arm = SelectArm { name: "v".into(), channel: ident("ch"), body: ident("v"), pos: pos() };
+        let select = Expr::Select { arms: vec![arm], default_arm: None, pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &select), &types::union_of(vec![INT, types::CLOSED])));
+    }
+
+    #[test]
+    fn infer_exprのselectはアーム束縛名が外側の同名変数をshadowしても外側の型を漏らさない() {
+        // code review指摘: 束縛名が外側スコープの型が違う変数をshadowしている場合、
+        // 以前は外側の(誤った)型がbodyの推論に漏れてきていた(`v := 42; ... select {
+        // v := <-ch => v }`でchの中身がintでなくても`v`がintと誤推論される)
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("v", INT); // 外側スコープのvはint
+        ctx.declare("ch", Type::Chan(Box::new(STRING)));
+        let arm = SelectArm { name: "v".into(), channel: ident("ch"), body: ident("v"), pos: pos() };
+        let select = Expr::Select { arms: vec![arm], default_arm: None, pos: pos() };
+        // 束縛したvの型(string | closed)が推論されるべきで、外側のint型が漏れてはいけない
+        assert!(types::type_equals(&infer_expr(&ctx, &select), &types::union_of(vec![STRING, types::CLOSED])));
     }
 }
