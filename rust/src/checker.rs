@@ -86,10 +86,12 @@ impl CheckerCtx {
         }
     }
 
-    // 新しいパッケージの処理を始める前に呼ぶ(単一パッケージ〈"main"のみ〉のコンパイルでは
-    // 一度も呼ばれず、newの初期値のまま——既存の全milestoneの単一ファイル挙動と完全互換)。
-    // fn_decls/struct_typesはパッケージごとのフラット名前空間なのでリセットするが、
-    // method_table/registryは全パッケージ共有なので触らない
+    // 新しいパッケージの処理を始める前に呼ぶ(codegen::generate_packageが全パッケージに
+    // ついて——単一パッケージ"main"のみのコンパイルでも1回——必ず呼ぶ。newの初期値
+    // 〈pkg="main"、import_aliases/fn_decls/struct_types空〉に対して呼んでも実質no-opなので、
+    // 既存の全milestoneの単一ファイル挙動とは完全互換のまま)。fn_decls/struct_typesは
+    // パッケージごとのフラット名前空間なのでリセットするが、method_table/registryは
+    // 全パッケージ共有なので触らない
     pub fn begin_package(&mut self, pkg: &str, import_aliases: HashSet<String>) {
         self.pkg = pkg.to_string();
         self.import_aliases = import_aliases;
@@ -181,12 +183,20 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
         TypeNode::Literal { value, .. } => Type::Literal(value.clone()),
         // pkg修飾された型注釈(`mathutil.Point`)はパッケージのレジストリから引く
         // (milestone 6・複数パッケージ対応)。未import/未exportなら(診断は出さない設計
-        // なので)pkg修飾済みの空フィールドstructへフォールボック——codegen側が実際に
-        // このstructを使おうとしたところで明確なErrになる
-        TypeNode::Name { name, pkg: Some(alias), .. } => ctx
-            .lookup_package_type(alias, name)
-            .cloned()
-            .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false }),
+        // なので)pkg修飾済みの空フィールドstructへフォールバック——codegen側が実際に
+        // このstructを使おうとしたところで明確なErrになる。
+        // code review指摘: `alias`が実際にこのパッケージのimport_aliasesに含まれるか
+        // (is_package_alias)を確認せずにレジストリを直接引いていたため、`import`を
+        // 宣言していない他パッケージの型でも(たまたま別経路でロードされてさえいれば)
+        // 解決できてしまっていた——「パッケージ間でのstruct循環は構造的に起こり得ない」
+        // という前提(circular importが依存グラフの循環検出で必ず弾かれる、という設計)は
+        // 依存グラフがimport文だけを見て構築されることに依存しているため、import宣言を
+        // 経由しない参照が許されるとこの前提が崩れる。infer_callの自由関数呼び出しは
+        // 既に is_package_alias でこれを確認しているので、型/struct literal側も揃える
+        TypeNode::Name { name, pkg: Some(alias), .. } => {
+            if ctx.is_package_alias(alias) { ctx.lookup_package_type(alias, name).cloned() } else { None }
+                .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false })
+        }
         TypeNode::Name { name, pkg: None, .. } => match name.as_str() {
             "int" => INT,
             "float" => FLOAT,
@@ -308,9 +318,16 @@ fn visit_for_cycle(name: &str, deps: &HashMap<String, Vec<String>>, visiting: &m
     false
 }
 
+// code review指摘(milestone 6): pkg修飾された参照(`otherpkg.Point`)は他パッケージの
+// 型であり、このパッケージ自身の循環検出の対象外——素の名前だけ見て収集すると、
+// たまたま同じ素の名前を持つ同一パッケージ内の無関係なstruct(例: ローカルの`Point`)への
+// 依存と誤認され、実際には循環が無いのに「self-referential/cyclic struct」という
+// 誤ったErrになってしまう(find_struct_cycleの`names`フィルタが素の名前だけで
+// 一致判定するため)
 fn collect_referenced_names(node: &TypeNode, out: &mut Vec<String>) {
     match node {
-        TypeNode::Name { name, .. } => out.push(name.clone()),
+        TypeNode::Name { name, pkg: None, .. } => out.push(name.clone()),
+        TypeNode::Name { pkg: Some(_), .. } => {}
         TypeNode::Literal { .. } => {}
         TypeNode::Union { members, .. } => members.iter().for_each(|m| collect_referenced_names(m, out)),
         TypeNode::Array { elem, .. } | TypeNode::Chan { elem, .. } => collect_referenced_names(elem, out),
@@ -349,11 +366,14 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         Expr::Call { callee, args, .. } => infer_call(ctx, callee, args),
         // pkg修飾されたstruct literal(`mathutil.Point{...}`)はパッケージのレジストリから
         // 引く(milestone 6・複数パッケージ対応)。それ以外(pkg: None)は今まで通り
-        // 素の名前でstruct_typesを引く(見つからなければ殻)
-        Expr::StructLit { name, pkg: Some(alias), .. } => ctx
-            .lookup_package_type(alias, name)
-            .cloned()
-            .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false }),
+        // 素の名前でstruct_typesを引く(見つからなければ殻)。resolve_type_nodeの
+        // 同じ分岐と同じ理由でis_package_aliasも確認する(import宣言を経由しない
+        // 参照を許すと依存グラフの循環検出が前提とする「全てのパッケージ間参照は
+        // import文に対応する」という不変条件が崩れる)
+        Expr::StructLit { name, pkg: Some(alias), .. } => {
+            if ctx.is_package_alias(alias) { ctx.lookup_package_type(alias, name).cloned() } else { None }
+                .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false })
+        }
         Expr::StructLit { name, pkg: None, .. } => {
             ctx.lookup_struct(name).cloned().unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false })
         }
@@ -1136,17 +1156,48 @@ mod tests {
     fn パッケージレジストリはexportedシンボルをpkg修飾名で引ける() {
         let mut ctx = CheckerCtx::new();
         let mut symbols = PackageSymbols::default();
-        symbols.types.insert("Point".into(), Type::Struct { name: "mathutil.Point".into(), fields: vec![], is_error_type: false });
+        symbols
+            .types
+            .insert("Point".into(), Type::Struct { name: "mathutil.Point".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false });
         symbols.fns.insert("add".into(), Type::Fn { params: vec![INT, INT], ret: Box::new(INT) });
         ctx.register_package("mathutil", symbols);
+        ctx.begin_package("main", HashSet::from(["mathutil".to_string()]));
 
         let qualified = TypeNode::Name { name: "Point".into(), pkg: Some("mathutil".into()), pos: pos() };
-        let Type::Struct { name, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
+        let Type::Struct { name, fields, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
+        assert_eq!(fields.len(), 1, "importが宣言済みなのでレジストリの実体(フィールド込み)が引けるべき");
 
         let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
-        let Type::Struct { name, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
+        let Type::Struct { name, fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
+        assert_eq!(fields.len(), 1);
+    }
+
+    #[test]
+    fn import宣言していないパッケージへの修飾参照はレジストリを引かず殻にフォールバックする() {
+        // code review指摘: 以前はimport_aliasesを確認せずレジストリを直接引いていたため、
+        // 実際にはimportしていない(が別経路でロードされた)パッケージの型でも解決できて
+        // しまっていた——これは依存グラフの循環検出がimport文だけを見て構築される、
+        // という前提を崩す(パッケージ間参照がimport文を経由しなくても成立してしまうため)。
+        // "mathutil"をregister_packageはするがbegin_packageのimport_aliasesには含めない
+        // (=このパッケージはmathutilをimportしていない)ことで、レジストリに実体があっても
+        // 解決されず殻にフォールバックすることを確認する
+        let mut ctx = CheckerCtx::new();
+        let mut symbols = PackageSymbols::default();
+        symbols
+            .types
+            .insert("Point".into(), Type::Struct { name: "mathutil.Point".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false });
+        ctx.register_package("mathutil", symbols);
+        ctx.begin_package("main", HashSet::new()); // "mathutil"をimportしていない
+
+        let qualified = TypeNode::Name { name: "Point".into(), pkg: Some("mathutil".into()), pos: pos() };
+        let Type::Struct { fields, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
+        assert!(fields.is_empty(), "importしていないので殻(空フィールド)にフォールバックすべき");
+
+        let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
+        let Type::Struct { fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
+        assert!(fields.is_empty());
     }
 
     #[test]

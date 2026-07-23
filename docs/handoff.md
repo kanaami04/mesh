@@ -258,12 +258,24 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (mainは無修飾、それ以外は`{pkg}$name`——TS版`fnJsName`と同じ)を自由関数/メソッド以外の
   命名に使用。**意図的なスコープ縮小**: 未export診断・パッケージ誤用診断・パッケージ
   修飾された値参照(呼び出しを伴わない)・パッケージ修飾レシーバ・exportedなconstの
-  レジストリ登録(同名のトップレベルconstが複数パッケージにまたがるとJS名が衝突しうる
-  残存リスクを記録)は対象外。新設`modules.rs`5件+`checker.rs`4件+`codegen.rs`7件の
-  テストを追加、201→220件、`cargo clippy --all-targets -- -D warnings`クリーン。
+  レジストリ登録は対象外。新設`modules.rs`5件+`checker.rs`4件+`codegen.rs`7件の
+  テストを追加、`cargo clippy --all-targets -- -D warnings`クリーン。
   新設のマルチファイルエントリポイント経由で`examples/modules_demo.mesh`+
   `examples/mathutil/{ops,point}.mesh`を実行し`bun run mesh run`(TS版)とbyte-for-byte
   一致を確認、既存の全exampleも回帰無しを再確認。詳細はtodo.mdの当該項目が一次情報源
+- **PR #21の5エージェントcode reviewで4件のバグを発見・PR内で修正済み(2026-07-23、
+  全て実際のビルド+実行で再現確認済み)**: (1) `spawn`/`detach`でパッケージ修飾された
+  自由関数呼び出しが解決できなかったバグ、(2) pkg修飾された型注釈の循環検出が素の
+  名前だけを見ていたため同一パッケージ内の無関係なstructと誤って循環認定してしまう
+  バグ、(3) 複数パッケージ(または同一パッケージの複数ファイル)で同名のトップレベル
+  constを宣言すると生成JSがパースできない構文エラーになるバグ(新規`declared_consts`
+  で重複検出し明確なErrに変更)、(4)「パッケージ間でのstruct循環は構造的に起こり
+  得ない」という設計上の前提が、型注釈/struct literalの解決で`is_package_alias`
+  (実際にimportされているか)を確認していなかったため成り立っていなかったバグ
+  (import文を経由しないパッケージ間の型参照を許すと依存グラフの循環検出をすり抜け、
+  処理順に依存して非決定的に振る舞っていた)。回帰テスト6件追加、220→226件、
+  `cargo clippy --all-targets -- -D warnings`クリーン。詳細はtodo.mdの当該項目が
+  一次情報源
 - **次にやるなら**: 確認済みの6マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール)が全て完了。次の対象はkanayamaと相談して決める
   (`match`/`is`式・判別可能union・`error type`〈union形式〉・`json struct`・

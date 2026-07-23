@@ -862,14 +862,45 @@
           的な書き方)は今回の検証対象のいずれも使わないため対象外のまま(既存の
           `Expr::Member`/`receiver_struct_name`の即Errにフォールバックする)。exportedな
           constのレジストリ登録も同じ理由で対象外(`PackageSymbols.consts`は常に空——
-          将来pkg修飾constの読み出しに対応する際に埋める)。同名のトップレベルconstが複数
-          パッケージにまたがると生成JSで衝突しうる残存リスクも、fnとは違いconstの
-          JS名にはpkg接頭辞を付けていない(付けるとconstの参照側にも同じ配線が必要になり
-          今回のスコープを超えるため)——検証対象exampleはトップレベルconstを使わないため
-          未検証、既知の限界として記録。`mesh test`相当や`_test.mesh`除外もRust版には
-          まだ`run`/`build`以外のCLIサブコマンドが無いため対象外。
-        - テスト: `modules.rs`5件+`checker.rs`4件+`codegen.rs`7件を追加。201→220件、全件
-          パス。`cargo clippy --all-targets -- -D warnings`クリーン。
+          将来pkg修飾constの読み出しに対応する際に埋める)。`mesh test`相当や
+          `_test.mesh`除外もRust版にはまだ`run`/`build`以外のCLIサブコマンドが無いため対象外。
+        - **PR #21の5エージェントcode reviewで4件のバグを発見・PR内で修正済み
+          (2026-07-23、いずれも独立に実際のビルド+実行で再現確認済み)**:
+          (1) `spawn`/`detach`でパッケージ修飾された自由関数(`spawn mathutil.add(...)`)を
+          呼ぶと、`gen_call`は解決できるのに`gen_spawn`が使う`resolve_free_fn_value`には
+          同じ分岐が無く、素の関数値を得られず「package/member access is not yet
+          supported」という紛らわしいエラーになっていた——`resolve_free_fn_value`に
+          `gen_call`と同じパッケージ修飾判定を追加して修正。
+          (2) pkg修飾された型注釈(`otherpkg.Point`)の循環検出(`collect_referenced_names`)が
+          素の名前だけを見ていたため、同一パッケージ内にたまたま同じ素の名前のstructが
+          あると無関係な相互参照だと誤認し、実際には循環していないのに
+          「self-referential/cyclic struct」という誤ったエラーになっていた——
+          `TypeNode::Name`の`pkg: Some(_)`分岐(他パッケージへの参照)を循環検出の
+          収集対象から除外して修正。
+          (3) 2つのパッケージ(または同一パッケージの2ファイル)が同じ名前のトップレベル
+          constを宣言すると、トップレベル関数/メソッドと違いconstのJS名にはpkg接頭辞を
+          付けていないため、生成JSの同じフラットスコープに同名の`const`宣言が2つ現れ、
+          実行時クラッシュではなく**JS自体が構文エラーでパースできず起動不能になる**
+          (delete()クラッシュ等より悪い壊れ方)——新規`declared_consts`集合で全パッケージに
+          わたるトップレベルconst名の重複を検出し、明確なErrにして修正(constへの
+          pkg接頭辞付けそのものは、参照側の配線まで必要になり今回のスコープを超えるため
+          見送り、検出だけで対処)。
+          (4) 「パッケージ間でのstruct循環は構造的に起こり得ない」という設計上の前提が、
+          実際には`resolve_type_node`/`infer_expr`のpkg修飾分岐がそのエイリアスが本当に
+          importされているか(`is_package_alias`)を確認せずレジストリを直接引いていた
+          ため成り立っていなかった——2つのパッケージが互いの型を(import文を宣言せずに)
+          参照し合うと、依存グラフ(import文だけを見て構築される)がその循環を検出
+          できず、どちらが先に処理されるか(HashSetの反復順に依存)によって結果が
+          非決定的に変わってしまう。`infer_call`の自由関数呼び出し判定は既に
+          `is_package_alias`を確認していたので、型注釈・struct literal(checker.rs・
+          codegen.rs双方)にも同じ確認を追加して修正——これによりパッケージ間の型参照は
+          必ずimport文を経由するようになり、前提の正しさが回復した。
+          回帰テスト6件追加、既存の軽微なコメントの誤り2件(`begin_package`が単一
+          パッケージでも実際には毎回呼ばれる点/`fn_js_name`がconstには適用されない点)も
+          修正。220→226件、全件パス、`cargo clippy`クリーンを確認済み。
+        - テスト: `modules.rs`5件+`checker.rs`4件+`codegen.rs`7件を追加(milestone本体)、
+          上記code review対応で6件追加。201→226件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。
         - **実行確認**: 新設のマルチファイルエントリポイント(`main.rs`→`modules::load_modules`
           →`codegen::generate_modules`)経由で既存の`examples/modules_demo.mesh`+
           `examples/mathutil/{ops,point}.mesh`をコンパイル・実行し、`bun run mesh run`

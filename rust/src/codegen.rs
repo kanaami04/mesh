@@ -68,11 +68,28 @@ struct Codegen {
     // 相当——prop_usedと同じ理由で単一のフラグで足りる。関数ごとのリセットを忘れると
     // 前の関数のspawn使用が次の関数に漏れて無駄なwait枠を生成してしまうので要注意
     spawn_used: bool,
+    // これまでに生成したトップレベルconstの名前(全パッケージ分、リセットしない)。
+    // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_nameで
+    // pkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
+    // 意図的に無修飾のまま生成している——2つのパッケージ(または同一パッケージの2ファイル)が
+    // 同じ名前のトップレベルconstを宣言すると、生成JSの同じフラットスコープに同名の`const`
+    // 宣言が2つ現れ、JS自体が構文エラーで一切パースできなくなる(実行時クラッシュより
+    // 悪い、ファイル全体が起動不能になる)。これを静かに`Ok(js)`として返さず、重複を
+    // 検出した時点で明確なErrにする
+    declared_consts: HashSet<String>,
 }
 
 impl Codegen {
     fn new() -> Self {
-        Codegen { out: Vec::new(), indent: 0, file: String::new(), ctx: CheckerCtx::new(), prop_used: false, spawn_used: false }
+        Codegen {
+            out: Vec::new(),
+            indent: 0,
+            file: String::new(),
+            ctx: CheckerCtx::new(),
+            prop_used: false,
+            spawn_used: false,
+            declared_consts: HashSet::new(),
+        }
     }
 
     fn emit(&mut self, line: impl Into<String>) {
@@ -215,6 +232,20 @@ impl Codegen {
     }
 
     fn gen_const_decl(&mut self, c: &ConstDecl) -> CodegenResult<()> {
+        // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_name
+        // でpkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
+        // 意図的に無修飾のまま生成している——2つのパッケージ(または同一パッケージの2ファイル)が
+        // 同じ名前のトップレベルconstを宣言すると、生成JSの同じフラットスコープに同名の
+        // `const`宣言が2つ現れ、実行時クラッシュではなくJS自体がパースできない
+        // (`SyntaxError: Identifier 'x' has already been declared`)という、ファイル全体が
+        // 起動不能になるもっと悪い壊れ方をする。これを静かに`Ok(js)`として返さず、
+        // 重複を検出した時点で明確なErrにする
+        if !self.declared_consts.insert(c.name.clone()) {
+            return Err(format!(
+                "codegen: top-level const '{}' is declared more than once across the compiled packages ({}:{})",
+                c.name, c.pos.line, c.pos.col
+            ));
+        }
         let value = self.gen_expr(&c.value)?;
         // 型注釈があればそちらが「本当の型」(TS版checker/modules.tsの`declared ?? valueType`)
         let ty = c.type_node.as_ref().map(|t| checker::resolve_type_node(&self.ctx, t)).unwrap_or_else(|| checker::infer_expr(&self.ctx, &c.value));
@@ -733,11 +764,19 @@ impl Codegen {
                 // 引く——未import/未exportなら実行時にプロパティが噛み合わない壊れたJSを
                 // 静かに生成せず、ここで明確なErrにする
                 let is_error_instance = match pkg {
-                    Some(alias) => {
+                    // code review指摘: import宣言していないパッケージ名でも(別経路で
+                    // ロードされてさえいれば)レジストリを直接引けてしまっていた——
+                    // is_package_aliasで実際にimportされていることも確認する(依存グラフの
+                    // 循環検出がimport文だけを見て構築されるため、import文を経由しない
+                    // パッケージ間参照を許すと循環検出をすり抜けられてしまう)
+                    Some(alias) if self.ctx.is_package_alias(alias) => {
                         let Some(ty) = self.ctx.lookup_package_type(alias, name) else {
                             return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                         };
                         matches!(ty, Type::Struct { is_error_type: true, .. })
+                    }
+                    Some(alias) => {
+                        return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                     }
                     None => matches!(self.ctx.lookup_struct(name), Some(Type::Struct { is_error_type: true, .. })),
                 };
@@ -894,12 +933,26 @@ impl Codegen {
 
     // 自由関数の呼び出し先を素のJS識別子へ解決する。自パッケージの既知のトップレベル関数
     // (fn_decls)ならpkg接頭辞付きの名前(mainパッケージなら無修飾のまま——fn_js_name参照)、
+    // パッケージ修飾(`mathutil.add`)ならそのパッケージのexportedな関数か確認して
+    // 同様にpkg接頭辞付きの名前(code review指摘: この分岐が無いと`spawn mathutil.add(...)`
+    // が素の関数値を得られず、既存のMember読み取りガードに落ちて「package/member access
+    // is not yet supported」という紛らわしいエラーになっていた——gen_callの呼び出し形
+    // 〈`(await ...)`まで含めて組み立てる〉とは別に、ここでは呼び出し先の値だけを解決する)、
     // それ以外(ローカル変数に入った関数値等)はgen_exprへ素通しする。gen_call/gen_spawnで共有
     fn resolve_free_fn_value(&mut self, callee: &Expr) -> CodegenResult<String> {
         if let Expr::Ident { name, .. } = callee
             && self.ctx.lookup_fn(name).is_some()
         {
             return Ok(fn_js_name(self.ctx.pkg(), name));
+        }
+        if let Expr::Member { target, name, pos } = callee
+            && let Expr::Ident { name: alias, .. } = &**target
+            && self.ctx.is_package_alias(alias)
+        {
+            if self.ctx.lookup_package_fn(alias, name).is_none() {
+                return Err(format!("codegen: package '{alias}' has no exported function '{name}' ({}:{})", pos.line, pos.col));
+            }
+            return Ok(fn_js_name(alias, name));
         }
         self.gen_expr(callee)
     }
@@ -1098,9 +1151,12 @@ fn method_js_name(struct_name: &str, method_name: &str) -> String {
     format!("__m_{}_{}", struct_name.replace('.', "$"), method_name)
 }
 
-// トップレベルのfn/constの生成JS名: mainパッケージは素の名前のまま、それ以外は
+// トップレベル自由関数の生成JS名: mainパッケージは素の名前のまま、それ以外は
 // "{pkg}${name}"(TS版fnJsNameと同じ)。パッケージ修飾呼び出し(`mathutil.add(...)`)の
-// 呼び出し先と、その関数自身の宣言側の両方でこの名前が一致していないと参照が壊れる
+// 呼び出し先と、その関数自身の宣言側の両方でこの名前が一致していないと参照が壊れる。
+// トップレベルconstにはこの接頭辞を付けていない(パッケージ修飾された「呼び出しを
+// 伴わない」値参照が対象外のため——gen_const_decl参照。複数パッケージで同名の
+// トップレベルconstが衝突する場合はgen_const_declが明確なErrで検出する)
 fn fn_js_name(pkg: &str, name: &str) -> String {
     if pkg == "main" { name.to_string() } else { format!("{pkg}${name}") }
 }
@@ -1832,5 +1888,77 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("import cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn spawn_detachでのパッケージ修飾自由関数呼び出しが解決できる() {
+        // code review指摘: gen_call(通常呼び出し)はパッケージ修飾を解決していたが、
+        // gen_spawnが使うresolve_free_fn_valueには同じ分岐が無く、`spawn mathutil.add(...)`
+        // が素の関数値を得られず「package/member access is not yet supported」という
+        // 紛らわしいエラーになっていた
+        let js = gen_modules_body(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"mathutil\"\nfn main() {\n  spawn mathutil.add(3, 4)\n  detach mathutil.add(5, 6)\n  print(\"ok\")\n}",
+            ),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js.contains("__spawn(mathutil$add, [3, 4]);"), "got: {js}");
+        assert!(js.contains("__detach(mathutil$add, [5, 6]);"), "got: {js}");
+    }
+
+    #[test]
+    fn 未exportな関数をspawnでパッケージ修飾呼び出しすると明確なエラーになる() {
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"mathutil\"\nfn main() {\n  spawn mathutil.double(3)\n}"),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ])
+        .unwrap_err();
+        assert!(err.contains("package 'mathutil' has no exported function 'double'"), "got: {err}");
+    }
+
+    #[test]
+    fn 別パッケージのstructと同じ素の名前でも誤った循環エラーにならない() {
+        // code review指摘: pkg修飾された型注釈(otherpkg.Point)を循環検出が素の名前
+        // (Point)だけで見ていたため、同一パッケージ内にたまたま同じ素の名前のstructが
+        // あると無関係な相互参照だと誤認し、実際には循環していないのに
+        // 「self-referential/cyclic struct」という誤ったエラーになっていた
+        let js = gen_modules_body(&[
+            ("main", "main.mesh", "import \"otherpkg\"\nstruct Point {\n  other: otherpkg.Point\n}\nfn main() {\n  print(1)\n}"),
+            ("otherpkg", "otherpkg/p.mesh", "export struct Point {\n  x: int\n}\n"),
+        ]);
+        assert!(js.contains("async function main()"), "got: {js}");
+    }
+
+    #[test]
+    fn 複数パッケージにまたがる同名のトップレベルconstは明確なエラーになる() {
+        // code review指摘: トップレベル関数/メソッドはpkg接頭辞で衝突しないが、constは
+        // 無修飾のまま生成するため、2つのパッケージが同じ名前のトップレベルconstを
+        // 宣言すると生成JSの同じフラットスコープに同名のconst宣言が2つ現れ、
+        // 実行時クラッシュではなくJS自体がパースできない(SyntaxError)という
+        // もっと悪い壊れ方をする。静かに`Ok(js)`を返さず明確なErrにする
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"pkgb\"\ndebug := 1\nfn main() {\n  print(debug)\n  print(pkgb.f())\n}"),
+            ("pkgb", "pkgb/b.mesh", "debug := 2\nexport fn f() int {\n  return debug\n}"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("top-level const 'debug' is declared more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn import宣言していないパッケージのstruct_literalは明確なエラーになる() {
+        // code review指摘: is_package_aliasを確認せずレジストリを直接引いていたため、
+        // importを宣言していない(が別経路でロードされてさえいる)パッケージの
+        // struct literalも解決できてしまっていた——依存グラフの循環検出はimport文だけを
+        // 見て構築されるため、import文を経由しないパッケージ間参照を許すと循環検出を
+        // すり抜けられてしまう
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"a\"\nfn main() {\n  x := b.Bar{}\n  print(x)\n}"),
+            ("a", "a/a.mesh", "export fn f() {}"),
+            ("b", "b/b.mesh", "export struct Bar {}"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("package 'b' has no exported struct 'Bar'"), "got: {err}");
     }
 }
