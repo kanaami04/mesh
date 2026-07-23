@@ -260,7 +260,7 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         Expr::Ident { name, .. } => ctx.lookup(name).cloned().unwrap_or(ANY),
         Expr::Binary { op, left, right, .. } => infer_binary(ctx, *op, left, right).result,
         Expr::Unary { operand, .. } => infer_expr(ctx, operand),
-        Expr::Call { callee, .. } => infer_call(ctx, callee),
+        Expr::Call { callee, args, .. } => infer_call(ctx, callee, args),
         // パッケージ修飾(pkg: Some)はパッケージ/モジュールのmilestoneまで対象外——名前だけで
         // struct_typesを引く(見つからなければ従来通り殻)
         Expr::StructLit { name, .. } => {
@@ -277,7 +277,31 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // contextやright/bindingの中身は結果型に影響しない)
         Expr::Prop { operand, .. } => types::union_without(infer_expr(ctx, operand), is_failure_type),
         Expr::OrElse { left, .. } => types::union_without(infer_expr(ctx, left), is_failure_type),
-        // M3未対応の式(map/channel/並行処理等)はANYへ最善努力でフォールバックする。
+        // 配列リテラル: 型注釈があればそれ、無ければ最初の要素の型をwiden_literalしたもの
+        // (TS版expressions.tsの"arrayLit"ケースと同じ)。空リテラルはArray(ANY)——
+        // 文脈(型注釈つき変数宣言等)で具体化される想定はTS版と同じ
+        Expr::ArrayLit { elems, elem_type, .. } => match elem_type {
+            Some(t) => Type::Array(Box::new(resolve_type_node(ctx, t))),
+            None => match elems.first() {
+                None => Type::Array(Box::new(ANY)),
+                Some(first) => Type::Array(Box::new(types::widen_literal(infer_expr(ctx, first)))),
+            },
+        },
+        // mapリテラル: key/valueの型注釈は構文上常に必須(TS版と同じ文法)なので、
+        // 要素からの推論は不要
+        Expr::MapLit { key, value, .. } => {
+            Type::Map { key: Box::new(resolve_type_node(ctx, key)), value: Box::new(resolve_type_node(ctx, value)) }
+        }
+        // 添字読み: targetがMapなら`V | none`(mapの欠損キーはnoneになる)、Arrayなら
+        // elem型そのまま(`a[i]`は範囲外panicの設計——`get()`組み込みだけが`elem | none`)、
+        // 文字列ならSTRING、それ以外はANY
+        Expr::Index { target, .. } => match infer_expr(ctx, target) {
+            Type::Map { value, .. } => types::union_of(vec![*value, NONE]),
+            Type::Array(elem) => *elem,
+            t if types::is_stringy(&t) => STRING,
+            _ => ANY,
+        },
+        // M4未対応の式(channel/並行処理等)はANYへ最善努力でフォールバックする。
         // codegen側がこれらの構文自体を「まだ対応していません」と明確なエラーにするので、
         // ここで型を誤魔化しても実害は無い
         _ => ANY,
@@ -318,6 +342,43 @@ pub fn has_structured_failure(t: &Type) -> bool {
         Type::Union { members, .. } => members.iter().any(has_structured_failure),
         Type::Struct { is_error_type: true, .. } => true,
         _ => false,
+    }
+}
+
+// range-forのループ変数をsubjectの型に応じてスコープへ宣言する(TS版
+// `checker/statements.ts`のrange-for検査を移植。個数不一致等の診断は対象外——
+// 与えられた名前の数だけ順番に宣言する。`ctx.declare`が"_"を自動で捨てるので
+// ブランク名の特別扱いは不要)。Array: names[0]→int(添字)・names[1]→elem型(あれば)。
+// Map: names[0]→key型・names[1]→value型(あれば)。int: names[0]→int。
+// それ以外(Any等)は与えられた名前全てをANYで宣言する
+pub fn declare_range_for_names(ctx: &mut CheckerCtx, subject_ty: &Type, names: &[String]) {
+    match subject_ty {
+        Type::Array(elem) => {
+            if let Some(n) = names.first() {
+                ctx.declare(n, INT);
+            }
+            if let Some(n) = names.get(1) {
+                ctx.declare(n, (**elem).clone());
+            }
+        }
+        Type::Map { key, value } => {
+            if let Some(n) = names.first() {
+                ctx.declare(n, (**key).clone());
+            }
+            if let Some(n) = names.get(1) {
+                ctx.declare(n, (**value).clone());
+            }
+        }
+        t if types::type_equals(t, &INT) => {
+            if let Some(n) = names.first() {
+                ctx.declare(n, INT);
+            }
+        }
+        _ => {
+            for n in names {
+                ctx.declare(n, ANY);
+            }
+        }
     }
 }
 
@@ -379,13 +440,16 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type) -> BinaryInfo {
 // (code review指摘: 組み込みを素通ししてANYへ落としていたため、例えば`round(x) / round(y)`が
 // int同士の演算と分からず__idivが呼ばれず浮動小数点演算になっていた——組み込みの戻り値型を
 // 引けるようにして修正)。パッケージ修飾・structメソッドの解決は次のマイルストーン以降
-// (structが無いのでtargetの型がstructになることも無く、自然にこの経路には来ない)
-fn infer_call(ctx: &CheckerCtx, callee: &Expr) -> Type {
+// (structが無いのでtargetの型がstructになることも無く、自然にこの経路には来ない)。
+// argsはmilestone 4で追加——get/sort/keys/values等、引数依存の組み込みの戻り値型を
+// 解決するために必要(例えばsort(nums)の戻り値がint[]と分からないと、後続の算術が
+// __iarith経由にならずTS版とbyte単位で食い違う出力になる)
+fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     if let Expr::Ident { name, .. } = callee {
         if let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name) {
             return (**ret).clone();
         }
-        if let Some(t) = infer_builtin_call(name) {
+        if let Some(t) = infer_builtin_call(ctx, name, args) {
             return t;
         }
     }
@@ -401,13 +465,13 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr) -> Type {
     ANY
 }
 
-// M1のcodegenが実際に生成できる組み込みのうち、引数の型によらず戻り値型が決まるものだけを
-// 解決する(TS版`checker/builtins.ts`の`inferBuiltinCall`のうち、引数非依存の部分を移植)。
-// get/sort等(引数の配列要素型に依存)はこのリゾルバでは追わずANYのままにする——M1のcodegenは
-// 配列そのものをまだ生成できないため、その2つがここに来ることは無く実害が無い
-fn infer_builtin_call(name: &str) -> Option<Type> {
+// codegenが実際に生成できる組み込みの戻り値型を解決する(TS版`checker/builtins.ts`の
+// `inferBuiltinCall`を移植。診断は出さないので検査ロジックは持たず、型の解決だけ行う)。
+// `filter`/`map`/`reduce`は無名関数(Expr::FnExpr)のcodegenが無くまだ呼び出せないため、
+// ここでも対象外のまま(ANYへのフォールバックで実害は無い)
+fn infer_builtin_call(ctx: &CheckerCtx, name: &str, args: &[Expr]) -> Option<Type> {
     Some(match name {
-        "print" | "sleep" | "push" | "close" => VOID,
+        "print" | "sleep" | "push" | "close" | "delete" => VOID,
         "str" | "join" | "trim" | "upper" | "lower" => STRING,
         "toInt" => types::union_of(vec![INT, ERROR]),
         "toFloat" => FLOAT,
@@ -416,6 +480,25 @@ fn infer_builtin_call(name: &str) -> Option<Type> {
         "contains" => BOOL,
         "indexOf" => types::union_of(vec![INT, NONE]),
         "split" => Type::Array(Box::new(STRING)),
+        "len" => INT,
+        // get(arr, i): 範囲外はnoneになる安全な読み(`arr[i]`とは違いpanicしない)
+        "get" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(Type::Array(elem)) => types::union_of(vec![*elem, NONE]),
+            _ => ANY,
+        },
+        // sort(arr): 非破壊——同じ配列型のコピーを返す
+        "sort" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(t @ Type::Array(_)) => t,
+            _ => ANY,
+        },
+        "keys" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(Type::Map { key, .. }) => Type::Array(key),
+            _ => Type::Array(Box::new(ANY)),
+        },
+        "values" => match args.first().map(|a| infer_expr(ctx, a)) {
+            Some(Type::Map { value, .. }) => Type::Array(value),
+            _ => Type::Array(Box::new(ANY)),
+        },
         _ => return None,
     })
 }
@@ -520,16 +603,16 @@ mod tests {
     fn infer_callは自由関数の戻り値型を引く() {
         let mut ctx = CheckerCtx::new();
         ctx.declare_fn("add", Type::Fn { params: vec![INT, INT], ret: Box::new(INT) });
-        let call_ret = infer_call(&ctx, &Expr::Ident { name: "add".into(), pos: pos() });
+        let call_ret = infer_call(&ctx, &Expr::Ident { name: "add".into(), pos: pos() }, &[]);
         assert!(types::type_equals(&call_ret, &INT));
     }
 
     #[test]
     fn infer_callは組み込みの戻り値型も引く() {
         let ctx = CheckerCtx::new();
-        let round_call = infer_call(&ctx, &Expr::Ident { name: "round".into(), pos: pos() });
+        let round_call = infer_call(&ctx, &Expr::Ident { name: "round".into(), pos: pos() }, &[]);
         assert!(types::type_equals(&round_call, &INT), "round() should infer as int, got {round_call:?}");
-        let to_int_call = infer_call(&ctx, &Expr::Ident { name: "toInt".into(), pos: pos() });
+        let to_int_call = infer_call(&ctx, &Expr::Ident { name: "toInt".into(), pos: pos() }, &[]);
         assert!(types::type_equals(&to_int_call, &types::union_of(vec![INT, ERROR])));
     }
 
@@ -603,7 +686,7 @@ mod tests {
         ctx.declare_method("User", "describe", Type::Fn { params: vec![user_ty], ret: Box::new(STRING) });
         let recv = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
         let call = Expr::Member { target: Box::new(recv), name: "describe".into(), pos: pos() };
-        assert!(types::type_equals(&infer_call(&ctx, &call), &STRING));
+        assert!(types::type_equals(&infer_call(&ctx, &call, &[]), &STRING));
     }
 
     fn error_struct_decl(name: &str, fields: &[(&str, TypeNode)]) -> TypeDecl {
@@ -680,5 +763,98 @@ mod tests {
         assert!(has_structured_failure(&nested));
         assert!(!has_structured_failure(&types::union_of(vec![INT, ERROR])));
         assert!(!has_structured_failure(&types::union_of(vec![INT, NONE])));
+    }
+
+    #[test]
+    fn infer_exprは配列リテラルの型を推論する() {
+        let ctx = CheckerCtx::new();
+        // 型注釈あり
+        let typed = Expr::ArrayLit { elems: vec![], elem_type: Some(name_type("int")), pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &typed), &Type::Array(Box::new(INT))));
+        // 型注釈なし・空 → Array(ANY)
+        let empty = Expr::ArrayLit { elems: vec![], elem_type: None, pos: pos() };
+        assert!(matches!(infer_expr(&ctx, &empty), Type::Array(e) if matches!(*e, Type::Any)));
+        // 型注釈なし・非空 → 最初の要素の型(文字列リテラルはwiden_literalでstringになる)
+        let strs = Expr::ArrayLit {
+            elems: vec![Expr::String { value: "a".into(), pos: pos() }, Expr::String { value: "b".into(), pos: pos() }],
+            elem_type: None,
+            pos: pos(),
+        };
+        assert!(types::type_equals(&infer_expr(&ctx, &strs), &Type::Array(Box::new(STRING))));
+    }
+
+    #[test]
+    fn infer_exprはmapリテラルの型を推論する() {
+        let ctx = CheckerCtx::new();
+        let lit = Expr::MapLit { key: name_type("string"), value: name_type("int"), entries: vec![], pos: pos() };
+        assert!(types::type_equals(&infer_expr(&ctx, &lit), &Type::Map { key: Box::new(STRING), value: Box::new(INT) }));
+    }
+
+    #[test]
+    fn infer_exprは添字読みをmap_array_stringで使い分ける() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("m", Type::Map { key: Box::new(STRING), value: Box::new(INT) });
+        ctx.declare("a", Type::Array(Box::new(INT)));
+        ctx.declare("s", STRING);
+        let idx = |name: &str| Expr::Index { target: Box::new(Expr::Ident { name: name.into(), pos: pos() }), index: Box::new(int_lit("0")), pos: pos() };
+        // mapはV | none
+        assert!(types::type_equals(&infer_expr(&ctx, &idx("m")), &types::union_of(vec![INT, NONE])));
+        // 配列はelemそのまま(| noneは付かない——get()と違いa[i]は範囲外panicの設計)
+        assert!(types::type_equals(&infer_expr(&ctx, &idx("a")), &INT));
+        // 文字列はSTRING
+        assert!(types::type_equals(&infer_expr(&ctx, &idx("s")), &STRING));
+    }
+
+    #[test]
+    fn infer_callはget_sort_keys_valuesの引数依存の戻り値型を解決する() {
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("arr", Type::Array(Box::new(INT)));
+        ctx.declare("m", Type::Map { key: Box::new(STRING), value: Box::new(INT) });
+        let ident = |name: &str| Expr::Ident { name: name.into(), pos: pos() };
+        let call = |name: &str, arg: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![ident(arg)], pos: pos() };
+
+        assert!(types::type_equals(&infer_expr(&ctx, &call("get", "arr")), &types::union_of(vec![INT, NONE])));
+        assert!(types::type_equals(&infer_expr(&ctx, &call("sort", "arr")), &Type::Array(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &call("keys", "m")), &Type::Array(Box::new(STRING))));
+        assert!(types::type_equals(&infer_expr(&ctx, &call("values", "m")), &Type::Array(Box::new(INT))));
+        assert!(types::type_equals(&infer_expr(&ctx, &call("len", "arr")), &INT));
+    }
+
+    #[test]
+    fn declare_range_for_namesは配列でindexとelemを宣言する() {
+        let mut ctx = CheckerCtx::new();
+        declare_range_for_names(&mut ctx, &Type::Array(Box::new(STRING)), &["i".to_string(), "v".to_string()]);
+        assert!(types::type_equals(ctx.lookup("i").unwrap(), &INT));
+        assert!(types::type_equals(ctx.lookup("v").unwrap(), &STRING));
+    }
+
+    #[test]
+    fn declare_range_for_namesは配列で名前が1個でもindexだけ宣言する() {
+        let mut ctx = CheckerCtx::new();
+        declare_range_for_names(&mut ctx, &Type::Array(Box::new(STRING)), &["i".to_string()]);
+        assert!(types::type_equals(ctx.lookup("i").unwrap(), &INT));
+    }
+
+    #[test]
+    fn declare_range_for_namesはmapでkeyとvalueを宣言する() {
+        let mut ctx = CheckerCtx::new();
+        declare_range_for_names(&mut ctx, &Type::Map { key: Box::new(STRING), value: Box::new(INT) }, &["k".to_string(), "v".to_string()]);
+        assert!(types::type_equals(ctx.lookup("k").unwrap(), &STRING));
+        assert!(types::type_equals(ctx.lookup("v").unwrap(), &INT));
+    }
+
+    #[test]
+    fn declare_range_for_namesはintで単一名をintとして宣言する() {
+        let mut ctx = CheckerCtx::new();
+        declare_range_for_names(&mut ctx, &INT, &["i".to_string()]);
+        assert!(types::type_equals(ctx.lookup("i").unwrap(), &INT));
+    }
+
+    #[test]
+    fn declare_range_for_namesはanyで与えられた名前全てをanyにする() {
+        let mut ctx = CheckerCtx::new();
+        declare_range_for_names(&mut ctx, &ANY, &["a".to_string(), "b".to_string()]);
+        assert!(matches!(ctx.lookup("a"), Some(Type::Any)));
+        assert!(matches!(ctx.lookup("b"), Some(Type::Any)));
     }
 }

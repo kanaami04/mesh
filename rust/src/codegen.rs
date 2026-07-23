@@ -17,7 +17,7 @@
 use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, Program, Receiver, Stmt, TypeNode};
 use crate::checker::{self, CheckerCtx};
 use crate::token::{Pos, TokenType};
-use crate::types::Type;
+use crate::types::{self, INT, Type};
 
 // src/runtime.ts自体はTSファイル(`export const PRELUDE = \`...\`;`というテンプレートリテラル
 // 宣言でランタイムJSを包んでいる)なので、include_str!でファイル全体を埋め込むと
@@ -229,6 +229,12 @@ impl Codegen {
                 if targets.len() != 1 || values.len() != 1 {
                     return Err(format!("codegen: multi-target assignment is not yet supported ({}:{})", pos.line, pos.col));
                 }
+                // 添字代入(`a[i] = v`/`m[k] = v`)はgen_lvalueに渡す前に横取りする——
+                // targetがmapかarrayかで生成JSの形が丸ごと変わるため(gen_lvalue自身は
+                // Indexターゲットに対応しない設計のまま。下のgen_index_assign参照)
+                if let Expr::Index { target: container, index, pos: idx_pos } = &targets[0] {
+                    return self.gen_index_assign(&targets[0], container, index, *idx_pos, *compound_op, &values[0]);
+                }
                 let lvalue = self.gen_lvalue(&targets[0])?;
                 let rhs = self.gen_expr(&values[0])?;
                 let value =
@@ -264,6 +270,9 @@ impl Codegen {
                 Ok(())
             }
             Stmt::IncDec { target, op, .. } => {
+                if let Expr::Index { target: container, index, pos: idx_pos } = target {
+                    return self.gen_index_incdec(container, index, *idx_pos, *op);
+                }
                 let lvalue = self.gen_lvalue(target)?;
                 self.emit(format!("{lvalue}{op};"));
                 Ok(())
@@ -278,7 +287,7 @@ impl Codegen {
             }
             Stmt::Wait { pos, .. } => Err(format!("codegen: 'wait' is not yet supported ({}:{})", pos.line, pos.col)),
             Stmt::Send { pos, .. } => Err(format!("codegen: channel send is not yet supported ({}:{})", pos.line, pos.col)),
-            Stmt::RangeFor { pos, .. } => Err(format!("codegen: range-for is not yet supported ({}:{})", pos.line, pos.col)),
+            Stmt::RangeFor { names, subject, body, pos } => self.gen_range_for(names, subject, body, *pos),
             Stmt::DeferStmt { pos, .. } => Err(format!("codegen: 'defer' is not yet supported ({}:{})", pos.line, pos.col)),
         }
     }
@@ -309,6 +318,46 @@ impl Codegen {
                 Ok(())
             }
         }
+    }
+
+    // `for i, v := range arr` / `for k, v := range m` / `for i := range n`。subjectの型で
+    // 3形態に分岐する(TS版codegen.tsのrangeForケースと同じJS形)。
+    // **アリティ不一致は明確なErr**: TS版のcodegen自体は無条件分岐なので、Array+1名だと
+    // 「数値と配列を比較し続けて0回で終わるループ」を、Int+2名だと`.entries is not a
+    // function`のクラッシュを静かに/クラッシュで生成してしまう——これはTS本体では
+    // range-arity診断で到達不能な組み合わせ。診断を出さないこのリゾルバでは実際に
+    // 到達しうるため、ここで明確なErrにする(Anyのsubjectは元々ANY型の一般的な限界であり、
+    // 今回新たに導入するものではないので対象外のまま)
+    fn gen_range_for(&mut self, names: &[String], subject: &Expr, body: &Block, pos: Pos) -> CodegenResult<()> {
+        let subject_ty = checker::infer_expr(&self.ctx, subject);
+        let is_array_or_map = matches!(subject_ty, Type::Array(_) | Type::Map { .. });
+        let is_int = types::type_equals(&subject_ty, &INT);
+        if (is_array_or_map && names.len() != 2) || (is_int && names.len() != 1) {
+            return Err(format!(
+                "codegen: range-for over {} expects {} name(s), got {} ({}:{})",
+                types::type_to_string(&subject_ty),
+                if is_int { 1 } else { 2 },
+                names.len(),
+                pos.line,
+                pos.col
+            ));
+        }
+        let subject_js = self.gen_expr(subject)?;
+        self.ctx.push_scope();
+        checker::declare_range_for_names(&mut self.ctx, &subject_ty, names);
+        let js_names: Vec<String> = names.iter().map(|n| if n == "_" { String::new() } else { n.clone() }).collect();
+        if matches!(subject_ty, Type::Map { .. }) {
+            self.emit(format!("for (const [{}] of {subject_js}) {{", js_names.join(", ")));
+        } else if names.len() == 1 {
+            let i = if js_names[0].is_empty() { "__i" } else { &js_names[0] };
+            self.emit(format!("for (let {i} = 0, __n = {subject_js}; {i} < __n; {i}++) {{"));
+        } else {
+            self.emit(format!("for (const [{}] of {subject_js}.entries()) {{", js_names.join(", ")));
+        }
+        self.gen_block(body)?;
+        self.emit("}");
+        self.ctx.pop_scope();
+        Ok(())
     }
 
     // forヘッダ内のinit/post用: セミコロン無しの1行表現にする。TS版のgenSimpleStmtと同じく
@@ -365,6 +414,90 @@ impl Codegen {
             return Ok(format!("__iarith({current_code}, \"{op}\", {rhs}, {at})"));
         }
         Ok(format!("({current_code} {op} {rhs})"))
+    }
+
+    // 添字代入(`a[i] = v`/`m[k] = v`)。targetの型(Map/Array)で生成JSの形が丸ごと変わるため
+    // gen_lvalueより前段でこの専用ヘルパへ振り分ける(gen_lvalue自体はIndexターゲットに
+    // 対応しない設計のまま——forヘッダ内での添字代入は引き続き明確なErrになる)。
+    // index_exprは複合代入時にinfer_binaryへ渡す「対象式全体」(gen_compound_valueが
+    // infer_expr(target)で正しくelem型を引けるようにするため、containerとindexを
+    // 分解する前のExpr::Index自体を渡す)
+    fn gen_index_assign(
+        &mut self,
+        index_expr: &Expr,
+        container: &Expr,
+        index: &Expr,
+        pos: Pos,
+        compound_op: Option<TokenType>,
+        value_expr: &Expr,
+    ) -> CodegenResult<()> {
+        let container_ty = checker::infer_expr(&self.ctx, container);
+        // code review指摘(PR #19): map<K, map<...>>のようなネストしたmapを読むと`V | none`
+        // になり(Expr::Indexのinfer_expr参照)、`matches!(container_ty, Type::Map{..})`という
+        // 厳密一致だけではUnionをすり抜けて配列扱い(__idxset)になってしまう——TS版の
+        // checker(src/checker/expressions.ts)はそもそもUnion型への添字を`not-indexable`
+        // 診断で拒否しており(noneかもしれない値へさらに添字を続けるのは`or`/`is none`で
+        // 絞り込んでからでないと安全でないため)、それに倣い明確なErrにする
+        if let Type::Union { .. } = container_ty {
+            return Err(format!(
+                "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                types::type_to_string(&container_ty), pos.line, pos.col
+            ));
+        }
+        let container_js = self.gen_expr(container)?;
+        let index_js = self.gen_expr(index)?;
+        let rhs = self.gen_expr(value_expr)?;
+        if matches!(container_ty, Type::Map { .. }) {
+            // TS版の`compound-assign-on-map`診断と同じ理由で複合代入は明確なErrにする——
+            // mapの「今の値」は`V | none`であり、noneに対する算術は無意味(診断を出さない
+            // このリゾルバでは、ここで拾わないと__mgetが返すnullに__iarith等を適用する
+            // 壊れたJSを静かに生成してしまう)
+            if compound_op.is_some() {
+                return Err(format!(
+                    "codegen: compound assignment on a map entry is not yet supported (the current value may be none) ({}:{})",
+                    pos.line, pos.col
+                ));
+            }
+            self.emit(format!("{container_js}.set({index_js}, {rhs});"));
+            return Ok(());
+        }
+        let at = self.at(pos);
+        let current_code = format!("__idx({container_js}, {index_js}, {at})");
+        let value = match compound_op {
+            Some(op) => self.gen_compound_value(op, index_expr, &current_code, value_expr, &rhs, pos)?,
+            None => rhs,
+        };
+        self.emit(format!("__idxset({container_js}, {index_js}, {value}, {at});"));
+        Ok(())
+    }
+
+    // 添字のインクリメント/デクリメント(`a[i]++`等)。TS版のcodegen自体はarray/map問わず
+    // 無条件で__idx/__idxsetを使うが、それは`m[k]++`がTS本体のisNumericチェック
+    // (map読みは常に`V | none`)で弾かれ実際には到達しないコードだから安全なだけ——
+    // 診断を出さないこのリゾルバでは実際に到達しうるため、mapは明確なErrにする
+    fn gen_index_incdec(&mut self, container: &Expr, index: &Expr, pos: Pos, op: TokenType) -> CodegenResult<()> {
+        let container_ty = checker::infer_expr(&self.ctx, container);
+        // gen_index_assignと同じ理由(ネストしたmapの読みは`V | none`のUnionになり、
+        // 厳密一致のMapチェックをすり抜けてしまうため、Unionは明確なErrにする)
+        if let Type::Union { .. } = container_ty {
+            return Err(format!(
+                "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                types::type_to_string(&container_ty), pos.line, pos.col
+            ));
+        }
+        if matches!(container_ty, Type::Map { .. }) {
+            return Err(format!("codegen: increment/decrement of a map entry is not yet supported ({}:{})", pos.line, pos.col));
+        }
+        let container_js = self.gen_expr(container)?;
+        let index_js = self.gen_expr(index)?;
+        let at = self.at(pos);
+        let delta = match op {
+            TokenType::PlusPlus => "+",
+            TokenType::MinusMinus => "-",
+            _ => unreachable!("IncDec op is always ++ or --"),
+        };
+        self.emit(format!("__idxset({container_js}, {index_js}, (__idx({container_js}, {index_js}, {at}) {delta} 1), {at});"));
+        Ok(())
     }
 
     // 代入・インクリメント/デクリメント対象(lvalue)のJSコード片を組み立てる。Identはそのまま、
@@ -516,9 +649,44 @@ impl Codegen {
                 self.ctx.pop_scope();
                 Ok(format!("(await __or({left_js}, async ({}) => {right_js}))", bind_name.unwrap_or("")))
             }
-            Expr::ArrayLit { pos, .. } => Err(format!("codegen: array literals are not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::Index { pos, .. } => Err(format!("codegen: index access is not yet supported ({}:{})", pos.line, pos.col)),
-            Expr::MapLit { pos, .. } => Err(format!("codegen: map literals are not yet supported ({}:{})", pos.line, pos.col)),
+            // elem_typeはcodegenでは一切参照しない(TS版と同じく構文のみ——素のJS配列リテラル)
+            Expr::ArrayLit { elems, .. } => {
+                let js_elems = elems.iter().map(|e| self.gen_expr(e)).collect::<CodegenResult<Vec<_>>>()?;
+                Ok(format!("[{}]", js_elems.join(", ")))
+            }
+            Expr::MapLit { entries, .. } => {
+                if entries.is_empty() {
+                    return Ok("new Map()".to_string());
+                }
+                let mut js_entries = Vec::with_capacity(entries.len());
+                for e in entries {
+                    js_entries.push(format!("[{}, {}]", self.gen_expr(&e.key)?, self.gen_expr(&e.value)?));
+                }
+                Ok(format!("new Map([{}])", js_entries.join(", ")))
+            }
+            // 添字読み: targetがMap型なら`__mget`(欠損キーはnone)、それ以外は`__idx`
+            // (配列・文字列どちらも`.length`/`[i]`を持つのでこのまま使える。範囲外はpanic)
+            Expr::Index { target, index, pos } => {
+                let target_ty = checker::infer_expr(&self.ctx, target);
+                // code review指摘(PR #19): ネストしたmap(例: map<string, map<string,int>>)を
+                // 読むとtargetの型が`V | none`のUnionになり、`Type::Map`との厳密一致では
+                // すり抜けて配列扱い(`__idx`)になってしまう。TS版のchecker(src/checker/
+                // expressions.ts)はUnion型への添字自体を`not-indexable`診断で拒否しており
+                // (noneかもしれない値へ安全に添字を続けられないため)、それに倣い明確なErrにする
+                if let Type::Union { .. } = target_ty {
+                    return Err(format!(
+                        "codegen: cannot index into '{}' — narrow away 'none' first (e.g. with 'or') ({}:{})",
+                        types::type_to_string(&target_ty), pos.line, pos.col
+                    ));
+                }
+                let target_js = self.gen_expr(target)?;
+                let index_js = self.gen_expr(index)?;
+                if matches!(target_ty, Type::Map { .. }) {
+                    Ok(format!("__mget({target_js}, {index_js})"))
+                } else {
+                    Ok(format!("__idx({target_js}, {index_js}, {})", self.at(*pos)))
+                }
+            }
             Expr::FnExpr { pos, .. } => Err(format!("codegen: anonymous functions are not yet supported ({}:{})", pos.line, pos.col)),
         }
     }
@@ -526,14 +694,12 @@ impl Codegen {
     fn gen_call(&mut self, expr: &Expr) -> CodegenResult<String> {
         let Expr::Call { callee, args, pos } = expr else { unreachable!("caller guarantees Expr::Call") };
 
-        // 組み込み関数はランタイムの同期ヘルパへ直接変換(milestone 1はstruct/mapが無いので、
-        // TS版のうちそれらに依存しないものだけを移植——lenの map/配列判別・pushの配列操作等は
-        // 次のマイルストーン以降)
+        // 組み込み関数はランタイムの同期ヘルパへ直接変換
         if let Expr::Ident { name, .. } = &**callee
             && checker::is_builtin(name)
         {
             let js_args = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
-            return self.gen_builtin_call(name, &js_args, *pos);
+            return self.gen_builtin_call(name, args, &js_args, *pos);
         }
 
         // メソッド呼び出し: recv.method(args) → __m_Struct_method(recv, args)。
@@ -561,15 +727,16 @@ impl Codegen {
         Ok(format!("(await {callee_js}({}))", args_js.join(", ")))
     }
 
-    fn gen_builtin_call(&self, name: &str, args: &[String], pos: Pos) -> CodegenResult<String> {
+    fn gen_builtin_call(&self, name: &str, arg_exprs: &[Expr], args: &[String], pos: Pos) -> CodegenResult<String> {
         // code review指摘: パーサ/checkerのどちらも組み込みの引数個数を検査しないため、
         // 以前は`args[0]`/`args[1]`への直接インデックスが足りない引数でパニックしていた
         // (例: `round()`)。「まだ対応していない構文はErrで返す、パニックさせない」という
         // 設計原則(ast.rsコメント参照)に反するため、個数を先に検査してから分岐する
         let required = match name {
             "print" => 0,
-            "str" | "sleep" | "toInt" | "toFloat" | "round" | "floor" | "ceil" | "error" | "trim" | "upper" | "lower" | "sort" | "close" => 1,
-            "contains" | "indexOf" | "get" | "split" | "join" | "push" => 2,
+            "str" | "sleep" | "toInt" | "toFloat" | "round" | "floor" | "ceil" | "error" | "trim" | "upper" | "lower" | "sort" | "close" | "len"
+            | "keys" | "values" => 1,
+            "contains" | "indexOf" | "get" | "split" | "join" | "push" | "delete" => 2,
             _ => 0, // 未対応の組み込みはこの後のmatchのdefaultアームでエラーになる
         };
         if args.len() < required {
@@ -602,8 +769,35 @@ impl Codegen {
             "push" => Ok(format!("{}.push({})", args[0], args[1])),
             "sort" => Ok(format!("__sorted({})", args[0])),
             "close" => Ok(format!("{}.close()", args[0])),
-            // len/delete/keys/values/filter/map/reduceはmap/配列の判別か高階関数呼び出しが要り、
-            // milestone 1(配列/map未対応)の範囲外——次のマイルストーンで対応する
+            // mapは.size、配列・文字列は.length
+            "len" => {
+                if matches!(arg_exprs.first().map(|a| checker::infer_expr(&self.ctx, a)), Some(Type::Map { .. })) {
+                    Ok(format!("{}.size", args[0]))
+                } else {
+                    Ok(format!("{}.length", args[0]))
+                }
+            }
+            // code review指摘(PR #19): lenはmap/配列を型で分岐しているのに、deleteは
+            // 分岐せず無条件で`.delete()`を出していた——配列に`delete(xs, i)`を渡すと
+            // 実行時に`xs.delete is not a function`でクラッシュする(配列にはdeleteの
+            // 意味的な対応物が無い——TS版もdeleteはmap限定の組み込み)。型が確実に
+            // Map/Any以外だと分かる場合だけ明確なErrにする(ANYは診断を出さない設計上
+            // 許容——他の型に確実だと分かる場合だけ弾く、既存のrange-forアリティ
+            // ガードと同じ考え方)
+            "delete" => {
+                let confidently_not_map = matches!(
+                    arg_exprs.first().map(|a| checker::infer_expr(&self.ctx, a)),
+                    Some(t) if !matches!(t, Type::Map { .. } | Type::Any)
+                );
+                if confidently_not_map {
+                    return Err(format!("codegen: 'delete' requires a map argument ({}:{})", pos.line, pos.col));
+                }
+                Ok(format!("{}.delete({})", args[0], args[1]))
+            }
+            "keys" => Ok(format!("Array.from({}.keys())", args[0])),
+            "values" => Ok(format!("Array.from({}.values())", args[0])),
+            // filter/map/reduceは無名関数(Expr::FnExpr)のcodegenがまだ無く引数を生成できない
+            // ため対象外のまま——次のマイルストーン以降で対応する
             _ => Err(format!("codegen: builtin '{name}' is not yet supported ({}:{})", pos.line, pos.col)),
         }
     }
@@ -953,8 +1147,106 @@ mod tests {
     }
 
     #[test]
-    fn 配列リテラルは未対応として明確なエラーになる() {
-        let err = gen_js("fn main() {\n  xs := [1, 2, 3]\n}").unwrap_err();
-        assert!(err.contains("not yet supported"), "got: {err}");
+    fn 配列リテラルとmapリテラルが生成できる() {
+        let js = gen_body("fn main() {\n  xs := [1, 2, 3]\n  m := map<string, int>{\"a\": 1, \"b\": 2}\n  empty := map<string, int>{}\n}");
+        assert!(js.contains("const xs = [1, 2, 3];"), "got: {js}");
+        assert!(js.contains("const m = new Map([[\"a\", 1], [\"b\", 2]]);"), "got: {js}");
+        assert!(js.contains("const empty = new Map();"), "got: {js}");
+    }
+
+    #[test]
+    fn 添字読みはmapと配列で使い分けられる() {
+        let js = gen_body("fn main() {\n  xs := [1, 2, 3]\n  m := map<string, int>{\"a\": 1}\n  x := xs[0]\n  v := m[\"a\"]\n}");
+        assert!(js.contains("const x = __idx(xs, 0,"), "got: {js}");
+        assert!(js.contains("const v = __mget(m, \"a\");"), "got: {js}");
+    }
+
+    #[test]
+    fn 添字書き込みは配列がidxset_mapがsetになる() {
+        let js = gen_body(
+            "fn main() {\n  mut xs := [1, 2, 3]\n  m := map<string, int>{}\n  xs[0] = 10\n  m[\"a\"] = 1\n  xs[0] += 1\n  xs[0]++\n}",
+        );
+        assert!(js.contains("__idxset(xs, 0, 10,"), "got: {js}");
+        assert!(js.contains("m.set(\"a\", 1);"), "got: {js}");
+        assert!(js.contains("__idxset(xs, 0, __iarith(__idx(xs, 0,"), "got: {js}");
+        assert!(js.contains("__idxset(xs, 0, (__idx(xs, 0,"), "got: {js}");
+    }
+
+    #[test]
+    fn map要素への複合代入とincdecは明確なエラーになる() {
+        let err1 = gen_js("fn main() {\n  m := map<string, int>{}\n  m[\"a\"] += 1\n}").unwrap_err();
+        assert!(err1.contains("compound assignment on a map entry"), "got: {err1}");
+        let err2 = gen_js("fn main() {\n  m := map<string, int>{}\n  m[\"a\"]++\n}").unwrap_err();
+        assert!(err2.contains("increment/decrement of a map entry"), "got: {err2}");
+    }
+
+    #[test]
+    fn ネストしたmapへの添字は読み書きincdecともに明確なエラーになる() {
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  x := m[\"a\"][\"b\"]\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "read");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"] = 1\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "assign");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"] += 1\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "compound assign");
+
+        let src = "fn main() {\n  m := map<string, map<string, int>>{}\n  m[\"a\"][\"b\"]++\n}";
+        assert!(gen_js(src).unwrap_err().contains("narrow away 'none'"), "incdec");
+    }
+
+    #[test]
+    fn 範囲forの3形態が生成できる() {
+        let js = gen_body(
+            "fn main() {\n  xs := [1, 2, 3]\n  m := map<string, int>{\"a\": 1}\n  for i, v := range xs { print(i, v) }\n  for k, v := range m { print(k, v) }\n  for i := range 3 { print(i) }\n}",
+        );
+        assert!(js.contains("for (const [i, v] of xs.entries()) {"), "got: {js}");
+        assert!(js.contains("for (const [k, v] of m) {"), "got: {js}");
+        assert!(js.contains("for (let i = 0, __n = 3; i < __n; i++) {"), "got: {js}");
+    }
+
+    #[test]
+    fn 範囲forのブランク名は正しいjsになる() {
+        let js = gen_body("fn main() {\n  xs := [1, 2, 3]\n  for _, v := range xs { print(v) }\n}");
+        assert!(js.contains("for (const [, v] of xs.entries()) {"), "got: {js}");
+        // 単一名がブランクだとCスタイルループ変数に使えないため__iにフォールバックする
+        let js2 = gen_body("fn main() {\n  for _ := range 3 { }\n}");
+        assert!(js2.contains("for (let __i = 0, __n = 3; __i < __n; __i++) {"), "got: {js2}");
+    }
+
+    #[test]
+    fn 範囲forのアリティ不一致は明確なエラーになる() {
+        let err1 = gen_js("fn main() {\n  xs := [1, 2, 3]\n  for i := range xs { print(i) }\n}").unwrap_err();
+        assert!(err1.contains("expects 2 name"), "got: {err1}");
+        let err2 = gen_js("fn main() {\n  for i, j := range 3 { print(i, j) }\n}").unwrap_err();
+        assert!(err2.contains("expects 1 name"), "got: {err2}");
+    }
+
+    #[test]
+    fn len_はmapとarrayで使い分けられる() {
+        let js = gen_body("fn main() {\n  xs := [1, 2, 3]\n  m := map<string, int>{\"a\": 1}\n  a := len(xs)\n  b := len(m)\n}");
+        assert!(js.contains("const a = xs.length;"), "got: {js}");
+        assert!(js.contains("const b = m.size;"), "got: {js}");
+    }
+
+    #[test]
+    fn delete_keys_valuesが生成できる() {
+        let js = gen_body("fn main() {\n  m := map<string, int>{\"a\": 1}\n  delete(m, \"a\")\n  ks := keys(m)\n  vs := values(m)\n}");
+        assert!(js.contains("m.delete(\"a\");"), "got: {js}");
+        assert!(js.contains("const ks = Array.from(m.keys());"), "got: {js}");
+        assert!(js.contains("const vs = Array.from(m.values());"), "got: {js}");
+    }
+
+    #[test]
+    fn delete_を配列に使うと明確なerrになる() {
+        let err = gen_js("fn main() {\n  mut xs := [1, 2, 3]\n  delete(xs, 0)\n}").unwrap_err();
+        assert!(err.contains("delete"), "got: {err}");
+    }
+
+    #[test]
+    fn get_sort_の生成jsを確認する() {
+        let js = gen_body("fn main() {\n  xs := [3, 1, 2]\n  x := get(xs, 0)\n  s := sort(xs)\n}");
+        assert!(js.contains("const x = __get(xs, 0);"), "got: {js}");
+        assert!(js.contains("const s = __sorted(xs);"), "got: {js}");
     }
 }
