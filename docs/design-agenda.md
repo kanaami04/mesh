@@ -498,3 +498,28 @@ socketへの書き込みは無害なno-op」と反証し、却下した。
 テスト12件追加(checker 6件・e2e 6件、うち1件はcode review指摘の413回帰テスト)。
 todo.md「次の一手」に残る大きな討議項目は、これでC-6(コア+mesh/http v1)まで完了。
 次点は同todo.md記載のとおり、言語カード実証実験の継続またはRust移植の開始
+
+## J. json struct のエンコード方向(H-2の裏返し) — 討議中(2026-07-24提起)
+
+`demo/todo-api/main.mesh`実装中に発覚: H-2で`json struct X {...}`から自動生成されるのは
+**デコード方向**(`decode<X>(v: json.Value) X | error`)だけで、**エンコード方向**
+(`X` → `json.Value`/JSON文字列)は無い。実際にデモでは`Todo` → `json.Value`変換
+(`toJson()`メソッド)を毎回手で組み立てる必要があり、同じ形のボイラープレートが
+3箇所(`toJson`・`jsonResponse`・`errorResponse`)に発生した。
+
+他言語比較: Go(`encoding/json`のMarshal)・Rust(serdeのderive `Serialize`)は構造体
+タグ/deriveでデコード・エンコード**両方向**を自動生成するのに対し、現状のMeshは
+デコードのみ自動という非対称な状態——H-2時点では意識していなかった穴。
+
+**選択肢**(討議未着手、次回kanayamaと相談して決める):
+- (a) `encodeX(x: X) json.Value`という対になる自由関数を自動生成。`decodeX`と同じ
+  命名規則・同じ「構文レベルAST合成方式」(`src/json-decode.ts`)をそのまま流用できる
+- (b) レシーバメソッド`(x: X) toJson() json.Value`として生成。struct宣言に
+  「メソッドが後から自動で生える」という今までに無い挙動になるため、「メソッドは
+  ユーザーが自分で書く」という既存設計との整合を要検討
+- (c) `json.Value`を経由せず`stringifyX(x: X) string`まで直接生成。構成しやすさ
+  (`json.Value`として他の木に埋め込む用途)を諦める代わりに一番よくある用途を最短化する
+
+対応範囲はH-2のデコード側と対称(int/float/string/bool・同一ファイル内の他の
+json struct・それらの配列・`T | none`)にするのが自然そうだが、これも要確認。
+todo.mdの「次の一手」に控えとして記載。
