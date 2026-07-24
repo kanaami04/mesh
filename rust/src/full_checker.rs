@@ -14,13 +14,16 @@
 // use-is-none/division-by-zero——下記`infer_binary`/`check_arith`/`infer_unary`参照)、
 // milestone 26でユーザー定義関数呼び出しの引数個数・型検査(argument-count——下記
 // `fn_signature`/`Expr::Call`参照)、milestone 27で組み込み関数の個数・スカラー引数型検査
-// (argument-count/builtin-arg-type——下記`infer_builtin_call`参照)を追加。
-// struct/フィールド関連の診断・配列/map/channel等コレクションの要素型検査・
-// run/buildへのゲート統合は引き続き対象外
+// (argument-count/builtin-arg-type——下記`infer_builtin_call`参照)、milestone 29で
+// 名前付きstructのモデル化+structリテラルのフィールド検証(unknown-field/missing-fields/
+// duplicate-field/型不一致——型「解決」は既存`checker.rs`を再利用、診断「発行」だけ再実装。
+// 下記`type_ctx`/`resolve_type_ann`/`infer_struct_lit`参照)を追加。
+// フィールドアクセス(`u.name`)の型解決・メソッド・判別可能union構築・pkg修飾struct・
+// 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, TypeNode};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, StructLitField, TypeNode};
 use crate::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use crate::token::{Pos, TokenType};
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
@@ -49,11 +52,23 @@ pub struct FullCheckerCtx {
     // 深さ1までしか積まれないが、TS版`ctx.retStack`と同じ形にしておく)
     ret_stack: Vec<Type>,
     diagnostics: Vec<Diagnostic>,
+    // milestone 29: struct/union型のレジストリ。型「解決」は既存の`checker.rs`
+    // (最小リゾルバ、codegen依存ゼロ)を**再利用**する——`resolve_type_decls`が
+    // knot-tying(自己参照・循環対応、milestone 19の資産)でstruct_types/union_typesを
+    // 構築する。診断の「発行」だけをfull_checker側で書く(checker.rsのvalidateは
+    // Result即失敗で形が違うため、TS版`expressions.ts`/`calls.ts`を手本に診断蓄積形で
+    // 書き直す)。詳細はtodo.md/handoff.md milestone 29参照
+    type_ctx: crate::checker::CheckerCtx,
 }
 
 impl FullCheckerCtx {
     fn new() -> Self {
-        FullCheckerCtx { scopes: vec![HashMap::new()], ret_stack: Vec::new(), diagnostics: Vec::new() }
+        FullCheckerCtx {
+            scopes: vec![HashMap::new()],
+            ret_stack: Vec::new(),
+            diagnostics: Vec::new(),
+            type_ctx: crate::checker::CheckerCtx::new(),
+        }
     }
 
     fn push_scope(&mut self) {
@@ -101,10 +116,13 @@ impl FullCheckerCtx {
     }
 }
 
-// 型注釈をmilestone 22のスコープ(スカラーのみ)で解決する。struct/union/配列/map/channel/
-// 関数型やpkg修飾型はこの一歩の対象外なのでANYへフォールバックする(診断はしない——
-// 未対応の構文をあたかも誤りであるかのように報告しないため)
-fn resolve_scalar_type(node: &TypeNode) -> Type {
+// 型注釈を解決する。スカラー(int/float/...)+ milestone 29から**名前付きstruct**
+// (type_ctxのレジストリ経由)を解決する。**配列/map/channel/union/関数型/pkg修飾型は
+// 引き続きANY**——milestone 27の「コレクションは常にANY」という前提を保つため意図的に
+// 縮退させる(structのフィールドがコレクションでも、フィールドアクセス側でANYへ畳むので
+// この前提は崩れない)。ANYフォールバックは診断を出さない(未対応構文を誤りとして
+// 報告しないため)。
+fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     match node {
         TypeNode::Name { name, pkg: None, .. } => match name.as_str() {
             "int" => INT,
@@ -114,7 +132,11 @@ fn resolve_scalar_type(node: &TypeNode) -> Type {
             "void" => VOID,
             "error" => ERROR,
             "none" => NONE,
-            _ => ANY,
+            // 名前付きstructだけレジストリから解決。union/未知/その他はANYのまま
+            _ => match tc.lookup_struct(name) {
+                Some(t) if matches!(t, Type::Struct { .. }) => t.clone(),
+                _ => ANY,
+            },
         },
         _ => ANY,
     }
@@ -191,10 +213,82 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 ANY
             }
         }
-        // struct/array/map/channel/match/is/spawn/select/prop/orElse/無名関数など:
-        // milestone 22の対象外なので中へは踏み込まない
+        // milestone 29: 名前付きstructリテラルのフィールド検証。pkg修飾・判別可能union構築は
+        // 次段階(下記infer_struct_litがANYを返す)
+        Expr::StructLit { name, pkg, fields, pos } => infer_struct_lit(ctx, name, pkg.as_deref(), fields, *pos),
+        // array/map/channel/match/is/spawn/select/prop/orElse/無名関数など:
+        // まだ対象外なので中へは踏み込まない
         _ => ANY,
     }
+}
+
+// struct-litのフィールド値の型検査を行ってよい宣言型か。full_checkerが縮退させる型
+// (配列/map/channel/関数型/union/型パラメータ——resolve_type_annがANY相当にする)は、
+// レジストリ側(checker.rsが完全解決)の型と突き合わせると誤検知するので検査しない。
+// スカラー・struct・literal・none/closed等はfull_checker側の値の型が信頼できるので検査する
+fn is_checkable_field_type(t: &Type) -> bool {
+    !matches!(
+        t,
+        Type::Array(_) | Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_)
+    )
+}
+
+// 名前付きstructリテラル(`User{...}`)のフィールド検証(milestone 29)。TS版
+// `expressions.ts`のstructLitケース(名前付きstruct部分)の移植——診断を積んで継続する。
+// フィールド値の型・重複・未知・欠落を検査し、struct型を返す。判別可能union構築
+// (union名でのリテラル・タグdisambiguation)・pkg修飾structは次段階のためANYを返す。
+fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
+    // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
+    let field_types: Vec<Type> = fields.iter().map(|f| infer_expr(ctx, &f.value)).collect();
+    // pkg修飾はmilestone 29対象外
+    if pkg.is_some() {
+        return ANY;
+    }
+    // 名前がregistryのstructでなければ対象外(union/未宣言/ジェネリック型パラメータ等)——ANY
+    let struct_ty = match ctx.type_ctx.lookup_struct(name) {
+        Some(t) if matches!(t, Type::Struct { .. }) => t.clone(),
+        _ => return ANY,
+    };
+    let Type::Struct { fields: decl_cell, name: display_name, .. } = &struct_ty else {
+        return ANY;
+    };
+    let Some(decl_fields) = decl_cell.get() else {
+        return ANY; // 未解決(循環等でセットされていない)——素通り
+    };
+    // TS版structLitのforEach(重複→duplicate-field・未知→unknown-field・型不一致→
+    // type-mismatch)。いずれも診断を積んで次のフィールドへ継続する
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (f, ty) in fields.iter().zip(&field_types) {
+        if !seen.insert(f.name.as_str()) {
+            ctx.error(f.pos, DiagnosticCode::DuplicateField, format!("duplicate field '{}'", f.name));
+            continue;
+        }
+        match decl_fields.iter().find(|d| d.name == f.name) {
+            None => {
+                let field_names = decl_fields.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", ");
+                ctx.error(f.pos, DiagnosticCode::UnknownField, format!("{display_name} has no field '{}' (fields: {field_names})", f.name));
+            }
+            Some(decl) => {
+                // フィールド値の型検査は、full_checkerが値側の型を確実にモデル化できる型
+                // (スカラー・struct・literal等)のフィールドだけを対象にする。宣言側の型が
+                // 配列/map/channel/関数型/union(レジストリではchecker.rsが完全解決する)の
+                // フィールドは、full_checker側の値の型がANYや縮退したType::Fn(fn_signatureは
+                // パラメータをANYにする)になり、完全解決された宣言型と突き合わせると誤検知する
+                // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
+                // レジストリのparam=int[]で不一致になる。code reviewで発覚)。それらの型の
+                // フィールドはコレクション/関数型をモデル化する次段階まで検査をスキップ
+                if is_checkable_field_type(&decl.type_) && !types::assignable(ty, &decl.type_) {
+                    ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
+                }
+            }
+        }
+    }
+    // 全フィールド必須(v1。ゼロ値・デフォルト無し)
+    let missing: Vec<String> = decl_fields.iter().filter(|d| !seen.contains(d.name.as_str())).map(|d| d.name.clone()).collect();
+    if !missing.is_empty() {
+        ctx.error(pos, DiagnosticCode::MissingFields, format!("missing field(s) in {display_name}: {}", missing.join(", ")));
+    }
+    struct_ty
 }
 
 // 二項演算の妥当性検査+結果型の推論(milestone 25)。TS版`inferBinary`+`checkArithOp`
@@ -534,7 +628,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
         }
         Stmt::TypedVarDecl { name, type_node, value, mutable, pos } => {
-            let declared = resolve_scalar_type(type_node);
+            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
             let value_ty = infer_expr(ctx, value);
             if !types::assignable(&value_ty, &declared) {
                 ctx.error(
@@ -684,11 +778,12 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
 // 関数のシグネチャ型(Type::Fn)。milestone 26でcheck_programがトップレベル関数を
 // この型で登録するようになり、呼び出し側の個数・型照合(argument-count/type-mismatch)が
 // 効くようになった。params/retはスカラースコープで解決する(union/struct/配列/pkg修飾型は
-// resolve_scalar_typeでANYへ潰れる——個数照合は常に効き、型照合はスカラーのみ効く)。
+// resolve_type_annでANYへ潰れる(struct型はmilestone 29から解決される)——個数照合は
+// 常に効き、型照合はスカラー+structで効く)。
 // TS版`checkPackage`もトップレベル関数を通常のdeclareBindingでFn型として登録する
-fn fn_signature(f: &FnDecl) -> Type {
-    let params = f.params.iter().map(|p| resolve_scalar_type(&p.type_node)).collect();
-    let ret = f.ret.as_ref().map(resolve_scalar_type).unwrap_or(VOID);
+fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
+    let params = f.params.iter().map(|p| resolve_type_ann(tc, &p.type_node)).collect();
+    let ret = f.ret.as_ref().map(|r| resolve_type_ann(tc, r)).unwrap_or(VOID);
     Type::Fn { params, ret: Box::new(ret) }
 }
 
@@ -700,9 +795,10 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // (正しくは外側スコープの再利用としてshadowing)
     ctx.push_scope();
     for p in &f.params {
-        ctx.declare(&p.name, resolve_scalar_type(&p.type_node), p.pos, false);
+        let pt = resolve_type_ann(&ctx.type_ctx, &p.type_node);
+        ctx.declare(&p.name, pt, p.pos, false);
     }
-    ctx.ret_stack.push(f.ret.as_ref().map(resolve_scalar_type).unwrap_or(VOID));
+    ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID));
     check_block(ctx, &f.body);
     ctx.ret_stack.pop();
     ctx.pop_scope();
@@ -717,7 +813,7 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
     let value_ty = infer_expr(ctx, &c.value);
     let final_ty = match &c.type_node {
         Some(type_node) => {
-            let declared = resolve_scalar_type(type_node);
+            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
             if !types::assignable(&value_ty, &declared) {
                 ctx.error(
                     c.pos,
@@ -736,6 +832,16 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
 // 見つかった診断を返す。空なら「(このスコープの範囲で)問題なし」の意味
 pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     let mut ctx = FullCheckerCtx::new();
+    // milestone 29: struct/union型のレジストリを既存の`checker.rs`のリゾルバで構築する
+    // (再利用。knot-tying・自己参照・循環検出込み)。fn/const登録より前に済ませておく——
+    // fn_signatureや型注釈がstruct名を解決できるようにするため。Err(裸union循環等)は
+    // この一歩では診断化せず握り潰す(TS版の`type-alias-cycle`診断は将来のmilestone。
+    // 稀なケースなので誤検知ではなく検出漏れ側に倒す)。**注意**: resolve_type_declsは
+    // 最初のErrで走査全体を打ち切るため(checker.rsのループ設計)、壊れた型宣言1つで
+    // **それ以降にファイル内で宣言されたstructも全て未登録=ANY扱い**になり、そのstructの
+    // リテラル検証が無診断で素通りする(code reviewで波及範囲を明確化)。診断機構
+    // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
+    let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &program.types);
     // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
     // 定数を検査+登録し、最後に関数本体を検査する。
@@ -756,7 +862,7 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // already-declaredの誤検知になる)
     for f in &program.fns {
         if f.receiver.is_none() {
-            let ty = if f.type_params.is_empty() { fn_signature(f) } else { ANY };
+            let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
             ctx.declare(&f.name, ty, f.pos, false);
         }
     }
@@ -1369,5 +1475,89 @@ mod tests {
         // 合成後(run_check/codegenと同じ前処理)は decodeUser が登録され誤検知しない
         let synthed = check_with_json(src);
         assert_eq!(synthed, vec![]);
+    }
+
+    // ---- milestone 29: 名前付きstructリテラルのフィールド検証 ----
+
+    const USER: &str = "struct User {\n    name: string\n    age: int\n}\n";
+
+    #[test]
+    fn 未知のフィールドはunknown_fieldを報告する() {
+        // typo `nmae` は unknown-field と(name欠落による)missing-fields の2件を出す
+        // ——診断を積んで継続する(TS版とbyte-for-byte一致、実機確認済み)
+        let diags = check(&format!("{USER}fn main() {{\n    u := User{{nmae: \"a\", age: 1}}\n    print(u)\n}}\n"));
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].code, DiagnosticCode::UnknownField);
+        assert_eq!(diags[0].message, "User has no field 'nmae' (fields: name, age)");
+        assert_eq!(diags[1].code, DiagnosticCode::MissingFields);
+    }
+
+    #[test]
+    fn フィールド値の型不一致はtype_mismatchを報告する() {
+        let diags = check(&format!("{USER}fn main() {{\n    u := User{{name: 5, age: 1}}\n    print(u)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "field 'name': cannot use int as string");
+    }
+
+    #[test]
+    fn フィールド欠落はmissing_fieldsを報告する() {
+        let diags = check(&format!("{USER}fn main() {{\n    u := User{{name: \"a\"}}\n    print(u)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MissingFields);
+        assert_eq!(diags[0].message, "missing field(s) in User: age");
+    }
+
+    #[test]
+    fn 重複フィールドはduplicate_fieldを報告する() {
+        let diags = check(&format!("{USER}fn main() {{\n    u := User{{name: \"a\", name: \"b\", age: 1}}\n    print(u)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DuplicateField);
+    }
+
+    #[test]
+    fn 正しいstructリテラルは診断を出さない() {
+        let diags = check(&format!("{USER}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u)\n}}\n"));
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn struct型はコレクション組み込みで正しく弾かれる() {
+        // milestone 27のinvariant(コレクションはANY)を保ったまま、structは具体型として
+        // len等に弾かれる(TS版と一致)——struct modelingがbuiltinを壊さないことの回帰
+        let diags = check(&format!("{USER}fn main() {{\n    n := len(User{{name: \"a\", age: 1}})\n    print(n)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::BuiltinArgType);
+        assert_eq!(diags[0].message, "len() requires string, array or map, got User");
+    }
+
+    #[test]
+    fn struct型のパラメータ不一致はtype_mismatchを報告する() {
+        // milestone 26のargument checkがstruct型パラメータでも効く(paramがANYでなくなった)
+        let diags = check(&format!("{USER}fn greet(u: User) {{\n    print(u.name)\n}}\nfn main() {{\n    greet(5)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "argument 1: cannot use int as User");
+    }
+
+    #[test]
+    fn 関数型やコレクション型のフィールドは誤検知しない() {
+        // 回帰(code reviewで発覚): `cb: fn(int[]) int`のフィールドに名前付き関数を代入すると、
+        // full_checkerのfn_signatureはparamをANYに縮退する一方、レジストリ側の宣言型は
+        // int[]を具体解決するため、Fn{[any],int} vs Fn{[int[]],int}で誤ってtype-mismatchに
+        // なっていた。縮退する型(配列/map/chan/fn/union)のフィールドは検査スキップで解消
+        let src = "struct Box {\n    cb: fn(int[]) int\n    items: int[]\n}\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    b := Box{cb: sum, items: [1, 2]}\n    print(b)\n}\n";
+        assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn structのメソッド呼び出しとフィールドアクセスは誤検知しない() {
+        // フィールドアクセス(u.name)・メソッド呼び出し(u.describe())はまだANY扱いで
+        // 診断しない(milestone 29はリテラル構築の検証のみ。メソッド/フィールド読みは次段階)——
+        // 正当なコードで誤検知が出ないことを確認
+        let src = format!(
+            "{USER}fn (u: User) describe() string {{\n    return u.name\n}}\nfn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.name)\n    print(u.describe())\n}}\n"
+        );
+        assert_eq!(check(&src), vec![]);
     }
 }

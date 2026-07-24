@@ -2657,6 +2657,39 @@
               full_checkerが全exampleで無診断である必要がある)。回帰テスト1件(合成前は
               undefined-name・合成後は無診断)。431→432件、全件パス。`cargo clippy`クリーン。
               **全single-file exampleでfull_checkerが無診断になったことを確認**(ゲート統合の前提が整った)。
+        - [x] **milestone 29: full_checkerのスカラー卒業・第一歩(名前付きstructのモデル化+リテラル検証)**
+              ✅ 2026-07-25実装。kanayamaが「full_checkerをスカラー卒業」方向を選択(残る大きめ方向
+              3択から)、その第一歩。**アーキテクチャ決定(サブフォーク)**: 型「解決」層は既存の
+              `checker.rs`(最小リゾルバ、codegen依存ゼロ)を**再利用**し、診断「発行」層だけ
+              full_checkerに**再実装**するハイブリッド。根拠は調査で確定——checker.rsの
+              `resolve_type_decls`はknot-tying(自己参照・循環検出、milestone 19の資産)で
+              struct/unionレジストリを構築でき、これを再実装するのはriskが高い。一方checker.rsの
+              使用箇所検証(unknown-field等)は`Result`即失敗で「診断を積んで継続」というfull_checkerの
+              モデルと形が違うため、TS版`expressions.ts`/`calls.ts`を手本に書き直す。
+              - `FullCheckerCtx`に`type_ctx: checker::CheckerCtx`を追加し、`check_program`冒頭で
+                `checker::resolve_type_decls`を呼んでstruct/unionレジストリを構築。
+                `resolve_scalar_type`→`resolve_type_ann`に改名し、名前付きstructをレジストリから
+                解決するよう拡張(fn_signature/param/ret/型注釈つき変数宣言/const も struct 型を解決)。
+              - **milestone 27のinvariant(コレクションは常にANY)を厳密に維持**: 配列/map/channel/
+                union/関数型/pkg修飾型は引き続きANYへ縮退させる(structのフィールドがコレクション
+                でも、フィールドアクセス側は当面ANYへ畳むのでinvariantは崩れない)。これにより
+                `push(realArray)`等が誤検知しない一方、`len(User{...})`は「got User」で正しく弾かれる
+                (struct具体型がcollection builtinに弾かれるのはTS版と一致)。
+              - `infer_struct_lit`を新設(TS版structLitケースの名前付きstruct部分の移植)。
+                unknown-field/missing-fields/duplicate-field/type-mismatch(フィールド値)を
+                **診断を積んで継続**する形で検査し、struct型を返す。判別可能union構築(union名での
+                リテラル・タグdisambiguation)・pkg修飾struct・フィールドアクセス(`u.name`)の
+                unknown-field・メソッド呼び出しは次段階のためANY(誤検知しない)。
+              - 診断コード3種(unknown-field/missing-fields/duplicate-field)を追加。
+              - 新規テスト8件(unknown/型不一致/欠落/重複/正常・structはcollection builtinで弾かれる・
+                struct型paramの引数不一致・メソッド/フィールド読みは誤検知なし)。432→440件、
+                全件パス。`cargo clippy`クリーン。7パターンをTS版と`mesh check`で突き合わせ
+                コード・メッセージ・位置まで完全一致(typo時のunknown-field+missing-fields 2診断も
+                byte-for-byte一致)。全トップレベルexample(struct使用のusers/discriminated_union/
+                struct_methods/tree含む)がfull_checker無診断のまま回帰なし。
+              - **次段階(milestone 30候補)**: フィールドアクセス(`u.name`)の型解決+unknown-field・
+                メソッド(method_table構築+method-not-called/メソッド呼び出し)・判別可能union構築・
+                pkg修飾struct・配列/map型のモデル化(collection builtinの要素型検査とセット)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
