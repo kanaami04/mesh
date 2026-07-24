@@ -2575,6 +2575,30 @@
               - **スコープ外(意図的)**: 比較演算子の結果の使われ方以外の高度な検査は無し。
                 struct/フィールド関連の診断・argument-count・run/buildへのゲート統合は
                 引き続き次のmilestone候補
+        - [x] **milestone 26: argument-count(ユーザー定義関数の引数個数・型)**
+              ✅ 2026-07-24実装。kanayamaと候補(argument-count/struct・フィールド関連/
+              run・buildゲート統合)を相談しargument-countを選択。
+              - **土台**: milestone 22以来、full_checkerはトップレベル関数を`ANY`で
+                登録していた(名前の存在だけ)。今回`fn_signature`を新設し
+                `Type::Fn{params, ret}`で登録するよう変更——params/retは
+                `resolve_scalar_type`で解決(union/struct/配列/pkg修飾型はANYへ潰れる)。
+                副次効果として関数呼び出しの結果型が正しく伝播するようになった
+                (以前は常にANY——`x: string = add(1,2)`のような型不一致も拾えるように)。
+              - `infer_expr`の`Expr::Call`を書き換え、calleeが`Type::Fn`のとき
+                TS版`checkArgsAgainst`(src/checker/calls.ts)相当の照合を行う:
+                個数不一致は`argument-count`(`expected N argument(s), got M`)、
+                重なる範囲の各引数の型不一致は`type-mismatch`
+                (`argument i: cannot use X as Y`、引数自身の位置)。paramがANYなら
+                常にassignableなので非スカラー引数で誤検知しない。
+              - **スコープ外(意図的)**: 組み込み関数(`print`/`len`/`push`…)の
+                個数・型検査はTS版`builtins.ts`の巨大switch(ビルトインごとに個別 arity/型)
+                の移植が要るため次回に分離。pkg修飾呼び出し・メソッド呼び出し・ジェネリック
+                関数も対象外(いずれもcalleeがANYになり従来どおりANYを返す)。
+              - 新規テスト7件(引数不足/過多→argument-count・引数型不一致→type-mismatch・
+                正しい呼び出し・前方参照・戻り値型の伝播・組み込みは対象外で誤検知なし)。
+                413→420件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を
+                4パターン(不足/過多/型不一致/正常)で突き合わせコード・メッセージ・位置まで
+                完全一致を確認。既存exampleも回帰なし
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

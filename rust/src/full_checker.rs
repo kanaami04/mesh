@@ -154,13 +154,28 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         }
         Expr::Binary { op, left, right, pos } => infer_binary(ctx, *op, left, right, *pos),
         Expr::Unary { op, operand, pos } => infer_unary(ctx, *op, operand, *pos),
-        Expr::Call { callee, args, .. } => {
-            infer_expr(ctx, callee);
-            for a in args {
-                infer_expr(ctx, a);
+        Expr::Call { callee, args, pos } => {
+            let callee_ty = infer_expr(ctx, callee);
+            let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+            // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
+            // シグネチャ付きで登録)なら個数・各引数の型を照合する(TS版`checkArgsAgainst`)。
+            // 組み込み関数(builtins.tsの巨大switch)・pkg修飾呼び出し・値呼び出しは
+            // calleeがANYになるため対象外——従来どおりANYを返す(次のmilestone候補)
+            if let Type::Fn { params, ret } = &callee_ty {
+                if arg_tys.len() != params.len() {
+                    ctx.error(*pos, DiagnosticCode::ArgumentCount, format!("expected {} argument(s), got {}", params.len(), arg_tys.len()));
+                }
+                // 個数が違っても重なる範囲は型照合する(TS版と同じ min(args, params))。
+                // paramがANY(union/struct/未対応型)なら常にassignableなので誤検知しない
+                for (i, (at, pt)) in arg_tys.iter().zip(params.iter()).enumerate() {
+                    if !types::assignable(at, pt) {
+                        ctx.error(args[i].pos(), DiagnosticCode::TypeMismatch, format!("argument {}: cannot use {} as {}", i + 1, types::type_to_string(at), types::type_to_string(pt)));
+                    }
+                }
+                (**ret).clone()
+            } else {
+                ANY
             }
-            // 引数の数・型の照合(argument-count等)はmilestone 22の対象外
-            ANY
         }
         // struct/array/map/channel/match/is/spawn/select/prop/orElse/無名関数など:
         // milestone 22の対象外なので中へは踏み込まない
@@ -454,6 +469,17 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
     }
 }
 
+// 関数のシグネチャ型(Type::Fn)。milestone 26でcheck_programがトップレベル関数を
+// この型で登録するようになり、呼び出し側の個数・型照合(argument-count/type-mismatch)が
+// 効くようになった。params/retはスカラースコープで解決する(union/struct/配列/pkg修飾型は
+// resolve_scalar_typeでANYへ潰れる——個数照合は常に効き、型照合はスカラーのみ効く)。
+// TS版`checkPackage`もトップレベル関数を通常のdeclareBindingでFn型として登録する
+fn fn_signature(f: &FnDecl) -> Type {
+    let params = f.params.iter().map(|p| resolve_scalar_type(&p.type_node)).collect();
+    let ret = f.ret.as_ref().map(resolve_scalar_type).unwrap_or(VOID);
+    Type::Fn { params, ret: Box::new(ret) }
+}
+
 fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // パラメータ用の外側スコープ+本体用のネストしたスコープ(check_block)という
     // 2段構成(TS版`checker/functions.ts`と同じ——pushScope〈パラメータ〉の後、
@@ -513,7 +539,9 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // already-declaredの誤検知になる)
     for f in &program.fns {
         if f.receiver.is_none() {
-            ctx.declare(&f.name, ANY, f.pos, false);
+            // milestone 26: ANYではなくシグネチャ(Type::Fn)で登録し、呼び出し側の
+            // 個数・型照合を効かせる
+            ctx.declare(&f.name, fn_signature(f), f.pos, false);
         }
     }
     for c in &program.consts {
@@ -949,6 +977,62 @@ mod tests {
             \x20   print(\"${a} ${c} ${d} ${e} ${f} ${s} ${n}\")\n\
             }\n",
         );
+        assert_eq!(diags, vec![]);
+    }
+
+    // ---- milestone 26: argument-count(ユーザー定義関数の引数個数・型) ----
+
+    #[test]
+    fn 引数不足はargument_countを報告する() {
+        let diags = check("fn add(a: int, b: int) int {\n    return a + b\n}\nfn main() {\n    x := add(1)\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ArgumentCount);
+        assert_eq!(diags[0].message, "expected 2 argument(s), got 1");
+    }
+
+    #[test]
+    fn 引数過多もargument_countを報告する() {
+        let diags = check("fn greet(name: string) {\n    print(name)\n}\nfn main() {\n    greet(\"a\", \"b\")\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ArgumentCount);
+        assert_eq!(diags[0].message, "expected 1 argument(s), got 2");
+    }
+
+    #[test]
+    fn 引数の型不一致はtype_mismatchを報告する() {
+        let diags = check("fn sq(n: int) int {\n    return n * n\n}\nfn main() {\n    x := sq(\"hi\")\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "argument 1: cannot use \"hi\" as int");
+    }
+
+    #[test]
+    fn 正しい引数の呼び出しは診断を出さない() {
+        let diags = check("fn add(a: int, b: int) int {\n    return a + b\n}\nfn main() {\n    print(\"${add(2, 3)}\")\n}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn 前方参照の呼び出しでも個数検査が効く() {
+        // 本体検査より前に全関数を登録するので、後で定義する関数の呼び出しも照合できる
+        let diags = check("fn main() {\n    later(1, 2)\n}\nfn later(a: int) {\n    print(a)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ArgumentCount);
+    }
+
+    #[test]
+    fn 関数の戻り値型が呼び出し側に伝播する() {
+        // addはintを返すのでstringへの代入はtype-mismatch(呼び出し結果がANYに潰れない)
+        let diags = check("fn add(a: int, b: int) int {\n    return a + b\n}\nfn main() {\n    x: string = add(1, 2)\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn 組み込み関数の呼び出しはargument_count対象外で誤検知しない() {
+        // 組み込み(print等)はcalleeがANYになるためmilestone 26の対象外——
+        // 可変長のprintに複数引数を渡しても誤検知しない
+        let diags = check("fn main() {\n    print(1, 2, 3)\n}\n");
         assert_eq!(diags, vec![]);
     }
 }
