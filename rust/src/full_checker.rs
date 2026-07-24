@@ -804,6 +804,14 @@ mod tests {
         check_program(&program)
     }
 
+    // codegen経路と同じくjson structのデコーダを合成してから検査する(mesh checkのrun_checkが
+    // やるのと同じ前処理)。json struct由来の合成関数を検査対象に含めたいテスト用
+    fn check_with_json(src: &str) -> Vec<Diagnostic> {
+        let mut program = parse(src).expect("test source must parse");
+        crate::json_decode::synthesize_json_decoders(&mut program).expect("synthesis must succeed");
+        check_program(&program)
+    }
+
     #[test]
     fn 正しいスカラープログラムは診断を出さない() {
         let diags = check(
@@ -1347,5 +1355,19 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::BuiltinArgType);
         assert_eq!(diags[0].message, "round() requires a float, got int");
+    }
+
+    // ---- milestone 28: mesh checkでもjson structデコーダを合成する ----
+
+    #[test]
+    fn json構造体の合成デコーダ呼び出しは合成後undefined_nameにならない() {
+        // 生成デコーダは json.field 等を呼ぶので mesh/json のimportが要る(合成の前提)
+        let src = "import \"mesh/json\"\njson struct User { name: string }\nfn main() {\n    u := decodeUser(5)\n    print(u)\n}\n";
+        // 合成しない生の検査では decodeUser が未定義扱い(バグの再現)
+        let raw = check(src);
+        assert!(raw.iter().any(|d| d.code == DiagnosticCode::UndefinedName), "合成前はundefined-nameになるはず");
+        // 合成後(run_check/codegenと同じ前処理)は decodeUser が登録され誤検知しない
+        let synthed = check_with_json(src);
+        assert_eq!(synthed, vec![]);
     }
 }

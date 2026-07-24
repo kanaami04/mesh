@@ -88,7 +88,7 @@ fn run_check(path_arg: Option<&String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let program = match parse(&source) {
+    let mut program = match parse(&source) {
         Ok(program) => program,
         Err(errors) => {
             for e in &errors {
@@ -97,6 +97,13 @@ fn run_check(path_arg: Option<&String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // codegen経路(下記generate)と同じく、check前にjson structのデコーダを合成する。
+    // これをやらないと`json struct`が生成する`decode*`関数をfull_checkerが知らず、
+    // それを呼ぶ正当なコードが誤ってundefined-nameになる(examples/json_decode.mesh)
+    if let Err(e) = synthesize_json_decoders(&mut program) {
+        eprintln!("{path}: {e}");
+        return ExitCode::FAILURE;
+    }
     let diagnostics = full_checker::check_program(&program);
     if diagnostics.is_empty() {
         return ExitCode::SUCCESS;

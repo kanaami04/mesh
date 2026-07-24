@@ -2643,6 +2643,20 @@
                 milestone 26テストの「calleeがANY」も現状に合わせて更新)。
               - **スコープ外**: コレクション要素型・添字型・callback署名の検査
                 (配列/map/channel型のモデル化とセット)、pkg修飾された組み込み。
+        - [x] **milestone 28: mesh checkでもjson structのデコーダを合成する**
+              ✅ 2026-07-25実装。全exampleでfull_checker(`mesh check`)が誤検知を出さないか
+              確認したところ、`examples/json_decode.mesh`だけが`decodeUser`をundefined-nameに
+              する**false positive**を出していた——`json struct X`がコンパイル時に生成する
+              `decodeX`関数(json_decode.rs、milestone 9)を、codegen経路(`main.rs`のgenerate)は
+              `synthesize_json_decoders`で合成してから処理するのに対し、`mesh check`経路
+              (`run_check`)は合成せず生のprogramをfull_checkerへ渡していたため、生成デコーダの
+              呼び出しが未定義扱いになっていた。`run_check`にcodegen経路と同じ合成を挟むだけで解消
+              (合成が失敗する条件——`import "mesh/json"`欠如等——のエラー処理もcodegen経路と同形)。
+              これは既存のTS非互換バグ(milestone 27の作業ではなく、gate統合の実現可能性調査で発覚)で、
+              将来の`mesh run`/`build`へのfull_checkerゲート統合の前提でもある(gateする前に
+              full_checkerが全exampleで無診断である必要がある)。回帰テスト1件(合成前は
+              undefined-name・合成後は無診断)。431→432件、全件パス。`cargo clippy`クリーン。
+              **全single-file exampleでfull_checkerが無診断になったことを確認**(ゲート統合の前提が整った)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
