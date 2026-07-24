@@ -731,7 +731,79 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   「mesh/io → mesh/http → デモアプリ開発」の3段階を完走した。細かな意図的な
   スコープ縮小(json.Valueを本物の自己参照型として再定義すること・`json.Value`の
   2階層以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
-  struct参照)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
+  struct参照)は引き続きtodo.mdに記録済みの通り残る。**次の対象はkanayamaと相談し
+  「Rustのdiagnostics/CLIを埋める」ことに決定(2026-07-24)**——詳細と着手プラン
+  (milestone 22)は下記「次のフェーズ: フルchecker移植」節を参照。まだ実装は
+  始めていない(次のセッションでの着手を想定した申し送り事項)
+
+## 次のフェーズ: フルchecker移植(2026-07-24、まだ未着手・申し送り)
+
+kanayamaに「TSからRustにはどのくらい移植できましたか?もうTSで実装するのはいいかな」と
+聞かれ、現状を調査して報告した結果、「Rustのdiagnostics/CLIを埋める」方針に合意
+(このセッションでは調査と設計合意のみ行い、実装は次のセッションに送る)。
+
+**現状調査で分かったこと(2026-07-24時点)**:
+- 行数: TS実装 9,393行(`src/checker/`2,903行込み)/ Rust実装 10,523行。テスト数:
+  TS 500件 / Rust 366件
+- **言語機能(コード生成)はほぼ移植済み**: struct/メソッド・判別可能union・match/is・
+  配列/map・並行処理・モジュール・error type・自己参照型・defer・filter/map/reduce・
+  `mesh/io`・`mesh/http`・`json struct`のデコード方向まで21マイルストーンで移植し、
+  生成JSは全exampleでTS版とbyte-for-byte一致することを確認済み。未移植な言語機能は
+  ジェネリック関数(F-1後半)・`json struct`のエンコード方向(design-agenda.md J節、
+  2026-07-24にTS側のみ実装)・`json.Value`の本物の自己参照型化くらい
+- **大きく欠けているのはフルの型検査(診断)とCLI**: `rust/src/checker.rs`は
+  冒頭コメントで明言している通り「最小リゾルバ」であって**フルcheckerの移植ではない**
+  ——「診断は出さない」設計で、未解決の型は`Type::Any`へ黙ってフォールバックし
+  コンパイラをpanicさせないことだけが目的。TS版`src/checker/`
+  (2,903行・診断コード約87種`src/diagnostic-codes.ts`・`mesh check --json`で
+  AIエージェント向け構造化出力・機械適用可能なfix付き)に相当するものが丸ごと無い。
+  CLIも`rust/src/main.rs`が「`file.mesh [--emit-js]`」だけの疎通確認用のままで、
+  TS版の`mesh run`/`build`/`check`/`test`/`fmt`/`explain`/`card`/`card --for`という
+  一通りのサブコマンド群が無い。パーサの複数エラー報告(パニックモード復帰、
+  `self.errors: Vec<CompileError>`に積んで先に進む設計)だけはTS版と1:1移植済み
+
+**合意したアーキテクチャ方針**: TS版は「checkで全診断を集める→0件ならcodegen」という
+2段構成(`compiler.ts`の`compileModules`)。今のRust版`checker.rs`はこれと逆に
+「resolverとcodegenを1回のトラバーサルに融合、診断を出さず`Result`で即失敗」という
+設計(意図的な簡略化、milestone 1のコメント参照)。**これを作り変えるのではなく、
+新しい「フルchecker」フェーズをcodegenの前段に追加する**方針で合意:
+- 新設するフルcheckerは、パーサのパニックモード復帰と同じ発想で`Result`の即失敗
+  ではなく`Vec<Diagnostic>`に積んで走査を続ける設計にする(TS版`error(ctx, pos,
+  code, message, fix)`が診断を`ctx.diagnostics`にpushして呼び出し元へ普通に
+  returnする設計と同じ——`src/checker/context.ts`参照)
+- 既存の`checker.rs`(最小リゾルバ)+`codegen.rs`(3,393行、言語機能はTS版と
+  byte-for-byte一致するところまで育っている)は**ほぼそのまま「フェーズ2」として
+  温存**する——新設フルcheckerが診断0件を確認した後にしか呼ばれなくなるので、
+  既存の「Rust版だけの安全ガード」群(milestone 2以降で何十件も積み上げてきた
+  防御的チェック)は二重の安全網として無駄にならず残る。TS版もこの2段構成
+  (checkが通ってからcodegenへ)なので設計として素直
+- 新設フルcheckerのファイル名は既存の`checker.rs`(最小リゾルバ用)と衝突するため
+  未定——`full_checker.rs`のような別名を暫定案として提示したが、まだkanayamaと
+  最終確認していない。着手時に決めること
+
+**milestone 22として合意した最初の一歩**(まだ未着手):
+1. 診断コード基盤の移植: `src/diagnostic-codes.ts`(498行、`DiagnosticCode`という
+   ~87種の文字列リテラルunion+`Fix`/`Diagnostic`インターフェース+
+   `DIAGNOSTIC_EXPLANATIONS`という`mesh explain`用の説明文マップ)を`rust/src/`へ
+   移植。ほとんどはコード名+説明文の機械的な書き写しだが、この最初の一歩では
+   milestone 22で実際に使うコードだけ実装し、残りは後続milestoneで機能を足すたびに
+   埋めていく形でよいか(全87件を先に埋めるか)は要検討
+2. 最小スコープ(元のcodegen移植のmilestone 1相当=スカラーのみ)でフルcheckerの
+   骨格を通す。TS版`src/checker/`の分割(`context.ts`基盤+`types-resolve.ts`+
+   `narrowing.ts`+`expressions.ts`+`match-select.ts`+`calls.ts`+`generics.ts`+
+   `builtins.ts`+`functions.ts`+`statements.ts`+`modules.ts`)を参考に、
+   まずは変数宣言・型不一致・未定義名程度の少数の診断コードだけ通す
+3. CLIに`mesh check`相当のモードを生やし、`file.mesh:line:col: error[code]:
+   message`の形で実際に出力されるところまで確認する
+4. アーキテクチャが正しいと分かった時点で、機能ごとに広げていく
+   (既存21マイルストーンと同じ進め方——1機能ずつ実装・テスト・TS版とのbyte-for-byte
+   比較・todo.md記録・PR・code review・squash merge)
+
+**参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
+説明)・`src/checker/context.ts`(`CheckerCtx`の構造・診断のpush方式・スコープ管理・
+`declareBinding`等の基盤関数)・`src/diagnostic-codes.ts`(コード一覧+説明文)。
+次のセッションはまずこの3ファイルを読むところから始めるとよい。
+
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

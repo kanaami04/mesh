@@ -2374,6 +2374,23 @@
         JSには`encodeTodo`の呼び出しだけがあり定義が無くランタイムエラーになることを
         実機確認したため撤回——デモの「TS版・Rust版どちらでも動く」という前提を優先し、
         既存の手書き`toJson()`のまま据え置いた。詳細はdesign-agenda.md J節が一次情報源
+  - [ ] **フルchecker(診断)+CLI移植** — 2026-07-24提起・方針合意のみ、**未着手**
+        (次のセッションへの申し送り)。kanayamaに「TS→Rustの移植状況、もうTSでの実装は
+        いいかな」と聞かれ調査した結果、言語機能(コード生成)は21マイルストーンで
+        ほぼ移植済みだが、TS版`src/checker/`(2,903行・診断コード約87種)相当の
+        「型エラーを位置・コード付きで報告するフルchecker」と、TS版`mesh run/build/
+        check/test/fmt/explain/card`相当のCLIサブコマンド群がRust側に丸ごと欠けている
+        ことが判明。「Rustのdiagnostics/CLIを埋める」方針で合意し、まずフルcheckerから
+        着手することも合意した。**設計方針・milestone 22の具体的な範囲・参考にすべき
+        TS側資料は[docs/handoff.md](docs/handoff.md)の「次のフェーズ: フルchecker移植」節に
+        詳しく書いた(このtodo.mdエントリは要約のみ)**——アーキテクチャは「新しい
+        フルcheckerフェーズをcodegenの前段に追加し、`Vec<Diagnostic>`に積んで走査を
+        続ける設計にする(パーサのパニックモード復帰と同じ発想)。既存の
+        `checker.rs`(最小リゾルバ)+`codegen.rs`はほぼそのまま温存し、フルcheckerが
+        診断0件を確認した後にしか呼ばれないフェーズ2として使う」という方針で合意。
+        milestone 22は診断コード基盤(`diagnostic-codes.ts`移植)+最小スコープ
+        (スカラーのみ)でのフルcheckerの骨格+`mesh check`のCLI疎通確認、というところから
+        始める予定
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
