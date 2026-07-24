@@ -14,9 +14,12 @@
 // use-is-none/division-by-zero——下記`infer_binary`/`check_arith`/`infer_unary`参照)、
 // milestone 26でユーザー定義関数呼び出しの引数個数・型検査(argument-count——下記
 // `fn_signature`/`Expr::Call`参照)、milestone 27で組み込み関数の個数・スカラー引数型検査
-// (argument-count/builtin-arg-type——下記`infer_builtin_call`参照)を追加。
-// struct/フィールド関連の診断・配列/map/channel等コレクションの要素型検査・
-// run/buildへのゲート統合は引き続き対象外
+// (argument-count/builtin-arg-type——下記`infer_builtin_call`参照)、milestone 29で
+// 名前付きstructのモデル化+structリテラルのフィールド検証(unknown-field/missing-fields/
+// duplicate-field/型不一致——型「解決」は既存`checker.rs`を再利用、診断「発行」だけ再実装。
+// 下記`type_ctx`/`resolve_type_ann`/`infer_struct_lit`参照)を追加。
+// フィールドアクセス(`u.name`)の型解決・メソッド・判別可能union構築・pkg修飾struct・
+// 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -219,6 +222,17 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
     }
 }
 
+// struct-litのフィールド値の型検査を行ってよい宣言型か。full_checkerが縮退させる型
+// (配列/map/channel/関数型/union/型パラメータ——resolve_type_annがANY相当にする)は、
+// レジストリ側(checker.rsが完全解決)の型と突き合わせると誤検知するので検査しない。
+// スカラー・struct・literal・none/closed等はfull_checker側の値の型が信頼できるので検査する
+fn is_checkable_field_type(t: &Type) -> bool {
+    !matches!(
+        t,
+        Type::Array(_) | Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_)
+    )
+}
+
 // 名前付きstructリテラル(`User{...}`)のフィールド検証(milestone 29)。TS版
 // `expressions.ts`のstructLitケース(名前付きstruct部分)の移植——診断を積んで継続する。
 // フィールド値の型・重複・未知・欠落を検査し、struct型を返す。判別可能union構築
@@ -255,7 +269,15 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
                 ctx.error(f.pos, DiagnosticCode::UnknownField, format!("{display_name} has no field '{}' (fields: {field_names})", f.name));
             }
             Some(decl) => {
-                if !types::assignable(ty, &decl.type_) {
+                // フィールド値の型検査は、full_checkerが値側の型を確実にモデル化できる型
+                // (スカラー・struct・literal等)のフィールドだけを対象にする。宣言側の型が
+                // 配列/map/channel/関数型/union(レジストリではchecker.rsが完全解決する)の
+                // フィールドは、full_checker側の値の型がANYや縮退したType::Fn(fn_signatureは
+                // パラメータをANYにする)になり、完全解決された宣言型と突き合わせると誤検知する
+                // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
+                // レジストリのparam=int[]で不一致になる。code reviewで発覚)。それらの型の
+                // フィールドはコレクション/関数型をモデル化する次段階まで検査をスキップ
+                if is_checkable_field_type(&decl.type_) && !types::assignable(ty, &decl.type_) {
                     ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
                 }
             }
@@ -813,8 +835,12 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // milestone 29: struct/union型のレジストリを既存の`checker.rs`のリゾルバで構築する
     // (再利用。knot-tying・自己参照・循環検出込み)。fn/const登録より前に済ませておく——
     // fn_signatureや型注釈がstruct名を解決できるようにするため。Err(裸union循環等)は
-    // この一歩では診断化せず握り潰す(該当プログラムはstructをANY扱いで素通り。TS版の
-    // `type-alias-cycle`診断は将来のmilestone。稀なケースなので誤検知ではなく検出漏れ側に倒す)
+    // この一歩では診断化せず握り潰す(TS版の`type-alias-cycle`診断は将来のmilestone。
+    // 稀なケースなので誤検知ではなく検出漏れ側に倒す)。**注意**: resolve_type_declsは
+    // 最初のErrで走査全体を打ち切るため(checker.rsのループ設計)、壊れた型宣言1つで
+    // **それ以降にファイル内で宣言されたstructも全て未登録=ANY扱い**になり、そのstructの
+    // リテラル検証が無診断で素通りする(code reviewで波及範囲を明確化)。診断機構
+    // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &program.types);
     // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
@@ -1512,6 +1538,16 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
         assert_eq!(diags[0].message, "argument 1: cannot use int as User");
+    }
+
+    #[test]
+    fn 関数型やコレクション型のフィールドは誤検知しない() {
+        // 回帰(code reviewで発覚): `cb: fn(int[]) int`のフィールドに名前付き関数を代入すると、
+        // full_checkerのfn_signatureはparamをANYに縮退する一方、レジストリ側の宣言型は
+        // int[]を具体解決するため、Fn{[any],int} vs Fn{[int[]],int}で誤ってtype-mismatchに
+        // なっていた。縮退する型(配列/map/chan/fn/union)のフィールドは検査スキップで解消
+        let src = "struct Box {\n    cb: fn(int[]) int\n    items: int[]\n}\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    b := Box{cb: sum, items: [1, 2]}\n    print(b)\n}\n";
+        assert_eq!(check(src), vec![]);
     }
 
     #[test]
