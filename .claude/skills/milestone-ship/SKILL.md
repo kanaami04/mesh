@@ -106,6 +106,35 @@ git checkout main && git fetch --prune origin && git merge --ff-only origin/main
 
 squash merge のみ(リポジトリ設定でmerge commit/rebase mergeは無効)。
 
+### 5-b. 積み上げ(stacked)PRの注意 — 2026-07-24に踏んだ落とし穴
+
+milestone N+1 が未マージの N のコードに依存する場合、開発中は N+1 を N のブランチの上に
+積む(`gh pr create --base <Nのブランチ>`)。だが**マージ時が危険**:
+
+- **`gh pr merge <親> --squash --delete-branch` で親ブランチを消すと、その上に積んだ子PRが
+  自動で main へ張り替わらず CLOSED になることがある**(2026-07-24に実際に発生)。GitHubの
+  auto-retarget は当てにしない。
+- **安全な順序**(親ブランチを消す前に子を main へ逃がす。**順序が重要** — 子を rebase する
+  時点で親の変更が既に main に入っている必要がある):
+  1. 親を**`--delete-branch`無しで**先に squash マージ: `gh pr merge <親> --squash`
+     (main に親の変更が入るが、親ブランチはまだ残る)
+  2. 子PRの base を main へ張り替える: `gh pr edit <子> --base main`(親ブランチが
+     まだ生きているのでこの時点では CLOSED リスク無し)
+  3. 子ブランチを main に rebase して親由来の重複コミットを落とす:
+     `git checkout <子> && git fetch origin && git rebase origin/main && git push --force-with-lease`
+     ——**この順序なら**手順1で親の変更が既に main にあるので、親のコミットは
+     「適用済み」として自動スキップされる(先に子を rebase しても main に親が無く効かない)
+  4. 親ブランチを手動削除: `git push origin --delete <親ブランチ名>`(子は既に retarget 済みで安全)
+  5. 子の CI 再確認 → 子をマージ(**マージは §5 の合意どおり明示指示を待つ**)
+- **既にCLOSEDになった子の復旧**(先に親を`--delete-branch`してしまった場合): 消えた base
+  ブランチを元コミットで復元する。元コミットのSHAは記憶や reflog より
+  `gh pr view <親> --json commits`(または `git fetch origin refs/pull/<親PR番号>/head`)で
+  確実に取れる。`git push origin <old-sha>:refs/heads/<親ブランチ名>` で復元 →
+  `gh pr reopen <子>` → `gh pr edit <子> --base main` → 一時ブランチ削除
+  (`git push origin --delete <親ブランチ名>`)→ 子を main に rebase して force-push。
+- **そもそも積まない**選択肢も有効: 各マイルストーンPRを main ベースにして、前のPRが
+  マージされ次第 `git rebase origin/main` で次を追従させる(依存が浅ければこちらが単純)。
+
 ## このスキルが守る不変条件
 
 - **検証なしでコミットしない**(rust-test + clippy + TS版突き合わせ)。
