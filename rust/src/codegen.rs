@@ -1910,6 +1910,21 @@ mod tests {
     }
 
     #[test]
+    fn proto拒否_構築も参照もされないstruct宣言でもerrになる() {
+        // milestone 18: TS版`checkFieldName`はstruct literal構築や関数注釈など、実際に
+        // 使われるかどうかに関わらず、宣言をパッケージ内で解決した時点で拒否する
+        // (実機確認済み: TS版に同じプログラムを通しても`reserved-field-name`で拒否される)
+        let err = gen_js("struct Bad {\n  __proto__: string\n}\nfn main() {\n}").unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn proto拒否_判別可能unionの無名メンバーのフィールド名としても宣言時点でerrになる() {
+        let err = gen_js("type Shape = { kind: \"circle\", __proto__: float } | { kind: \"square\", side: float }\nfn main() {\n}").unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
     fn 未宣言_非struct型のレシーバは明確なエラーになる() {
         let err = gen_js("fn (u: int) describe() {\n  print(u)\n}\nfn main() {}").unwrap_err();
         assert!(err.contains("not a declared struct"), "got: {err}");
