@@ -1,9 +1,14 @@
 // v1マイルストーン: lexer+parser+codegen(milestone 6・複数ファイル/パッケージ修飾まで)の
-// 疎通確認CLI。checker/codegenがさらに育ったら`mesh run`/`build`/`check`相当に育てていく
+// 疎通確認CLI。checker/codegenがさらに育ったら`mesh run`/`build`相当に育てていく
 // (`--emit-js`が無ければ、今まで通り各ファイルのパース結果のASTを整形表示するだけ)。
 // 複数ファイル発見(エントリファイル+importされたパッケージのソース一式)はmodules::load_modules
-// (TS版cli.tsのloadModules/loadDependencies相当)に委ねる
+// (TS版cli.tsのloadModules/loadDependencies相当)に委ねる。
+//
+// `mesh check <file.mesh>`(milestone 22)はfull_checker::check_programの疎通確認用の
+// 最小実装——full_checkerの現状のスコープ(スカラーのMesh、import/パッケージ対象外)に
+// 合わせて、load_modulesを介さず単一ファイルだけをそのままparseして検査する
 use mesh::codegen::{self, ModuleUnit};
+use mesh::full_checker;
 use mesh::json_decode::synthesize_json_decoders;
 use mesh::modules::load_modules;
 use mesh::parser::parse;
@@ -13,8 +18,13 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("check") {
+        return run_check(args.get(2));
+    }
+
     let Some(path) = args.get(1) else {
-        eprintln!("usage: mesh <file.mesh> [--emit-js]");
+        eprintln!("usage: mesh <file.mesh> [--emit-js]\n       mesh check <file.mesh>");
         return ExitCode::FAILURE;
     };
     let emit_js = args.get(2).map(|a| a == "--emit-js").unwrap_or(false);
@@ -64,4 +74,35 @@ fn main() -> ExitCode {
         }
         ExitCode::SUCCESS
     }
+}
+
+fn run_check(path_arg: Option<&String>) -> ExitCode {
+    let Some(path) = path_arg else {
+        eprintln!("usage: mesh check <file.mesh>");
+        return ExitCode::FAILURE;
+    };
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let program = match parse(&source) {
+        Ok(program) => program,
+        Err(errors) => {
+            for e in &errors {
+                println!("{path}:{}:{}: error[{}]: {}", e.pos.line, e.pos.col, e.code, e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    let diagnostics = full_checker::check_program(&program);
+    if diagnostics.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    for d in &diagnostics {
+        println!("{path}:{}:{}: error[{}]: {}", d.pos.line, d.pos.col, d.code, d.message);
+    }
+    ExitCode::FAILURE
 }
