@@ -644,13 +644,21 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   struct-struct相互参照・直接の自己参照(unionで包まない形)も正しく解決
   できるようになった(TS版も元々これらを拒否していないことを実機確認済み)。
   json.Valueを本物の自己参照判別可能unionへ再定義するボーナス案は今回の
-  スコープに含めず、次のmilestone候補として提案するに留めた。テスト
-  354→358件、既存の全22 example(**`tree.mesh`含む**——これまで唯一の除外
-  対象だったが今回から他の21本と同列にbyte-for-byte確認対象に含まれる
-  ようになった)がbyte-for-byte一致のまま回帰無し。`tree.mesh`の実際の出力
-  (`6`/`3`)・`struct A{b:B} struct B{a:A}`(相互循環、コンパイル成功)・
-  `type A = B|none type B = A|error`(裸union循環、引き続き拒否)をRust版・
-  TS版両方で確認済み。詳細はtodo.mdの当該項目が一次情報源
+  スコープに含めず、次のmilestone候補として提案するに留めた。
+  **code reviewで発見・即修正した1件**(bug-scanエージェントが実際に再現して
+  発見): union宣言のメンバーが互いに`type_equals`で等しく解決される場合
+  (`type Status = "active" | "active"`)、`union_of`のdedupでUnionではない
+  素の型が返るケースを想定しておらず`unreachable!()`でpanicしていた(この
+  milestoneで作り込んだregression)。TS版`resolveAlias`と同じく、flattened
+  がUnionでなくても自分自身のknot-tying identityは保ったまま1要素の
+  `UnionBody`として包むよう修正。テスト354→359件、既存の全22 example
+  (**`tree.mesh`含む**——これまで唯一の除外対象だったが今回から他の21本と
+  同列にbyte-for-byte確認対象に含まれるようになった)がbyte-for-byte一致の
+  まま回帰無し。`tree.mesh`の実際の出力(`6`/`3`)・`struct A{b:B} struct
+  B{a:A}`(相互循環、コンパイル成功)・`type A = B|none type B = A|error`
+  (裸union循環、引き続き拒否)・`type Status = "active" | "active"`
+  (dedup、以前はRust版だけpanicしていた)をRust版・TS版両方で確認済み。
+  詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの19マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの

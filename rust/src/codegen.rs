@@ -1500,11 +1500,13 @@ impl Codegen {
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
 // 実装済み(H-2実装時にruntime.ts全体を移植済みのため、ここではシグネチャの登録だけでよい)。
 // json.Valueは真に自己参照する判別可能union(TS版はarr/objメンバーがValue自身を配列/map
-// 越しに参照する共有可変オブジェクトとして手組みする)——milestone 2以来一貫して
-// 「対応不可、明確なErr」としてきた自己参照型の壁そのもの(examples/tree.mesh参照)なので、
-// 不透明な殻structとして扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明な
-// ヘルパー越しにしかValueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に
-// 分解する手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
+// 越しに参照する共有可変オブジェクトとして手組みする)。milestone 19でRust版でも
+// `Rc<OnceCell<_>>`によるknot-tyingで自己参照型自体は表現できるようになった
+// (examples/tree.mesh参照)が、json.Valueをその仕組みで本物の自己参照型として再定義する
+// こと自体は別のmilestone候補として見送っており、ここでは引き続き不透明な殻structとして
+// 扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明なヘルパー越しにしか
+// Valueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に分解する
+// 手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
 fn json_stdlib_symbols() -> checker::PackageSymbols {
     fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
         Type::Fn { params, ret: Box::new(ret) }

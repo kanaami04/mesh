@@ -320,8 +320,22 @@ fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &T
             let flattened = types::union_of(raw_members);
             let flattened = if decl.is_error { tag_error_union(name, members, flattened)? } else { flattened };
             let final_ty = compute_discriminant_tag(name, flattened, decl.pos)?;
-            let Type::Union { body: final_body } = final_ty else { unreachable!("union宣言は必ずType::Unionへ解決される") };
-            let final_ub = final_body.get().expect("union_of/compute_discriminant_tagは常に即座に解決済みのbodyを返す").clone();
+            // code review発覚・実行確認済みの回帰(union宣言のメンバーが互いにtype_equalsで
+            // 等しい場合、例: `type Status = "active" | "active"`): union_ofがdedupし
+            // 1個だけ残るとUnionではない素の型(Literal等)を返すため、以前はここで
+            // `Type::Union`を無条件に前提としてunreachable!()に到達しpanicしていた
+            // (TS版resolveAliasは自分自身のunion knot-tying identityを保ったまま、
+            // flattenedがunion出なければ`union.members = [flattened]`という1要素配列に
+            // するだけで、決して素の型へ「なる」ことはない——同じ理由で自己参照が
+            // 巻き戻し不能になるのを避けるためと考えられる)。同じ設計をここでも再現し、
+            // Unionでなければ1要素のUnionBodyとして包む(タグは2個未満のメンバーには
+            // 元々不要)
+            let final_ub = match final_ty {
+                Type::Union { body: final_body } => {
+                    final_body.get().expect("union_of/compute_discriminant_tagは常に即座に解決済みのbodyを返す").clone()
+                }
+                other => types::UnionBody { members: vec![other], discriminant_tag: None },
+            };
             let _ = cell.set(final_ub);
         }
         _ => {}
@@ -628,10 +642,12 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
 // `json.Value{kind:"arr", items:[json.Value{kind:"num",n:1.0}, ...]}`)。
 // 素の`types::assignable`は名前付きstruct同士を名前で厳密比較するため、この不透明な殻
 // (union全体を渡そうとする側の型と一致しない)を常にtype-mismatchとして拒否して
-// しまう——TS版は本物の自己参照structなのでこの問題自体が起きない、Rust版の型表現上の
-// 制約に対するpatch。milestone 15と同じくANYと同じ「常に代入可」として扱う
-// (この不透明な殻がArray/Mapの要素/値位置に現れる場合のみ、他の空フィールドstructは
-// 引き続き厳密に検証する)
+// しまう——milestone 19で自己参照型自体はRust版でも表現できるようになったが、
+// json.Valueをその仕組みで本物の自己参照型として再定義するのは別途のmilestone候補として
+// 見送っており(json_stdlib_symbols参照)、この不透明な殻は今も残っているため、その
+// 不透明structに対するpatchとして引き続き必要。milestone 15と同じくANYと同じ
+// 「常に代入可」として扱う(この不透明な殻がArray/Mapの要素/値位置に現れる場合のみ、
+// 他の空フィールドstructは引き続き厳密に検証する)
 fn assignable_allowing_opaque_json_value(from: &Type, to: &Type) -> bool {
     fn is_opaque_json_value(t: &Type) -> bool {
         matches!(t, Type::Struct { name, fields, .. } if name == "json.Value" && fields.get().is_some_and(|f| f.is_empty()))
@@ -671,14 +687,16 @@ pub fn validate_struct_field(target_ty: &Type, name: &str, ctx: &CheckerCtx, pos
     let fields = fields.get().expect("struct fields resolved before field access");
     // git historyレビュー発覚・実行確認済みの回帰: `mesh/json`のjson.Value(milestone 9・
     // codegen.rsのjson_stdlib_symbols)は、自己参照する再帰位置(`arr.items`の要素・
-    // `obj.entries`の値)をRust版が表現できない自己参照型のため、意図的に「空フィールドの
-    // 不透明な殻」として表す(struct宣言の未解決名フォールバックと同じ`fields: vec![]`表現を
-    // 流用している)。これを他の「本当に空のstruct」や「未解決の型名」と同じに扱うと、
-    // milestone 9で「2階層以上の入れ子destructureは意図的にスコープ外(実行時テストは
-    // 動くがchecker側の型推論の精度だけ落ちる)」としていた箇所への書き込み
-    // (`val.s = "..."`のような2階層以上ネストしたjson値への代入)まで、以前は動いていたのに
-    // このmilestoneの新しい検証で誤って`unknown-field`にしてしまっていた。ANYと同じ扱いに
-    // する(この不透明structだけの特例——他の空フィールドstructは引き続き厳密に検証する)
+    // `obj.entries`の値)を意図的に「空フィールドの不透明な殻」として表す(struct宣言の
+    // 未解決名フォールバックと同じ`fields: vec![]`表現を流用している——milestone 19で
+    // Rust版でも自己参照型自体は表現できるようになったが、json.Valueを本物の自己参照型
+    // として再定義するのは別のmilestone候補として見送っており、この不透明な殻は今も残る)。
+    // これを他の「本当に空のstruct」や「未解決の型名」と同じに扱うと、milestone 9で
+    // 「2階層以上の入れ子destructureは意図的にスコープ外(実行時テストは動くがchecker側の
+    // 型推論の精度だけ落ちる)」としていた箇所への書き込み(`val.s = "..."`のような
+    // 2階層以上ネストしたjson値への代入)まで、以前は動いていたのにこのmilestoneの新しい
+    // 検証で誤って`unknown-field`にしてしまっていた。ANYと同じ扱いにする(この不透明
+    // structだけの特例——他の空フィールドstructは引き続き厳密に検証する)
     if struct_name == "json.Value" && fields.is_empty() {
         return Ok(ANY);
     }
@@ -2446,6 +2464,24 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         let err = resolve_type_decls(&mut ctx, &types).unwrap_err();
         assert!(err.contains("type alias cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn union宣言のメンバーが互いに等しく解決されても_panicせず1メンバーのunionとして解決できる() {
+        // code review発覚・実行確認済みの回帰: `union_of`はtype_equalsで等しいメンバーを
+        // 重複除去するため、`"active" | "active"`のような宣言はflatten後にUnionではない
+        // 素の型(Literal)を返す——以前はここで無条件にType::Unionを前提としており、
+        // このケースでunreachable!()に到達してpanicしていた(実機確認済み: TS版は
+        // resolveAliasが自分自身のunion knot-tying identityを保ったまま
+        // `union.members = [flattened]`という1要素配列にするだけで、素の型に「なる」
+        // ことはないので問題なくコンパイルできる)
+        let types = vec![union_decl("Status", vec![literal_type("active"), literal_type("active")])];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Union { body }) = ctx.lookup_union("Status") else { panic!("expected union") };
+        let ub = body.get().expect("resolved");
+        assert_eq!(ub.members.len(), 1);
+        assert!(types::type_equals(&ub.members[0], &Type::Literal("active".into())));
     }
 
     #[test]
