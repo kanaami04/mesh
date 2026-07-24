@@ -1,0 +1,120 @@
+// Todo風REST APIデモ — mesh/http(milestone C-6) + mesh/json(milestone H-2)の実地デモ。
+// struct/メソッド・T | error・T | none・クロージャによるmut状態捕捉・json struct自動
+// デコードを一通り使う。ルーティングはmesh/http v1の方針通りルーター内蔵が無いので、
+// req.path/req.methodを見て自分で分岐する。
+//
+// 使い方: demo/todo-api/README.md 参照。
+import "mesh/http"
+import "mesh/json"
+
+struct Todo {
+	id: int
+	title: string
+	done: bool
+}
+
+fn (t: Todo) toJson() json.Value {
+	entries := map<string, json.Value>{
+		"id": json.Value{kind: "num", n: t.id}
+		"title": json.Value{kind: "str", s: t.title}
+		"done": json.Value{kind: "bool", b: t.done}
+	}
+	return json.Value{kind: "obj", entries: entries}
+}
+
+json struct CreateTodoRequest {
+	title: string
+}
+
+json struct UpdateTodoRequest {
+	done: bool
+}
+
+fn jsonResponse(status: int, v: json.Value) http.Response {
+	headers := map<string, string>{"Content-Type": "application/json"}
+	return http.Response{status: status, body: json.stringify(v), headers: headers}
+}
+
+fn errorResponse(status: int, message: string) http.Response {
+	entries := map<string, json.Value>{"error": json.Value{kind: "str", s: message}}
+	return jsonResponse(status, json.Value{kind: "obj", entries: entries})
+}
+
+fn findTodoIndex(todos: Todo[], id: int) int | none {
+	for i := 0; i < len(todos); i++ {
+		if todos[i].id == id {
+			return i
+		}
+	}
+	return none
+}
+
+fn main() {
+	mut todos: Todo[] = []
+	mut nextId := 1
+	handler := fn(req: http.Request) http.Response {
+		if req.path == "/todos" {
+			if req.method == "GET" {
+				items := map(todos, fn(t: Todo) json.Value { return t.toJson() })
+				return jsonResponse(200, json.Value{kind: "arr", items: items})
+			}
+			if req.method == "POST" {
+				v := json.parse(req.body)
+				if v is error {
+					return errorResponse(400, "invalid json")
+				}
+				body := decodeCreateTodoRequest(v)
+				if body is error {
+					return errorResponse(400, "${body}")
+				}
+				todo := Todo{id: nextId, title: body.title, done: false}
+				push(todos, todo)
+				nextId++
+				return jsonResponse(201, todo.toJson())
+			}
+			return errorResponse(405, "method not allowed")
+		}
+		parts := split(req.path, "/")
+		if len(parts) == 3 && parts[1] == "todos" {
+			id := toInt(parts[2])
+			if id is error {
+				return errorResponse(400, "invalid id")
+			}
+			idx := findTodoIndex(todos, id)
+			if idx is none {
+				return errorResponse(404, "todo not found")
+			}
+			if req.method == "GET" {
+				return jsonResponse(200, todos[idx].toJson())
+			}
+			if req.method == "PATCH" {
+				v := json.parse(req.body)
+				if v is error {
+					return errorResponse(400, "invalid json")
+				}
+				body := decodeUpdateTodoRequest(v)
+				if body is error {
+					return errorResponse(400, "${body}")
+				}
+				todos[idx] = Todo{id: todos[idx].id, title: todos[idx].title, done: body.done}
+				return jsonResponse(200, todos[idx].toJson())
+			}
+			if req.method == "DELETE" {
+				mut remaining: Todo[] = []
+				for i := 0; i < len(todos); i++ {
+					if i != idx {
+						push(remaining, todos[i])
+					}
+				}
+				todos = remaining
+				return http.Response{status: 204, body: "", headers: map<string, string>{}}
+			}
+			return errorResponse(405, "method not allowed")
+		}
+		return errorResponse(404, "not found")
+	}
+	r := http.listen(":8080", handler)
+	if r is error {
+		print("failed to start server: ${r}")
+	}
+}

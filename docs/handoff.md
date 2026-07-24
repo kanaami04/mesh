@@ -707,6 +707,19 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   byte-for-byte一致することを確認、さらに両方のJSを実際に`node`で起動し`curl`で
   `POST /hello?query`(200・カスタムヘッダ・補間済みbody)と`GET /missing`(404)の両方に
   対して同一のレスポンスを返すことを確認済み。詳細はtodo.mdの当該項目が一次情報源
+- **デモアプリ開発完了(2026-07-24)**。kanayamaと合意した順序(mesh/io → mesh/http →
+  デモアプリ開発)の最終段。コンパイラの新機能追加ではなく、mesh/http・mesh/json・
+  struct/メソッド・`T | error`/`T | none`・クロージャによる`mut`状態捕捉・`json
+  struct`自動デコードを組み合わせて実用的なものが書けることを示す実地デモとして
+  `demo/todo-api/`(Todo風REST API、CRUD一式)を新設。`examples/`には置いていない
+  (`mise run run-examples`は「実行して終了コード0を待つ」方式のため、
+  `http.listen`でプロセスが生き続けるプログラムを混ぜるとハングする)。ルーティングは
+  `mesh/http` v1の方針通りルーター非内蔵なので`req.path`/`req.method`を自分で見て分岐、
+  パスパラメータは文字列インデックス/スライスが無いため`split(req.path, "/")`で代用。
+  TS版・Rust移植版の両CLIでコンパイルし生成JSがbyte-for-byte一致することを確認したうえで、
+  両方が生成したJSを実際に起動して同じcurlシナリオ(作成→一覧→取得→更新→削除→
+  エラーケース)を実行し、同一の応答であることを確認済み。詳細はtodo.mdの当該項目が
+  一次情報源
 - **次にやるなら**: 確認済みの21マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
@@ -714,11 +727,11 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
   検証 → resolve_method_targetのフィールド名判定統一 → struct宣言時点の
   `__proto__`ガード → 自己参照型のサポート → mesh/ioパッケージの移植 →
-  `mesh/http`)が全て完了。kanayamaと合意した順序(mesh/io → mesh/http →
-  デモアプリ開発)通り、次はデモアプリ開発。細かな意図的なスコープ縮小
-  (json.Valueを本物の自己参照型として再定義すること・`json.Value`の2階層
-  以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
-  struct参照)は引き続きtodo.mdに記録済みの通り残る。
+  `mesh/http`)+ デモアプリ開発が全て完了——kanayamaと合意していた
+  「mesh/io → mesh/http → デモアプリ開発」の3段階を完走した。細かな意図的な
+  スコープ縮小(json.Valueを本物の自己参照型として再定義すること・`json.Value`の
+  2階層以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
+  struct参照)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
