@@ -73,11 +73,14 @@ PR作成後、次の2つを **並行** で(順不同):
 gh pr checks <番号> --watch   # CI green を確認
 ```
 
-`/code-review <番号> --comment` を **ユーザーが** 実行する必要がある
-(このコマンドはモデルからは起動できない = `disable-model-invocation`)。
-`.claude/hooks/enforce-code-review.sh` が、PRに `### Code review` 見出しのコメントが
-無い状態での `gh pr merge` を機械的に拒否する。レビュー指摘があれば対応コミットを足し、
-CIとレビューをやり直す。
+コードレビューを回す。**`code-review` プラグインが入っていて `code-review:code-review`
+スキルとしてモデルから起動できる環境なら、Claude自身がSkillツールで実行できる**
+(2026-07-24に`/plugin`で導入して確認済み)。プラグインが無い環境の組み込み `/code-review`
+スラッシュコマンドは `disable-model-invocation` でユーザーしか起動できないので、その場合は
+ユーザーに `/code-review <番号> --comment` の実行を依頼する。いずれにせよ結果は
+`### Code review` 見出しのコメントとしてPRに投稿される。
+`.claude/hooks/enforce-code-review.sh` が、そのコメントが無い状態での `gh pr merge` を
+機械的に拒否する。レビュー指摘(80点以上)があれば対応コミットを足し、CIとレビューをやり直す。
 
 ### 5. merge(=ここでいったん止まる)
 
