@@ -972,6 +972,11 @@ impl Codegen {
             // 一度だけ評価して束縛するIIFE(TS版と同じ——struct形パターンはoperandを
             // 複数回参照しうるため)
             Expr::Is { operand, target, .. } => {
+                // milestone 18: `is { __proto__: ... }`のような無名{...}パターンもTS版
+                // `checkFieldName`の対象(struct宣言のフィールドと同じ`parse_inline_struct_type`
+                // 由来)——resolve_type_decls側の宣言時点チェックとは別に、使用側のここでも
+                // 同じ検証を通す
+                checker::check_struct_type_field_names(target)?;
                 if let Expr::Ident { name, .. } = &**operand {
                     Ok(gen_type_test(name, target))
                 } else {
@@ -1009,15 +1014,19 @@ impl Codegen {
                     if is_last && exhaustive {
                         parts.push(body_js);
                     } else {
-                        let test = arm
-                            .patterns
-                            .iter()
-                            .map(|p| match p {
+                        let mut test_parts = Vec::with_capacity(arm.patterns.len());
+                        for p in &arm.patterns {
+                            test_parts.push(match p {
                                 MatchPattern::Wildcard { .. } => "true".to_string(),
-                                MatchPattern::Type(node) => gen_type_test("__m", node),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" || ");
+                                MatchPattern::Type(node) => {
+                                    // milestone 18: is式と同じ理由——matchの無名{...}
+                                    // パターンもTS版checkFieldNameの対象
+                                    checker::check_struct_type_field_names(node)?;
+                                    gen_type_test("__m", node)
+                                }
+                            });
+                        }
+                        let test = test_parts.join(" || ");
                         parts.push(format!("{test} ? {body_js} :"));
                     }
                 }
@@ -1921,6 +1930,27 @@ mod tests {
     #[test]
     fn proto拒否_判別可能unionの無名メンバーのフィールド名としても宣言時点でerrになる() {
         let err = gen_js("type Shape = { kind: \"circle\", __proto__: float } | { kind: \"square\", side: float }\nfn main() {\n}").unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn proto拒否_is式の無名パターンのフィールド名としても使えない() {
+        // code review(milestone 18で発覚): resolve_type_declsの宣言時点チェックだけでは
+        // is式/matchパターンの無名{...}(同じparse_inline_struct_type由来)を素通しして
+        // しまっていた——実行確認済み(TS版はreserved-field-nameで拒否する)
+        let err = gen_js(
+            "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\", value: 1}\n  if r is { __proto__: string } {\n    print(\"matched\")\n  }\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn proto拒否_matchパターンの無名構造でも使えない() {
+        let err = gen_js(
+            "type Resp = { kind: \"ok\", value: int } | { kind: \"err\" }\nfn describe(r: Resp) int {\n  return match r {\n    { __proto__: string } => 1\n    { kind: \"err\" } => 0\n  }\n}\nfn main() {\n  print(describe(Resp{kind: \"ok\", value: 1}))\n}",
+        )
+        .unwrap_err();
         assert!(err.contains("__proto__"), "got: {err}");
     }
 

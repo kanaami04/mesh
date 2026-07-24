@@ -297,18 +297,10 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
     // 意図的にバイパスする経路でも、生成されるJSへ`__proto__`が紛れ込むのを防ぐため)
     for decl in &type_decls {
         match &decl.node {
-            TypeNode::StructType { fields, .. } => {
-                for f in fields {
-                    check_reserved_field_name(&f.name, f.pos)?;
-                }
-            }
+            TypeNode::StructType { .. } => check_struct_type_field_names(&decl.node)?,
             TypeNode::Union { members, .. } => {
                 for m in members {
-                    if let TypeNode::StructType { fields, .. } = m {
-                        for f in fields {
-                            check_reserved_field_name(&f.name, f.pos)?;
-                        }
-                    }
+                    check_struct_type_field_names(m)?;
                 }
             }
             _ => {}
@@ -350,10 +342,20 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
 }
 
 // TS版`checkFieldName`(`src/checker/context.ts`)の移植。__proto__は他のフィールド名と
-// 違ってJSオブジェクトリテラルで特別扱いされる(prototypeの差し替えになる)ため予約済み
-fn check_reserved_field_name(name: &str, pos: Pos) -> Result<(), String> {
-    if name == "__proto__" {
-        return Err(format!("checker: '__proto__' can't be used as a field name — pick a different name ({}:{})", pos.line, pos.col));
+// 違ってJSオブジェクトリテラルで特別扱いされる(prototypeの差し替えになる)ため予約済み。
+// TS版はこのチェックを、named struct宣言・無名{...}のunionメンバーだけでなく、
+// `resolveType`が通る場所ならどこでも(=`{...}`という無名構造体型が書ける場所ならどこでも)
+// 同じ経路で行う——`is`式(`src/checker/expressions.ts`)・matchパターン
+// (`src/checker/match-select.ts`)の無名{...}パターンも例外ではない。Rust版のパーサーも
+// `parse_inline_struct_type`を(1)union宣言のメンバー、(2)`is`式の右辺、(3)matchパターンの
+// 3箇所全てで共有しているため、フィールド名検証もこの1箇所にまとめて全呼び出し元
+// (`resolve_type_decls`の宣言側事前走査・codegen.rsの`is`/matchパターン使用側)から呼ぶ
+pub fn check_struct_type_field_names(node: &TypeNode) -> Result<(), String> {
+    let TypeNode::StructType { fields, .. } = node else { return Ok(()) };
+    for f in fields {
+        if f.name == "__proto__" {
+            return Err(format!("checker: '__proto__' can't be used as a field name — pick a different name ({}:{})", f.pos.line, f.pos.col));
+        }
     }
     Ok(())
 }

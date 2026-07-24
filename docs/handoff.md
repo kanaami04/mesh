@@ -604,11 +604,24 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   ガード(struct literal構築時・代入先)はそのまま維持——`json.Value`の不透明な殻
   (milestone 15/16、宣言側の検証を意図的にバイパスする)経由で生成JSへ`__proto__`が
   紛れ込む経路は`resolve_type_decls`を一切通らないビルトイン型のため、宣言時点の
-  今回のチェックでは塞げず、引き続き必要。テスト348→352件(+4)、既存の全example
+  今回のチェックでは塞げず、引き続き必要。
+  **code reviewで発見・即修正した1件**(git historyレビュー・code-comments準拠
+  レビューの両エージェントが独立発見): TS版`checkFieldName`は`resolveType`という
+  単一の分岐から呼ばれ、unionメンバーだけでなく`is`式・matchパターンの無名
+  {...}パターンも同じ経路を通る。Rust版のパーサーも`parse_inline_struct_type`を
+  union宣言のメンバー・`is`式の右辺・matchパターンの3箇所で共有しているが、
+  最初の実装はunionメンバー(1箇所目)しか事前走査していなかったため、
+  `if r is { __proto__: string } {...}`やmatchの無名{...}パターンは素通りして
+  いた(実機確認済み: TS版はどちらも拒否するが、実害としては読み取り専用の
+  構造判定なので実際のprototype汚染は起きず、常にfalseの無意味な分岐が黙って
+  通るだけ)。`check_reserved_field_name`を`check_struct_type_field_names`
+  へ一般化し、`resolve_type_decls`に加えてcodegen.rsの`is`式・matchパターンの
+  codegenからも同じ関数を呼ぶよう修正。テスト348→354件(+6)、既存の全example
   (22本)がbyte-for-byte一致のまま回帰無し。未構築の`struct Bad { __proto__:
-  string }`・判別可能unionの無名メンバーの`__proto__`フィールドの2パターンを
-  Rust版・TS版両方でコンパイルし、同じ理由・同じメッセージ・同じ位置情報で
-  拒否されることを確認済み。詳細はtodo.mdの当該項目が一次情報源
+  string }`・判別可能unionの無名メンバー・is式の無名パターン・matchの無名
+  パターンの4パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
+  メッセージ・同じ位置情報で拒否されることを確認済み。詳細はtodo.mdの当該項目が
+  一次情報源
 - **次にやるなら**: 確認済みの18マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
