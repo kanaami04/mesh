@@ -1914,14 +1914,15 @@
           わけではなく実害は無いため今回は修正せず、「読み書き共通の検証」という
           このPRの統一が完全ではない(3箇所目の独立したフィールド名判定が残る)
           という事実を次のmilestone候補として記録するに留める。
+          (→ milestone 17で解消済み)
           追加の回帰テスト`codegen.rs`1件(json.Valueの不透明な再帰位置への
           書き込みが今まで通り動くこと)。341→342件、全件パス。
           `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example
           を再度byte-for-byte確認(回帰無し)。
         - **milestone 15のスコープ外(意図的)**: pkg修飾struct literalの厳密検証・
           struct宣言時点の`__proto__`ガード・自己参照型・`resolve_method_target`の
-          フィールド名判定統一(上記「記録に留めた1件」参照)は引き続き対象外
-          (次のmilestone候補、順に対応していく予定)。
+          フィールド名判定統一(上記「記録に留めた1件」参照、→ milestone 17で解消済み)
+          は引き続き対象外(次のmilestone候補、順に対応していく予定)。
   - [x] **checker+codegen milestone 16(pkg修飾struct literalの厳密検証)**
         ✅ 2026-07-24実装。milestone 15完了後、kanayamaに残る既知の限界(pkg修飾
         struct literalの厳密検証・`resolve_method_target`のフィールド名判定統一・
@@ -1990,8 +1991,51 @@
           既存の全exampleを再度byte-for-byte確認(回帰無し)。
         - **milestone 16のスコープ外**: 無し(pkg修飾struct literalの検証を
           pkg無し側と完全に同じ経路に統一できた)。残る既知の限界として
-          `resolve_method_target`のフィールド名判定統一・struct宣言時点の
-          `__proto__`ガード・自己参照型は引き続きtodo.mdに記録済みの通り残る。
+          `resolve_method_target`のフィールド名判定統一(→ milestone 17で解消済み)・
+          struct宣言時点の`__proto__`ガード・自己参照型は引き続きtodo.mdに
+          記録済みの通り残る。
+  - [x] **checker+codegen milestone 17(resolve_method_targetのフィールド名判定統一)**
+        ✅ 2026-07-24実装。milestone 16完了後、kanayamaに残る既知の限界(上記
+        `resolve_method_target`のフィールド名判定統一・struct宣言時点の
+        `__proto__`ガード・自己参照型)を提示し、「resolve_method_targetの
+        フィールド名判定統一」に着手することで合意。
+        - TS版`src/checker/calls.ts`を精読し、TS本体は「フィールド直接アクセス」
+          (`memberFieldType`、milestone 15で移植済み——`{type} has no field
+          '{name}' (fields: ...)`)と「呼び出し式の解決」(`inferCall`の
+          `recv.method(args)`分岐——`{type} has no field or method '{name}'
+          (fields: ... または空なら literal "none")`)とで**意図的に異なる文言**を
+          使い分けていると判明(実機確認済み)。そのため「統一」は2つの関数を
+          1つへ統合するのではなく、フィールド/メソッド/不明の**判定ロジックだけ**を
+          共有し、メッセージの組み立ては呼び出し元ごとに独立させる設計とした。
+        - `checker.rs`: 新設`enum StructMember { Field(&Type), Method, Unknown }`
+          + `lookup_struct_member(fields, ctx, struct_name, name) -> StructMember`
+          (フィールド一致→`Field`、`ctx.lookup_method`一致→`Method`、
+          どちらも無ければ`Unknown`)。`validate_struct_field`(milestone 15)は
+          この共有ヘルパを使うようリファクタ(挙動・メッセージは一切変更無し)。
+          新設`resolve_method_call_target(fields, ctx, struct_name, name, pos)
+          -> Result<bool, String>`(`Field`ならメソッド呼び出しではない=`Ok(false)`
+          ——フィールドが勝つ、`Method`なら`Ok(true)`、`Unknown`ならTS版
+          `inferCall`と同じ文言〈フィールド一覧が空ならリテラル"none"〉で`Err`)。
+        - `codegen.rs`: `resolve_method_target`(milestone 5・PR #20由来、
+          `gen_call`/`gen_spawn`が共有)を、独自のフィールド/メソッド名判定
+          (typoされた呼び出しが`codegen: '{struct}' has no method '{name}'`という
+          TS版と食い違う簡略化した文言になっていた)から`checker::
+          resolve_method_call_target`への委譲へ書き換え。
+        - 既存テスト2件(struct/spawnそれぞれの不明な呼び出し)のアサーションを
+          新しい正確なTS一致文言に更新(メッセージのみの変更、テストの意図は
+          変わらず)。新規ユニットテスト`codegen.rs`1件(宣言済みフィールドが
+          0個のstructでの不明な呼び出しがTS版と同じ`(fields: none)`表示に
+          なること)。347→348件、全件パス。`cargo clippy --all-targets -- -D
+          warnings`クリーン。既存の全example(22本)を再度byte-for-byte確認
+          (回帰無し)。`u.discribe()`(フィールドありstruct)・`e.bar()`
+          (フィールド0個struct)の2パターンをRust版・TS版両方でコンパイルし、
+          いずれも同じ理由・同じメッセージ(`has no field or method`、"none"
+          フォールバック込み)・同じ位置情報で拒否することを確認済み(位置情報は
+          この修正前から一致していたため変更無し、文言のみ修正)。
+        - **milestone 17のスコープ外**: 無し(`resolve_method_target`の
+          フィールド名判定を他の全経路と統一できた)。残る既知の限界として
+          struct宣言時点の`__proto__`ガード・自己参照型は引き続きtodo.mdに
+          記録済みの通り残る。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

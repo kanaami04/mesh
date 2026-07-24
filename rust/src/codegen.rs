@@ -1310,21 +1310,24 @@ impl Codegen {
     // genCall/genExprの"spawn"ケースに同じ判定を2回書いているが、Rust版は1箇所にまとめる)。
     // TS版calls.ts/codegen.tsと同じ「フィールドが勝つ」順序——targetがstruct型で
     // nameが宣言済みフィールドでなければメソッドと判定する。Someなら(レシーバ式,
-    // メソッドのJS関数名)、Noneなら「フィールドまたは自由関数」呼び出し
+    // メソッドのJS関数名)、Noneなら「フィールドまたは自由関数」呼び出し。
+    // milestone 17: 未知の名前(フィールドでもメソッドでもない)の判定・エラー文言は
+    // `checker::resolve_method_call_target`(TS版`inferCall`のrecv.method(args)分岐と
+    // 同じ「has no field or method」文言)に委譲——以前はここで独自に
+    // `'{struct}' has no method '{name}'`という、TS版と食い違う簡略化したメッセージを
+    // 組み立てていた(PR #30のcode reviewで指摘・記録された、pkg修飾struct literal
+    // 検証とは別の「フィールド名判定の統一漏れ」)
     fn resolve_method_target<'e>(&self, callee: &'e Expr, call_pos: Pos) -> CodegenResult<Option<(&'e Expr, String)>> {
         let Expr::Member { target, name, .. } = callee else { return Ok(None) };
-        let Type::Struct { fields, name: struct_name, .. } = checker::infer_expr(&self.ctx, target) else {
+        let target_ty = checker::infer_expr(&self.ctx, target);
+        let Type::Struct { fields, name: struct_name, .. } = &target_ty else {
             return Ok(None);
         };
-        if fields.iter().any(|f| &f.name == name) {
-            return Ok(None); // フィールドが勝つ
+        if checker::resolve_method_call_target(fields, &self.ctx, struct_name, name, call_pos)? {
+            Ok(Some((target, method_js_name(struct_name, name))))
+        } else {
+            Ok(None)
         }
-        if self.ctx.lookup_method(&struct_name, name).is_none() {
-            // structではあるがfieldにもmethodにも無い名前——実行時に
-            // `undefined is not a function`でクラッシュさせず、ここで明確なErrにする
-            return Err(format!("codegen: '{struct_name}' has no method '{name}' ({}:{})", call_pos.line, call_pos.col));
-        }
-        Ok(Some((target, method_js_name(&struct_name, name))))
     }
 
     // spawn f(...) / detach f(...)。引数はspawn時点で評価する(Goと同じ)。呼び出し先は
@@ -1914,8 +1917,19 @@ mod tests {
 
     #[test]
     fn structにもフィールドにもないメソッド呼び出しは明確なエラーになる() {
+        // milestone 17: TS版`inferCall`のrecv.method(args)分岐と同じ文言
+        // (「has no field or method」、fields:一覧込み)に統一済み
         let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  u.unknown()\n}").unwrap_err();
-        assert!(err.contains("has no method"), "got: {err}");
+        assert!(err.contains("User has no field or method 'unknown' (fields: name)"), "got: {err}");
+    }
+
+    #[test]
+    fn フィールドが1つも無いstructでの不明な呼び出しはfields_noneと表示される() {
+        // TS版はfields一覧が空のとき`.join(", ") || "none"`でリテラル"none"を表示する
+        // (実行確認済み)
+        let err = gen_js("struct Empty {\n}\nfn (e: Empty) foo() string {\n  return \"x\"\n}\nfn main() {\n  e := Empty{}\n  print(e.bar())\n}")
+            .unwrap_err();
+        assert!(err.contains("Empty has no field or method 'bar' (fields: none)"), "got: {err}");
     }
 
     #[test]
@@ -2179,8 +2193,9 @@ mod tests {
 
     #[test]
     fn spawnで存在しないメソッドは明確なエラーになる() {
+        // milestone 17: TS版`inferCall`のrecv.method(args)分岐と同じ文言に統一済み
         let err = gen_js("struct W {\n  id: int\n}\nfn main() {\n  w := W{id: 1}\n  spawn w.bogus()\n}").unwrap_err();
-        assert!(err.contains("has no method"), "got: {err}");
+        assert!(err.contains("W has no field or method 'bogus' (fields: id)"), "got: {err}");
     }
 
     #[test]

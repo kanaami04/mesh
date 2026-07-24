@@ -566,16 +566,38 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   type unionの正しい構築の3パターンをRust版・TS版両方でコンパイル(・実行)し、
   同じ理由・同じメッセージ・同じ出力になることを確認済み。詳細はtodo.mdの
   当該項目が一次情報源
-- **次にやるなら**: 確認済みの16マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 17(resolve_method_targetのフィールド名判定統一)
+  完了(2026-07-24)**。milestone 16完了後、残る既知の限界(`resolve_method_target`
+  のフィールド名判定統一・struct宣言時点の`__proto__`ガード・自己参照型)から
+  「resolve_method_targetのフィールド名判定統一」を選んで着手。TS版
+  `src/checker/calls.ts`を読むと、TS本体は「フィールド直接アクセス」
+  (`memberFieldType`、milestone 15で移植済み)と「呼び出し式の解決」
+  (`inferCall`の`recv.method(args)`分岐)とで意図的に異なる文言(前者は
+  `has no field`、後者は`has no field or method`+空なら"none")を使い分けて
+  いると判明——そのため「統一」は2関数の統合ではなく、フィールド/メソッド/不明の
+  判定ロジックだけを共有し、メッセージ組み立ては呼び出し元ごとに独立させる設計に
+  した。新設`StructMember`enum + `lookup_struct_member`(共有の判定ロジック)を
+  `validate_struct_field`(milestone 15)がリファクタ経由で使うようにし、新設
+  `resolve_method_call_target`(TS版`inferCall`と同じ文言でErrを返す)を
+  `codegen.rs`の`resolve_method_target`(milestone 5・PR #20由来、独自の
+  簡略化した`codegen: '{struct}' has no method '{name}'`という、TS版と食い違う
+  文言を組み立てていた)から呼ぶように書き換えた。テスト347→348件(+1、既存2件は
+  文言更新)、既存の全example(22本)がbyte-for-byte一致のまま回帰無し。
+  `u.discribe()`(フィールドありstruct)・`e.bar()`(フィールド0個struct)の
+  2パターンをRust版・TS版両方でコンパイルし、同じ理由・同じメッセージ
+  (`has no field or method`、"none"フォールバック込み)・同じ位置情報で
+  拒否されることを確認済み(位置情報はこの修正前から一致していたため、
+  今回変わったのは文言のみ)。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの17マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
-  検証)が全て完了——TS版リファレンス実装の主要機能をRust版がひととおり
-  移植し終えた。細かな既知の限界・意図的なスコープ縮小(自己参照型・
-  `json.Value`の2階層以上のdestructure・ジェネリック関数・`mesh/io`/
-  `mesh/http`・cross-file/cross-packageのjson struct参照・struct宣言時点の
-  `__proto__`ガード・`resolve_method_target`のフィールド名判定統一 等)は
+  検証 → resolve_method_targetのフィールド名判定統一)が全て完了——TS版
+  リファレンス実装の主要機能をRust版がひととおり移植し終えた。細かな既知の
+  限界・意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上の
+  destructure・ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/
+  cross-packageのjson struct参照・struct宣言時点の`__proto__`ガード 等)は
   引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
