@@ -126,11 +126,13 @@ impl Codegen {
     // TS版compileModulesと同じ)、import依存グラフの依存順(importされる側が先)にソート
     // してから1パッケージずつ処理する
     fn generate_all_modules(&mut self, modules: &[ModuleUnit]) -> CodegenResult<String> {
-        // 組み込みパッケージ(milestone 9・`mesh/json`、milestone 20・`mesh/io`)を、
-        // ユーザーパッケージの処理が始まる前に登録しておく(依存グラフのソート対象には
-        // 現れない——topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
+        // 組み込みパッケージ(milestone 9・`mesh/json`、milestone 20・`mesh/io`、
+        // milestone 21・`mesh/http`)を、ユーザーパッケージの処理が始まる前に登録しておく
+        // (依存グラフのソート対象には現れない——topo_sort_packagesはpackagesに無い名前への
+        // 参照を無視するため無害)
         self.ctx.register_package("json", json_stdlib_symbols());
         self.ctx.register_package("io", io_stdlib_symbols());
+        self.ctx.register_package("http", http_stdlib_symbols());
 
         let mut packages: Vec<(String, Vec<&ModuleUnit>)> = Vec::new();
         for m in modules {
@@ -1607,6 +1609,54 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
     checker::PackageSymbols { types, fns, consts: HashMap::new() }
 }
 
+// mesh/http(組み込みパッケージ、milestone 21)のシグネチャ定義。TS版`stdlib.ts`の
+// BUILTIN_PACKAGESの"mesh/http"エントリに相当。json_stdlib_symbolsと違い、
+// Request/Responseは自己参照しない普通の名前付きstructなのでknot-tying不要
+// (struct_tyの非knot-tying経路でそのまま作れる)。ランタイムの実体(http$listen、
+// node:httpの動的import等)は既にprelude側に実装済み(TS版がC-6続きで実装したruntime.ts
+// をRust版もinclude_str!で共有しているため、ここではシグネチャの登録だけでよい)
+fn http_stdlib_symbols() -> checker::PackageSymbols {
+    fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn { params, ret: Box::new(ret) }
+    }
+    fn field(name: &str, type_: Type) -> types::StructField {
+        types::StructField { name: name.to_string(), type_ }
+    }
+
+    let string_map = Type::Map { key: Box::new(types::STRING), value: Box::new(types::STRING) };
+
+    let request_ty = types::struct_ty(
+        "Request",
+        vec![
+            field("method", types::STRING),
+            field("path", types::STRING), // クエリを含まないURLパスのみ
+            field("query", types::STRING), // 生のクエリ文字列(無ければ空文字列。未パース)
+            field("headers", string_map.clone()),
+            field("body", types::STRING),
+        ],
+        false,
+    );
+    let response_ty = types::struct_ty(
+        "Response",
+        vec![field("status", INT), field("body", types::STRING), field("headers", string_map)],
+        false,
+    );
+
+    let mut types = HashMap::new();
+    types.insert("Request".to_string(), request_ty.clone());
+    types.insert("Response".to_string(), response_ty.clone());
+
+    let mut fns = HashMap::new();
+    // 起動できたら(bindが成功したら)ほぼ即座にnoneを返す — 「サーバーが止まるまで待つ」
+    // わけではない(TS版stdlib.tsのコメントと同じ、mesh/http自体に「待つ」機構は無い)
+    fns.insert(
+        "listen".to_string(),
+        fn_ty(vec![types::STRING, fn_ty(vec![request_ty], response_ty)], types::union_of(vec![types::NONE, types::ERROR])),
+    );
+
+    checker::PackageSymbols { types, fns, consts: HashMap::new() }
+}
+
 // レシーバの型注釈から素の(pkg修飾されていない)struct名を取り出す。レシーバは常に
 // 自パッケージ内のstructを指す前提(`fn (p: Point) ...`はPointが今処理中のパッケージの
 // struct、という意味)——他パッケージの型に生やす拡張メソッド的な書き方
@@ -2471,6 +2521,39 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err2.contains("package name 'json' collides with the built-in package 'mesh/json'"), "got: {err2}");
+
+        let err3 = gen_modules(&[
+            ("main", "main.mesh", "import \"http\"\nfn main() {\n  print(http.listen(\":8080\", \"x\"))\n}"),
+            ("http", "http/h.mesh", "export fn listen(addr: string) string {\n  return addr\n}"),
+        ])
+        .unwrap_err();
+        assert!(err3.contains("package name 'http' collides with the built-in package 'mesh/http'"), "got: {err3}");
+    }
+
+    #[test]
+    fn mesh_http組み込みパッケージの関数呼び出しとresponse構築が解決できる() {
+        // milestone 21: mesh/httpは.meshソースを持たない組み込みパッケージ(http_stdlib_symbols)。
+        // ランタイムの実体(http$listen)はruntime.tsのPRELUDE側に既に実装済みなので、ここでは
+        // シグネチャ解決(pkg修飾型注釈・struct literal構築・関数呼び出し)だけを確認する
+        let js = gen_body(
+            "import \"mesh/http\"\nfn handler(req: http.Request) http.Response {\n  return http.Response{status: 200, body: req.method, headers: map<string, string>{}}\n}\nfn main() {\n  http.listen(\":8080\", handler)\n}",
+        );
+        assert!(js.contains("(await http$listen(\":8080\", handler))"), "got: {js}");
+        assert!(js.contains("status: 200, body: req.method, headers: new Map()"), "got: {js}"); // Responseはis_error_type無し、errTagで包まれない
+    }
+
+    #[test]
+    fn mesh_httpとユーザーパッケージのimportが共存できる() {
+        let js = gen_modules_body(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"mesh/http\"\nimport \"mathutil\"\nfn handler(req: http.Request) http.Response {\n  return http.Response{status: mathutil.add(1, 1), body: \"\", headers: map<string, string>{}}\n}\nfn main() {\n  http.listen(\":8080\", handler)\n}",
+            ),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js.contains("(await mathutil$add(1, 1))"), "got: {js}");
+        assert!(js.contains("(await http$listen(\":8080\", handler))"), "got: {js}");
     }
 
     #[test]
