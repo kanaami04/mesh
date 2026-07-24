@@ -1085,7 +1085,7 @@ impl Codegen {
                 // あると説明していたが、実際は`lookup_package_type`が解決済みの完全な
                 // `Type`〈fields/discriminant_tag/is_error_type込み〉を返すため技術的な
                 // 制約ではなく、単にスコープを広げすぎないための意図的な選択だったと
-                // milestone 15のcode reviewで訂正済み。§計画参照)。
+                // milestone 12のcode reviewで訂正済み。§計画参照)。
                 // TS版`structLit`の`displayName`計算(union構築ならexpr自身が書いた素の
                 // 名前、名前付きstruct構築なら解決済みの型自身の〈pkg修飾済みの〉名前)を
                 // そのまま再現する——pkg無し側は元々main packageの名前が無修飾なので
@@ -2417,6 +2417,24 @@ mod tests {
         .unwrap_err();
         // displayNameは(unionなので)pkg修飾されない、TS版の`expr.name`と同じ挙動
         assert!(err.contains("no member of 'GetUserResponse' has kind: \"bogus\""), "got: {err}");
+    }
+
+    #[test]
+    fn json_valueの自己参照する再帰位置への実際の構築は今まで通りコンパイルできる() {
+        // git historyレビュー発覚・実行確認済みの回帰: json.Valueのarr/objは自己参照する
+        // 再帰位置(items/entries)を空フィールドの不透明な殻(milestone 9)として表すため、
+        // このmilestoneが追加したフィールド型検証がunion全体を渡そうとする側の型と
+        // 一致せず、`json.Value{kind:"arr", items:[json.Value{...}, ...]}`のような
+        // 正当な構築まで誤ってtype-mismatchにしてしまっていた
+        let js = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  v := json.Value{kind: \"arr\", items: [\n    json.Value{kind: \"num\", n: 1.0},\n    json.Value{kind: \"null\"},\n  ]}\n  print(json.stringify(v))\n}",
+        );
+        assert!(js.contains("items: [({ kind: \"num\", n: 1.0 }), ({ kind: \"null\" })]"), "got: {js}");
+
+        let js2 = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  m := map<string, json.Value>{\"a\": json.Value{kind: \"num\", n: 1.0}}\n  v := json.Value{kind: \"obj\", entries: m}\n  print(json.stringify(v))\n}",
+        );
+        assert!(js2.contains("entries: m"), "got: {js2}");
     }
 
     const DBERROR_MESH: &str = "export error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\", ms: int }\nexport fn find(id: int) int | DbError {\n  if id == 1 {\n    return 100\n  }\n  return DbError{kind: \"notFound\", table: \"users\"}\n}\n";

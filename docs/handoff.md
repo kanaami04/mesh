@@ -554,9 +554,15 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   名前)を正確に再現すること——pkg無し側はこの2つが元々一致していたため
   区別が要らなかったが、pkg修飾側では観測可能な違いになる。milestone 8の
   "all"ヒューリスティック(`type_is_error_instance`)は不要になり関数ごと削除。
-  テスト342→346件(+4)、既存の全example(22本)がbyte-for-byte一致のまま
-  回帰無し。`mathutil.Point{x:1, typo:2}`・`json.Value{kind:"bogus",...}`
-  (以前から到達確認済みの既知の穴、この修正でまとめて閉じた)・pkg修飾error
+  **code reviewで実害のある回帰を発見・修正**: `json.Value`(milestone 9)の
+  自己参照する再帰位置(`arr.items`/`obj.entries`)は空フィールドの不透明な殻で
+  表しており、新しいフィールド型検証がこれをArray/Mapに包まれた形で見分けられず、
+  `json.Value{kind:"arr", items:[...]}`のような正当な構築まで誤って
+  `type-mismatch`にしてしまっていた——milestone 15の`validate_struct_field`と
+  同じ理由の特例を今回の型検証にも追加して解消。テスト342→347件(+5)、
+  既存の全example(22本)がbyte-for-byte一致のまま回帰無し。`mathutil.Point{x:1,
+  typo:2}`・`json.Value{kind:"bogus",...}`(以前から到達確認済みの既知の穴、
+  この修正でまとめて閉じた)・pkg修飾error
   type unionの正しい構築の3パターンをRust版・TS版両方でコンパイル(・実行)し、
   同じ理由・同じメッセージ・同じ出力になることを確認済み。詳細はtodo.mdの
   当該項目が一次情報源

@@ -533,7 +533,7 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
                 f.pos.col
             ));
         };
-        if !types::assignable(ty, &decl.type_) {
+        if !assignable_allowing_opaque_json_value(ty, &decl.type_) {
             let value_pos = f.value.pos();
             return Err(format!(
                 "checker: field '{}': cannot use {} as {} ({}:{})",
@@ -550,6 +550,31 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
         return Err(format!("checker: missing field(s) in {display_name}: {} ({}:{})", missing.join(", "), pos.line, pos.col));
     }
     Ok(())
+}
+
+// git historyレビュー発覚・実行確認済みの回帰(milestone 16): `mesh/json`のjson.Value
+// (milestone 9、自己参照する再帰位置`arr.items`/`obj.entries`を空フィールドの不透明な殻
+// として表す、milestone 15の`validate_struct_field`と同じ理由)が、struct literalの
+// フィールド宣言型としてArray/Mapに包まれた形で現れることがある(例:
+// `json.Value{kind:"arr", items:[json.Value{kind:"num",n:1.0}, ...]}`)。
+// 素の`types::assignable`は名前付きstruct同士を名前で厳密比較するため、この不透明な殻
+// (union全体を渡そうとする側の型と一致しない)を常にtype-mismatchとして拒否して
+// しまう——TS版は本物の自己参照structなのでこの問題自体が起きない、Rust版の型表現上の
+// 制約に対するpatch。milestone 15と同じくANYと同じ「常に代入可」として扱う
+// (この不透明な殻がArray/Mapの要素/値位置に現れる場合のみ、他の空フィールドstructは
+// 引き続き厳密に検証する)
+fn assignable_allowing_opaque_json_value(from: &Type, to: &Type) -> bool {
+    fn is_opaque_json_value(t: &Type) -> bool {
+        matches!(t, Type::Struct { name, fields, .. } if name == "json.Value" && fields.is_empty())
+    }
+    if is_opaque_json_value(to) {
+        return true;
+    }
+    match to {
+        Type::Array(elem) if is_opaque_json_value(elem) => true,
+        Type::Map { value, .. } if is_opaque_json_value(value) => true,
+        _ => types::assignable(from, to),
+    }
 }
 
 // structのフィールドアクセス(読み・書き共通)の妥当性検証。TS版`memberFieldType`
