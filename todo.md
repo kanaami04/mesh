@@ -2315,6 +2315,43 @@
           全てkill済み)。
         - **milestone 21のスコープ外**: `mesh/dom`との同居エラー検査(TS版もdesign止まりで
           未実装、features.md参照)。
+  - [x] **デモアプリ開発** ✅ 2026-07-24実装。kanayamaと合意した順序(mesh/io → mesh/http →
+        デモアプリ開発)の最終段。コンパイラの新機能追加ではなく、mesh/http・mesh/json・
+        struct/メソッド・`T | error`/`T | none`・クロージャによる`mut`状態捕捉・
+        `json struct`自動デコードを組み合わせて実用的なものが書けることを示す実地デモとして
+        `demo/todo-api/main.mesh`(Todo風REST API、CRUD一式)+`demo/todo-api/README.md`を新設。
+        `examples/`ディレクトリには置いていない(`mise run run-examples`が`examples/*.mesh`を
+        「実行して終了コード0を待つ」方式のため、`http.listen`でプロセスが生き続けるプログラムを
+        混ぜるとハングする——`tests/http.test.ts`が専用のspawn+killヘルパーを別途持っている
+        のと同じ理由)。
+        - **設計**: ルーティングは`mesh/http` v1の方針通りルーター非内蔵なので、
+          `req.path`/`req.method`を見て自分で分岐(`GET/POST /todos`・
+          `GET/PATCH/DELETE /todos/{id}`)。パスパラメータ抽出はMeshに文字列インデックス/
+          スライスが無いため`split(req.path, "/")`で代用(`"/todos/3"` →
+          `["", "todos", "3"]`)。データは`main()`内の`mut todos: Todo[]`/`mut nextId`を
+          ハンドラのクロージャが捕捉する形のインメモリ実装(features.md記載の「`mut`変数の
+          捕捉」がfilter/map/reduce専用ではなく一般のクロージャで機能することの実地検証も
+          兼ねる)。`Todo`の一覧取得ではmapビルトインで`Todo[]`→`json.Value[]`変換
+          (`map(todos, fn(t: Todo) json.Value { return t.toJson() })`)、単体はレシーバ
+          メソッド`(t: Todo) toJson() json.Value`。作成/更新は`json struct
+          CreateTodoRequest`/`UpdateTodoRequest`の自動生成デコーダ
+          (`decodeCreateTodoRequest`/`decodeUpdateTodoRequest`)を使い、デコード失敗は
+          そのままエラーメッセージ(`missing field 'title'`等)を含めて400で返す。
+        - **確認**: `bun run mesh check`で型検査グリーン、`bun run mesh fmt`で正規形に整形
+          (提出時に適用済み)。TS版CLI(`mesh run`)で実サーバーを起動し、
+          `POST /todos`→`GET /todos`→`GET /todos/{id}`→`PATCH /todos/{id}`→
+          `DELETE /todos/{id}`→削除後の`GET /todos`→存在しないidの404→不正bodyの400
+          (`missing field 'title'`)→未知パスの404、という一連のcurlシナリオを実行し
+          全て期待通りの応答を確認。Rust移植版CLI(`cargo run --emit-js`)でも同じソースを
+          コンパイルし、**生成JSがTS版とbyte-for-byte一致**することを確認したうえで、
+          Rust版が生成したJSを実際に`node`で起動し同じcurlシナリオを再実行、TS版と
+          同一の応答(作成id・toggle後のdone・削除後の一覧・エラーメッセージ文言まで)を
+          得ることを確認済み(起動したサーバープロセスは確認後に全てkill済み)。
+        - **開発中に踏んだ罠(記録)**: 開発機のポート8080が既存の別プロセス(VS Code系の
+          ヘルパー、Meshとは無関係)に使われており、`:8080`宛のcurlがそちらへ迷い込み
+          ハングした。デモ本体は汎用的な既定ポートとして`:8080`のままにし、検証だけは
+          一時的に別ポート(`127.0.0.1:1819x`)へ書き換えたコピーで実施した——環境依存の
+          テスト環境の問題であり、生成コード自体の不具合ではないことを確認済み。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
