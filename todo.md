@@ -1634,6 +1634,9 @@
           単なるスコープ判断、上記参照**)・`gen_lvalue`(代入先)のフィールド名検証・
           struct宣言時点の`__proto__`ガード(いずれもPR #17以来の既知の限界のうち、
           今回のスコープに含めなかった残り)。
+          **→ pkg修飾struct literalの厳密検証はchecker+codegen milestone 16
+          (2026-07-24)で解消。`gen_lvalue`の代入先フィールド名検証はmilestone 15
+          (2026-07-24)で解消。struct宣言時点の`__proto__`ガードは引き続き未対応**
   - [x] **checker+codegen milestone 13(算術演算子の妥当性検査・is_numericの
         Union/ANY問題)** ✅ 2026-07-24実装。milestone 12完了後、残る既知の限界の
         うち「`is_numeric`のUnion/ANY対応」に着手した。当初は「union型への算術が
@@ -1919,6 +1922,48 @@
           struct宣言時点の`__proto__`ガード・自己参照型・`resolve_method_target`の
           フィールド名判定統一(上記「記録に留めた1件」参照)は引き続き対象外
           (次のmilestone候補、順に対応していく予定)。
+  - [x] **checker+codegen milestone 16(pkg修飾struct literalの厳密検証)**
+        ✅ 2026-07-24実装。milestone 15完了後、kanayamaに残る既知の限界(pkg修飾
+        struct literalの厳密検証・`resolve_method_target`のフィールド名判定統一・
+        struct宣言時点の`__proto__`ガード・自己参照型)を提示し、milestone 12で
+        pkg無し側だけ厳密化していた「pkg修飾struct literalの厳密検証」から
+        着手することで合意(推奨案として提示、kanayamaも同意)。
+        - **実装は小さく済んだ**: `lookup_package_type`は解決済みの完全な`Type`
+          (fields/discriminant_tag/is_error_type込み)を返すため、milestone 12で
+          作った`resolve_struct_lit_member`/`validate_struct_lit_fields`を
+          pkg修飾側にもそのまま使うだけでよかった(milestone 12時点の
+          「他パッケージのunion構造をここでは持たない制約」という説明は、
+          milestone 15のcode reviewで既に「技術的制約ではなくスコープ判断」と
+          訂正済み)。パッケージ側の型宣言も同じ`resolve_type_decls`(`generate_
+          package`から呼ばれる)を通るため、`discriminant_tag`もmilestone 12以来
+          既に正しく計算されていた。
+        - `codegen.rs`: `Expr::StructLit`の`pkg`分岐を、pkg無し分岐と同じ
+          `resolve_struct_lit_member`→`validate_struct_lit_fields`の呼び出しに
+          統一。**唯一の注意点**: TS版`structLit`の`displayName`計算
+          (`resolved.kind === "union" ? expr.name : structType.name`)を
+          正確に再現する必要があった——union構築なら式自身が書いた素の名前
+          (例: "GetUserResponse")、名前付きstruct構築なら解決済みの型自身の
+          pkg修飾済みの名前(例: "mathutil.Point")を使う。pkg無し側は
+          main packageの型名が元々無修飾なのでこの2つが一致しており
+          区別が要らなかったが、pkg修飾側では観測可能な違いになる
+          (`types::type_to_string(&base)`で計算、実行確認済み)。
+        - milestone 8の"all"ヒューリスティック`type_is_error_instance`(pkg修飾側
+          専用に残していた最後の呼び出し元)が不要になったため関数ごと削除。
+        - 新規ユニットテスト`codegen.rs`4件(pkg修飾struct literalのtypo/欠落
+          フィールドがpkg修飾済みの名前でErrになる・pkg修飾error type unionの
+          正しい構築が新経路で`__errTag`されること・pkg修飾判別可能unionの
+          タグ値不一致がunion自身の素の名前でErrになる)。342→346件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example
+          (22本)を再度byte-for-byte確認(回帰無し)。`mathutil.Point{x:1,
+          typo:2}`・`json.Value{kind:"bogus",extra:1}`(以前から到達確認済みの
+          既知の穴、この修正でまとめて閉じた)・pkg修飾error type unionの
+          正しい構築の3パターンをRust版・TS版両方でコンパイル(・実行)し、
+          同じ理由・同じメッセージ・同じ位置情報で拒否/同じ出力になることを
+          確認済み。
+        - **milestone 16のスコープ外**: 無し(pkg修飾struct literalの検証を
+          pkg無し側と完全に同じ経路に統一できた)。残る既知の限界として
+          `resolve_method_target`のフィールド名判定統一・struct宣言時点の
+          `__proto__`ガード・自己参照型は引き続きtodo.mdに記録済みの通り残る。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

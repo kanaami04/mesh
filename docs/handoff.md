@@ -542,15 +542,34 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   `f := u.describe`の3パターンをRust版・TS版両方でコンパイルし、同じ理由・
   同じメッセージ・同じ位置情報で拒否されることも確認済み。詳細はtodo.mdの
   当該項目が一次情報源
-- **次にやるなら**: 確認済みの15マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 16(pkg修飾struct literalの厳密検証)完了
+  (2026-07-24)**。milestone 15完了後、残る既知の限界(pkg修飾struct literalの
+  厳密検証・`resolve_method_target`のフィールド名判定統一・struct宣言時点の
+  `__proto__`ガード・自己参照型)から、milestone 12でpkg無し側だけ厳密化して
+  いた「pkg修飾struct literalの厳密検証」を選んで着手(推奨案として提示、
+  kanayamaも同意)。`lookup_package_type`が解決済みの完全な`Type`を返すため、
+  milestone 12の`resolve_struct_lit_member`/`validate_struct_lit_fields`を
+  pkg修飾側にもそのまま使うだけで済み、実装は小さかった。唯一の注意点は
+  TS版の`displayName`計算(union構築は素の名前、名前付きstruct構築はpkg修飾済みの
+  名前)を正確に再現すること——pkg無し側はこの2つが元々一致していたため
+  区別が要らなかったが、pkg修飾側では観測可能な違いになる。milestone 8の
+  "all"ヒューリスティック(`type_is_error_instance`)は不要になり関数ごと削除。
+  テスト342→346件(+4)、既存の全example(22本)がbyte-for-byte一致のまま
+  回帰無し。`mathutil.Point{x:1, typo:2}`・`json.Value{kind:"bogus",...}`
+  (以前から到達確認済みの既知の穴、この修正でまとめて閉じた)・pkg修飾error
+  type unionの正しい構築の3パターンをRust版・TS版両方でコンパイル(・実行)し、
+  同じ理由・同じメッセージ・同じ出力になることを確認済み。詳細はtodo.mdの
+  当該項目が一次情報源
+- **次にやるなら**: 確認済みの16マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
-  読み/書き共通のstructフィールドアクセス検証)が全て完了——TS版リファレンス
-  実装の主要機能をRust版がひととおり移植し終えた。細かな既知の限界・意図的な
-  スコープ縮小(自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック
-  関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
-  struct宣言時点の`__proto__`ガード・pkg修飾struct literalの厳密検証 等)は
+  読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
+  検証)が全て完了——TS版リファレンス実装の主要機能をRust版がひととおり
+  移植し終えた。細かな既知の限界・意図的なスコープ縮小(自己参照型・
+  `json.Value`の2階層以上のdestructure・ジェネリック関数・`mesh/io`/
+  `mesh/http`・cross-file/cross-packageのjson struct参照・struct宣言時点の
+  `__proto__`ガード・`resolve_method_target`のフィールド名判定統一 等)は
   引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/

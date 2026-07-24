@@ -1053,40 +1053,48 @@ impl Codegen {
                 // pkg修飾(`mathutil.Point{...}`、milestone 6)ならパッケージのレジストリから
                 // 引く——未import/未exportなら実行時にプロパティが噛み合わない壊れたJSを
                 // 静かに生成せず、ここで明確なErrにする
-                let is_error_instance = match pkg {
+                let base = match pkg {
                     // code review指摘: import宣言していないパッケージ名でも(別経路で
                     // ロードされてさえいれば)レジストリを直接引けてしまっていた——
-                    // is_package_aliasで実際にimportされていることも確認する(依存グラフの
-                    // 循環検出がimport文だけを見て構築されるため、import文を経由しない
-                    // パッケージ間参照を許すと循環検出をすり抜けられてしまう)
+                    // is_package_aliasで実際にインポートされていることも確認する
+                    // (依存グラフの循環検出がimport文だけを見て構築されるため、import文を
+                    // 経由しないパッケージ間参照を許すと循環検出をすり抜けられてしまう)
                     Some(alias) if self.ctx.is_package_alias(alias) => {
                         let Some(ty) = self.ctx.lookup_package_type(alias, name) else {
                             return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                         };
-                        type_is_error_instance(ty)
+                        ty.clone()
                     }
                     Some(alias) => {
                         return Err(format!("codegen: package '{alias}' has no exported struct '{name}' ({}:{})", pos.line, pos.col));
                     }
-                    // pkg無し(milestone 12): フィールド名/型/判別可能unionのdisambiguationを
-                    // 実際に検証する(§計画参照——unknown-field/missing-fields/type-mismatch/
-                    // duplicate-fieldの各タイプミスをここで明確なErrにする、PR #17以来の穴)。
-                    // 未宣言の型名は既存のresolve_type_node/infer_exprと同じ「空フィールドの
-                    // 殻structへフォールバック」——それ自体は落とさず、フィールド検証の方で
-                    // 自然にunknown-field/missing-fieldsとして顕在化させる
-                    None => {
-                        let base = self
-                            .ctx
-                            .lookup_struct(name)
-                            .or_else(|| self.ctx.lookup_union(name))
-                            .cloned()
-                            .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false });
-                        let field_types: Vec<Type> = fields.iter().map(|f| checker::infer_expr(&self.ctx, &f.value)).collect();
-                        let member = checker::resolve_struct_lit_member(&base, name, fields, &field_types, *pos)?;
-                        checker::validate_struct_lit_fields(&member, name, fields, &field_types, *pos)?;
-                        matches!(member, Type::Struct { is_error_type: true, .. })
-                    }
+                    // pkg無し(milestone 12): 未宣言の型名は既存のresolve_type_node/infer_exprと
+                    // 同じ「空フィールドの殻structへフォールバック」——それ自体は落とさず、
+                    // フィールド検証の方で自然にunknown-field/missing-fieldsとして顕在化させる
+                    None => self
+                        .ctx
+                        .lookup_struct(name)
+                        .or_else(|| self.ctx.lookup_union(name))
+                        .cloned()
+                        .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
                 };
+                // milestone 16: pkg修飾側もフィールド名/型/判別可能unionのdisambiguationを
+                // 実際に検証するようにした(以前はmilestone 8の"all"ヒューリスティック
+                // 〈type_is_error_instance〉でerrTagの要否だけ見ており、フィールド自体は
+                // 一切検証していなかった——他パッケージのunion構造をここで持たない制約が
+                // あると説明していたが、実際は`lookup_package_type`が解決済みの完全な
+                // `Type`〈fields/discriminant_tag/is_error_type込み〉を返すため技術的な
+                // 制約ではなく、単にスコープを広げすぎないための意図的な選択だったと
+                // milestone 15のcode reviewで訂正済み。§計画参照)。
+                // TS版`structLit`の`displayName`計算(union構築ならexpr自身が書いた素の
+                // 名前、名前付きstruct構築なら解決済みの型自身の〈pkg修飾済みの〉名前)を
+                // そのまま再現する——pkg無し側は元々main packageの名前が無修飾なので
+                // この2つが一致しており区別不要だったが、pkg修飾側では区別が必要
+                let display_name = if matches!(base, Type::Union { .. }) { name.clone() } else { types::type_to_string(&base) };
+                let field_types: Vec<Type> = fields.iter().map(|f| checker::infer_expr(&self.ctx, &f.value)).collect();
+                let member = checker::resolve_struct_lit_member(&base, &display_name, fields, &field_types, *pos)?;
+                checker::validate_struct_lit_fields(&member, &display_name, fields, &field_types, *pos)?;
+                let is_error_instance = matches!(member, Type::Struct { is_error_type: true, .. });
                 let mut js_fields = Vec::with_capacity(fields.len());
                 for f in fields {
                     if f.name == "__proto__" {
@@ -1474,22 +1482,6 @@ impl Codegen {
     }
 }
 
-// レシーバの型注釈から素の(pkg修飾されていない)struct名を取り出す。レシーバは常に
-// 自パッケージ内のstructを指す前提(`fn (p: Point) ...`はPointが今処理中のパッケージの
-// struct、という意味)——他パッケージの型に生やす拡張メソッド的な書き方
-// (`fn (p: math.Point) ...`)はモジュールのこの段階でも対象外のまま
-// struct literalが__errTagで包まれるべきか(単体のerror struct、または`error type`の
-// union形式——milestone 8。union形は全メンバーが揃ってis_error_type付きのときだけ——
-// 通常structとerror type unionを混ぜたさらに外側のunionを、混入した1メンバーだけで
-// 誤って全部error扱いしないための"all"判定、milestone 8のcode reviewで確定)
-fn type_is_error_instance(ty: &Type) -> bool {
-    match ty {
-        Type::Struct { is_error_type: true, .. } => true,
-        Type::Union { members, .. } => members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })),
-        _ => false,
-    }
-}
-
 // mesh/json(組み込みパッケージ、milestone 9)のシグネチャ定義。`.mesh`ソースを持たない——
 // TS版`stdlib.ts`のBUILTIN_PACKAGESに相当し、この定義から直接`checker::PackageSymbols`へ
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
@@ -1565,6 +1557,10 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
     checker::PackageSymbols { types, fns, consts: HashMap::new() }
 }
 
+// レシーバの型注釈から素の(pkg修飾されていない)struct名を取り出す。レシーバは常に
+// 自パッケージ内のstructを指す前提(`fn (p: Point) ...`はPointが今処理中のパッケージの
+// struct、という意味)——他パッケージの型に生やす拡張メソッド的な書き方
+// (`fn (p: math.Point) ...`)はモジュールのこの段階でも対象外のまま
 fn receiver_struct_name(recv: &Receiver) -> CodegenResult<String> {
     match &recv.type_node {
         TypeNode::Name { name, pkg: None, .. } => Ok(name.clone()),
@@ -2359,6 +2355,68 @@ mod tests {
         assert!(js.contains("__m_mathutil$Point_magnitudeSq(p)"), "got: {js}");
         assert!(js.contains("const q = (await mathutil$origin());"), "got: {js}");
         assert!(js.contains("async function __m_mathutil$Point_magnitudeSq(p)"), "got: {js}");
+    }
+
+    // ---- milestone 16: pkg修飾struct literalの厳密検証 ----
+
+    #[test]
+    fn pkg修飾struct_literalのtypoしたフィールド名は明確なerrになりpkg修飾済みの名前で表示される() {
+        // PR #17以来の既知の限界(milestone 12はpkg無し側だけ厳密化していた)を解消。
+        // 表示名はTS版と同じくpkg修飾済みの型自身の名前("mathutil.Point")を使う
+        // (union構築時はexpr自身が書いた素の名前を使う、下のテスト参照)
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"mathutil\"\nfn main() {\n  p := mathutil.Point{x: 1, typo: 2}\n  print(p)\n}"),
+            ("mathutil", "mathutil/point.mesh", POINT_MESH),
+        ])
+        .unwrap_err();
+        assert!(err.contains("mathutil.Point has no field 'typo' (fields: x, y)"), "got: {err}");
+    }
+
+    #[test]
+    fn pkg修飾struct_literalの欠落フィールドも明確なerrになる() {
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"mathutil\"\nfn main() {\n  p := mathutil.Point{x: 1}\n  print(p)\n}"),
+            ("mathutil", "mathutil/point.mesh", POINT_MESH),
+        ])
+        .unwrap_err();
+        assert!(err.contains("missing field(s) in mathutil.Point: y"), "got: {err}");
+    }
+
+    #[test]
+    fn pkg修飾error_type_unionの構築は判別可能unionのdisambiguation経由で正しくerrtagされる() {
+        // milestone 8の"all"ヒューリスティック(type_is_error_instance)に代わり、
+        // pkg修飾側もmilestone 12のタグdisambiguation経由で特定した具体的なメンバー自身の
+        // is_error_typeを見る、より正確な経路を通るようになった
+        const ERR_MESH: &str = "export error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\" }\n";
+        let js = gen_modules_body(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"errpkg\"\nfn main() {\n  e := errpkg.DbError{kind: \"notFound\", table: \"users\"}\n  print(e)\n}",
+            ),
+            ("errpkg", "errpkg/err.mesh", ERR_MESH),
+        ]);
+        assert!(js.contains("__errTag({ kind: \"notFound\", table: \"users\" })"), "got: {js}");
+    }
+
+    #[test]
+    fn pkg修飾判別可能unionのタグ値不一致は明確なerrになりunion自身の素の名前で表示される() {
+        // 組み込みパッケージ(mesh/json)のjson.Valueも同じ経路を通ることを実行確認済み
+        // (git historyレビューが指摘していた"json.Value{kind: \"bogus\", ...}"が
+        // 無検証で素通りしていた穴も、この修正でまとめて閉じる)
+        const RESP_MESH: &str =
+            "export type GetUserResponse = { kind: \"ok\", value: int } | { kind: \"notFound\" }\n";
+        let err = gen_modules(&[
+            (
+                "main",
+                "main.mesh",
+                "import \"userpkg\"\nfn main() {\n  r := userpkg.GetUserResponse{kind: \"bogus\"}\n  print(r)\n}",
+            ),
+            ("userpkg", "userpkg/resp.mesh", RESP_MESH),
+        ])
+        .unwrap_err();
+        // displayNameは(unionなので)pkg修飾されない、TS版の`expr.name`と同じ挙動
+        assert!(err.contains("no member of 'GetUserResponse' has kind: \"bogus\""), "got: {err}");
     }
 
     const DBERROR_MESH: &str = "export error type DbError = { kind: \"notFound\", table: string } | { kind: \"timeout\", ms: int }\nexport fn find(id: int) int | DbError {\n  if id == 1 {\n    return 100\n  }\n  return DbError{kind: \"notFound\", table: \"users\"}\n}\n";
