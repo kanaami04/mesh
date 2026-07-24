@@ -588,17 +588,51 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (`has no field or method`、"none"フォールバック込み)・同じ位置情報で
   拒否されることを確認済み(位置情報はこの修正前から一致していたため、
   今回変わったのは文言のみ)。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの17マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 18(struct宣言時点の`__proto__`ガード)完了
+  (2026-07-24)**。milestone 17完了後、残る既知の限界(struct宣言時点の
+  `__proto__`ガード・自己参照型)から前者を選んで着手。TS版`checkFieldName`
+  (`src/checker/context.ts`)を読むと、named struct宣言・無名{...}のunionメンバー
+  両方の解決時点(`resolveAlias`/`resolveType`)で、`checkPackage`の「未使用でも
+  報告するため全エイリアスを解決しておく」eagerパスの一部として、**構築・参照の
+  有無に関わらず**即座に拒否すると判明(実機確認済み: 一度もconstructされない
+  `struct Bad { __proto__: string }`単体でもTS版は拒否する)。Rust版の既存
+  `__proto__`ガードはstruct literal構築時・代入先の2箇所のみで、未構築・未参照の
+  struct宣言は素通りしていたのがこの限界の実体。新設`check_reserved_field_name`
+  (TS版`checkFieldName`の移植)を、パッケージ内の全struct/union型宣言を一度だけ
+  解決する`resolve_type_decls`(TS版`checkPackage`のeagerパスに相当)の固定点反復の
+  前段に、1回だけの事前走査として追加。既存のcodegen.rs側の2つの`__proto__`
+  ガード(struct literal構築時・代入先)はそのまま維持——`json.Value`の不透明な殻
+  (milestone 15/16、宣言側の検証を意図的にバイパスする)経由で生成JSへ`__proto__`が
+  紛れ込む経路は`resolve_type_decls`を一切通らないビルトイン型のため、宣言時点の
+  今回のチェックでは塞げず、引き続き必要。
+  **code reviewで発見・即修正した1件**(git historyレビュー・code-comments準拠
+  レビューの両エージェントが独立発見): TS版`checkFieldName`は`resolveType`という
+  単一の分岐から呼ばれ、unionメンバーだけでなく`is`式・matchパターンの無名
+  {...}パターンも同じ経路を通る。Rust版のパーサーも`parse_inline_struct_type`を
+  union宣言のメンバー・`is`式の右辺・matchパターンの3箇所で共有しているが、
+  最初の実装はunionメンバー(1箇所目)しか事前走査していなかったため、
+  `if r is { __proto__: string } {...}`やmatchの無名{...}パターンは素通りして
+  いた(実機確認済み: TS版はどちらも拒否するが、実害としては読み取り専用の
+  構造判定なので実際のprototype汚染は起きず、常にfalseの無意味な分岐が黙って
+  通るだけ)。`check_reserved_field_name`を`check_struct_type_field_names`
+  へ一般化し、`resolve_type_decls`に加えてcodegen.rsの`is`式・matchパターンの
+  codegenからも同じ関数を呼ぶよう修正。テスト348→354件(+6)、既存の全example
+  (22本)がbyte-for-byte一致のまま回帰無し。未構築の`struct Bad { __proto__:
+  string }`・判別可能unionの無名メンバー・is式の無名パターン・matchの無名
+  パターンの4パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
+  メッセージ・同じ位置情報で拒否されることを確認済み。詳細はtodo.mdの当該項目が
+  一次情報源
+- **次にやるなら**: 確認済みの18マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
-  検証 → resolve_method_targetのフィールド名判定統一)が全て完了——TS版
-  リファレンス実装の主要機能をRust版がひととおり移植し終えた。細かな既知の
-  限界・意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上の
-  destructure・ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/
-  cross-packageのjson struct参照・struct宣言時点の`__proto__`ガード 等)は
-  引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
+  検証 → resolve_method_targetのフィールド名判定統一 → struct宣言時点の
+  `__proto__`ガード)が全て完了——TS版リファレンス実装の主要機能をRust版が
+  ひととおり移植し終えた。残る既知の限界は自己参照型のみ(細かな意図的な
+  スコープ縮小として`json.Value`の2階層以上のdestructure・ジェネリック関数・
+  `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照は引き続き
+  todo.mdに記録済みの通り残る)。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

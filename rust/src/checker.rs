@@ -282,6 +282,31 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
         return Err(format!("checker: self-referential/cyclic type definitions are not yet supported (found via '{cycle_name}')"));
     }
 
+    // struct宣言時点の予約フィールド名チェック(TS版`checkFieldName`、`src/checker/
+    // context.ts`)。__proto__はcodegenがプレーンなJSオブジェクトリテラルへ直訳する際、
+    // 代入ではなくprototypeの差し替えになり値が黙って消える(未対応のプロトタイプ汚染
+    // 経路)ため、TS版はstruct宣言を解決した時点(resolveAlias/resolveTypeのstructType
+    // 分岐)で——実際にconstructされるかに関わらず——即座に拒否する。ここは他パッケージも
+    // 含め全型宣言を(使用有無に関わらず)必ず一度は解決するTS版`checkPackage`のeagerパスに
+    // 相当する箇所なので、同じタイミングを再現できる。TS版と同じく named struct宣言の
+    // フィールドと、無名{...}のunionメンバー(判別可能union用、`parse_inline_struct_type`)の
+    // フィールドの両方が対象——名前付きの型を参照するunionメンバー(例: `Circle | Square`)は
+    // その型自身の宣言側で別途チェックされるためここでは素通しする。
+    // (struct-literal構築時・代入先としての`u.__proto__ = ...`のガードは既存のまま
+    // codegen.rsに残す——json.Valueの不透明structのように宣言側のフィールド検証を
+    // 意図的にバイパスする経路でも、生成されるJSへ`__proto__`が紛れ込むのを防ぐため)
+    for decl in &type_decls {
+        match &decl.node {
+            TypeNode::StructType { .. } => check_struct_type_field_names(&decl.node)?,
+            TypeNode::Union { members, .. } => {
+                for m in members {
+                    check_struct_type_field_names(m)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
     // 固定点反復: 依存先が(宣言順に関係なく)先に解決されているかどうかに関わらず、
     // 現在のレジストリの中身で全宣言を素朴に再解決するのをN回繰り返す。非循環である
     // ことは上のサイクル検出で保証済みなので、依存の深さはtypes.len()を超えない。
@@ -311,6 +336,25 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
                 }
                 _ => {}
             }
+        }
+    }
+    Ok(())
+}
+
+// TS版`checkFieldName`(`src/checker/context.ts`)の移植。__proto__は他のフィールド名と
+// 違ってJSオブジェクトリテラルで特別扱いされる(prototypeの差し替えになる)ため予約済み。
+// TS版はこのチェックを、named struct宣言・無名{...}のunionメンバーだけでなく、
+// `resolveType`が通る場所ならどこでも(=`{...}`という無名構造体型が書ける場所ならどこでも)
+// 同じ経路で行う——`is`式(`src/checker/expressions.ts`)・matchパターン
+// (`src/checker/match-select.ts`)の無名{...}パターンも例外ではない。Rust版のパーサーも
+// `parse_inline_struct_type`を(1)union宣言のメンバー、(2)`is`式の右辺、(3)matchパターンの
+// 3箇所全てで共有しているため、フィールド名検証もこの1箇所にまとめて全呼び出し元
+// (`resolve_type_decls`の宣言側事前走査・codegen.rsの`is`/matchパターン使用側)から呼ぶ
+pub fn check_struct_type_field_names(node: &TypeNode) -> Result<(), String> {
+    let TypeNode::StructType { fields, .. } = node else { return Ok(()) };
+    for f in fields {
+        if f.name == "__proto__" {
+            return Err(format!("checker: '__proto__' can't be used as a field name — pick a different name ({}:{})", f.pos.line, f.pos.col));
         }
     }
     Ok(())
@@ -1925,6 +1969,32 @@ mod tests {
         resolve_type_decls(&mut ctx, &types).unwrap();
         let Some(Type::Struct { is_error_type, .. }) = ctx.lookup_struct("NotFound") else { panic!("expected struct") };
         assert!(*is_error_type);
+    }
+
+    #[test]
+    fn resolve_type_declsはprotoという名前のフィールドを持つstruct宣言を構築有無に関わらずerrにする() {
+        // milestone 18: TS版`checkFieldName`は構築されるかに関わらず宣言解決時点で
+        // 拒否する。ここでは`Bad`をどこからも参照しない(struct literal構築・関数の
+        // 引数注釈すら無い)状態でも`resolve_type_decls`単体でerrになることを確認する
+        let types = vec![struct_decl("Bad", &[("__proto__", name_type("string"))])];
+        let mut ctx = CheckerCtx::new();
+        let err = resolve_type_decls(&mut ctx, &types).unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_type_declsは判別可能unionの無名メンバーのprotoフィールドもerrにする() {
+        // TS版`resolveType`のstructType分岐(無名{...}構造体型)経由の`checkFieldName`に相当
+        let types = vec![union_decl(
+            "Shape",
+            vec![
+                struct_type_node(&[("kind", literal_type("circle")), ("__proto__", name_type("float"))]),
+                struct_type_node(&[("kind", literal_type("square")), ("side", name_type("float"))]),
+            ],
+        )];
+        let mut ctx = CheckerCtx::new();
+        let err = resolve_type_decls(&mut ctx, &types).unwrap_err();
+        assert!(err.contains("__proto__"), "got: {err}");
     }
 
     fn error_union_decl(name: &str, members: Vec<TypeNode>) -> TypeDecl {

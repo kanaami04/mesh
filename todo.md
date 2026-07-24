@@ -2036,6 +2036,79 @@
           フィールド名判定を他の全経路と統一できた)。残る既知の限界として
           struct宣言時点の`__proto__`ガード・自己参照型は引き続きtodo.mdに
           記録済みの通り残る。
+  - [x] **checker+codegen milestone 18(struct宣言時点の`__proto__`ガード)**
+        ✅ 2026-07-24実装。milestone 17完了後、残る既知の限界(struct宣言時点の
+        `__proto__`ガード・自己参照型)から「struct宣言時点の`__proto__`ガード」を
+        選んで着手。TS版`src/checker/context.ts`の`checkFieldName`(`__proto__`は
+        codegenがプレーンなJSオブジェクトリテラルへ直訳する際、代入ではなく
+        prototypeの差し替えになり値が黙って消えるため予約済み)を読むと、
+        `src/checker/types-resolve.ts`の`resolveAlias`(named struct宣言、126行目)と
+        `resolveType`(無名{...}構造体型、38行目)の2箇所から呼ばれており、
+        「構築されるか・参照されるかに関わらず、struct宣言をパッケージ内で解決した
+        時点」で即座に拒否すると判明——`checkPackage`(`src/checker/modules.ts:191-197`)
+        の「未使用でも循環や未知型を報告するため全エイリアスを解決しておく」eager
+        パスの一部として実行される。実機確認: 一度も構築・参照されない
+        `struct Bad { __proto__: string }`単体でも、main packageだけでなく
+        importされた他パッケージの未参照exported structでもTS版は`reserved-field-name`
+        で拒否する(未importで一度もロードされないパッケージは対象外——そもそも
+        ファイルごと読まれないため)。
+        - 既存のRust版`__proto__`ガードは`codegen.rs`のstruct literal構築時
+          (1100行目付近)と代入先(854行目付近)の2箇所のみで、**未構築・未参照の
+          struct宣言は素通りしてしまっていた**(この限界の実体)。
+        - `checker.rs`: 新設`check_reserved_field_name(name, pos) -> Result<(),
+          String>`(TS版`checkFieldName`の移植)。`resolve_type_decls`
+          (パッケージ内の全struct/union型宣言を一度だけ解決する場所、TS版
+          `checkPackage`のeagerパスに相当——milestone 16の`resolve_type_decls`
+          コメントで既に確認済み)の中に、固定点反復の前段の1回だけの事前走査として
+          追加——TS版と同じく named struct宣言のフィールドと、無名{...}のunion
+          メンバー(判別可能union用)のフィールドの両方を対象にする(名前付き型を
+          参照するunionメンバーはその型自身の宣言側で別途チェックされるため対象外)。
+        - 既存のcodegen.rs側の2つの`__proto__`ガードはそのまま維持——`json.Value`の
+          不透明な殻(milestone 15/16、空フィールドとして宣言側の検証を意図的に
+          バイパスする)経由で生成JSへ`__proto__`が紛れ込む経路は、宣言時点の
+          今回のチェックでは塞げないため(json.Valueはstruct宣言ではなくcodegen.rsが
+          直接構築するビルトイン型で、`resolve_type_decls`を一切通らない)、
+          引き続き必要な安全ガードとして残す。
+        - 新規ユニットテスト`checker.rs`2件(`resolve_type_decls`単体で、未参照の
+          named struct宣言・判別可能unionの無名メンバーそれぞれの`__proto__`
+          フィールドがerrになること)+`codegen.rs`2件(未構築・未参照のtop-level
+          struct宣言でもerrになること・判別可能unionの無名メンバーでも宣言時点で
+          errになること)。348→352件、全件パス。
+        - **5エージェントのcode reviewで発見・即修正した1件**(実行確認済み、
+          git historyレビュー・code-comments準拠レビューの両エージェントが
+          独立発見): TS版`checkFieldName`は`resolveType`(`src/checker/
+          types-resolve.ts:38`)という単一の分岐から呼ばれており、これはunion
+          メンバーだけでなく、**`is`式の無名{...}パターン**(`src/checker/
+          expressions.ts`)・**matchパターンの無名{...}**(`src/checker/
+          match-select.ts`)からも同じ経路で呼ばれる。Rust版のパーサーも
+          `parse_inline_struct_type`を(1)union宣言のメンバー・(2)`is`式の右辺・
+          (3)matchパターンの3箇所で共有しているが、今回追加した`resolve_type_decls`
+          の事前走査は(1)のみを対象にしており、`if r is { __proto__: string }
+          {...}`や`match r { { __proto__: string } => ... }`のような(2)(3)は
+          素通りしてしまっていた(実機確認済み: TS版はどちらも`reserved-field-name`
+          で拒否するが、修正前のRust版は無条件にコンパイルが通ってしまっていた
+          ——実害としては、is/matchは構築や代入を伴わない読み取り専用の構造判定な
+          ので実際にprototypeが汚染されるわけではなく、常にfalseになる無意味な
+          分岐が黙って通ってしまうだけではある)。`check_reserved_field_name`を
+          `pub fn check_struct_type_field_names(node: &TypeNode) -> Result<(),
+          String>`へ一般化(`TypeNode::StructType`ならフィールド名を検証、
+          それ以外は素通り)し、`resolve_type_decls`の事前走査に加え、
+          `codegen.rs`の`Expr::Is`分岐(is式のcodegen)と`Expr::Match`の各アームの
+          テスト式組み立て(`MatchPattern::Type`分岐)からも同じ関数を呼ぶよう
+          修正——TS版が`resolveType`を単一の呼び出し口にしているのと同じ理由で、
+          Rust版もフィールド名検証を1つの共有関数にまとめた。
+          追加の回帰テスト`codegen.rs`2件(is式の無名パターン・matchパターンの
+          無名{...}、それぞれの`__proto__`フィールドがerrになること)。352→354件、
+          全件パス。`cargo clippy --all-targets -- -D warnings`クリーン。既存の
+          全example(22本、`tree.mesh`は既存の自己参照型の限界により対象外)を
+          再度byte-for-byte確認(回帰無し)。未構築の`struct Bad { __proto__:
+          string }`・判別可能unionの無名メンバー・is式の無名パターン・matchの
+          無名パターンの4パターンをRust版・TS版両方でコンパイルし、いずれも
+          同じ理由・同じメッセージ(`'__proto__' can't be used as a field name —
+          pick a different name`)・同じ位置情報で拒否することを確認済み。
+        - **milestone 18のスコープ外**: 無し(union宣言のメンバー・is式・match
+          パターンの3箇所全ての無名{...}を統一的にカバーできた)。残る既知の限界は
+          自己参照型のみ。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
