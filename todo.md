@@ -2690,6 +2690,44 @@
               - **次段階(milestone 30候補)**: フィールドアクセス(`u.name`)の型解決+unknown-field・
                 メソッド(method_table構築+method-not-called/メソッド呼び出し)・判別可能union構築・
                 pkg修飾struct・配列/map型のモデル化(collection builtinの要素型検査とセット)。
+        - [x] **milestone 30: structのフィールドアクセス+メソッド**
+              ✅ 2026-07-25実装。milestone 29の続き。フィールドアクセス読み取り(`u.name`)と
+              メソッド解決を追加。**フィールド読みとメソッド呼び出しは結合している**——
+              `u.method()`のcallee `u.method`を「未呼び出しメソッド」と誤検知しないため一括で実装。
+              - `check_program`でmethod_table(struct名→メソッド名→Type::Fn)を構築。codegen経路の
+                登録ループと同じだが、パラメータ型は`resolve_type_ann`(縮退解決)で作る
+                (full_checker側の呼び出し引数の型も縮退するので同じ型空間に揃える。milestone 29の
+                struct-litフィールド検査と同じ配慮)。
+              - `infer_member`新設(TS版`memberFieldType`の移植): field→型(collection/fn/union型の
+                フィールドは`widen_field_type`でANYへ畳む——milestone 27のinvariant維持)・宣言済み
+                メソッド名→method-not-called・それ以外→unknown-field。
+              - Callアームにメソッド呼び出しintercept(TS版`inferCall`のrecv.method分岐)を追加。
+                targetがstructでnameがフィールドでなければメソッドとして解決しret型を返す
+                (**引数照合はmilestone 31にdefer**、引数式は未定義名検出のため推論)。フィールドでも
+                メソッドでもなければunknown-field(「has no field or method」の呼び出し文言)。
+              - 診断コード`method-not-called`を追加。
+              - **回帰対応(実装中に発見)**: milestone 30でMember/メソッドがtargetを推論するように
+                なった結果、pkg修飾アクセス(`mathutil.add(...)`)のtarget `mathutil`が(変数でも
+                組み込みでもないため)undefined-nameに誤検知された。import alias(`program.imports`の
+                各alias)をANYとしてscopes[0]へ登録して解消(pkg修飾の中身の検査は次段階)。
+              - 新規テスト6件(未知フィールド読み・method-not-called・不明メソッド呼び出し・正常な
+                フィールド/メソッド・フィールド型の伝播〈`u.name + 1`がinvalid-operation〉・pkg修飾は
+                誤検知なし)。441→447件、全件パス。`cargo clippy`クリーン。6パターンをTS版と
+                `mesh check`で突き合わせコード・メッセージ・位置まで完全一致、全トップレベルexample
+                (pkg修飾を使うmodules_demo/json系含む)がfull_checker無診断のまま回帰なし。
+              - **次段階**: メソッド呼び出しの引数個数・型照合・判別可能union構築・pkg修飾struct/
+                pkg修飾呼び出しの中身・配列/map型のモデル化。
+              - **code reviewで発見・即修正した実バグ1件**(3エージェント独立指摘・再現確認済み):
+                メソッド呼び出しintercept(Member callee)がフォールバック経路で`infer_expr(callee)`へ
+                落とし、`infer_member`がtargetを再推論して**targetを二重評価**していた——
+                `undef.foo()`のundefined-nameが2回出ていた(TS版は「targetは一度だけ評価」、
+                calls.ts:78-80)。Member calleeをintercept内で必ず完結させ(fall throughさせず、
+                非struct/フィールド呼び出しも引数推論後にANYを返す)解消。回帰テスト追加。447→448件。
+              - **code reviewで記録した既知の限界(未移植の宣言時診断・下80点でブロック対象外)**:
+                (1)フィールドと同名メソッド→TS版`method-field-conflict`だがRust無診断、
+                (2)重複メソッド→TS版`duplicate-method`だがRust無診断、(3)import aliasと同名の
+                fn/const→TS版`name-conflicts-with-package`だがRust版は`already-declared`(誤コード)+
+                引数照合素通り。いずれも稀な入力・struct卒業の中で対応候補(コメント/handoffに記録)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
