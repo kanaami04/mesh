@@ -380,15 +380,27 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
     // 定数を検査+登録し、最後に関数本体を検査する。シグネチャ全体(引数/戻り値の型)の
     // 照合はmilestone 22と同じくこの一歩の対象外なので、関数の型はANYで登録する
-    // (「名前として存在する」ことだけをここで表現する)
+    // (「名前として存在する」ことだけをここで表現する)。
+    // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
+    // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
+    // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
+    // (`src/checker/functions.ts`のコメント「グローバルscopeには置かない」参照。
+    // メソッドの名前空間は自由関数と完全分離——異なるstructが同名メソッドを持てる)。
+    // structはmilestone 22/23とも対象外なので、メソッドは名前登録・本体検査どちらも
+    // 単純にスキップする(誤って自由関数と同じ扱いにすると、別々のstructの同名メソッドが
+    // already-declaredの誤検知になる)
     for f in &program.fns {
-        ctx.declare(&f.name, ANY, f.pos, false);
+        if f.receiver.is_none() {
+            ctx.declare(&f.name, ANY, f.pos, false);
+        }
     }
     for c in &program.consts {
         check_top_level_const(&mut ctx, c);
     }
     for f in &program.fns {
-        check_fn(&mut ctx, f);
+        if f.receiver.is_none() {
+            check_fn(&mut ctx, f);
+        }
     }
     ctx.diagnostics
 }
@@ -514,6 +526,37 @@ mod tests {
         let diags = check("helper := 1\nfn helper() int { return 2 }\nfn main() {\n    print(helper)\n}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::AlreadyDeclared);
+    }
+
+    #[test]
+    fn 異なるstructの同名メソッドはalready_declaredの誤検知にならない() {
+        // 回帰テスト: program.fnsには自由関数とstructのメソッド(receiver付き)が
+        // 同じ配列に混在している。メソッドの名前空間は自由関数と完全分離(TS版
+        // `checker/functions.ts`の`declareMethod`はscopes[0]に触れない)なので、
+        // 異なるstructが同名メソッドを持つのは正当。フィルタし忘れるとここが
+        // already-declaredの誤検知になる
+        let diags = check(
+            "struct Todo {\n    title: string\n}\n\nfn (t: Todo) describe() string {\n    return t.title\n}\n\nstruct User {\n    name: string\n}\n\nfn (u: User) describe() string {\n    return u.name\n}\n\nfn main() {\n}\n",
+        );
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn ローカル変数がメソッド名と同じでもshadowingの誤検知にならない() {
+        let diags = check(
+            "struct Todo {\n    title: string\n}\n\nfn (t: Todo) describe() string {\n    return t.title\n}\n\nfn main() {\n    describe := 5\n    print(describe)\n}\n",
+        );
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn トップレベル定数の型が参照側でも正しく伝播する() {
+        // milestone 22時点ではトップレベル定数を参照する式は常にANYへフォールバック
+        // していたが、milestone 23でconstをctx.declare()経由で本物のBindingとして
+        // 登録するようになった副次効果で、参照側でも実際の型と照合されるようになった
+        let diags = check("limit: int = 10\nfn main() {\n    x: string = limit\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
     }
 
     #[test]

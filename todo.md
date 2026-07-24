@@ -2479,10 +2479,25 @@
                 milestone 22と同じくまだ対象外なのでANYで登録)→トップレベル定数を
                 検査+登録(値の型注釈があればそちらを、無ければ値から推論した型で
                 登録)→各関数の本体を検査
-              - テスト4件新規(重複関数宣言→already-declared・組み込み名の関数宣言→
+              - テスト7件新規(重複関数宣言→already-declared・組み込み名の関数宣言→
                 builtin-redeclared・予約語の関数宣言→reserved-word・定数と関数の名前
-                衝突→already-declared)。387→391件、全件パス。
+                衝突→already-declared・異なるstructの同名メソッド→誤検知なし・
+                メソッド名と同名のローカル変数→誤検知なし・トップレベル定数の型が
+                参照側でも伝播することの確認)。387→394件、全件パス。
                 `cargo clippy --all-targets -- -D warnings`クリーン
+              - **`/code-review`(5並列エージェント)で発見・修正した実バグ1件**:
+                `program.fns`には自由関数とstructのメソッド(`receiver`付き)が同じ配列に
+                混在しているが、トップレベル名の事前登録ループ(`ctx.declare()`)が
+                receiverの有無を見ずに両方登録していたため、**異なるstructが同名メソッドを
+                持つ**(TS版・実際のMesh言語仕様では正当——メソッドの名前空間は自由関数と
+                完全分離)だけで`already-declared`の誤検知になっていた
+                (`examples/struct_methods.mesh`相当のコードが壊れる実害あり)。
+                milestone 22時点の`top_level_names`(単なる集合、重複挿入は無害)から
+                `ctx.declare()`(衝突を実際に検査)へ切り替えたことで初めて表面化した
+                バグ——TS版`checker/functions.ts`の`declareMethod`が別の`methodTable`に
+                登録し`scopes[0]`には触れない設計と突き合わせて発覚。トップレベル名の
+                登録・本体検査どちらもレシーバ付き関数(メソッド)をスキップするよう修正
+                (structはmilestone 22/23とも対象外なので、スキップが正しい扱い)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
