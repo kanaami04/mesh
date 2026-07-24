@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { check, checkModules } from "../src/checker";
 import { compile, compileModules } from "../src/compiler";
 import { DIAGNOSTIC_EXPLANATIONS, type DiagnosticCode } from "../src/diagnostic-codes";
+import { synthesizeJsonEncoders } from "../src/json-decode";
 import { parse } from "../src/parser";
 import { CompileError } from "../src/token";
 
@@ -1879,6 +1880,78 @@ fn main() {}`),
           pkg: "main",
           file: "app.mesh",
           source: `import "mesh/json"\nimport "models"\nfn main() {\n\tv := json.parse("{}") or _ => json.Value{kind: "null"}\n\tu := models.decodeUser(v)\n\tif u is error { return }\n\tprint(u.name)\n}`,
+        },
+        {
+          pkg: "models",
+          file: "models/models.mesh",
+          source: `import "mesh/json"\nexport json struct User {\n\tname: string\n}`,
+        },
+      ]);
+      expect(result.diagnostics).toEqual([]);
+    });
+  });
+
+  describe("design-agenda J節: json structのエンコード(H-2の裏返し)", () => {
+    test("フラットなjson structは型検査を通り、encode<Name>が呼び出せる", () => {
+      const errors = jsonErrorsOf(`import "mesh/json"
+json struct User {
+	name: string
+	age: int
+}
+fn main() {
+	u := User{name: "alice", age: 30}
+	v := encodeUser(u)
+	print(json.stringify(v))
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("ネスト・配列・optionalの組み合わせも型検査を通る", () => {
+      const errors = jsonErrorsOf(`import "mesh/json"
+json struct Address { city: string }
+json struct Person {
+	name: string
+	address: Address
+	tags: string[]
+	nickname: string | none
+}
+fn main() {
+	p := Person{name: "a", address: Address{city: "x"}, tags: ["a"], nickname: none}
+	v := encodePerson(p)
+	print(json.stringify(v))
+}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("退行防止: サポート外のフィールド型(素のstruct・map)は合成時にjson-struct-unsupported-fieldで拒否される", () => {
+      // decode/encodeは同じ制約を共有するため、decode側の合成(compiler.tsで先に呼ばれる)が
+      // 先にこのエラーを出す——ここではsynthesizeJsonEncoders自体が同じ検査を持つことを
+      // decodeを経由せず直接確認する(json-decode.tsのコメント参照: 自己完結の意図的な設計)
+      const program = parse(`import "mesh/json"
+struct Address { city: string }
+json struct Person {
+	name: string
+	address: Address
+}
+fn main() {}`);
+      expect(() => synthesizeJsonEncoders(program)).toThrow(/can't auto-encode field 'address'/);
+    });
+
+    test("退行防止: import \"mesh/json\"が無いとjson-struct-missing-importで拒否される", () => {
+      expect(
+        jsonErrorsOf(`json struct User {
+	name: string
+}
+fn main() {}`),
+      ).toEqual([expect.stringContaining("needs 'import \"mesh/json\"'")]);
+    });
+
+    test("export json structは、生成されたencode<Name>もexportされる(他パッケージから呼べる)", () => {
+      const result = compileModules([
+        {
+          pkg: "main",
+          file: "app.mesh",
+          source: `import "mesh/json"\nimport "models"\nfn main() {\n\tu := models.User{name: "alice"}\n\tv := models.encodeUser(u)\n\tprint(json.stringify(v))\n}`,
         },
         {
           pkg: "models",

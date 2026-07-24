@@ -336,7 +336,22 @@
       合成し通常の`FnDecl`として`program.fns`へ注入する(`src/json-decode.ts`、
       `compiler.ts`のparse直後・check直前で実行)。既存のchecker/codegenを一切変更せず
       再利用でき、生成コードも普通の関数として型検査される(安全網が「無料」で付く)。
-      テスト12件追加(checker 6件・e2e 6件) |
+      テスト12件追加(checker 6件・e2e 6件)。
+      **エンコード方向(design-agenda.md J節)** ✅ 2026-07-24実装(demo/todo-api実装中に
+      「デコードしか自動生成されず、逆方向〈struct → JSON〉は毎回手書きが必要」という
+      非対称に気づき、kanayamaと討議のうえ選択肢(a)=decodeと対になる自由関数を採用)。
+      同じ`json struct X {...}`から`encodeX(x: X) json.Value`も自動生成される
+      (Go `encoding/json`のMarshal・Rust serdeの`derive(Serialize)`が両方向を1つの
+      アノテーションから生成するのと同じ発想)。検証を伴わない一方向の変換なので戻り値は
+      `json.Value | error`ではなく素の`json.Value`。対応フィールド型・エラー
+      (`json-struct-unsupported-field`/`json-struct-missing-import`)はデコード側と対称。
+      **TS版のみ実装**(`src/json-decode.ts`に`synthesizeJsonEncoders`を追加、
+      `compiler.ts`で`synthesizeJsonDecoders`の直後に呼ぶ)——Rust移植版
+      (`rust/src/json_decode.rs`)はTS版デコード部分を忠実に移植したものだが、
+      このエンコード方向はまだ移植していない。そのためdemo/todo-apiは意図的に
+      この新機能を使わないまま据え置いた(使うとRust版生成JSが`encodeTodo`未定義の
+      ランタイムエラーになり、デモの「TS版・Rust版どちらでも動く」という前提が
+      崩れるため)。テスト10件追加(checker 5件・e2e 5件) |
 | `mesh/http`(C-6続き) | ✅ | 2026-07-21実装(kanayamaと討議のうえ、案1=Go `net/http`直訳の
       生ハンドラ+単純listenを採用。ルーター内蔵は却下ではなく「v2でmesh/http自身に追加」と
       design-agenda.md C-6へ明記 — Meshにはまだサードパーティパッケージのエコシステムが無く

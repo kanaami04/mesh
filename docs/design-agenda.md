@@ -499,7 +499,7 @@ socketへの書き込みは無害なno-op」と反証し、却下した。
 todo.md「次の一手」に残る大きな討議項目は、これでC-6(コア+mesh/http v1)まで完了。
 次点は同todo.md記載のとおり、言語カード実証実験の継続またはRust移植の開始
 
-## J. json struct のエンコード方向(H-2の裏返し) — 討議中(2026-07-24提起)
+## J. json struct のエンコード方向(H-2の裏返し) — ✅ 決着・実装済み(2026-07-24): 選択肢(a)を採用
 
 `demo/todo-api/main.mesh`実装中に発覚: H-2で`json struct X {...}`から自動生成されるのは
 **デコード方向**(`decode<X>(v: json.Value) X | error`)だけで、**エンコード方向**
@@ -511,15 +511,38 @@ todo.md「次の一手」に残る大きな討議項目は、これでC-6(コア
 タグ/deriveでデコード・エンコード**両方向**を自動生成するのに対し、現状のMeshは
 デコードのみ自動という非対称な状態——H-2時点では意識していなかった穴。
 
-**選択肢**(討議未着手、次回kanayamaと相談して決める):
-- (a) `encodeX(x: X) json.Value`という対になる自由関数を自動生成。`decodeX`と同じ
-  命名規則・同じ「構文レベルAST合成方式」(`src/json-decode.ts`)をそのまま流用できる
-- (b) レシーバメソッド`(x: X) toJson() json.Value`として生成。struct宣言に
-  「メソッドが後から自動で生える」という今までに無い挙動になるため、「メソッドは
-  ユーザーが自分で書く」という既存設計との整合を要検討
-- (c) `json.Value`を経由せず`stringifyX(x: X) string`まで直接生成。構成しやすさ
-  (`json.Value`として他の木に埋め込む用途)を諦める代わりに一番よくある用途を最短化する
+**討議の経緯(2026-07-24)**: 3つの選択肢を提示——(a) `encodeX(x: X) json.Value`という
+対になる自由関数(`decodeX`と同じ命名規則・同じAST合成方式をそのまま流用できる)、
+(b) レシーバメソッド`(x: X) toJson() json.Value`(struct宣言に「メソッドが後から自動で
+生える」という新しい挙動が入り、「メソッドはユーザーが自分で書く」既存設計と整合しない
+懸念があった)、(c) `json.Value`を経由せず`stringifyX(x: X) string`まで直接生成
+(構成しやすさを失う代わりに最短化)。kanayamaと相談し(a)を採用。
 
-対応範囲はH-2のデコード側と対称(int/float/string/bool・同一ファイル内の他の
-json struct・それらの配列・`T | none`)にするのが自然そうだが、これも要確認。
-todo.mdの「次の一手」に控えとして記載。
+**実装メモ**:
+- `src/json-decode.ts`に`synthesizeJsonEncoders`(+ヘルパー群)を追加し、
+  `compiler.ts`で`synthesizeJsonDecoders`の直後に呼ぶ。デコードと対称の対応範囲
+  (`int/float/string/bool`・同一ファイル内の他の`json struct`・それらの配列・
+  `T | none`)、対称のエラー(`json-struct-unsupported-field`/
+  `json-struct-missing-import`)。エンコードは検証を伴わない(Mesh側は既に型付きなので
+  失敗し得ない)ため戻り値は`json.Value | error`ではなく素の`json.Value`
+- decode/encodeは同じ`isSimple`/`optionalInner`ヘルパーを共有するため対応範囲は完全に
+  対称——compiler.tsでは`synthesizeJsonDecoders`が先に走るので、実運用上は
+  「decodeが通ればencodeも必ず通る」(decode側のエラーが先に出る)。それでも
+  `synthesizeJsonEncoders`自身は自己完結した検証を持つ(decode側の実装都合に依存しない
+  設計、テストからも直接呼べる)
+- **テスト**: `synthesizeJsonEncoders`単体の型検査(checker.test.ts 5件: フラット・
+  ネスト+配列+optional・サポート外フィールドの拒否・import漏れの拒否・export越しの
+  呼び出し)+ 実行結果(e2e.test.ts 5件: フラット・ネスト+配列+optional・
+  配列要素がjson struct+配列自体optional・encode→decodeのラウンドトリップ・
+  複数パッケージでのexport)。500件全件パス、`tsc --noEmit`クリーン、既存の全example
+  (`defer_panic.mesh`の意図的なpanicを除く)を再実行し回帰無し
+- **Rust移植版は対象外**: `rust/src/json_decode.rs`はTS版`json-decode.ts`の
+  デコード部分を忠実に移植したものだが、今回追加したエンコード方向はまだ移植していない
+  (`rust/`は並行して育てている移植版であり、TS側の新機能に即座に追随する義務は無い
+  ——CLAUDE.md「Rust移植について」参照)。そのため`demo/todo-api/main.mesh`は
+  意図的にこの新機能へ切り替えなかった——`json struct Todo`にして`encodeTodo`を
+  使う版を試作したところ、Rust版が生成したJSには`encodeTodo`の**呼び出しだけ**が
+  含まれ定義が無く、実行時`ReferenceError`になることを実機確認した(Rust版の
+  `json_decode.rs`にエンコード合成が無いため)。デモの存在意義が「TS版・Rust版
+  どちらでコンパイルしても同じ挙動」であることなので、この試作は取り消し、
+  デモは既存の手書き`toJson()`のまま据え置いた
