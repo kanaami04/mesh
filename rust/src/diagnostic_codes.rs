@@ -37,6 +37,7 @@ pub enum DiagnosticCode {
     UseIsNone,
     DivisionByZero,
     ArgumentCount,
+    BuiltinArgType,
 }
 
 impl DiagnosticCode {
@@ -58,6 +59,7 @@ impl DiagnosticCode {
             DiagnosticCode::UseIsNone => "use-is-none",
             DiagnosticCode::DivisionByZero => "division-by-zero",
             DiagnosticCode::ArgumentCount => "argument-count",
+            DiagnosticCode::BuiltinArgType => "builtin-arg-type",
         }
     }
 }

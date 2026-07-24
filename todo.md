@@ -2606,6 +2606,31 @@
                 413→420件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を
                 4パターン(不足/過多/型不一致/正常)で突き合わせコード・メッセージ・位置まで
                 完全一致を確認。既存exampleも回帰なし
+        - [x] **milestone 27: 組み込み関数の検査(argument-count / builtin-arg-type)**
+              ✅ 2026-07-25実装。milestone 26で「次回」としていた組み込み関数
+              (`print`/`len`/`push`/`str`/…27個)の検査。TS版`src/checker/builtins.ts`の
+              `inferBuiltinCall`(巨大switch)を`full_checker.rs`の新設`infer_builtin_call`へ移植。
+              - `Expr::Call`で裸のIdentが組み込み名なら先にintercept(組み込みはshadow
+                不可なので必ず組み込み呼び出し)。
+              - **スカラースコープでの縮退**: 配列/map/channel/関数型はfull_checkerでは
+                すべてANYに潰れるため、TS版が`arr.kind === "array"`等でガードする要素型・
+                添字型・callback署名の検査(type-mismatch/invalid-index-type/
+                callback-signature-mismatch)は到達せず、コレクションをモデル化する将来の
+                milestoneで拾う。この一歩で実際に効くのは(1)全組み込みのarity
+                (argument-count、`str() expects 1 argument(s), got 2`等)、(2)スカラー引数の
+                型検査(builtin-arg-type、`len(5)`→"requires string, array or map"・
+                `round(3)`→"requires a float"・`contains(5,x)`→"requires an array"等——
+                具体スカラーを渡した場合だけ発火、TS版と一致)、(3)スカラー戻り値型
+                (str→string, len→int, round→int 等)。コレクション/union戻り値
+                (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す。
+              - 診断コード`builtin-arg-type`を追加(`argument-count`はmilestone 26で既存)。
+              - 新規テスト7件(個数不一致・len非文字列・round非float・コレクション組み込みへの
+                スカラー・正しい呼び出し・配列/map引数で誤検知なし・組み込み引数の未定義名検出)。
+                422→429件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を9パターンで
+                突き合わせコード・メッセージ・位置まで完全一致、実コレクションを使う正当な
+                プログラムで誤検知が無いことも両CLIで確認。既存exampleも回帰なし。
+              - **スコープ外**: コレクション要素型・添字型・callback署名の検査
+                (配列/map/channel/関数型のモデル化とセット)、pkg修飾された組み込み。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
