@@ -491,16 +491,34 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (22本)がbyte-for-byte一致のまま回帰無し。`<-ch`/map読み取り/`true - false`/
   `bools[0]++`の各パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
   位置情報で拒否されることまで確認済み。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの13マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 14(比較/論理/等価演算子の妥当性検査)完了
+  (2026-07-24)**。milestone 13で意図的にスコープ外としていた残り3カテゴリ
+  (`&&`/`||`の`not-bool`・`==`/`!=`の`use-is-none`/`incomparable-types`・
+  `< <= > >=`の`incomparable-types`)を、kanayamaから「妥当性検査の部分全て
+  やってしまいましょう」という依頼を受けてまとめて実装。TS版`checkArithOp`
+  周辺の該当ロジック(milestone 13の調査時に既読)をそのまま移植——`infer_binary`
+  の`match`を`check_logical_op`/`check_equality_op`/`check_comparison_op`へ
+  分割し、型互換性は既存の`types::assignable`/`is_numeric`/`is_stringy`を
+  再利用。`codegen.rs`は変更不要(milestone 13で付けた`?`がそのまま新しいErrも
+  伝播する)。テスト322→330件(+8)。**このmilestoneが今までで最も回帰リスクが
+  高かった**(`&&`/`||`/`==`/`!=`/`< <= > >=`は全exampleで最も広範囲に使われる
+  演算子カテゴリ)が、既存の全example(22本)がbyte-for-byte一致のまま回帰無し
+  だった(milestone 12/13と同じ理由——既存のexampleは全てTS版のこの検査を
+  既に通過済み)。4パターン(非bool論理演算子・リテラルnoneとの等価比較・
+  比較不能な等価/順序比較)をRust版・TS版両方でコンパイルし、同じ理由・同じ
+  位置情報で拒否されることも確認済み。これでTS版`checkArithOp`+二項演算子
+  まわりの主要な妥当性検査(算術・比較・論理・等価)をひととおり移植し終えた。
+  詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの14マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
-  フィールド検証 → 算術演算子の妥当性検査)が全て完了——TS版リファレンス実装の
-  主要機能をRust版がひととおり移植し終えた。細かな既知の限界・意図的なスコープ
-  縮小(自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック関数・
-  `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
-  `gen_lvalue`の代入先フィールド名検証・struct宣言時点の`__proto__`ガード・
-  比較演算子/`&&`/`||`/`==`/`!=`の妥当性検査 等)は引き続きtodo.mdに記録済みの
-  通り残る。次の対象はkanayamaと相談して決める
+  フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査)が
+  全て完了——TS版リファレンス実装の主要機能をRust版がひととおり移植し終えた。
+  細かな既知の限界・意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上の
+  destructure・ジェネリック関数・`mesh/io`/`mesh/http`・
+  cross-file/cross-packageのjson struct参照・`gen_lvalue`の代入先フィールド名
+  検証・struct宣言時点の`__proto__`ガード・pkg修飾struct literalの厳密検証 等)は
+  引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

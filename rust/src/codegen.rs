@@ -2904,4 +2904,45 @@ mod tests {
         assert!(js.contains("(-x)"), "got: {js}");
         assert!(js.contains("z++;"), "got: {js}");
     }
+
+    // ---- milestone 14: 比較/論理/等価演算子の妥当性検査 ----
+
+    #[test]
+    fn 非bool_operandでの論理演算子はerrになる() {
+        let err = gen_js("fn main() {\n  x := 1\n  if x && true {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err.contains("'&&' requires bool operands, got int"), "got: {err}");
+    }
+
+    #[test]
+    fn リテラルnoneとの等価比較はerrになる() {
+        // P1: `x == none`は`is none`に一本化する言語ルールそのもの
+        let err = gen_js("fn main() {\n  x := 1\n  if x == none {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err.contains("use 'is none'"), "got: {err}");
+        let err2 = gen_js("fn main() {\n  x := 1\n  if none != x {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err2.contains("use 'is none'"), "got: {err2}");
+    }
+
+    #[test]
+    fn 比較不能な型同士の等価比較や順序比較はerrになる() {
+        let err = gen_js(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  if u == 5 {\n    print(\"yes\")\n  }\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot compare User with int"), "got: {err}");
+
+        let err2 = gen_js(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  v := User{name: \"b\"}\n  if u < v {\n    print(\"yes\")\n  }\n}",
+        )
+        .unwrap_err();
+        assert!(err2.contains("cannot compare User with User"), "got: {err2}");
+    }
+
+    #[test]
+    fn 正常な論理_等価_順序比較は今まで通りコンパイルできる() {
+        let js = gen_body(
+            "fn main() {\n  x := 3\n  ok := x > 1 && x < 10\n  same := x == 3\n  print(ok)\n  print(same)\n}",
+        );
+        assert!(js.contains("((x > 1) && (x < 10))"), "got: {js}");
+        assert!(js.contains("(x === 3)"), "got: {js}");
+    }
 }
