@@ -7,8 +7,10 @@ description: Mesh(特にRust移植)のマイルストーン1件を、検証→do
 
 実装が一段落した変更を、Meshの標準ワークフロー(docs/handoff.md「開発の進め方」節が一次情報源)に
 沿って **PR作成まで自動で** 進めるための手順書。**mergeは絶対に自動でやらない**
-(kanayamaさんとの合意 [[pr-flow-autonomy]]。`gh pr merge` はユーザーが「マージして」と
-明示するまで実行しない)。
+(2026-07-24のkanayamaさんとの合意。`gh pr merge` はユーザーが「マージして」と明示するまで
+実行しない)。この「PR作成まで自動・mergeは明示指示まで待つ」合意はマシン横断で共有すべき内容
+なので docs/handoff.md「開発の進め方」節に記載済み(このマシンのローカルメモリ
+[[pr-flow-autonomy]] にも同内容があるが、メモリは別マシンから読めないためdocsが正)。
 
 ## 前提
 
@@ -27,8 +29,13 @@ Rust移植の変更なら:
 
 ```sh
 mise run rust-test    # 全テストパスを確認(件数が増えているはず)
-mise run rust-check   # cargo clippy --all-targets -- -D warnings がクリーン
+mise run rust-check   # = cargo clippy --all-targets(警告はエラー化しないので出力を目視)
 ```
+
+**注意**: `mise run rust-check` は `-D warnings` を付けない(`mise.toml` の定義がそう)ため
+警告が出ても exit 0 になる。CI は `cargo clippy --all-targets -- -D warnings` で警告を
+エラー扱いするので、CIと同じ基準で確認したいなら `(cd rust && cargo clippy --all-targets -- -D warnings)`
+を直接実行するか、`mise run rust-check` の出力に警告が無いことを目視で確かめること。
 
 さらに、TS版が正(オラクル)なので **必ずTS版と突き合わせる**:
 
@@ -54,11 +61,16 @@ TS版でしか通らない/落ちる組み合わせがある点に注意(例: `o
 
 ```sh
 git checkout -b <topic-branch>
+git status --short && git diff --stat   # ステージ前に確認(意図しないファイルを混ぜない)
 git add -A
 git commit -F <message-file>   # 決定の経緯・却下した代替案もメッセージに書く
 git push -u origin <topic-branch>
 gh pr create --base main --title "..." --body "..."
 ```
+
+`git add -A` は自動フローでも**必ず直前に `git status`/`git diff --stat` を目視**してから
+使う——無関係なローカル生成物・別作業の変更を巻き込まないため(CLAUDE.md「無関係な変更は
+別コミットに分ける」)。
 
 コミットメッセージ末尾には環境指定のトレーラ(`Co-Authored-By:` / `Claude-Session:`)、
 PR本文末尾には `🤖 Generated with [Claude Code]...` を付ける(ハーネス既定に従う)。
