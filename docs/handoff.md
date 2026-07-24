@@ -622,17 +622,48 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   パターンの4パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
   メッセージ・同じ位置情報で拒否されることを確認済み。詳細はtodo.mdの当該項目が
   一次情報源
-- **次にやるなら**: 確認済みの18マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 19(自己参照型のサポート)完了(2026-07-24)**。
+  milestone 18完了後、残る唯一の既知の限界だった自己参照型
+  (`examples/tree.mesh`がコンパイル不能)にkanayamaの明示的な指示で着手。
+  `types.rs`冒頭のコメントにmilestone 2以来ずっと記されていた設計上の宿題
+  ——TS版はstructのfields/unionのmembersを「後から埋める」knot-tying
+  (オブジェクト参照の共有グラフ)で自己参照型を表現するが、Rust版は所有権
+  ベースの木構造のため値が自分自身を含む真の循環をそもそも構築できなかった
+  ——に対応した。`Type::Struct.fields`/新設`Type::Union`(`UnionBody`を包む)
+  を`Rc<OnceCell<_>>`化し、`resolve_type_decls`を「DFSで循環を問答無用で
+  拒否→固定点反復」方式からTS版`resolveAlias`と同じ「名前ごとにオンデマンド
+  +memo化で再帰的に解決する」方式(新設`resolve_named_type`)へ全面書き換え。
+  struct/union宣言それぞれ「空のRcを先に登録→中身を解決」の知恵の輪で、
+  自己参照する宣言を解決中に自分自身の名前を再度参照しても同じ(まだ空かも
+  しれない)Rcが返るようにした。「structを挟まない裸のunion同士の相互参照」
+  だけはTS版と同じ理由で引き続き`type alias cycle`のErrにする(tree.mesh
+  自身のコメントが明言する既存のスコープ制限、TS版も同じ制限)。
+  `type_equals`/`type_to_string`(types.rs)にはTS版と同じ`seen`循環ガードを
+  `Rc::ptr_eq`で追加(自己参照するunion同士の比較・表示が無限再帰し
+  スタックオーバーフローすることを設計段階で確認し、追加)。副次効果として
+  struct-struct相互参照・直接の自己参照(unionで包まない形)も正しく解決
+  できるようになった(TS版も元々これらを拒否していないことを実機確認済み)。
+  json.Valueを本物の自己参照判別可能unionへ再定義するボーナス案は今回の
+  スコープに含めず、次のmilestone候補として提案するに留めた。テスト
+  354→358件、既存の全22 example(**`tree.mesh`含む**——これまで唯一の除外
+  対象だったが今回から他の21本と同列にbyte-for-byte確認対象に含まれる
+  ようになった)がbyte-for-byte一致のまま回帰無し。`tree.mesh`の実際の出力
+  (`6`/`3`)・`struct A{b:B} struct B{a:A}`(相互循環、コンパイル成功)・
+  `type A = B|none type B = A|error`(裸union循環、引き続き拒否)をRust版・
+  TS版両方で確認済み。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの19マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
   検証 → resolve_method_targetのフィールド名判定統一 → struct宣言時点の
-  `__proto__`ガード)が全て完了——TS版リファレンス実装の主要機能をRust版が
-  ひととおり移植し終えた。残る既知の限界は自己参照型のみ(細かな意図的な
-  スコープ縮小として`json.Value`の2階層以上のdestructure・ジェネリック関数・
-  `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照は引き続き
-  todo.mdに記録済みの通り残る)。次の対象はkanayamaと相談して決める
+  `__proto__`ガード → 自己参照型のサポート)が全て完了——TS版リファレンス
+  実装の主要機能をRust版がひととおり移植し終え、既知の限界として記録されて
+  いたものは全て解消した。細かな意図的なスコープ縮小(json.Valueを本物の
+  自己参照型として再定義すること・`json.Value`の2階層以上のdestructure・
+  ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson
+  struct参照)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと
+  相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

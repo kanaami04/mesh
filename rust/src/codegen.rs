@@ -546,7 +546,7 @@ impl Codegen {
         // 宣言しておかないと(例えば)`gen_call`自身のメソッド判定がANY扱いになってしまう
         let invoke_callee: Expr = if let Expr::Member { target, name, pos: member_pos } = &**callee {
             let target_ty = checker::infer_expr(&self.ctx, target);
-            let is_method = matches!(&target_ty, Type::Struct { fields, .. } if !fields.iter().any(|f| &f.name == name));
+            let is_method = matches!(&target_ty, Type::Struct { fields, .. } if !fields.get().is_some_and(|fs| fs.iter().any(|f| &f.name == name)));
             if is_method {
                 let recv_js = self.gen_expr(target)?;
                 let recv_temp = format!("__d{}", self.defer_temp_counter);
@@ -1085,7 +1085,7 @@ impl Codegen {
                         .lookup_struct(name)
                         .or_else(|| self.ctx.lookup_union(name))
                         .cloned()
-                        .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
+                        .unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
                 };
                 // milestone 16: pkg修飾側もフィールド名/型/判別可能unionのdisambiguationを
                 // 実際に検証するようにした(以前はmilestone 8の"all"ヒューリスティック
@@ -1332,6 +1332,7 @@ impl Codegen {
         let Type::Struct { fields, name: struct_name, .. } = &target_ty else {
             return Ok(None);
         };
+        let fields = fields.get().expect("struct fields resolved before method-call resolution");
         if checker::resolve_method_call_target(fields, &self.ctx, struct_name, name, call_pos)? {
             Ok(Some((target, method_js_name(struct_name, name))))
         } else {
@@ -1509,7 +1510,7 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
         Type::Fn { params, ret: Box::new(ret) }
     }
     fn anon_struct(fields: Vec<types::StructField>) -> Type {
-        Type::Struct { name: types::ANONYMOUS_STRUCT_NAME.to_string(), fields, is_error_type: false }
+        types::struct_ty(types::ANONYMOUS_STRUCT_NAME, fields, false)
     }
     fn field(name: &str, type_: Type) -> types::StructField {
         types::StructField { name: name.to_string(), type_ }
@@ -1529,9 +1530,9 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
     // 入れ子destructureだけがこのスコープ縮小の影響を受ける(is/matchの実行時テスト
     // 自体はASTから直接組み立てるため2階層以上でも動く——影響を受けるのは
     // checker側の型推論の精度だけ、milestone 7のgen_type_test参照)
-    let hollow_value = Type::Struct { name: "json.Value".to_string(), fields: vec![], is_error_type: false };
-    let value_ty = Type::Union {
-        members: vec![
+    let hollow_value = types::struct_ty("json.Value", vec![], false);
+    let value_ty = types::union_ty(
+        vec![
             anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
             anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
             anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
@@ -1548,8 +1549,8 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
         // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
         // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
         // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
-        discriminant_tag: Some("kind".to_string()),
-    };
+        Some("kind".to_string()),
+    );
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
     let mut types = HashMap::new();
@@ -2752,9 +2753,27 @@ mod tests {
     }
 
     #[test]
-    fn 自己参照するunion型aliasは明確なエラーになる() {
-        let err = gen_js("type Tree = { kind: \"leaf\" } | { kind: \"node\", left: Tree, right: Tree }\nfn main() {}").unwrap_err();
-        assert!(err.contains("self-referential/cyclic type definitions"), "got: {err}");
+    fn 自己参照するunion型aliasはstruct越しの参照ならコンパイルできる() {
+        // milestone 19: examples/tree.mesh相当。以前はこの形も一律で
+        // self-referential/cyclic type definitionsとして拒否していたが、TS版と同じく
+        // struct(無名メンバー)のフィールド越しの自己参照は正しく受理するようになった
+        let js = gen_js(
+            "type Tree = { kind: \"leaf\", value: int } | { kind: \"node\", left: Tree, right: Tree }\n\
+             fn leaf(v: int) Tree {\n  return Tree{ kind: \"leaf\", value: v }\n}\n\
+             fn node(l: Tree, r: Tree) Tree {\n  return Tree{ kind: \"node\", left: l, right: r }\n}\n\
+             fn sumTree(t: Tree) int {\n  return match t {\n    { kind: \"leaf\" } => t.value\n    { kind: \"node\" } => sumTree(t.left) + sumTree(t.right)\n  }\n}\n\
+             fn main() {\n  tree := node(node(leaf(1), leaf(2)), leaf(3))\n  print(sumTree(tree))\n}",
+        )
+        .unwrap();
+        assert!(js.contains("function main"), "got: {js}");
+    }
+
+    #[test]
+    fn structを挟まない裸のunion型alias同士の相互参照は引き続き明確なエラーになる() {
+        // TS版と同じ既知の制限(tree.meshのコメント参照): structを挟まない裸のunion同士の
+        // 相互参照だけは今も未対応
+        let err = gen_js("type A = B | \"none_a\"\ntype B = A | \"none_b\"\nfn main() {}").unwrap_err();
+        assert!(err.contains("type alias cycle"), "got: {err}");
     }
 
     #[test]

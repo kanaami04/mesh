@@ -18,7 +18,9 @@
 use crate::ast::{Expr, MatchArm, MatchPattern, StructLitField, TypeDecl, TypeNode};
 use crate::token::{Pos, TokenType};
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 // 組み込み関数。TS版`checker/context.ts`のBUILTINSをそのまま移植(特殊な検査は
 // このリゾルバの対象外なので、名前の集合だけが必要)
@@ -51,13 +53,14 @@ pub struct CheckerCtx {
     // 以下4つは「現在処理中のパッケージ」ぶんだけを持つフラット名前空間——codegen側が
     // パッケージを切り替えるたびbegin_packageでリセットする(milestone 6・複数パッケージ対応)
     fn_decls: HashMap<String, Type>,
-    // 名前→解決済みのstruct型(resolve_type_declsが埋める)。TS版のresolvedAliasesに相当するが、
-    // knot-tying(共有可変状態)ではなく固定点反復で埋めるため、単純な所有権ベースのmapでよい
-    // (ファイル冒頭のコメント参照)。キーは常に素の(pkg修飾されていない)名前——ただし
-    // 値のType::Struct.name自体はpkg=="main"以外ならpkg修飾済み(qualify_struct_name参照)
+    // 名前→解決済みのstruct型(resolve_type_declsが埋める)。TS版のresolvedAliasesと同じく
+    // knot-tying(milestone 19: Type::Struct.fieldsがRc<OnceCell<_>>なので、ここに登録した
+    // 「まだ空」のplaceholderをcloneで配ってから後で中身をsetできる)。キーは常に素の
+    // (pkg修飾されていない)名前——ただし値のType::Struct.name自体はpkg=="main"以外なら
+    // pkg修飾済み(qualify_struct_name参照)
     struct_types: HashMap<String, Type>,
     // 名前→解決済みのunion型(`type X = A | B`、milestone 7・判別可能union対応)。
-    // struct_typesと並ぶ姉妹テーブル——resolve_type_declsが同じ固定点反復の中で埋める
+    // struct_typesと並ぶ姉妹テーブル——resolve_type_declsが同じknot-tying方式で埋める
     union_types: HashMap<String, Type>,
     pkg: String,                     // 現在処理中パッケージ名("main"かimportエイリアス名)
     import_aliases: HashSet<String>, // 現在処理中パッケージのimportエイリアス集合
@@ -186,11 +189,12 @@ impl CheckerCtx {
 }
 
 // 型注釈(構文)を内部表現の型へ変換。TS版`checker/types-resolve.ts`のresolveTypeのうち、
-// このRust移植で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying。循環検出込み)は
-// 自己参照型(milestone 2の自己参照struct・milestone 7の自己参照判別可能union、共に
-// 明確なErrで対象外)を除き`ctx.struct_types`/`ctx.union_types`(resolve_type_declsが
-// 埋める)を引き、無ければ名前だけを覚えた空フィールドのstruct型として素通しする
-// (未宣言の型名のフォールバック)
+// このRust移植で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying、milestone 19)は
+// `ctx.struct_types`/`ctx.union_types`(resolve_type_declsが埋める——自己参照する宣言は
+// 解決中の時点でも空のplaceholderが既に登録されているため、ここでそのまま見つかる)を引き、
+// それでも無ければ名前だけを覚えた空フィールドのstruct型として素通しする(未宣言の型名の
+// フォールバック)。この関数自体は読み取り専用(&CheckerCtx)のまま——`resolve_type_decls`
+// 側が呼び出し前に依存する型を先に解決しておく(`resolve_named_type`参照)
 pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
     match node {
         TypeNode::Union { members, .. } => types::union_of(members.iter().map(|m| resolve_type_node(ctx, m)).collect()),
@@ -209,7 +213,7 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
         // 既に is_package_alias でこれを確認しているので、型/struct literal側も揃える
         TypeNode::Name { name, pkg: Some(alias), .. } => {
             if ctx.is_package_alias(alias) { ctx.lookup_package_type(alias, name).cloned() } else { None }
-                .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false })
+                .unwrap_or_else(|| types::struct_ty(format!("{alias}.{name}"), vec![], false))
         }
         TypeNode::Name { name, pkg: None, .. } => match name.as_str() {
             "int" => INT,
@@ -222,11 +226,7 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
             "closed" => types::CLOSED,
             // union型alias(`type Status = "active" | "banned"`、milestone 7)はstruct_typesに
             // 無ければunion_typesも試す。どちらにも無ければ従来通り殻structへフォールバック
-            _ => ctx
-                .lookup_struct(name)
-                .or_else(|| ctx.lookup_union(name))
-                .cloned()
-                .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
+            _ => ctx.lookup_struct(name).or_else(|| ctx.lookup_union(name)).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
         },
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_node(ctx, elem))),
         TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node(ctx, elem))),
@@ -237,11 +237,11 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
             params: params.iter().map(|p| resolve_type_node(ctx, p)).collect(),
             ret: Box::new(ret.as_deref().map(|r| resolve_type_node(ctx, r)).unwrap_or(VOID)),
         },
-        TypeNode::StructType { fields, .. } => Type::Struct {
-            name: types::ANONYMOUS_STRUCT_NAME.to_string(),
-            fields: fields.iter().map(|f| types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) }).collect(),
-            is_error_type: false,
-        },
+        TypeNode::StructType { fields, .. } => types::struct_ty(
+            types::ANONYMOUS_STRUCT_NAME,
+            fields.iter().map(|f| types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) }).collect(),
+            false,
+        ),
     }
 }
 
@@ -250,93 +250,96 @@ pub fn resolve_return_type(ctx: &CheckerCtx, ret: &Option<TypeNode>) -> Type {
 }
 
 // トップレベルのtype宣言(struct・union型alias)をすべて`ctx.struct_types`/`ctx.union_types`
-// へ解決する。TS版はASTを直接書き換えるknot-tyingで自己参照型を表現するが、Rustの
-// 所有権ベースの木ではそのパターンに向かない(types.rs冒頭のコメント参照)。代わりに
-// **固定点反復**で解決する: 現時点のレジストリを使って全宣言のfields/membersを繰り返し
-// 再解決し、`types.len()`回のパスで非循環(DAG)なら宣言順に関係なく必ず収束する。
-// ただし循環(自己参照含む)は固定点反復では「クラッシュはしないが深さが毎パス線形に
-// 伸びる中途半端な入れ子」になってしまい、「自己参照は未対応」という前提を静かに
-// 裏切ってしまうため、固定点反復の前に生のTypeNode参照関係だけを見た軽量なDFSサイクル
-// 検出を挟み、循環があれば明確なErrを返す(codegenの「まだ対応していません」と同じ
-// 精神——診断ではなく、対応していない構造を正直に伝える)。struct宣言とunion型alias宣言
-// (milestone 7・判別可能union対応)は同じ依存グラフの中で扱う——一方が他方を参照しうる
-// ため(例: unionのメンバーが名前付きstructを参照する、structのフィールドがunion型
-// aliasを参照する)。**自己参照する判別可能union(`examples/tree.mesh`)はこの循環検出で
-// 明確なErrになり対象外のまま**——無名structの構造的比較(ANONYMOUS_STRUCT_NAME)では
-// 自己参照を安全に表現できないため、milestone 2の自己参照structと同じ理由の意図的な
-// スコープ縮小
+// へ解決する。milestone 19: TS版`resolveAlias`(`src/checker/types-resolve.ts:109-192`)と
+// 同じ「名前ごとにオンデマンド+memo化で再帰的に解決する」方式へ全面書き換え——以前の
+// 「DFSで循環を問答無用で拒否 → 固定点反復」方式(自己参照を一律非対応にしていた)を廃止した。
+// `Type::Struct.fields`/`Type::Union`の中身がRc<OnceCell<_>>で共有可能になったため
+// (types.rs冒頭のコメント参照)、TS版と同じ「空の入れ物を先にレジストリへ登録 → 中身を
+// 解決」のknot-tyingが行える。全宣言に対して`resolve_named_type`を呼ぶだけ——未参照でも
+// 診断するTS版`checkPackage`のeagerパスと同じ意図を維持する
 pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<(), String> {
-    // code review(milestone 3で発覚): 以前は`!t.is_error`も条件に含めていたため、
-    // `error struct X {...}`宣言がここで丸ごと無視され、is_error_typeタグが一切効かない
-    // バグになっていた。error structもここで解決し(下のstruct構築コードが既に
-    // `is_error_type: decl.is_error`を渡しているので、それ以外の変更は不要)。
     // json struct(milestone 9)もTS版と同じく普通のstructとして解決する——`is_json`は
     // decode<X>自動生成(json_decode.rs)の対象を決めるだけのフラグで、struct自体の
-    // 型解決(構築・フィールドアクセス)には一切影響しない(TS版のresolveAlias/
-    // resolveTypeがisJsonを一切参照しないことを確認済み)。以前ここで除外していたのは
-    // 「decode<X>合成がまだ無い」ための暫定処置だった
+    // 型解決(構築・フィールドアクセス)には一切影響しない
     let type_decls: Vec<&TypeDecl> = types.iter().filter(|t| matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. })).collect();
-    let names: HashSet<&str> = type_decls.iter().map(|t| t.name.as_str()).collect();
-
-    if let Some(cycle_name) = find_type_decl_cycle(&type_decls, &names) {
-        return Err(format!("checker: self-referential/cyclic type definitions are not yet supported (found via '{cycle_name}')"));
-    }
-
-    // struct宣言時点の予約フィールド名チェック(TS版`checkFieldName`、`src/checker/
-    // context.ts`)。__proto__はcodegenがプレーンなJSオブジェクトリテラルへ直訳する際、
-    // 代入ではなくprototypeの差し替えになり値が黙って消える(未対応のプロトタイプ汚染
-    // 経路)ため、TS版はstruct宣言を解決した時点(resolveAlias/resolveTypeのstructType
-    // 分岐)で——実際にconstructされるかに関わらず——即座に拒否する。ここは他パッケージも
-    // 含め全型宣言を(使用有無に関わらず)必ず一度は解決するTS版`checkPackage`のeagerパスに
-    // 相当する箇所なので、同じタイミングを再現できる。TS版と同じく named struct宣言の
-    // フィールドと、無名{...}のunionメンバー(判別可能union用、`parse_inline_struct_type`)の
-    // フィールドの両方が対象——名前付きの型を参照するunionメンバー(例: `Circle | Square`)は
-    // その型自身の宣言側で別途チェックされるためここでは素通しする。
-    // (struct-literal構築時・代入先としての`u.__proto__ = ...`のガードは既存のまま
-    // codegen.rsに残す——json.Valueの不透明structのように宣言側のフィールド検証を
-    // 意図的にバイパスする経路でも、生成されるJSへ`__proto__`が紛れ込むのを防ぐため)
+    let decls: HashMap<&str, &TypeDecl> = type_decls.iter().map(|d| (d.name.as_str(), *d)).collect();
     for decl in &type_decls {
-        match &decl.node {
-            TypeNode::StructType { .. } => check_struct_type_field_names(&decl.node)?,
-            TypeNode::Union { members, .. } => {
-                for m in members {
-                    check_struct_type_field_names(m)?;
-                }
-            }
-            _ => {}
-        }
+        resolve_named_type(ctx, &decl.name, &decls)?;
     }
+    Ok(())
+}
 
-    // 固定点反復: 依存先が(宣言順に関係なく)先に解決されているかどうかに関わらず、
-    // 現在のレジストリの中身で全宣言を素朴に再解決するのをN回繰り返す。非循環である
-    // ことは上のサイクル検出で保証済みなので、依存の深さはtypes.len()を超えない。
-    // 他パッケージへの参照(pkg修飾された型注釈)はfind_type_decl_cycleが素の名前しか
-    // 見ないため対象に含まれず、resolve_type_node経由でregistryから都度解決される
-    // (パッケージは依存順に処理されるので、そのregistry参照は既に確定済み——反復不要)
-    for _ in 0..type_decls.len().max(1) {
-        for decl in &type_decls {
-            match &decl.node {
-                TypeNode::StructType { fields, .. } => {
-                    let resolved_fields =
-                        fields.iter().map(|f| types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) }).collect();
-                    let name = qualify_struct_name(ctx.pkg(), &decl.name);
-                    ctx.declare_struct(&decl.name, Type::Struct { name, fields: resolved_fields, is_error_type: decl.is_error });
-                }
-                // union型alias(`type Status = "active" | "banned"`等)。is/matchのcodegenは
-                // ASTのTypeNodeから直接テストを組み立てる(TS版genTypeTestと同じ)ため
-                // discriminant_tag自体はcodegenのそちらの経路には不要だが、milestone 12の
-                // struct literal構築時disambiguation(F-7)がタグ名を要求するため、ここで
-                // 計算して`Type::Union.discriminant_tag`に持たせる(§計画参照)。
-                // `error type X = A | B`(milestone 8)ならタグ付けも行う
-                TypeNode::Union { members, .. } => {
-                    let resolved = resolve_type_node(ctx, &decl.node);
-                    let resolved = if decl.is_error { tag_error_union(&decl.name, members, resolved)? } else { resolved };
-                    let resolved = compute_discriminant_tag(&decl.name, resolved, decl.pos)?;
-                    ctx.declare_union(&decl.name, resolved);
-                }
-                _ => {}
+// 名前ひとつぶんの宣言をオンデマンドで解決する(TS版`resolveAlias`の移植)。既に
+// `ctx.struct_types`/`ctx.union_types`にあれば(解決済み、または解決中でplaceholderが
+// 登録済みのいずれか)即座に戻る——これがmemoization兼reentrancy停止になる。ローカル
+// 宣言でない名前(pkg修飾/未知の名前)は対象外——`resolve_type_node`のフォールバックに任せる
+fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &TypeDecl>) -> Result<(), String> {
+    if ctx.lookup_struct(name).is_some() || ctx.lookup_union(name).is_some() {
+        return Ok(());
+    }
+    let Some(decl) = decls.get(name).copied() else { return Ok(()) };
+    match &decl.node {
+        // struct宣言時点の予約フィールド名チェック(TS版`checkFieldName`、milestone 18)。
+        // 構築されるかに関わらずここで即座に拒否する(TS版`checkPackage`のeagerパス相当の
+        // タイミング)
+        TypeNode::StructType { fields, .. } => {
+            check_struct_type_field_names(&decl.node)?;
+            let qualified = qualify_struct_name(ctx.pkg(), &decl.name);
+            let cell: Rc<OnceCell<Vec<types::StructField>>> = Rc::new(OnceCell::new());
+            // knot-tying本体: 空のplaceholderを先に登録してから各フィールドを解決する。
+            // 自己参照するフィールド(`next: Node | none`)がこの名前を再度参照しても、
+            // 上の早期returnで即座にこの(まだ空の)同じRcのcloneが返る
+            ctx.declare_struct(name, Type::Struct { name: qualified, fields: Rc::clone(&cell), is_error_type: decl.is_error });
+            let mut resolved_fields = Vec::with_capacity(fields.len());
+            for f in fields {
+                ensure_deps_resolved(ctx, &f.type_node, decls)?;
+                resolved_fields.push(types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) });
             }
+            let _ = cell.set(resolved_fields);
         }
+        TypeNode::Union { members, .. } => {
+            for m in members {
+                check_struct_type_field_names(m)?;
+            }
+            let cell: Rc<OnceCell<types::UnionBody>> = Rc::new(OnceCell::new());
+            ctx.declare_union(name, Type::Union { body: Rc::clone(&cell) }); // knot-tying: 先に登録
+            for m in members {
+                ensure_deps_resolved(ctx, m, decls)?;
+            }
+            let raw_members: Vec<Type> = members.iter().map(|m| resolve_type_node(ctx, m)).collect();
+            // 「structを挟まない裸のunion同士の相互参照」チェック(TS版resolveAliasの
+            // unsafeチェックの移植)。`union_of`でflattenする**前**の生メンバーに対して
+            // 行う——flatten後だと、union_of自身がまだ埋まっていない他のunionのbodyを
+            // 読もうとして「flatten時に相手がまだ空のplaceholderで型情報が消える」という
+            // 過去に実際に踏んだ穴と同じことになる。tree.meshのような自己参照union
+            // (struct越しの参照)はここに引っかからない——union自身の生メンバーは常に
+            // 無名structであり、structのフィールドの中でしかこのunion自身を参照しないため
+            if raw_members.iter().any(|m| matches!(m, Type::Union { body } if body.get().is_none())) {
+                return Err(format!("checker: type alias cycle involving '{name}'"));
+            }
+            let flattened = types::union_of(raw_members);
+            let flattened = if decl.is_error { tag_error_union(name, members, flattened)? } else { flattened };
+            let final_ty = compute_discriminant_tag(name, flattened, decl.pos)?;
+            let Type::Union { body: final_body } = final_ty else { unreachable!("union宣言は必ずType::Unionへ解決される") };
+            let final_ub = final_body.get().expect("union_of/compute_discriminant_tagは常に即座に解決済みのbodyを返す").clone();
+            let _ = cell.set(final_ub);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// 型ノードが参照するローカルな型名(struct/union宣言)を先に解決しておく。直後に呼ぶ
+// `resolve_type_node`(無改造・読み取り専用のまま)の通常lookupが、この関数が登録した
+// (まだ空かもしれない)placeholder/解決済みの値を正しく見つけられるようにするための
+// 事前ステップ——TS版`resolveType`が名前に出会うたびオンデマンドで`resolveAlias`へ
+// 再帰するのと同じ探索を、既存の`collect_referenced_names`(循環検出用に元々あった、
+// TypeNodeの全バリアントを正しく辿りpkg修飾名を除外するロジック)を再利用して行う
+fn ensure_deps_resolved(ctx: &mut CheckerCtx, node: &TypeNode, decls: &HashMap<&str, &TypeDecl>) -> Result<(), String> {
+    let mut referenced = Vec::new();
+    collect_referenced_names(node, &mut referenced);
+    for dep_name in referenced {
+        resolve_named_type(ctx, &dep_name, decls)?;
     }
     Ok(())
 }
@@ -381,8 +384,15 @@ fn tag_error_union(name: &str, source_members: &[TypeNode], resolved: Type) -> R
             other => other,
         }
     }
+    // `resolved`はunion_ofが直前に組み立てたばかりの(まだctxのknot-tying用cellへ
+    // 渡す前の)中間値なので、bodyは常に即座に解決済み——ここで読んでもう一度
+    // union_ty経由で組み立て直して問題ない(このmilestone 19の`resolve_named_type`が
+    // 最終的にcell.set()するのは、ここから返ってきた値をさらに1段挟んだ後)
     Ok(match resolved {
-        Type::Union { members, discriminant_tag } => Type::Union { members: members.into_iter().map(tag).collect(), discriminant_tag },
+        Type::Union { body } => {
+            let ub = body.get().expect("union body available immediately after union_of").clone();
+            types::union_ty(ub.members.into_iter().map(tag).collect(), ub.discriminant_tag)
+        }
         other => tag(other),
     })
 }
@@ -399,11 +409,12 @@ fn is_anonymous_struct(t: &Type) -> bool {
 // 設計のため)
 fn compute_discriminant_tag(name: &str, resolved: Type, pos: Pos) -> Result<Type, String> {
     match resolved {
-        Type::Union { members, discriminant_tag } => {
-            let anonymous: Vec<Type> = members.iter().filter(|m| is_anonymous_struct(m)).cloned().collect();
+        Type::Union { body } => {
+            let ub = body.get().expect("union body available immediately after union_of/tag_error_union").clone();
+            let anonymous: Vec<Type> = ub.members.iter().filter(|m| is_anonymous_struct(m)).cloned().collect();
             if anonymous.len() >= 2 {
                 match find_discriminant_tag(&anonymous) {
-                    Some(tag) => Ok(Type::Union { members, discriminant_tag: Some(tag) }),
+                    Some(tag) => Ok(types::union_ty(ub.members, Some(tag))),
                     None => Err(format!(
                         "checker: discriminated union '{name}' needs a tag field — every struct member must share \
                          one field with a distinct string-literal value (e.g. kind: \"...\") so a member can be \
@@ -412,7 +423,7 @@ fn compute_discriminant_tag(name: &str, resolved: Type, pos: Pos) -> Result<Type
                     )),
                 }
             } else {
-                Ok(Type::Union { members, discriminant_tag })
+                Ok(types::union_ty(ub.members, ub.discriminant_tag))
             }
         }
         other => Ok(other),
@@ -421,13 +432,18 @@ fn compute_discriminant_tag(name: &str, resolved: Type, pos: Pos) -> Result<Type
 
 // F-7: 判別可能unionのタグフィールド名を求める(TS版`findDiscriminantTag`の移植)。
 // 「全メンバーに存在し、リテラル型で、値が互いに異なる」フィールドが1つでもあればそれを
-// 使う(複数の候補があっても最初に見つかったものでよい)。無ければNone
+// 使う(複数の候補があっても最初に見つかったものでよい)。無ければNone。渡ってくる
+// メンバーは全て`resolve_type_node`が直前に組み立てたばかりの無名structなので、
+// fieldsは常に即座に解決済み(自己参照は無い形——parse_inline_struct_typeが生成する
+// 無名structのフィールド型注釈自体はここではまだ辿らない、名前だけを見る)
 fn find_discriminant_tag(members: &[Type]) -> Option<String> {
     let Type::Struct { fields: first_fields, .. } = members.first()? else { return None };
+    let first_fields = first_fields.get().expect("anonymous struct fields resolved immediately");
     'outer: for candidate in first_fields {
         let mut values: Vec<&String> = Vec::with_capacity(members.len());
         for m in members {
             let Type::Struct { fields, .. } = m else { continue 'outer };
+            let fields = fields.get().expect("anonymous struct fields resolved immediately");
             let Some(field) = fields.iter().find(|f| f.name == candidate.name) else { continue 'outer };
             let Type::Literal(value) = &field.type_ else { continue 'outer };
             values.push(value);
@@ -445,9 +461,12 @@ fn find_discriminant_tag(members: &[Type]) -> Option<String> {
 // `field_types`は各フィールド値を1回だけ推論した結果(呼び出し側で計算済み・
 // 名前付きstruct同士のunionのタイブレークにも使い回す——TS版と同じく二重評価しない)
 pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[StructLitField], field_types: &[Type], pos: Pos) -> Result<Type, String> {
-    let Type::Union { members, discriminant_tag } = base else {
+    let Type::Union { body } = base else {
         return Ok(base.clone());
     };
+    let ub = body.get().expect("union body resolved before struct literal construction");
+    let members = &ub.members;
+    let discriminant_tag = ub.discriminant_tag.as_ref();
     let struct_members: Vec<&Type> = members.iter().filter(|m| matches!(m, Type::Struct { .. })).collect();
     let anonymous_members: Vec<&Type> = struct_members.iter().filter(|m| is_anonymous_struct(m)).copied().collect();
 
@@ -471,6 +490,7 @@ pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[Stru
         };
         let matched = anonymous_members.iter().find(|m| {
             let Type::Struct { fields, .. } = m else { return false };
+            let fields = fields.get().expect("anonymous struct fields resolved before struct literal construction");
             fields.iter().any(|f| &f.name == tag_name && matches!(&f.type_, Type::Literal(v) if v == tag_value))
         });
         match matched {
@@ -480,6 +500,7 @@ pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[Stru
                     .iter()
                     .filter_map(|m| {
                         let Type::Struct { fields, .. } = m else { return None };
+                        let fields = fields.get().expect("anonymous struct fields resolved before struct literal construction");
                         fields.iter().find(|f| &f.name == tag_name).and_then(|f| match &f.type_ {
                             Type::Literal(v) => Some(format!("{v:?}")),
                             _ => None,
@@ -508,6 +529,7 @@ pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[Stru
             .iter()
             .filter(|m| {
                 let Type::Struct { fields: mf, .. } = m else { return false };
+                let mf = mf.get().expect("named struct fields resolved before struct literal construction");
                 let mut member_names: Vec<&str> = Vec::new();
                 for f in mf {
                     if !member_names.contains(&f.name.as_str()) {
@@ -521,6 +543,7 @@ pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[Stru
         if candidates.len() > 1 {
             candidates.retain(|m| {
                 let Type::Struct { fields: mf, .. } = m else { return false };
+                let mf = mf.get().expect("named struct fields resolved before struct literal construction");
                 fields
                     .iter()
                     .zip(field_types)
@@ -534,6 +557,7 @@ pub fn resolve_struct_lit_member(base: &Type, display_name: &str, fields: &[Stru
                     .iter()
                     .map(|m| {
                         let Type::Struct { fields: mf, .. } = m else { return String::new() };
+                        let mf = mf.get().expect("named struct fields resolved before struct literal construction");
                         format!("{{ {} }}", mf.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", "))
                     })
                     .collect();
@@ -563,6 +587,7 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
     let Type::Struct { fields: decl_fields, .. } = member else {
         return Err(format!("checker: '{display_name}' is not a struct ({}:{})", pos.line, pos.col));
     };
+    let decl_fields = decl_fields.get().expect("struct fields resolved before struct literal validation");
     let mut seen: HashSet<&str> = HashSet::new();
     for (f, ty) in fields.iter().zip(field_types) {
         if !seen.insert(f.name.as_str()) {
@@ -609,7 +634,7 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
 // 引き続き厳密に検証する)
 fn assignable_allowing_opaque_json_value(from: &Type, to: &Type) -> bool {
     fn is_opaque_json_value(t: &Type) -> bool {
-        matches!(t, Type::Struct { name, fields, .. } if name == "json.Value" && fields.is_empty())
+        matches!(t, Type::Struct { name, fields, .. } if name == "json.Value" && fields.get().is_some_and(|f| f.is_empty()))
     }
     if is_opaque_json_value(to) {
         return true;
@@ -643,6 +668,7 @@ pub fn validate_struct_field(target_ty: &Type, name: &str, ctx: &CheckerCtx, pos
     let Type::Struct { fields, name: struct_name, .. } = target_ty else {
         return Err(format!("checker: '{}' is not a struct ({}:{})", types::type_to_string(target_ty), pos.line, pos.col));
     };
+    let fields = fields.get().expect("struct fields resolved before field access");
     // git historyレビュー発覚・実行確認済みの回帰: `mesh/json`のjson.Value(milestone 9・
     // codegen.rsのjson_stdlib_symbols)は、自己参照する再帰位置(`arr.items`の要素・
     // `obj.entries`の値)をRust版が表現できない自己参照型のため、意図的に「空フィールドの
@@ -724,64 +750,11 @@ pub fn qualify_struct_name(pkg: &str, name: &str) -> String {
     if pkg == "main" { name.to_string() } else { format!("{pkg}.{name}") }
 }
 
-// struct宣言同士の直接参照関係(fieldsに現れる型名)を有向グラフとして辿り、循環を検出する。
-// Array/Chan/MapType/Union/FnTypeの中も再帰的に見る(例: `children: Node[]`も
-// `Node`への依存として数える——配列越しでも固定点反復の収束が壊れる点は同じため)
-fn find_type_decl_cycle(type_decls: &[&TypeDecl], names: &HashSet<&str>) -> Option<String> {
-    let mut deps: HashMap<String, Vec<String>> = HashMap::new();
-    for decl in type_decls {
-        let mut referenced = Vec::new();
-        match &decl.node {
-            TypeNode::StructType { fields, .. } => {
-                for f in fields {
-                    collect_referenced_names(&f.type_node, &mut referenced);
-                }
-            }
-            TypeNode::Union { members, .. } => {
-                for m in members {
-                    collect_referenced_names(m, &mut referenced);
-                }
-            }
-            _ => {}
-        }
-        deps.insert(decl.name.clone(), referenced.into_iter().filter(|n| names.contains(n.as_str())).collect());
-    }
-
-    let mut visiting: HashSet<String> = HashSet::new();
-    let mut done: HashSet<String> = HashSet::new();
-    for decl in type_decls {
-        if visit_for_cycle(&decl.name, &deps, &mut visiting, &mut done) {
-            return Some(decl.name.clone());
-        }
-    }
-    None
-}
-
-fn visit_for_cycle(name: &str, deps: &HashMap<String, Vec<String>>, visiting: &mut HashSet<String>, done: &mut HashSet<String>) -> bool {
-    if done.contains(name) {
-        return false;
-    }
-    if !visiting.insert(name.to_string()) {
-        return true; // 現在たどっている経路上に再び現れた = 循環
-    }
-    if let Some(refs) = deps.get(name) {
-        for r in refs {
-            if visit_for_cycle(r, deps, visiting, done) {
-                return true;
-            }
-        }
-    }
-    visiting.remove(name);
-    done.insert(name.to_string());
-    false
-}
-
-// code review指摘(milestone 6): pkg修飾された参照(`otherpkg.Point`)は他パッケージの
-// 型であり、このパッケージ自身の循環検出の対象外——素の名前だけ見て収集すると、
-// たまたま同じ素の名前を持つ同一パッケージ内の無関係なstruct(例: ローカルの`Point`)への
-// 依存と誤認され、実際には循環が無いのに「self-referential/cyclic struct」という
-// 誤ったErrになってしまう(find_struct_cycleの`names`フィルタが素の名前だけで
-// 一致判定するため)
+// 型ノードが参照するローカルな(pkg修飾されていない)型名を集める。元々は循環検出
+// (milestone 6時点)専用のヘルパだったが、milestone 19で`resolve_named_type`の依存解決
+// (`ensure_deps_resolved`)にも転用している。pkg修飾された参照(`otherpkg.Point`)は
+// 他パッケージの型であり対象外——素の名前だけ見て収集すると、たまたま同じ素の名前を持つ
+// 同一パッケージ内の無関係なstruct(例: ローカルの`Point`)への依存と誤認してしまうため
 fn collect_referenced_names(node: &TypeNode, out: &mut Vec<String>) {
     match node {
         TypeNode::Name { name, pkg: None, .. } => out.push(name.clone()),
@@ -852,22 +825,20 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // import文に対応する」という不変条件が崩れる)
         Expr::StructLit { name, pkg: Some(alias), .. } => {
             if ctx.is_package_alias(alias) { ctx.lookup_package_type(alias, name).cloned() } else { None }
-                .unwrap_or_else(|| Type::Struct { name: format!("{alias}.{name}"), fields: vec![], is_error_type: false })
+                .unwrap_or_else(|| types::struct_ty(format!("{alias}.{name}"), vec![], false))
         }
         // union型aliasの名前でも構築できる(`GetUserResponse{kind: "ok", ...}`、milestone 7)。
         // discriminant一致による厳密なmember disambiguationはしない——union全体を近似型
         // として返す(どのexampleも構築直後の式自体の型を厳密に使わないため、実害は無い。
         // §計画参照)
-        Expr::StructLit { name, pkg: None, .. } => ctx
-            .lookup_struct(name)
-            .or_else(|| ctx.lookup_union(name))
-            .cloned()
-            .unwrap_or_else(|| Type::Struct { name: name.clone(), fields: vec![], is_error_type: false }),
+        Expr::StructLit { name, pkg: None, .. } => {
+            ctx.lookup_struct(name).or_else(|| ctx.lookup_union(name)).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false))
+        }
         // フィールドアクセス。targetがstruct型でnameが宣言済みフィールドならその型を返す。
         // メソッド名(フィールドではない名前)はここでは解決しない——裸のメンバー値として
         // メソッドを参照する式はcodegen側でも対象外(TS版と同じくcall式側だけで判別する)
         Expr::Member { target, name, .. } => match infer_expr(ctx, target) {
-            Type::Struct { fields, .. } => fields.into_iter().find(|f| &f.name == name).map(|f| f.type_).unwrap_or(ANY),
+            Type::Struct { fields, .. } => fields.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| f.type_.clone()).unwrap_or(ANY),
             _ => ANY,
         },
         // `?`/`or`はどちらも「失敗メンバーを取り除いた残り」が結果の型になる(TS版と同じ式。
@@ -1021,7 +992,8 @@ pub fn is_failure_type(t: &Type) -> bool {
 // 扱う実装にはなっていない。診断を出さないRust版でこの経路に来た場合も同じ挙動にする)
 pub fn or_binding_type(t: &Type) -> Type {
     match t {
-        Type::Union { members, .. } => {
+        Type::Union { body } => {
+            let members = &body.get().expect("union body resolved before or-binding inference").members;
             let failures: Vec<Type> = members.iter().filter(|m| is_failure_type(m)).cloned().collect();
             if failures.is_empty() { ANY } else { types::union_of(failures) }
         }
@@ -1039,7 +1011,7 @@ pub fn or_binding_type(t: &Type) -> Type {
 // 実行時に静かに壊れた挙動になる
 pub fn has_structured_failure(t: &Type) -> bool {
     match t {
-        Type::Union { members, .. } => members.iter().any(has_structured_failure),
+        Type::Union { body } => body.get().is_some_and(|ub| ub.members.iter().any(has_structured_failure)),
         Type::Struct { is_error_type: true, .. } => true,
         _ => false,
     }
@@ -1063,6 +1035,7 @@ pub fn pattern_matches_member(ctx: &CheckerCtx, member: &Type, pattern: &TypeNod
         TypeNode::Name { name, pkg: None, .. } if name == "error" => types::type_equals(member, &ERROR),
         TypeNode::StructType { fields, .. } => {
             let Type::Struct { fields: member_fields, .. } = member else { return false };
+            let Some(member_fields) = member_fields.get() else { return false };
             fields.iter().all(|pf| {
                 member_fields.iter().find(|mf| mf.name == pf.name).is_some_and(|mf| match &pf.type_node {
                     TypeNode::Literal { value, .. } => matches!(&mf.type_, Type::Literal(v) if v == value),
@@ -1088,10 +1061,11 @@ fn match_pattern_matches_member(ctx: &CheckerCtx, member: &Type, pattern: &Match
 // 含まれていればそのアームは何にでも一致するので絞り込まない。一致するmemberが無ければ
 // (診断を出さない設計なので)安全側でsubject_tyそのものへフォールバックする
 pub fn narrow_for_match_patterns(ctx: &CheckerCtx, subject_ty: &Type, patterns: &[MatchPattern]) -> Type {
-    let Type::Union { members, .. } = subject_ty else { return subject_ty.clone() };
+    let Type::Union { body } = subject_ty else { return subject_ty.clone() };
     if patterns.iter().any(|p| matches!(p, MatchPattern::Wildcard { .. })) {
         return subject_ty.clone();
     }
+    let members = &body.get().expect("union body resolved before match narrowing").members;
     let matched: Vec<Type> = members.iter().filter(|m| patterns.iter().any(|p| match_pattern_matches_member(ctx, m, p))).cloned().collect();
     if matched.is_empty() { subject_ty.clone() } else { types::union_of(matched) }
 }
@@ -1099,7 +1073,8 @@ pub fn narrow_for_match_patterns(ctx: &CheckerCtx, subject_ty: &Type, patterns: 
 // `is`式・`if x is T`文用: 単一パターンでの絞り込み。戻り値は(then節での絞り込み型,
 // else節での絞り込み型)。subject_tyがUnionでなければ絞り込めないのでどちらもそのまま
 pub fn narrow_for_is(ctx: &CheckerCtx, subject_ty: &Type, target: &TypeNode) -> (Type, Type) {
-    let Type::Union { members, .. } = subject_ty else { return (subject_ty.clone(), subject_ty.clone()) };
+    let Type::Union { body } = subject_ty else { return (subject_ty.clone(), subject_ty.clone()) };
+    let members = &body.get().expect("union body resolved before is-narrowing").members;
     let (matched, rest): (Vec<Type>, Vec<Type>) = members.iter().cloned().partition(|m| pattern_matches_member(ctx, m, target));
     let then_ty = if matched.is_empty() { subject_ty.clone() } else { types::union_of(matched) };
     let else_ty = if rest.is_empty() { subject_ty.clone() } else { types::union_of(rest) };
@@ -1121,10 +1096,11 @@ pub fn match_is_exhaustive(ctx: &CheckerCtx, subject_ty: &Type, arms: &[MatchArm
     if arms.is_empty() {
         return false;
     }
-    let Type::Union { members, .. } = subject_ty else { return matches!(subject_ty, Type::Any) };
+    let Type::Union { body } = subject_ty else { return matches!(subject_ty, Type::Any) };
     if arms.iter().any(|a| a.patterns.iter().any(|p| matches!(p, MatchPattern::Wildcard { .. }))) {
         return true;
     }
+    let members = &body.get().expect("union body resolved before exhaustiveness check").members;
     members.iter().all(|m| arms.iter().any(|a| a.patterns.iter().any(|p| match_pattern_matches_member(ctx, m, p))))
 }
 
@@ -1420,7 +1396,7 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     // targetがstruct型でnameが宣言済みフィールドでなければメソッドとして解決する
     if let Expr::Member { target, name, .. } = callee
         && let Type::Struct { fields, name: struct_name, .. } = infer_expr(ctx, target)
-        && !fields.iter().any(|f| &f.name == name)
+        && !fields.get().is_some_and(|fs| fs.iter().any(|f| &f.name == name))
         && let Some(Type::Fn { ret, .. }) = ctx.lookup_method(&struct_name, name)
     {
         return (**ret).clone();
@@ -1593,7 +1569,7 @@ mod tests {
     #[test]
     fn struct同士の算術はerrになる() {
         let mut ctx = CheckerCtx::new();
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         ctx.declare("a", user.clone());
         ctx.declare("b", user);
         let (a, b) = (ident("a"), ident("b"));
@@ -1618,7 +1594,7 @@ mod tests {
         // trueだが相手がnumericでない場合(struct/union等)は最初の分岐を満たさないため、
         // この2段目が無いと`ANY op struct`が誤ってErrになってしまう
         let mut ctx = CheckerCtx::new();
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         ctx.declare("a", Type::Any);
         ctx.declare("b", user);
         ctx.declare("c", types::union_of(vec![INT, NONE]));
@@ -1694,7 +1670,7 @@ mod tests {
     #[test]
     fn 等価演算子は双方向assignableでなければerrになりanyは常に許可される() {
         let mut ctx = CheckerCtx::new();
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         ctx.declare("u", user);
         ctx.declare("a", Type::Any);
         let (u, five, a) = (ident("u"), int_lit("5"), ident("a"));
@@ -1709,7 +1685,7 @@ mod tests {
 
     #[test]
     fn 順序比較演算子は数値同士_文字列同士_anyのいずれかでなければerrになる() {
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         assert!(check_comparison_op(&INT, &FLOAT, pos()).is_ok());
         assert!(check_comparison_op(&STRING, &Type::Literal("a".into()), pos()).is_ok());
         assert!(check_comparison_op(&Type::Any, &user, pos()).is_ok());
@@ -1749,11 +1725,7 @@ mod tests {
 
     #[test]
     fn validate_struct_fieldは宣言済みフィールドなら型を返す() {
-        let user = Type::Struct {
-            name: "User".into(),
-            fields: vec![types::StructField { name: "name".into(), type_: STRING }],
-            is_error_type: false,
-        };
+        let user = types::struct_ty("User", vec![types::StructField { name: "name".into(), type_: STRING }], false);
         let ctx = CheckerCtx::new();
         let ty = validate_struct_field(&user, "name", &ctx, pos()).unwrap();
         assert!(types::type_equals(&ty, &STRING));
@@ -1762,11 +1734,7 @@ mod tests {
     #[test]
     fn validate_struct_fieldはtypoしたフィールド名をunknown_fieldとしてerrにする() {
         // PR #17以来の既知の限界(代入先のフィールド名は一切照合されない)を解消
-        let user = Type::Struct {
-            name: "User".into(),
-            fields: vec![types::StructField { name: "name".into(), type_: STRING }],
-            is_error_type: false,
-        };
+        let user = types::struct_ty("User", vec![types::StructField { name: "name".into(), type_: STRING }], false);
         let ctx = CheckerCtx::new();
         let err = validate_struct_field(&user, "nmae", &ctx, pos()).unwrap_err();
         assert!(err.contains("User has no field 'nmae' (fields: name)"), "got: {err}");
@@ -1776,7 +1744,7 @@ mod tests {
     fn validate_struct_fieldはメソッド名の値参照をmethod_not_calledとしてerrにする() {
         // 以前はmethod_tableを実際に確認せず、未検出のフィールドを常に「メソッド名」
         // 扱いしていた——typoと真のメソッド名参照を区別できていなかった
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         let mut ctx = CheckerCtx::new();
         ctx.declare_method("User", "describe", Type::Fn { params: vec![], ret: Box::new(STRING) });
         let err = validate_struct_field(&user, "describe", &ctx, pos()).unwrap_err();
@@ -1901,23 +1869,39 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
         let Some(Type::Struct { fields, .. }) = ctx.lookup_struct("Line").cloned() else { panic!("expected struct") };
+        let fields = fields.get().expect("struct fields resolved");
         let Type::Struct { fields: point_fields, name, .. } = &fields[0].type_ else { panic!("expected resolved Point field") };
+        let point_fields = point_fields.get().expect("struct fields resolved");
         assert_eq!(name, "Point");
         assert_eq!(point_fields.len(), 2);
     }
 
     #[test]
-    fn resolve_struct_declsは相互循環structを検出してerrを返す() {
+    fn resolve_struct_declsは相互循環structも自己参照knot_tyingで解決できる() {
+        // milestone 19: struct越しの相互参照は(TS版のresolveAliasと同じ知恵の輪で)もはや
+        // errではなく正しく解決できる——実機確認済み(TS版も同じプログラムを受理する)
         let types = vec![struct_decl("A", &[("b", name_type("B"))]), struct_decl("B", &[("a", name_type("A"))])];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Struct { fields: a_fields, .. }) = ctx.lookup_struct("A").cloned() else { panic!("expected struct A") };
+        let a_fields = a_fields.get().expect("struct fields resolved");
+        let Type::Struct { name: b_name, .. } = &a_fields[0].type_ else { panic!("expected resolved B field") };
+        assert_eq!(b_name, "B");
     }
 
     #[test]
-    fn resolve_struct_declsは自己参照structも検出してerrを返す() {
+    fn resolve_struct_declsは自己参照structもknot_tyingで解決できる() {
+        // milestone 19: 直接の自己参照(`next: Node`、unionで包まない形)もTS版と同じく
+        // 受理する(実機確認済み: TS版はこの形を元から拒否していない)
         let types = vec![struct_decl("Node", &[("next", name_type("Node"))])];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Struct { fields: node_cell, .. }) = ctx.lookup_struct("Node").cloned() else { panic!("expected struct") };
+        let fields = node_cell.get().expect("struct fields resolved");
+        let Type::Struct { fields: next_cell, name, .. } = &fields[0].type_ else { panic!("expected resolved Node field") };
+        assert_eq!(name, "Node");
+        // 自己参照——next.fieldsは自分自身と同じRcを共有しているはず
+        assert!(Rc::ptr_eq(next_cell, &node_cell));
     }
 
     #[test]
@@ -1952,8 +1936,8 @@ mod tests {
 
     #[test]
     fn is_failure_typeはnone_error_タグ付きstructでtrue() {
-        let tagged = Type::Struct { name: "NotFound".into(), fields: vec![], is_error_type: true };
-        let plain = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let tagged = types::struct_ty("NotFound", vec![], true);
+        let plain = types::struct_ty("User", vec![], false);
         assert!(is_failure_type(&NONE));
         assert!(is_failure_type(&ERROR));
         assert!(is_failure_type(&tagged));
@@ -2014,7 +1998,8 @@ mod tests {
         )];
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
-        let Some(Type::Union { members, .. }) = ctx.lookup_union("DbError") else { panic!("expected union") };
+        let Some(Type::Union { body }) = ctx.lookup_union("DbError") else { panic!("expected union") };
+        let members = &body.get().expect("union body resolved").members;
         assert_eq!(members.len(), 2);
         assert!(members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })));
     }
@@ -2052,7 +2037,8 @@ mod tests {
         let with_db_error = types::union_of(vec![INT, db_error]);
         assert!(has_structured_failure(&with_db_error));
         let bound = or_binding_type(&with_db_error);
-        let Type::Union { members, .. } = &bound else { panic!("expected union binding type, got {bound:?}") };
+        let Type::Union { body } = &bound else { panic!("expected union binding type, got {}", types::type_to_string(&bound)) };
+        let members = &body.get().expect("union body resolved").members;
         assert_eq!(members.len(), 2);
         assert!(members.iter().all(|m| matches!(m, Type::Struct { is_error_type: true, .. })));
     }
@@ -2095,12 +2081,12 @@ mod tests {
 
     #[test]
     fn has_structured_failureはstructのerrorタグを再帰的に検出する() {
-        let tagged = Type::Struct { name: "NotFound".into(), fields: vec![], is_error_type: true };
+        let tagged = types::struct_ty("NotFound", vec![], true);
         assert!(has_structured_failure(&tagged));
         assert!(has_structured_failure(&types::union_of(vec![INT, tagged.clone()])));
         // union_ofは平坦化するため、genuinely入れ子のUnionを直接組んで再帰を検証する
-        let inner = Type::Union { members: vec![INT, tagged], discriminant_tag: None };
-        let nested = Type::Union { members: vec![STRING, inner], discriminant_tag: None };
+        let inner = types::union_ty(vec![INT, tagged], None);
+        let nested = types::union_ty(vec![STRING, inner], None);
         assert!(has_structured_failure(&nested));
         assert!(!has_structured_failure(&types::union_of(vec![INT, ERROR])));
         assert!(!has_structured_failure(&types::union_of(vec![INT, NONE])));
@@ -2315,7 +2301,7 @@ mod tests {
         let mut symbols = PackageSymbols::default();
         symbols
             .types
-            .insert("Point".into(), Type::Struct { name: "mathutil.Point".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false });
+            .insert("Point".into(), types::struct_ty("mathutil.Point", vec![types::StructField { name: "x".into(), type_: INT }], false));
         symbols.fns.insert("add".into(), Type::Fn { params: vec![INT, INT], ret: Box::new(INT) });
         ctx.register_package("mathutil", symbols);
         ctx.begin_package("main", HashSet::from(["mathutil".to_string()]));
@@ -2323,12 +2309,12 @@ mod tests {
         let qualified = TypeNode::Name { name: "Point".into(), pkg: Some("mathutil".into()), pos: pos() };
         let Type::Struct { name, fields, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
-        assert_eq!(fields.len(), 1, "importが宣言済みなのでレジストリの実体(フィールド込み)が引けるべき");
+        assert_eq!(fields.get().expect("resolved").len(), 1, "importが宣言済みなのでレジストリの実体(フィールド込み)が引けるべき");
 
         let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
         let Type::Struct { name, fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
-        assert_eq!(fields.len(), 1);
+        assert_eq!(fields.get().expect("resolved").len(), 1);
     }
 
     #[test]
@@ -2344,17 +2330,17 @@ mod tests {
         let mut symbols = PackageSymbols::default();
         symbols
             .types
-            .insert("Point".into(), Type::Struct { name: "mathutil.Point".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false });
+            .insert("Point".into(), types::struct_ty("mathutil.Point", vec![types::StructField { name: "x".into(), type_: INT }], false));
         ctx.register_package("mathutil", symbols);
         ctx.begin_package("main", HashSet::new()); // "mathutil"をimportしていない
 
         let qualified = TypeNode::Name { name: "Point".into(), pkg: Some("mathutil".into()), pos: pos() };
         let Type::Struct { fields, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
-        assert!(fields.is_empty(), "importしていないので殻(空フィールド)にフォールバックすべき");
+        assert!(fields.get().expect("resolved").is_empty(), "importしていないので殻(空フィールド)にフォールバックすべき");
 
         let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
         let Type::Struct { fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
-        assert!(fields.is_empty());
+        assert!(fields.get().expect("resolved").is_empty());
     }
 
     #[test]
@@ -2397,8 +2383,8 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
         let status_ty = resolve_type_node(&ctx, &name_type("Status"));
-        let Type::Union { members, .. } = &status_ty else { panic!("expected union, got {status_ty:?}") };
-        assert_eq!(members.len(), 2);
+        let Type::Union { body } = &status_ty else { panic!("expected union, got {}", types::type_to_string(&status_ty)) };
+        assert_eq!(body.get().expect("resolved").members.len(), 2);
     }
 
     #[test]
@@ -2416,15 +2402,20 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
         let resp_ty = resolve_type_node(&ctx, &name_type("Resp"));
-        let Type::Union { members, .. } = &resp_ty else { panic!("expected union") };
+        let Type::Union { body } = &resp_ty else { panic!("expected union") };
+        let members = &body.get().expect("resolved").members;
         assert_eq!(members.len(), 2);
         let Type::Struct { fields, .. } = &members[0] else { panic!("expected struct member") };
+        let fields = fields.get().expect("resolved");
         let user_field = fields.iter().find(|f| f.name == "user").expect("user field");
         assert!(types::type_equals(&user_field.type_, &resolve_type_node(&ctx, &name_type("User"))));
     }
 
     #[test]
-    fn 自己参照するunion型aliasは循環として検出されerrになる() {
+    fn 自己参照する判別可能unionはstruct越しの参照ならknot_tyingで解決できる() {
+        // milestone 19: examples/tree.mesh相当。struct(無名メンバー)のフィールド越しの
+        // 自己参照は「structを挟まない裸のunion同士の相互参照」ではないため受理する
+        // (実機確認済み: TS版も同じ形を受理する)
         let types = vec![union_decl(
             "Tree",
             vec![
@@ -2433,7 +2424,28 @@ mod tests {
             ],
         )];
         let mut ctx = CheckerCtx::new();
-        assert!(resolve_type_decls(&mut ctx, &types).is_err());
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        let Some(Type::Union { body }) = ctx.lookup_union("Tree") else { panic!("expected union") };
+        let ub = body.get().expect("resolved");
+        assert_eq!(ub.discriminant_tag.as_deref(), Some("kind"));
+        assert_eq!(ub.members.len(), 2);
+        let Type::Struct { fields: node_fields, .. } = &ub.members[1] else { panic!("expected node member") };
+        let node_fields = node_fields.get().expect("resolved");
+        let left = &node_fields.iter().find(|f| f.name == "left").expect("left field").type_;
+        // leftの型は自分自身(Tree)と同じunion bodyを共有しているはず(真の自己参照)
+        let Type::Union { body: left_body } = left else { panic!("expected union-typed left field") };
+        assert!(Rc::ptr_eq(left_body, body));
+    }
+
+    #[test]
+    fn structを挟まない裸のunion同士の相互参照は引き続きerrになる() {
+        // milestone 19: TS版resolveAliasのunsafeチェック(unionOfでflattenする際、相手が
+        // まだ解決中の空placeholderだった場合の検出)の移植——構造上、struct越しでない
+        // union同士の直接の相互参照だけが今も未対応(tree.meshのコメント参照)
+        let types = vec![union_decl("A", vec![name_type("B"), literal_type("none_a")]), union_decl("B", vec![name_type("A"), literal_type("none_b")])];
+        let mut ctx = CheckerCtx::new();
+        let err = resolve_type_decls(&mut ctx, &types).unwrap_err();
+        assert!(err.contains("type alias cycle"), "got: {err}");
     }
 
     #[test]
@@ -2446,7 +2458,7 @@ mod tests {
         // named error struct(is_error_type付き)は`error`パターンとは別物——TS版は
         // これをimpossible-patternで弾き、codegenの`instanceof Error`テストも
         // named error structには決してマッチしないため、checker側もマッチさせない
-        let err_struct = Type::Struct { name: "Oops".into(), fields: vec![], is_error_type: true };
+        let err_struct = types::struct_ty("Oops", vec![], true);
         assert!(!pattern_matches_member(&ctx, &err_struct, &name_type("error")));
         assert!(pattern_matches_member(&ctx, &NONE, &name_type("none")));
         assert!(pattern_matches_member(&ctx, &INT, &name_type("int")));
@@ -2470,8 +2482,8 @@ mod tests {
         let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
 
         let narrowed = narrow_for_match_patterns(&ctx, &subject_ty, &[MatchPattern::Type(ok_shape.clone())]);
-        let Type::Struct { fields, .. } = &narrowed else { panic!("expected single struct member, got {narrowed:?}") };
-        assert!(fields.iter().any(|f| f.name == "kind"));
+        let Type::Struct { fields, .. } = &narrowed else { panic!("expected single struct member, got {}", types::type_to_string(&narrowed)) };
+        assert!(fields.get().expect("resolved").iter().any(|f| f.name == "kind"));
 
         let wildcard_narrowed = narrow_for_match_patterns(&ctx, &subject_ty, &[MatchPattern::Wildcard { pos: pos() }]);
         assert!(types::type_equals(&wildcard_narrowed, &subject_ty));
@@ -2552,11 +2564,11 @@ mod tests {
     // ---- milestone 12: struct literalのフィールド検証(F-7タグ計算+disambiguation+検証) ----
 
     fn anon_struct(fields: &[(&str, Type)]) -> Type {
-        Type::Struct {
-            name: types::ANONYMOUS_STRUCT_NAME.to_string(),
-            fields: fields.iter().map(|(n, t)| types::StructField { name: n.to_string(), type_: t.clone() }).collect(),
-            is_error_type: false,
-        }
+        types::struct_ty(
+            types::ANONYMOUS_STRUCT_NAME,
+            fields.iter().map(|(n, t)| types::StructField { name: n.to_string(), type_: t.clone() }).collect(),
+            false,
+        )
     }
 
     fn field(name: &str, value: Expr) -> StructLitField {
@@ -2597,8 +2609,8 @@ mod tests {
         )];
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
-        let Some(Type::Union { discriminant_tag, .. }) = ctx.lookup_union("Resp") else { panic!("expected union") };
-        assert_eq!(discriminant_tag.as_deref(), Some("kind"));
+        let Some(Type::Union { body }) = ctx.lookup_union("Resp") else { panic!("expected union") };
+        assert_eq!(body.get().expect("resolved").discriminant_tag.as_deref(), Some("kind"));
     }
 
     #[test]
@@ -2617,7 +2629,7 @@ mod tests {
 
     #[test]
     fn resolve_struct_lit_memberは単純structならそのまま返す() {
-        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let user = types::struct_ty("User", vec![], false);
         let result = resolve_struct_lit_member(&user, "User", &[], &[], pos()).unwrap();
         assert!(types::type_equals(&result, &user));
     }
@@ -2626,7 +2638,7 @@ mod tests {
     fn resolve_struct_lit_memberは判別可能unionをタグの値で特定する() {
         let ok = anon_struct(&[("kind", Type::Literal("ok".into())), ("value", INT)]);
         let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
-        let resp = Type::Union { members: vec![ok.clone(), err], discriminant_tag: Some("kind".into()) };
+        let resp = types::union_ty(vec![ok.clone(), err], Some("kind".into()));
 
         let fields = [field("kind", Expr::String { value: "ok".into(), pos: pos() }), field("value", int_lit("1"))];
         let field_types = [Type::Literal("ok".into()), INT];
@@ -2639,7 +2651,7 @@ mod tests {
         // 以前(milestone 11以前)は静かに素通りしていた穴——PR #17以来の既知の限界
         let ok = anon_struct(&[("kind", Type::Literal("ok".into()))]);
         let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
-        let resp = Type::Union { members: vec![ok, err], discriminant_tag: Some("kind".into()) };
+        let resp = types::union_ty(vec![ok, err], Some("kind".into()));
 
         let fields = [field("kind", Expr::String { value: "unknown".into(), pos: pos() })];
         let field_types = [Type::Literal("unknown".into())];
@@ -2650,7 +2662,7 @@ mod tests {
     fn resolve_struct_lit_memberはタグフィールド自体が無ければerrになる() {
         let ok = anon_struct(&[("kind", Type::Literal("ok".into()))]);
         let err = anon_struct(&[("kind", Type::Literal("err".into()))]);
-        let resp = Type::Union { members: vec![ok, err], discriminant_tag: Some("kind".into()) };
+        let resp = types::union_ty(vec![ok, err], Some("kind".into()));
 
         let fields = [field("value", int_lit("1"))];
         let field_types = [INT];
@@ -2659,9 +2671,9 @@ mod tests {
 
     #[test]
     fn resolve_struct_lit_memberは名前付きstruct同士のunionをフィールド集合で解決する() {
-        let circle = Type::Struct { name: "Circle".into(), fields: vec![types::StructField { name: "radius".into(), type_: INT }], is_error_type: false };
-        let square = Type::Struct { name: "Square".into(), fields: vec![types::StructField { name: "side".into(), type_: INT }], is_error_type: false };
-        let shape = Type::Union { members: vec![circle.clone(), square], discriminant_tag: None };
+        let circle = types::struct_ty("Circle", vec![types::StructField { name: "radius".into(), type_: INT }], false);
+        let square = types::struct_ty("Square", vec![types::StructField { name: "side".into(), type_: INT }], false);
+        let shape = types::union_ty(vec![circle.clone(), square], None);
 
         let fields = [field("radius", int_lit("3"))];
         let field_types = [INT];
@@ -2671,9 +2683,9 @@ mod tests {
 
     #[test]
     fn resolve_struct_lit_memberは名前付きstruct同士のunionでフィールド集合が一致しなければerrになる() {
-        let circle = Type::Struct { name: "Circle".into(), fields: vec![types::StructField { name: "radius".into(), type_: INT }], is_error_type: false };
-        let square = Type::Struct { name: "Square".into(), fields: vec![types::StructField { name: "side".into(), type_: INT }], is_error_type: false };
-        let shape = Type::Union { members: vec![circle, square], discriminant_tag: None };
+        let circle = types::struct_ty("Circle", vec![types::StructField { name: "radius".into(), type_: INT }], false);
+        let square = types::struct_ty("Square", vec![types::StructField { name: "side".into(), type_: INT }], false);
+        let shape = types::union_ty(vec![circle, square], None);
 
         let fields = [field("height", int_lit("3"))];
         let field_types = [INT];
@@ -2682,9 +2694,9 @@ mod tests {
 
     #[test]
     fn resolve_struct_lit_memberは名前付きstruct同士のunionで複数候補が値でも絞れなければambiguousになる() {
-        let a = Type::Struct { name: "A".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false };
-        let b = Type::Struct { name: "B".into(), fields: vec![types::StructField { name: "x".into(), type_: INT }], is_error_type: false };
-        let union = Type::Union { members: vec![a, b], discriminant_tag: None };
+        let a = types::struct_ty("A", vec![types::StructField { name: "x".into(), type_: INT }], false);
+        let b = types::struct_ty("B", vec![types::StructField { name: "x".into(), type_: INT }], false);
+        let union = types::union_ty(vec![a, b], None);
 
         let fields = [field("x", int_lit("1"))];
         let field_types = [INT];
@@ -2693,11 +2705,11 @@ mod tests {
 
     #[test]
     fn validate_struct_lit_fieldsは重複_未知_型不一致_欠落を検出する() {
-        let user = Type::Struct {
-            name: "User".into(),
-            fields: vec![types::StructField { name: "name".into(), type_: STRING }, types::StructField { name: "age".into(), type_: INT }],
-            is_error_type: false,
-        };
+        let user = types::struct_ty(
+            "User",
+            vec![types::StructField { name: "name".into(), type_: STRING }, types::StructField { name: "age".into(), type_: INT }],
+            false,
+        );
 
         // 正常系
         let ok_fields = [field("name", Expr::String { value: "a".into(), pos: pos() }), field("age", int_lit("1"))];
