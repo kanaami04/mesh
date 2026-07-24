@@ -11,8 +11,10 @@
 // milestone 23でトップレベル宣言(fn/const)自体の名前衝突検査(下記`check_program`参照)、
 // milestone 24でmain関数の形検査(missing-main/invalid-main-signature)、
 // milestone 25で演算子の妥当性検査(invalid-operation/incomparable-types/not-bool/
-// use-is-none/division-by-zero——下記`infer_binary`/`check_arith`/`infer_unary`参照)を追加。
-// struct/フィールド関連の診断・argument-count・run/buildへのゲート統合は引き続き対象外
+// use-is-none/division-by-zero——下記`infer_binary`/`check_arith`/`infer_unary`参照)、
+// milestone 26でユーザー定義関数呼び出しの引数個数・型検査(argument-count——下記
+// `fn_signature`/`Expr::Call`参照)を追加。組み込み関数の個数・型検査・struct/フィールド
+// 関連の診断・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -158,9 +160,12 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             let callee_ty = infer_expr(ctx, callee);
             let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
             // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
-            // シグネチャ付きで登録)なら個数・各引数の型を照合する(TS版`checkArgsAgainst`)。
-            // 組み込み関数(builtins.tsの巨大switch)・pkg修飾呼び出し・値呼び出しは
-            // calleeがANYになるため対象外——従来どおりANYを返す(次のmilestone候補)
+            // 非ジェネリック自由関数をシグネチャ付きで登録)なら個数・各引数の型を照合する
+            // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
+            // (`f := add; f(1,2)`)もcalleeがType::Fnとして伝播するので同じく照合される
+            // (TS版`checkCallOfValue`も同じ経路)。組み込み関数(builtins.tsの巨大switch)・
+            // pkg修飾呼び出し・メソッド呼び出し・ジェネリック関数はcalleeがANYになるため
+            // 対象外——従来どおりANYを返す(次のmilestone候補)
             if let Type::Fn { params, ret } = &callee_ty {
                 if arg_tys.len() != params.len() {
                     ctx.error(*pos, DiagnosticCode::ArgumentCount, format!("expected {} argument(s), got {}", params.len(), arg_tys.len()));
@@ -526,9 +531,14 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     let mut ctx = FullCheckerCtx::new();
     // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
-    // 定数を検査+登録し、最後に関数本体を検査する。シグネチャ全体(引数/戻り値の型)の
-    // 照合はmilestone 22と同じくこの一歩の対象外なので、関数の型はANYで登録する
-    // (「名前として存在する」ことだけをここで表現する)。
+    // 定数を検査+登録し、最後に関数本体を検査する。
+    // milestone 26以降、非ジェネリックの自由関数は`fn_signature`でシグネチャ付き
+    // (`Type::Fn`)で登録し、呼び出し側の個数・型照合(argument-count/type-mismatch)を
+    // 効かせる。**ジェネリック関数(`type_params`有り)だけは従来どおりANYで登録**——
+    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で
+    // 扱い、引数不足なら`generic-inference-failed`を出す。full_checkerはこの推論を
+    // 未実装なので、`Type::Fn`で登録するとTS版と違って`argument-count`を出してしまう
+    // (診断コードのTS非互換)。ANY登録で呼び出しを丸ごと対象外にしておく。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
@@ -539,9 +549,8 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // already-declaredの誤検知になる)
     for f in &program.fns {
         if f.receiver.is_none() {
-            // milestone 26: ANYではなくシグネチャ(Type::Fn)で登録し、呼び出し側の
-            // 個数・型照合を効かせる
-            ctx.declare(&f.name, fn_signature(f), f.pos, false);
+            let ty = if f.type_params.is_empty() { fn_signature(f) } else { ANY };
+            ctx.declare(&f.name, ty, f.pos, false);
         }
     }
     for c in &program.consts {
@@ -1034,5 +1043,23 @@ mod tests {
         // 可変長のprintに複数引数を渡しても誤検知しない
         let diags = check("fn main() {\n    print(1, 2, 3)\n}\n");
         assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn ジェネリック関数の呼び出しはargument_count対象外で誤検知しない() {
+        // ジェネリック関数はANY登録なので個数検査されない——TS版は引数不足時に
+        // generic-inference-failedを出すが、full_checkerは型パラメータ推論が未実装のため
+        // 意図的に対象外(argument-countをTS非互換に出してしまうのを避ける)
+        let diags = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    identity(1, 2, 3)\n    print(1)\n}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn ローカル変数に束縛した関数値の呼び出しも個数検査される() {
+        // `f := add` で f の型は Type::Fn として伝播するので、f(1) は argument-count
+        // (TS版 checkCallOfValue も同じ経路——値呼び出しは対象外ではない)
+        let diags = check("fn add(a: int, b: int) int {\n    return a + b\n}\nfn main() {\n    f := add\n    x := f(1)\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ArgumentCount);
     }
 }

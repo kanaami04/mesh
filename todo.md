@@ -2590,10 +2590,17 @@
                 重なる範囲の各引数の型不一致は`type-mismatch`
                 (`argument i: cannot use X as Y`、引数自身の位置)。paramがANYなら
                 常にassignableなので非スカラー引数で誤検知しない。
+              - ローカル変数に束縛した関数値の呼び出し(`f := add; f(1)`)もcalleeが
+                `Type::Fn`として伝播するため同じく照合される(TS版`checkCallOfValue`と一致・
+                実機確認済み)。
               - **スコープ外(意図的)**: 組み込み関数(`print`/`len`/`push`…)の
                 個数・型検査はTS版`builtins.ts`の巨大switch(ビルトインごとに個別 arity/型)
-                の移植が要るため次回に分離。pkg修飾呼び出し・メソッド呼び出し・ジェネリック
-                関数も対象外(いずれもcalleeがANYになり従来どおりANYを返す)。
+                の移植が要るため次回に分離。pkg修飾呼び出し・メソッド呼び出しはcalleeが
+                ANYになるため対象外。**ジェネリック関数だけは明示的にANY登録でスキップ**
+                (`type_params`有りは`fn_signature`を使わない)——TS版はジェネリック呼び出しを
+                型パラメータ推論つきの別経路で扱い引数不足なら`generic-inference-failed`を出す。
+                `Type::Fn`で登録するとTS版と違って`argument-count`を出す非互換になるため、
+                推論を実装するまでは呼び出しを丸ごと対象外にする(code reviewで発覚・修正)。
               - 新規テスト7件(引数不足/過多→argument-count・引数型不一致→type-mismatch・
                 正しい呼び出し・前方参照・戻り値型の伝播・組み込みは対象外で誤検知なし)。
                 413→420件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を
