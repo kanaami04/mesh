@@ -13,7 +13,7 @@
 // (invalid-operation等)は対象外——アーキテクチャが正しいと分かった時点で、
 // 機能ごとに広げていく方針(既存21マイルストーンと同じ進め方)。
 
-use crate::ast::{Block, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, TypeNode};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, TypeNode};
 use crate::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use crate::token::Pos;
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
@@ -34,14 +34,21 @@ pub struct FullCheckerCtx {
     scopes: Vec<HashMap<String, Binding>>,
     // トップレベルのfn/const名。この一歩では「呼べる/参照できる」ことだけ知っていればよく
     // (シグネチャ照合は対象外)、型はANYで十分——ここに入れておかないと、同じファイル内の
-    // 他の関数を呼ぶだけの正しいコードがundefined-nameの誤検知になってしまう
+    // 他の関数を呼ぶだけの正しいコードがundefined-nameの誤検知になってしまう。
+    // TS版はトップレベル関数をscopes[0]へ普通にdeclareBindingするため(`checker/modules.ts`)
+    // 「外側スコープ(関数名を含む)」というshadowing判定に自然に乗るが、Rust版は別集合に
+    // 分けているぶんdeclare()側でも明示的にこの集合を見る必要がある(見落として実装時に
+    // 一度スコープアウトさせてしまった)
     top_level_names: HashSet<String>,
+    // 今検査中の関数の戻り値型のスタック(無名関数はmilestone 22の対象外なので実際には
+    // 深さ1までしか積まれないが、TS版`ctx.retStack`と同じ形にしておく)
+    ret_stack: Vec<Type>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl FullCheckerCtx {
     fn new() -> Self {
-        FullCheckerCtx { scopes: vec![HashMap::new()], top_level_names: HashSet::new(), diagnostics: Vec::new() }
+        FullCheckerCtx { scopes: vec![HashMap::new()], top_level_names: HashSet::new(), ret_stack: Vec::new(), diagnostics: Vec::new() }
     }
 
     fn push_scope(&mut self) {
@@ -77,9 +84,10 @@ impl FullCheckerCtx {
             self.error(pos, DiagnosticCode::AlreadyDeclared, format!("'{name}' is already declared in this scope"));
             return;
         }
-        // シャドーイング禁止(TS版と同じ2026-07-17決定): 外側スコープに同名があれば、
-        // 更新し忘れて`:=`してしまっただけの疑いが強いバグとして拒否する
-        if self.lookup(name).is_some() {
+        // シャドーイング禁止(TS版と同じ2026-07-17決定): 外側スコープ(トップレベルの
+        // fn/const名を含む——TS版コメント「外側スコープ(関数名を含む)」と同じ扱い)に
+        // 同名があれば、更新し忘れて`:=`してしまっただけの疑いが強いバグとして拒否する
+        if self.lookup(name).is_some() || self.top_level_names.contains(name) {
             self.error(pos, DiagnosticCode::Shadowing, format!("'{name}' shadows an outer binding — use '=' to update it, or pick a different name"));
             return;
         }
@@ -135,12 +143,19 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 ANY
             }
         }
-        Expr::Binary { left, right, .. } => {
+        Expr::Binary { op, left, right, .. } => {
             let left_ty = infer_expr(ctx, left);
             infer_expr(ctx, right);
-            // 演算子ごとの妥当性検査(invalid-operation等)はmilestone 22の対象外——
-            // 左辺の型をそのまま伝播し、内側の未定義名だけ拾う
-            left_ty
+            // 比較・論理演算子は被演算子の型によらず結果は常にbool(妥当性検査自体は
+            // milestone 22の対象外だが、結果の型は演算子だけで決まるので取り違えると
+            // `x: bool = a > b`のような正しいコードがtype-mismatchの誤検知になる)。
+            // それ以外(算術演算子)は左辺の型をそのまま伝播する——int/floatの昇格規則等の
+            // 妥当性検査はmilestone 22の対象外
+            use crate::token::TokenType::*;
+            match op {
+                EqEq | NotEq | Lt | Gt | Le | Ge | AndAnd | OrOr => BOOL,
+                _ => left_ty,
+            }
         }
         Expr::Unary { operand, .. } => infer_expr(ctx, operand),
         Expr::Call { callee, args, .. } => {
@@ -210,15 +225,32 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         Stmt::ExprStmt { expr, .. } => {
             infer_expr(ctx, expr);
         }
-        Stmt::Return { value, .. } => {
+        Stmt::Return { value, pos } => {
+            // 戻り値なしのreturn(値が要る関数で足りない場合はmissing-return-value)は
+            // この一歩で実装した7種に含めていないので診断しない——値がある場合の
+            // type-mismatchだけ、7種の同じ診断コードとしてここでも検査する
             if let Some(v) = value {
-                infer_expr(ctx, v);
+                let value_ty = infer_expr(ctx, v);
+                let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
+                if !types::assignable(&value_ty, &expected) {
+                    ctx.error(
+                        *pos,
+                        DiagnosticCode::TypeMismatch,
+                        format!("cannot return a value of type '{}' as '{}'", types::type_to_string(&value_ty), types::type_to_string(&expected)),
+                    );
+                }
             }
         }
         Stmt::If(if_stmt) => check_if(ctx, if_stmt),
         Stmt::For { init, cond, post, body, .. } => {
-            // ヘッダのinit変数(例: `for i := 0; ...`)はbody側からも見える必要があるので、
-            // bodyと同じ一段のスコープに入れる(check_blockは呼ばずstmtsを直接処理)
+            // ヘッダのinit変数(例: `for i := 0; ...`)用の外側スコープを1つ作り、
+            // bodyはcheck_block経由でその内側にネストした別スコープを持つ(TS版
+            // `checker/statements.ts`の`for`ケースと同じ2段構成——pushScope(ヘッダ)の
+            // 後、bodyはcheckBlockが自分でpushScopeする)。ここを1段のスコープに
+            // 潰すと、body内で`i := ...`のようにヘッダ変数と同名の宣言をしたとき
+            // 「同じスコープ」と誤認してalready-declaredになってしまう
+            // (正しくは外側スコープの再利用としてshadowing——実装時に見落とし、
+            // git履歴・TS版との突き合わせで発覚した)
             ctx.push_scope();
             if let Some(init) = init {
                 check_for_init(ctx, init);
@@ -229,20 +261,17 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             if let Some(post) = post {
                 check_stmt(ctx, post);
             }
-            for s in &body.stmts {
-                check_stmt(ctx, s);
-            }
+            check_block(ctx, body);
             ctx.pop_scope();
         }
         Stmt::RangeFor { names, subject, body, pos } => {
+            // for文と同じ理由でヘッダ(range変数)とbodyは別スコープにする
             infer_expr(ctx, subject);
             ctx.push_scope();
             for n in names {
                 ctx.declare(n, ANY, *pos, false);
             }
-            for s in &body.stmts {
-                check_stmt(ctx, s);
-            }
+            check_block(ctx, body);
             ctx.pop_scope();
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
@@ -302,16 +331,38 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
 }
 
 fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
-    // パラメータと関数本体トップレベルは1つの関数スコープを共有する(TS版と同じ——
-    // パラメータ名を本体で再宣言するとalready-declaredになる)
+    // パラメータ用の外側スコープ+本体用のネストしたスコープ(check_block)という
+    // 2段構成(TS版`checker/functions.ts`と同じ——pushScope〈パラメータ〉の後、
+    // 本体はcheckBlockが自分でpushScopeする)。1段に潰すと、本体でパラメータ名を
+    // 再宣言したとき「同じスコープ」と誤認してalready-declaredになってしまう
+    // (正しくは外側スコープの再利用としてshadowing)
     ctx.push_scope();
     for p in &f.params {
         ctx.declare(&p.name, resolve_scalar_type(&p.type_node), p.pos, false);
     }
-    for stmt in &f.body.stmts {
-        check_stmt(ctx, stmt);
-    }
+    ctx.ret_stack.push(f.ret.as_ref().map(resolve_scalar_type).unwrap_or(VOID));
+    check_block(ctx, &f.body);
+    ctx.ret_stack.pop();
     ctx.pop_scope();
+}
+
+// トップレベル定数(F-9c)自体の名前衝突検査(builtin-redeclared等)はmilestone 22の
+// 対象外(ファイル冒頭コメント参照)だが、値の式は他の変数宣言と同じく
+// type-mismatch/undefined-nameの対象——ここだけ見落とすと、この一歩が実装したと
+// 謳う2つの診断が定数の初期値だけすり抜けてしまう
+fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
+    let value_ty = infer_expr(ctx, &c.value);
+    let Some(type_node) = &c.type_node else {
+        return; // 型注釈が無ければ値から推論するだけ(TS版と同じ)——比較対象が無い
+    };
+    let declared = resolve_scalar_type(type_node);
+    if !types::assignable(&value_ty, &declared) {
+        ctx.error(
+            c.pos,
+            DiagnosticCode::TypeMismatch,
+            format!("cannot assign a value of type '{}' to '{}' of type '{}'", types::type_to_string(&value_ty), c.name, types::type_to_string(&declared)),
+        );
+    }
 }
 
 // このProgram(単一ファイル。milestone 22はimport/パッケージ対象外)を検査し、
@@ -319,6 +370,9 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
 pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     let mut ctx = FullCheckerCtx::new();
     ctx.top_level_names = program.fns.iter().map(|f| f.name.clone()).chain(program.consts.iter().map(|c| c.name.clone())).collect();
+    for c in &program.consts {
+        check_top_level_const(&mut ctx, c);
+    }
     for f in &program.fns {
         check_fn(&mut ctx, f);
     }
@@ -414,11 +468,79 @@ mod tests {
     }
 
     #[test]
+    fn トップレベル関数名を再宣言するとshadowingになる() {
+        // 回帰テスト: top_level_namesが通常のscopeとは別集合になっているため、
+        // declare()のshadowing判定にこの集合も含めないと見落とす
+        let diags = check("fn helper() int { return 1 }\nfn main() {\n    helper := 5\n    print(helper)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::Shadowing);
+    }
+
+    #[test]
+    fn 戻り値の型不一致はtype_mismatchを報告する() {
+        let diags = check("fn helper() int {\n    return \"oops\"\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn トップレベル定数の型不一致もtype_mismatchを報告する() {
+        let diags = check("x: int = \"oops\"\nfn main() {\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn トップレベル定数内の未定義名もundefined_nameを報告する() {
+        let diags = check("x := missing\nfn main() {\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn 比較演算子の結果はboolになり型不一致を誤検知しない() {
+        // 回帰テスト: Binaryの結果型を「左辺の型をそのまま伝播」で済ませると、
+        // `a > b`(int同士の比較)がintのまま返ってしまい、boolへの代入が
+        // type-mismatchの誤検知になっていた
+        let diags = check("fn main() {\n    ok: bool = 1 > 0\n    print(ok)\n}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn 論理演算子の結果もboolになり型不一致を誤検知しない() {
+        let diags = check("fn main() {\n    mut ok := true\n    ok = 1 > 0 && 2 > 1\n}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
     fn トップレベル関数呼び出しはundefined_nameを誤検知しない() {
         // 回帰テスト: トップレベル関数名をscopeに登録し忘れると、他の関数を呼ぶだけの
         // 正しいコードがundefined-nameになってしまう
         let diags = check("fn helper() int { return 1 }\nfn main() {\n    x := helper()\n    print(x)\n}\n");
         assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn 関数本体でパラメータ名を再宣言するとshadowingになる() {
+        // 回帰テスト: パラメータのスコープと本体のスコープを1段に潰すと、本体側の
+        // 再宣言が(shadowingではなく)already-declaredに誤判定されていた
+        let diags = check("fn f(x: int) {\n    x := 5\n    print(x)\n}\nfn main() {\n    f(1)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::Shadowing);
+    }
+
+    #[test]
+    fn forボディでヘッダのinit変数を再宣言するとshadowingになる() {
+        let diags = check("fn main() {\n    for i := 0; i < 3; i++ {\n        i := 5\n        print(i)\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::Shadowing);
+    }
+
+    #[test]
+    fn range_forボディでヘッダの変数を再宣言するとshadowingになる() {
+        let diags = check("fn main() {\n    for i := range 3 {\n        i := 5\n        print(i)\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::Shadowing);
     }
 
     #[test]

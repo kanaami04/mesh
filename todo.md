@@ -2425,9 +2425,38 @@
                 合わせ、`load_modules`を介したimport解決はまだ行わない)。
                 `mesh run`/`build`への統合(0診断を確認してからcodegenへ進むゲート化)
                 は次のmilestone以降——今回はCLI疎通確認まで
-              - テスト12件新規(full_checker.rs、7診断コードそれぞれ+正常系2件+
-                トップレベル関数呼び出しの回帰1件+forヘッダの回帰1件)。366→378件、
-                全件パス。`cargo clippy --all-targets -- -D warnings`クリーン
+              - テスト21件新規(full_checker.rs)。366→387件、全件パス。
+                `cargo clippy --all-targets -- -D warnings`クリーン
+              - **`/code-review`(5並列エージェント)で発見・修正した実バグ7件**:
+                1. `Expr::Binary`が比較・論理演算子(`==`/`<`/`&&`等)も左辺の型を
+                   そのまま返しており、`x: bool = a > b`のような正しいコードが
+                   type-mismatchの誤検知になっていた——結果は演算子だけで常にbool
+                2. `for`/`range for`/関数のヘッダ(init変数・range変数・パラメータ)と
+                   本体を1段のスコープに潰していたため、本体側でヘッダと同名を
+                   再宣言したときshadowingではなくalready-declaredになっていた
+                   (TS版`checker/statements.ts`/`functions.ts`と実際に突き合わせて発覚。
+                   ヘッダ用スコープ+check_block経由の本体用ネストスコープという
+                   2段構成に修正)
+                3. トップレベル定数(F-9c)の初期値式が一切検査されておらず、
+                   `x: int = "oops"`のような明白な型不一致がすり抜けていた
+                4. `return`の値が関数の宣言済み戻り値型と照合されておらず、
+                   `fn f() int { return "oops" }`がすり抜けていた
+                5. トップレベルのfn/const名がscopeとは別集合(`top_level_names`)に
+                   あるため、`declare()`のshadowing判定がこの集合を見ておらず、
+                   ローカル変数でトップレベル関数名を隠しても検知できなかった
+                6. `docs/handoff.md`「Rust移植の現状」節の「まだ実装は始めていない」
+                   という古い一文を、同PRで書き換えた「次のフェーズ」節が
+                   「実装済み」と書き換えたのに直さず放置していた(ドキュメント内矛盾)
+                7. `diagnostic_codes.rs`の設計判断コメントが「全107件を先に定義すると
+                   clippyのdead-code警告で落ちる」と書いていたが実測すると誤り
+                   (pub enumはdead-code対象外)——技術的な必然という誤った説明を、
+                   正確な理由(実装の無い変体を先回りして定義しない、という設計判断)に
+                   訂正
+                - レビュー中に副作用として、1エージェントがメインの作業ツリーで
+                  `git reset --hard`相当を実行し上記1〜6の未コミット修正が一時的に
+                  消える事故があった(reflogで検知・全て再適用・再検証済み)。
+                  以後、git操作を伴うレビューエージェントはworktree限定にする等の
+                  対策が要検討
               - **意図的なスコープ外(次のmilestone以降)**: トップレベル宣言
                 (fn/const)自体の名前衝突検査・missing-main/invalid-main-signature・
                 演算子の妥当性検査(invalid-operation等)・argument-count・

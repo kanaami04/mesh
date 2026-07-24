@@ -732,9 +732,9 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   スコープ縮小(json.Valueを本物の自己参照型として再定義すること・`json.Value`の
   2階層以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
   struct参照)は引き続きtodo.mdに記録済みの通り残る。**次の対象はkanayamaと相談し
-  「Rustのdiagnostics/CLIを埋める」ことに決定(2026-07-24)**——詳細と着手プラン
-  (milestone 22)は下記「次のフェーズ: フルchecker移植」節を参照。まだ実装は
-  始めていない(次のセッションでの着手を想定した申し送り事項)
+  「Rustのdiagnostics/CLIを埋める」ことに決定(2026-07-24)**——詳細と進捗
+  (milestone 22)は下記「次のフェーズ: フルchecker移植」節を参照。同日のうちに
+  milestone 22(第一歩)まで実装済み
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
