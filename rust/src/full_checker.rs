@@ -198,6 +198,10 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // method-not-calledと誤判定してしまう(呼び出しているのに)。TS版`inferCall`の
             // recv.method分岐に対応。**引数の個数・型照合はこの一歩では対象外**(struct型の
             // 引数照合はmilestone 31。引数式は未定義名検出のため必ず推論する)
+            // **重要**: Member calleeは必ずここで完結させる(fall throughして下の
+            // `infer_expr(callee)`へ落とすと、targetが二重評価され`undef.foo()`のような場合に
+            // undefined-nameが2回出る。TS版`calls.ts:78-80`が「targetは一度だけ評価する」と
+            // 明記している不変条件。code reviewで発覚し再現確認済み)
             if let Expr::Member { target, name, pos: mpos } = &**callee {
                 let tgt = infer_expr(ctx, target);
                 if let Type::Struct { name: sname, fields: fcell, .. } = &tgt {
@@ -221,10 +225,15 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                             }
                         };
                     }
-                    // フィールド名だった(関数値フィールドの呼び出し等)——generic経路へ落ちる
-                    // (フィールド型はwidenでANYになるので引数照合は効かない=defer)
+                    // フィールド名の呼び出し(関数値フィールド等)——フィールド型はwidenでANYに
+                    // なるので引数照合は効かない(値呼び出しの照合はdefer)。下の共通処理で完結
                 }
-                // struct以外/フィールド呼び出し——generic経路へ(下でcalleeを推論しなおす)
+                // struct以外/フィールド呼び出し: 引数だけ推論してANY(targetは上で評価済み——
+                // 二重評価を避けるためここで完結させ、generic経路へは落とさない)
+                for a in args {
+                    infer_expr(ctx, a);
+                }
+                return ANY;
             }
             let callee_ty = infer_expr(ctx, callee);
             let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
@@ -921,8 +930,11 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // `resolve_type_ann`(full_checkerの縮退解決)で作る——full_checker側の呼び出し引数の
     // 型も縮退するので、両者を同じ型空間に揃えて突き合わせられるようにするため
     // (codegenはresolve_type_nodeで完全解決するが、それと突き合わせると縮退した引数型で
-    // 誤検知する。milestone 29のstruct-litフィールド検査と同じ配慮)。フィールドが勝つ
-    // (フィールドと同名のメソッドはメソッド表に入れない)——TS版declareMethodと同じ。
+    // 誤検知する。milestone 29のstruct-litフィールド検査と同じ配慮)。**フィールドが勝つ**のは
+    // 参照時のlookup順のみ(infer_member/Callアームがフィールドを先に見る)——メソッド自体は
+    // 無条件で登録する。TS版`declareMethod`はさらにフィールド衝突(`method-field-conflict`)・
+    // 重複メソッド(`duplicate-method`)を宣言時に診断で弾くが、それらは未移植=次段階
+    // (該当する誤ったコードは無診断で素通り。full_checkerのdefer方針どおり)。
     // レシーバが未宣言/非struct/pkg修飾なら登録しない(誤った名前で登録しないため素通り)
     for f in &program.fns {
         let Some(recv) = &f.receiver else { continue };
@@ -942,7 +954,12 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // ANYとしてscopes[0]へ登録する。full_checkerはimport/パッケージを解決しないが、登録しないと
     // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
     // 誤検知される——milestone 30でMember/メソッド呼び出しがtargetを推論するようになり顕在化。
-    // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)
+    // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)。
+    // **既知の限界**: `declare()`を通さず直接insertするため、import aliasと同名のfn/constが
+    // あると、後続のfn/const登録が`declare()`で`already-declared`になる(TS版は専用の
+    // `name-conflicts-with-package`診断を出すが未移植)。その際そのfn/constの実型が
+    // 登録されず呼び出しの引数照合が素通りする副作用もある——稀な衝突(import名と同名の
+    // fn/const)につき次段階でname-conflicts-with-package診断とセットで対応する候補
     for imp in &program.imports {
         ctx.scopes[0].insert(imp.alias.clone(), Binding { ty: ANY, mutable: false });
     }
@@ -1706,6 +1723,16 @@ mod tests {
         let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    x := u.name + 1\n    print(x)\n}}\n"));
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+    }
+
+    #[test]
+    fn メソッド呼び出しのtargetは二重評価されない() {
+        // 回帰(code reviewで発覚): Member calleeのメソッド呼び出しがフォールバック経路で
+        // targetを二重推論し、`undef.foo()`のundefined-nameが2回出ていた。Member calleeを
+        // intercept内で完結させて解消(TS版calls.tsの「targetは一度だけ評価」)
+        let diags = check("fn main() {\n    x := undef.foo()\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
     }
 
     #[test]

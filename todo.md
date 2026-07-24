@@ -2717,6 +2717,17 @@
                 (pkg修飾を使うmodules_demo/json系含む)がfull_checker無診断のまま回帰なし。
               - **次段階**: メソッド呼び出しの引数個数・型照合・判別可能union構築・pkg修飾struct/
                 pkg修飾呼び出しの中身・配列/map型のモデル化。
+              - **code reviewで発見・即修正した実バグ1件**(3エージェント独立指摘・再現確認済み):
+                メソッド呼び出しintercept(Member callee)がフォールバック経路で`infer_expr(callee)`へ
+                落とし、`infer_member`がtargetを再推論して**targetを二重評価**していた——
+                `undef.foo()`のundefined-nameが2回出ていた(TS版は「targetは一度だけ評価」、
+                calls.ts:78-80)。Member calleeをintercept内で必ず完結させ(fall throughさせず、
+                非struct/フィールド呼び出しも引数推論後にANYを返す)解消。回帰テスト追加。447→448件。
+              - **code reviewで記録した既知の限界(未移植の宣言時診断・下80点でブロック対象外)**:
+                (1)フィールドと同名メソッド→TS版`method-field-conflict`だがRust無診断、
+                (2)重複メソッド→TS版`duplicate-method`だがRust無診断、(3)import aliasと同名の
+                fn/const→TS版`name-conflicts-with-package`だがRust版は`already-declared`(誤コード)+
+                引数照合素通り。いずれも稀な入力・struct卒業の中で対応候補(コメント/handoffに記録)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
