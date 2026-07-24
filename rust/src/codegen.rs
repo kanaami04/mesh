@@ -126,16 +126,34 @@ impl Codegen {
     // TS版compileModulesと同じ)、import依存グラフの依存順(importされる側が先)にソート
     // してから1パッケージずつ処理する
     fn generate_all_modules(&mut self, modules: &[ModuleUnit]) -> CodegenResult<String> {
-        // 組み込みパッケージ(milestone 9・`mesh/json`)を、ユーザーパッケージの処理が
-        // 始まる前に登録しておく(依存グラフのソート対象には現れない——
-        // topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
+        // 組み込みパッケージ(milestone 9・`mesh/json`、milestone 20・`mesh/io`)を、
+        // ユーザーパッケージの処理が始まる前に登録しておく(依存グラフのソート対象には
+        // 現れない——topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
         self.ctx.register_package("json", json_stdlib_symbols());
+        self.ctx.register_package("io", io_stdlib_symbols());
 
         let mut packages: Vec<(String, Vec<&ModuleUnit>)> = Vec::new();
         for m in modules {
             match packages.iter_mut().find(|(pkg, _)| pkg == &m.pkg) {
                 Some((_, files)) => files.push(m),
                 None => packages.push((m.pkg.clone(), vec![m])),
+            }
+        }
+
+        // 組み込みパッケージのエイリアス名("json"/"io")と衝突するユーザーパッケージ名を
+        // 検出する(TS版`checkModules`の`package-name-reserved`診断の移植)。registryは
+        // エイリアス名だけをキーにした単一のHashMapなので、これを検出せずに済ませると
+        // ユーザーパッケージの登録(generate_packageの`register_package`呼び出し)が
+        // 組み込みパッケージを静かに上書きしてしまい、生成JSが同名関数の二重宣言
+        // (例: 組み込みの`io$args`とユーザー定義の`io$args`)でロード時にクラッシュする
+        // ——コンパイル自体は成功したように見えるのに実行時に壊れる、実機確認済みの
+        // 実際のバグ(milestone 9の`mesh/json`登場時からTS版が最初から持っていた検査だが、
+        // Rust移植では見落とされていた)
+        for (pkg, _files) in &packages {
+            if let Some(builtin_path) = crate::modules::BUILTIN_PACKAGE_PATHS.iter().find(|p| p.rsplit('/').next() == Some(pkg.as_str())) {
+                return Err(format!(
+                    "codegen: package name '{pkg}' collides with the built-in package '{builtin_path}' — rename the '{pkg}/' directory (built-in package names are reserved)"
+                ));
             }
         }
 
@@ -1495,6 +1513,23 @@ impl Codegen {
     }
 }
 
+// mesh/io(組み込みパッケージ、milestone 20)のシグネチャ定義。`.mesh`ソースを持たない——
+// TS版`stdlib.ts`のBUILTIN_PACKAGES("mesh/io"エントリ)に相当し、この定義から直接
+// `checker::PackageSymbols`へ登録する(generate_all_modules参照)。ランタイムの実体
+// (io$args/io$readFile)は既にprelude側に実装済み(H-2実装時にruntime.ts全体を移植済み
+// のため、ここではシグネチャの登録だけでよい)。json.Valueのような自己参照/不透明structの
+// ワークアラウンドは一切不要——型はどちらも単純(引数無しの配列返却・string引数の
+// string|error返却)で、型システム上の罠は無い
+fn io_stdlib_symbols() -> checker::PackageSymbols {
+    fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn { params, ret: Box::new(ret) }
+    }
+    let mut fns = HashMap::new();
+    fns.insert("args".to_string(), fn_ty(vec![], Type::Array(Box::new(types::STRING))));
+    fns.insert("readFile".to_string(), fn_ty(vec![types::STRING], types::union_of(vec![types::STRING, types::ERROR])));
+    checker::PackageSymbols { types: HashMap::new(), fns, consts: HashMap::new() }
+}
+
 // mesh/json(組み込みパッケージ、milestone 9)のシグネチャ定義。`.mesh`ソースを持たない——
 // TS版`stdlib.ts`のBUILTIN_PACKAGESに相当し、この定義から直接`checker::PackageSymbols`へ
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
@@ -2390,6 +2425,52 @@ mod tests {
         ]);
         assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
         assert!(js.contains("(await json$stringify(v))"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_io組み込みパッケージの関数呼び出しが解決できる() {
+        // milestone 20: mesh/ioは.messソースを持たない組み込みパッケージ(io_stdlib_symbols)。
+        // json.Valueのような自己参照/不透明structのワークアラウンドは不要——型は単純な
+        // 配列返却・string|error返却のみ
+        let js = gen_body(
+            "import \"mesh/io\"\nfn main() {\n  args := io.args()\n  print(len(args))\n  content := io.readFile(\"a.txt\") or err => \"missing: \" + str(err)\n  print(content)\n}",
+        );
+        assert!(js.contains("(await io$args())"), "got: {js}");
+        assert!(js.contains("(await io$readFile(\"a.txt\"))"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_ioとユーザーパッケージのimportが共存できる() {
+        let js = gen_modules_body(&[
+            ("main", "main.mesh", "import \"mesh/io\"\nimport \"mathutil\"\nfn main() {\n  print(mathutil.add(1, 2), len(io.args()))\n}"),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
+        assert!(js.contains("(await io$args())"), "got: {js}");
+    }
+
+    #[test]
+    fn 組み込みパッケージ名と衝突するユーザーパッケージ名は明確なエラーになる() {
+        // code review発覚・実行確認済みの回帰(TS版`checkModules`の
+        // `package-name-reserved`診断が元々あったのにRust移植で見落としていた):
+        // registryはエイリアス名だけをキーにした単一のHashMapのため、"io"/"json"という
+        // 名前のユーザーパッケージがあると組み込みパッケージのシグネチャを静かに上書きし、
+        // 生成JSが同名関数の二重宣言(例: 組み込みの`io$args`とユーザー定義の`io$args`)で
+        // ロード時にクラッシュする——コンパイル自体は成功したように見えるのに実行時に
+        // 壊れる。TS版と同じくコンパイル時点で明確なErrにする
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"io\"\nfn main() {\n  print(io.args())\n}"),
+            ("io", "io/io.mesh", "export fn args() string {\n  return \"shadowed\"\n}"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("package name 'io' collides with the built-in package 'mesh/io'"), "got: {err}");
+
+        let err2 = gen_modules(&[
+            ("main", "main.mesh", "import \"json\"\nfn main() {\n  print(json.parse(\"x\"))\n}"),
+            ("json", "json/j.mesh", "export fn parse(s: string) string {\n  return s\n}"),
+        ])
+        .unwrap_err();
+        assert!(err2.contains("package name 'json' collides with the built-in package 'mesh/json'"), "got: {err2}");
     }
 
     #[test]
