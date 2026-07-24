@@ -2238,11 +2238,35 @@
         - 新規ユニットテスト`modules.rs`1件(mesh/ioがファイルシステムを
           見ずに解決できることの回帰防止、mesh/jsonと同じ理由)+`codegen.rs`
           2件(mesh/io単体での関数呼び出し解決・ユーザーパッケージとの共存)。
-          360→362件、全件パス。`cargo clippy --all-targets -- -D warnings`
-          クリーン。既存の全22 exampleを再度byte-for-byte確認(回帰無し)。
           `io.args()`(空配列)・`io.readFile(path)`(存在しないパスで
           `error`、実在するファイルで内容取得・`?`での伝播)の3パターンを
           Rust版・TS版両方で実行し、同じ出力・同じ挙動になることを確認済み。
+        - **5エージェントのcode reviewで発見・即修正した1件**(実行確認済み、
+          git-historyレビュー・bug-scanの両エージェントが独立発見): TS版
+          `checkModules`(`src/checker/modules.ts`)は組み込みパッケージの
+          エイリアス名("io"/"json")と同名のユーザーパッケージディレクトリを
+          `package-name-reserved`診断で検出・拒否するが、Rust版にはこの検査が
+          milestone 9の`mesh/json`導入時から一度も無かった(registryが
+          エイリアス名だけをキーにした単一のHashMapのため、ユーザーパッケージの
+          登録が組み込みパッケージのシグネチャを静かに上書きし、生成JSが
+          同名関数の二重宣言——例: 組み込みの`io$args`とユーザー定義の
+          `io$args`——でロード時にcrashする。**コンパイル自体は成功したように
+          見えるのに実行時に壊れる**、実機で再現・確認済みの実際のバグ)。
+          このPR自体が「組み込みパッケージの扱いを一般化する」というテーマ
+          だったため見つかった——`generate_all_modules`にTS版と同じ検査を
+          追加し、`BUILTIN_PACKAGE_PATHS`(このPRで新設)のエイリアス名と
+          衝突するユーザーパッケージ名を明確なErrにした。回帰テスト
+          `codegen.rs`1件(io/jsonそれぞれのパッケージ名衝突がTS版と同じ
+          メッセージで拒否されること)。362→363件、全件パス。`cargo clippy
+          --all-targets -- -D warnings`クリーン。既存の全22 exampleを再度
+          byte-for-byte確認(回帰無し)。"io"/"json"という名前のユーザー
+          パッケージをRust版・TS版両方でコンパイルし、どちらも同じ理由で
+          拒否される(Rust版は以前、実行時にJSのcrashという形で静かに壊れて
+          いた)ことを確認済み。
+          あわせて、テスト件数の記載ミス(このPRの前提となる直前のmilestone
+          19時点のテスト数を"360"と誤記していた——正しくは"359"、milestoneの
+          区切りをまたぐカウントの記帳ミスで、code-comments準拠レビュー
+          エージェントが発見)も修正した。
         - **milestone 20のスコープ外**: 無し(mesh/ioの2関数を完全にカバー)。
           次はmesh/httpに着手する予定(kanayamaと合意した順序)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)

@@ -673,11 +673,20 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   一般化)と、新設`io_stdlib_symbols()`(`json_stdlib_symbols`と同形)を
   `register_package("io", ...)`で登録するだけ。自由関数の生成JS名は
   importパスのaliasから自動的に`io$args`/`io$readFile`になるため、
-  json.Value構築時のような追加のcodegen側特別扱いは不要だった。テスト
-  360→362件、既存の全22 exampleがbyte-for-byte一致のまま回帰無し。
-  `io.args()`・`io.readFile(path)`(存在しないパスでerror・実在ファイルの
-  内容取得・`?`での伝播)をRust版・TS版両方で実行し確認済み。詳細はtodo.mdの
-  当該項目が一次情報源
+  json.Value構築時のような追加のcodegen側特別扱いは不要だった。
+  **code reviewで発見・即修正した1件**(git-historyレビュー・bug-scanの両
+  エージェントが独立発見、実行確認済み): TS版`checkModules`は組み込み
+  パッケージのエイリアス名("io"/"json")と同名のユーザーパッケージを
+  `package-name-reserved`診断で拒否するが、Rust版にはmilestone 9の
+  `mesh/json`導入時からこの検査が一度も無く、ユーザーパッケージの登録が
+  組み込みパッケージのシグネチャを静かに上書きし、生成JSが同名関数の
+  二重宣言でロード時にcrashする(コンパイルは成功したように見えるのに
+  実行時に壊れる)実際のバグだった。TS版と同じ検査を`generate_all_modules`に
+  追加して解消。テスト359→363件、既存の全22 exampleがbyte-for-byte一致の
+  まま回帰無し。`io.args()`・`io.readFile(path)`(存在しないパスでerror・
+  実在ファイルの内容取得・`?`での伝播)・"io"/"json"という名前のユーザー
+  パッケージ(TS版と同じ理由で拒否)をRust版・TS版両方で実行し確認済み。
+  詳細はtodo.mdの当該項目が一次情報源
 - **次にやるなら**: 確認済みの20マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの

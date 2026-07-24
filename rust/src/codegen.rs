@@ -140,6 +140,23 @@ impl Codegen {
             }
         }
 
+        // 組み込みパッケージのエイリアス名("json"/"io")と衝突するユーザーパッケージ名を
+        // 検出する(TS版`checkModules`の`package-name-reserved`診断の移植)。registryは
+        // エイリアス名だけをキーにした単一のHashMapなので、これを検出せずに済ませると
+        // ユーザーパッケージの登録(generate_packageの`register_package`呼び出し)が
+        // 組み込みパッケージを静かに上書きしてしまい、生成JSが同名関数の二重宣言
+        // (例: 組み込みの`io$args`とユーザー定義の`io$args`)でロード時にクラッシュする
+        // ——コンパイル自体は成功したように見えるのに実行時に壊れる、実機確認済みの
+        // 実際のバグ(milestone 9の`mesh/json`登場時からTS版が最初から持っていた検査だが、
+        // Rust移植では見落とされていた)
+        for (pkg, _files) in &packages {
+            if let Some(builtin_path) = crate::modules::BUILTIN_PACKAGE_PATHS.iter().find(|p| p.rsplit('/').next() == Some(pkg.as_str())) {
+                return Err(format!(
+                    "codegen: package name '{pkg}' collides with the built-in package '{builtin_path}' — rename the '{pkg}/' directory (built-in package names are reserved)"
+                ));
+            }
+        }
+
         let order = topo_sort_packages(&packages)?;
 
         self.out.push(prelude().trim_end().to_string());
@@ -2430,6 +2447,30 @@ mod tests {
         ]);
         assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
         assert!(js.contains("(await io$args())"), "got: {js}");
+    }
+
+    #[test]
+    fn 組み込みパッケージ名と衝突するユーザーパッケージ名は明確なエラーになる() {
+        // code review発覚・実行確認済みの回帰(TS版`checkModules`の
+        // `package-name-reserved`診断が元々あったのにRust移植で見落としていた):
+        // registryはエイリアス名だけをキーにした単一のHashMapのため、"io"/"json"という
+        // 名前のユーザーパッケージがあると組み込みパッケージのシグネチャを静かに上書きし、
+        // 生成JSが同名関数の二重宣言(例: 組み込みの`io$args`とユーザー定義の`io$args`)で
+        // ロード時にクラッシュする——コンパイル自体は成功したように見えるのに実行時に
+        // 壊れる。TS版と同じくコンパイル時点で明確なErrにする
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"io\"\nfn main() {\n  print(io.args())\n}"),
+            ("io", "io/io.mesh", "export fn args() string {\n  return \"shadowed\"\n}"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("package name 'io' collides with the built-in package 'mesh/io'"), "got: {err}");
+
+        let err2 = gen_modules(&[
+            ("main", "main.mesh", "import \"json\"\nfn main() {\n  print(json.parse(\"x\"))\n}"),
+            ("json", "json/j.mesh", "export fn parse(s: string) string {\n  return s\n}"),
+        ])
+        .unwrap_err();
+        assert!(err2.contains("package name 'json' collides with the built-in package 'mesh/json'"), "got: {err2}");
     }
 
     #[test]
