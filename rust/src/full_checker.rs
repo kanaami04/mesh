@@ -430,7 +430,13 @@ fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type)
 fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
     if let Stmt::ShortVarDecl { names, values, pos, .. } = init {
         for (name, value) in names.iter().zip(values.iter()) {
-            let ty = infer_expr(ctx, value);
+            // forヘッダ変数は(:=で書いても)常にmutable扱い——codegenも常にletで出し、
+            // postで書き換わる。ShortVarDeclのmut分岐と同じくリテラル型を広げないと、
+            // milestone 25でExpr::StringをType::Literalにした結果、
+            // `for s := "a"; s != "z"; s = "b"` のsがLiteral("a")のままになり、
+            // 比較(incomparable-types)・再代入(type-mismatch)が誤検知になる
+            // (code reviewで発見した回帰)
+            let ty = types::widen_literal(infer_expr(ctx, value));
             ctx.declare(name, ty, *pos, true);
         }
     } else {
@@ -912,6 +918,16 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::DivisionByZero);
         assert_eq!(diags[0].message, "integer modulo by zero");
+    }
+
+    #[test]
+    fn forヘッダの文字列変数はwidenされ誤検知しない() {
+        // 回帰(code reviewで発見): milestone 25でExpr::StringをType::Literalにした際、
+        // ShortVarDeclはmut時にwiden_literalしたがcheck_for_init(常にmutableなforヘッダ
+        // 変数)を見落としていた。widenしないとsがLiteral("a")のままになり、`s != "z"`が
+        // incomparable-types、`s = "b"`がtype-mismatchの誤検知になる(TS版は無診断)
+        let diags = check("fn main() {\n    for s := \"a\"; s != \"z\"; s = \"b\" {\n        print(s)\n    }\n}\n");
+        assert_eq!(diags, vec![]);
     }
 
     #[test]

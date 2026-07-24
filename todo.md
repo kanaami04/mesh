@@ -2563,6 +2563,15 @@
                 8演算子エラー + ヒント有無 + 正当プログラム(誤検知なし)を
                 Rust版・TS版両CLIの`mesh check`で突き合わせ、コード・メッセージ・位置まで
                 完全一致することを確認済み。
+              - **code reviewで発見・即修正した回帰1件**: `Expr::String`→`Type::Literal`化に
+                伴うwidenを`ShortVarDecl`のmut分岐にだけ入れ、C形式forヘッダ変数を宣言する
+                `check_for_init`(常にmutable扱い)を見落としていた——`for s := "a"; s != "z";
+                s = "b"`のsが`Literal("a")`のままになり、比較が`incomparable-types`・再代入が
+                `type-mismatch`の誤検知になっていた(TS版は無診断)。`check_for_init`でも
+                `widen_literal`するよう修正し回帰テスト追加(412→413件)。RangeForの変数は
+                元々ANY宣言なので影響なし。ほか2エージェントが既存の`immutable-assignment`
+                メッセージ文言のTS版とのズレ(milestone 22由来・本PR非該当)を指摘したが、
+                pre-existingにつき別途の課題として記録(将来メッセージ完全一致を詰める際に対応)。
               - **スコープ外(意図的)**: 比較演算子の結果の使われ方以外の高度な検査は無し。
                 struct/フィールド関連の診断・argument-count・run/buildへのゲート統合は
                 引き続き次のmilestone候補
