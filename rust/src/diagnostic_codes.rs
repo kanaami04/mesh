@@ -36,6 +36,7 @@ pub enum DiagnosticCode {
     NotBool,
     UseIsNone,
     DivisionByZero,
+    ArgumentCount,
 }
 
 impl DiagnosticCode {
@@ -56,6 +57,7 @@ impl DiagnosticCode {
             DiagnosticCode::NotBool => "not-bool",
             DiagnosticCode::UseIsNone => "use-is-none",
             DiagnosticCode::DivisionByZero => "division-by-zero",
+            DiagnosticCode::ArgumentCount => "argument-count",
         }
     }
 }
