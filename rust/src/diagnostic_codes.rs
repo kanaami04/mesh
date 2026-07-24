@@ -38,6 +38,9 @@ pub enum DiagnosticCode {
     DivisionByZero,
     ArgumentCount,
     BuiltinArgType,
+    UnknownField,
+    MissingFields,
+    DuplicateField,
 }
 
 impl DiagnosticCode {
@@ -60,6 +63,9 @@ impl DiagnosticCode {
             DiagnosticCode::DivisionByZero => "division-by-zero",
             DiagnosticCode::ArgumentCount => "argument-count",
             DiagnosticCode::BuiltinArgType => "builtin-arg-type",
+            DiagnosticCode::UnknownField => "unknown-field",
+            DiagnosticCode::MissingFields => "missing-fields",
+            DiagnosticCode::DuplicateField => "duplicate-field",
         }
     }
 }
