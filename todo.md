@@ -2728,6 +2728,56 @@
                 (2)重複メソッド→TS版`duplicate-method`だがRust無診断、(3)import aliasと同名の
                 fn/const→TS版`name-conflicts-with-package`だがRust版は`already-declared`(誤コード)+
                 引数照合素通り。いずれも稀な入力・struct卒業の中で対応候補(コメント/handoffに記録)。
+        - [x] **milestone 31: structメソッドの卒業(引数照合・メソッド本体の検査・宣言時診断)**
+              ✅ 2026-07-25実装。milestone 30がdeferした「メソッド呼び出しの引数照合」に着手する
+              調査の中で、**full_checkerがメソッド本体を丸ごと検査していない**という、より大きな穴を
+              発見した(`check_program`の最終ループが`if f.receiver.is_none()`でメソッドを除外していた
+              ——TS版`checkPackage`は`for (const fn of program.fns) checkFn(ctx, fn)`とレシーバの有無で
+              分けない)。メソッド本体の未定義名・型不一致・引数不一致が一切検出されない状態だった。
+              kanayamaに3択(引数照合だけ/+本体検査/メソッド一式)で提示し「メソッド一式で卒業」を選択。
+              - **引数照合**(TS版`calls.ts`の`checkCallArgs`+`paramsWithoutReceiver`): Callアームの
+                メソッド解決で、メソッド型`Type::Fn`の`params[0]`(レシーバ)を落として個数・型を照合する
+                (argument-count / type-mismatch)。milestone 26の自由関数側の照合コードを
+                `check_args_against`(TS版`checkArgsAgainst`と同じ切り出し)へ共通化し、両者を合流させた。
+              - **メソッド本体の検査**: 最終ループのレシーバ除外を撤去し、`check_fn`がレシーバ
+                (`fn (u: User) ...`の`u`)をパラメータより先にスコープへ宣言するようにした
+                (TS版`checkFn`と同じ順序。これが無いと本体の`u`がundefined-nameになる)。
+              - **宣言時診断4種**(TS版`functions.ts`の`declareMethod`の移植): milestone 30の
+                「登録するだけ」のループを`declare_method`関数に切り出し、TS版と同じ順序で
+                invalid-receiver-type → builtin-redeclared(メソッド名専用の文言)→
+                method-field-conflict → duplicate-method を検査する(どれかに当たれば登録せず戻る)。
+                **型空間の使い分け**: 「レシーバがstructか」の判定と診断メッセージだけは`checker.rs`の
+                完全解決(`resolve_type_node`)を使い(`fn (x: int)`で"got int"というTS版と同じ文言を
+                出すため)、メソッドのパラメータ/戻り値型は従来どおり縮退解決(`resolve_type_ann`)で
+                作る——呼び出し側の引数の型も縮退するので、同じ型空間に揃えないと引数照合が誤検知する
+                (milestone 29/30と同じ配慮)。
+              - 診断コード4種追加(invalid-receiver-type / method-field-conflict / duplicate-method /
+                void-used-as-value)。
+              - **副産物: milestone 22以来のTS非互換メッセージ2件を修正**(メソッド本体を検査する
+                ようになり、これらの診断が新しい場所で出るようになって発覚)。(1) undefined-nameの
+                文言が`'x' is not defined`とRust独自だった→TS版と同じ`undefined: 'x'`へ。
+                (2) return文の型検査が、位置を`return`キーワード(TS版は**値の式**)・文言を
+                `cannot return a value of type 'X' as 'Y'`(TS版は`cannot return X as Y`)と
+                独自にしており、さらに**戻り値なし関数でreturnに値を書くケース**でTS版の
+                `void-used-as-value`ではなくtype-mismatchを出していた→3点ともTS版に合わせた。
+              - **意図的なスコープ外(既知の限界として記録)**: (a) 未知の型名のレシーバ
+                (`fn (y: Bogus) f()`)は`resolve_type_node`が「空フィールドの殻struct」へ
+                フォールバックするため、TS版の`unknown-type`+`invalid-receiver-type`のどちらも
+                出ない(full_checkerは型注釈のunknown-type検査自体が未移植——誤検知ではなく検出漏れ側に
+                倒す既定方針どおり)。(b) 非structへのメンバーアクセス(`c.n.foo()`のような
+                int上のメソッド呼び出し)の`not-a-struct`、union上の`narrow-required`は引き続き未移植
+                (milestone 30から据え置き。unionはfull_checkerではANYへ潰れるためnarrow-requiredは
+                そもそも発火し得ない)。(c) import aliasと同名のfn/constの`name-conflicts-with-package`
+                (milestone 30のcode review記録3件目)も未着手。
+              - 新規テスト12件。448→460件、全件パス。`cargo clippy --all-targets -- -D warnings`
+                クリーン。TS版と`mesh check`を突き合わせ、メソッド4パターン(引数不足/過多/型不一致/
+                正常)+宣言時診断4種+メソッド本体の未定義名・戻り値検査でコード・メッセージ・位置まで
+                完全一致を確認(唯一の差分は上記(b)の`not-a-struct`未実装による検出漏れのみ)。
+                **全single-file exampleでfull_checkerが無診断のまま回帰なし**(メソッドを使う
+                struct_methods/users/defer系を含む)。
+              - **次段階**: 判別可能union構築・pkg修飾struct/pkg修飾呼び出しの中身・
+                not-a-struct/narrow-required・配列/map型のモデル化(collection builtinの要素型検査
+                とセット)・`mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

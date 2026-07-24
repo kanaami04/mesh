@@ -20,8 +20,11 @@
 // 下記`type_ctx`/`resolve_type_ann`/`infer_struct_lit`参照)、milestone 30で
 // structのフィールドアクセス読み取り(`u.name`→型/unknown-field/method-not-called、
 // 下記`infer_member`参照)+メソッド解決(method_table構築・`u.method()`呼び出しの解決、
-// Callアーム参照)を追加。
-// メソッド呼び出しの引数個数・型照合・判別可能union構築・pkg修飾struct・
+// Callアーム参照)を追加。milestone 31でstructメソッドを卒業——メソッド呼び出しの
+// 引数個数・型照合(下記`check_args_against`)+**メソッド本体の検査**(milestone 30まで
+// `check_program`の最終ループがレシーバ付き関数を丸ごとスキップしていた穴。`check_fn`が
+// レシーバをスコープへ宣言するのとセット)+宣言時の4診断(下記`declare_method`)。
+// 判別可能union構築・pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・
 // 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
@@ -177,7 +180,10 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             } else if crate::checker::is_builtin(name) {
                 ANY
             } else {
-                ctx.error(*pos, DiagnosticCode::UndefinedName, format!("'{name}' is not defined"));
+                // 文言はTS版`expressions.ts:253`と同じ`undefined: 'x'`(milestone 22で
+                // `'x' is not defined`という独自文言になっていたのをmilestone 31で揃えた——
+                // メソッド本体の検査が入りこの診断が新しい場所で出るようになったため発覚)
+                ctx.error(*pos, DiagnosticCode::UndefinedName, format!("undefined: '{name}'"));
                 ANY
             }
         }
@@ -196,8 +202,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // targetがstruct、nameがフィールドでなければメソッドとして解決する。ここで
             // interceptしないと、bareのフィールドアクセス(infer_member)がメソッド名を
             // method-not-calledと誤判定してしまう(呼び出しているのに)。TS版`inferCall`の
-            // recv.method分岐に対応。**引数の個数・型照合はこの一歩では対象外**(struct型の
-            // 引数照合はmilestone 31。引数式は未定義名検出のため必ず推論する)
+            // recv.method分岐に対応。milestone 31で引数の個数・型照合も行うようになった
+            // (解決できなかった場合も引数式は未定義名検出のため必ず推論する)
             // **重要**: Member calleeは必ずここで完結させる(fall throughして下の
             // `infer_expr(callee)`へ落とすと、targetが二重評価され`undef.foo()`のような場合に
             // undefined-nameが2回出る。TS版`calls.ts:78-80`が「targetは一度だけ評価する」と
@@ -207,17 +213,19 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 if let Type::Struct { name: sname, fields: fcell, .. } = &tgt {
                     let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
                     if !field_names.iter().any(|n| n == name) {
-                        // フィールドではない——メソッドとして解決を試みる(retだけ読んでborrowを閉じる)
-                        let method_ret = match ctx.type_ctx.lookup_method(sname, name) {
-                            Some(Type::Fn { ret, .. }) => Some(widen_field_type((**ret).clone())),
-                            _ => None,
-                        };
-                        for a in args {
-                            infer_expr(ctx, a);
-                        }
-                        return match method_ret {
-                            Some(ret) => ret,
-                            None => {
+                        // フィールドではない——メソッドとして解決を試みる(所有型へcloneして
+                        // type_ctxのborrowを閉じてから引数を推論する)
+                        let method_ty = ctx.type_ctx.lookup_method(sname, name).cloned();
+                        let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+                        return match method_ty {
+                            // milestone 31: 引数の個数・型照合。メソッド型の`params[0]`は
+                            // レシーバなので落として照合する(TS版`inferCall`の
+                            // `paramsWithoutReceiver`と同じ)
+                            Some(Type::Fn { params, ret }) => {
+                                check_args_against(ctx, *pos, args, &arg_tys, params.get(1..).unwrap_or(&[]));
+                                widen_field_type(*ret)
+                            }
+                            _ => {
                                 // フィールドでもメソッドでもない——unknown-field(メソッド呼び出し文言)
                                 let fnames = if field_names.is_empty() { "none".to_string() } else { field_names.join(", ") };
                                 ctx.error(*mpos, DiagnosticCode::UnknownField, format!("{} has no field or method '{name}' (fields: {fnames})", types::type_to_string(&tgt)));
@@ -244,17 +252,9 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // (TS版`checkCallOfValue`も同じ経路)。pkg修飾呼び出し・メソッド呼び出し・
             // ジェネリック関数はcalleeがANYになるため対象外——従来どおりANYを返す
             if let Type::Fn { params, ret } = &callee_ty {
-                if arg_tys.len() != params.len() {
-                    ctx.error(*pos, DiagnosticCode::ArgumentCount, format!("expected {} argument(s), got {}", params.len(), arg_tys.len()));
-                }
-                // 個数が違っても重なる範囲は型照合する(TS版と同じ min(args, params))。
-                // paramがANY(union/struct/未対応型)なら常にassignableなので誤検知しない
-                for (i, (at, pt)) in arg_tys.iter().zip(params.iter()).enumerate() {
-                    if !types::assignable(at, pt) {
-                        ctx.error(args[i].pos(), DiagnosticCode::TypeMismatch, format!("argument {}: cannot use {} as {}", i + 1, types::type_to_string(at), types::type_to_string(pt)));
-                    }
-                }
-                (**ret).clone()
+                let (params, ret) = (params.clone(), (**ret).clone());
+                check_args_against(ctx, *pos, args, &arg_tys, &params);
+                ret
             } else {
                 ANY
             }
@@ -289,6 +289,22 @@ fn is_checkable_field_type(t: &Type) -> bool {
 // literalはそのまま返す(ネストしたstructフィールドアクセスが効く)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
+}
+
+// 推論済みの引数型をパラメータ型と照合する共通部分(TS版`calls.ts`の`checkArgsAgainst`)。
+// 自由関数/関数値の呼び出し(milestone 26)とメソッド呼び出し(milestone 31)が
+// ここへ合流する——TS版と同じく、個数が違っても重なる範囲は型照合する
+// (min(args, params))。paramがANY(union/コレクション/未対応型)なら常にassignableに
+// なるので誤検知しない
+fn check_args_against(ctx: &mut FullCheckerCtx, call_pos: Pos, args: &[Expr], arg_tys: &[Type], params: &[Type]) {
+    if arg_tys.len() != params.len() {
+        ctx.error(call_pos, DiagnosticCode::ArgumentCount, format!("expected {} argument(s), got {}", params.len(), arg_tys.len()));
+    }
+    for (i, (at, pt)) in arg_tys.iter().zip(params.iter()).enumerate() {
+        if !types::assignable(at, pt) {
+            ctx.error(args[i].pos(), DiagnosticCode::TypeMismatch, format!("argument {}: cannot use {} as {}", i + 1, types::type_to_string(at), types::type_to_string(pt)));
+        }
+    }
 }
 
 // structのフィールドアクセス読み取り(`u.name`)の型解決(milestone 30)。TS版
@@ -747,18 +763,22 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         Stmt::ExprStmt { expr, .. } => {
             infer_expr(ctx, expr);
         }
-        Stmt::Return { value, pos } => {
+        Stmt::Return { value, .. } => {
             // 戻り値なしのreturn(値が要る関数で足りない場合はmissing-return-value)は
             // この一歩で実装した7種に含めていないので診断しない——値がある場合の
-            // type-mismatchだけ、7種の同じ診断コードとしてここでも検査する
+            // type-mismatchだけ、7種の同じ診断コードとしてここでも検査する。
+            // milestone 31でTS版`statements.ts:178-187`と細部まで揃えた(位置は`return`
+            // ではなく**値の式**・文言・戻り値なし関数でのreturn値はvoid-used-as-value)
             if let Some(v) = value {
                 let value_ty = infer_expr(ctx, v);
                 let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
-                if !types::assignable(&value_ty, &expected) {
+                if types::type_equals(&expected, &VOID) {
+                    ctx.error(v.pos(), DiagnosticCode::VoidUsedAsValue, "this function has no return value");
+                } else if !types::assignable(&value_ty, &expected) {
                     ctx.error(
-                        *pos,
+                        v.pos(),
                         DiagnosticCode::TypeMismatch,
-                        format!("cannot return a value of type '{}' as '{}'", types::type_to_string(&value_ty), types::type_to_string(&expected)),
+                        format!("cannot return {} as {}", types::type_to_string(&value_ty), types::type_to_string(&expected)),
                     );
                 }
             }
@@ -870,6 +890,57 @@ fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
     Type::Fn { params, ret: Box::new(ret) }
 }
 
+// `fn (u: User) describe() string {...}`のシグネチャをメソッド表へ登録する
+// (TS版`checker/functions.ts`の`declareMethod`の移植)。milestone 30では登録だけを
+// 行っていたが、milestone 31でTS版と同じ4つの宣言時検査を追加した——順序もTS版どおりで、
+// どれかに引っかかったら登録せずに戻る(レシーバ非struct→builtin名→フィールド衝突→重複)。
+// **型空間の使い分け**: 「レシーバがstructか」の判定と診断メッセージだけは`checker.rs`の
+// 完全解決(`resolve_type_node`、TS版`resolveType`に対応)を使う——`fn (x: int)`/
+// `fn (x: []int)`のときの"got int"/"got int[]"という文言をTS版と一致させるため。
+// 一方メソッドのパラメータ/戻り値型は従来どおりfull_checker側の縮退解決
+// (`resolve_type_ann`)で作る:呼び出し側の引数の型も縮退するので、両者を同じ型空間へ
+// 揃えないと引数照合(milestone 31)が誤検知する(milestone 29/30と同じ配慮)。
+// **フィールドが勝つ**のは参照時のlookup順(infer_member/Callアームがフィールドを先に見る)
+// だが、そもそも同名のフィールドとメソッドはここでmethod-field-conflictとして弾かれる。
+// **既知の限界**: 未知の型名のレシーバ(`fn (y: Bogus) f()`)は`resolve_type_node`が
+// 「空フィールドの殻struct」へフォールバックするため、TS版が出す`unknown-type`+
+// `invalid-receiver-type`のどちらも出ない(full_checkerは型注釈のunknown-type検査自体が
+// 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり)
+fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
+    let Some(recv) = &f.receiver else { return };
+    let recv_full = crate::checker::resolve_type_node(&ctx.type_ctx, &recv.type_node);
+    let Type::Struct { name: sname, fields: fcell, .. } = &recv_full else {
+        ctx.error(
+            recv.pos,
+            DiagnosticCode::InvalidReceiverType,
+            format!("method receiver must be a struct type, got {}", types::type_to_string(&recv_full)),
+        );
+        return;
+    };
+    let sname = sname.clone();
+    let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|fd| fd.name.clone()).collect()).unwrap_or_default();
+    // 組み込み関数名はメソッド名にも使えない(TS版はここだけ「cannot be used as a method
+    // name」という専用の文言。declare()の"cannot be redeclared"とは別)
+    if crate::checker::is_builtin(&f.name) {
+        ctx.error(f.pos, DiagnosticCode::BuiltinRedeclared, format!("'{}' is a builtin function and cannot be used as a method name", f.name));
+        return;
+    }
+    if field_names.contains(&f.name) {
+        ctx.error(f.pos, DiagnosticCode::MethodFieldConflict, format!("{sname} already has a field named '{}'", f.name));
+        return;
+    }
+    if ctx.type_ctx.lookup_method(&sname, &f.name).is_some() {
+        ctx.error(f.pos, DiagnosticCode::DuplicateMethod, format!("{sname} already has a method named '{}'", f.name));
+        return;
+    }
+    let mut params = vec![resolve_type_ann(&ctx.type_ctx, &recv.type_node)];
+    params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
+    let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+    // mainパッケージ単一ファイルなので struct 名は無修飾のまま(declare_methodの
+    // qualify_struct_nameはmain時に無修飾——lookup側も無修飾のstruct.nameで引く)
+    ctx.type_ctx.declare_method(&sname, &f.name, Type::Fn { params, ret: Box::new(ret) });
+}
+
 fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // パラメータ用の外側スコープ+本体用のネストしたスコープ(check_block)という
     // 2段構成(TS版`checker/functions.ts`と同じ——pushScope〈パラメータ〉の後、
@@ -877,6 +948,13 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // 再宣言したとき「同じスコープ」と誤認してalready-declaredになってしまう
     // (正しくは外側スコープの再利用としてshadowing)
     ctx.push_scope();
+    // milestone 31: メソッドのレシーバ(`fn (u: User) ...`の`u`)をパラメータと同じ
+    // スコープへ、パラメータより先に宣言する(TS版`checkFn`と同じ順序)。これが無いと
+    // メソッド本体の`u`がundefined-nameになるため、メソッド本体の検査とセットで入れた
+    if let Some(recv) = &f.receiver {
+        let rt = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
+        ctx.declare(&recv.name, rt, recv.pos, false);
+    }
     for p in &f.params {
         let pt = resolve_type_ann(&ctx.type_ctx, &p.type_node);
         ctx.declare(&p.name, pt, p.pos, false);
@@ -925,30 +1003,10 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // リテラル検証が無診断で素通りする(code reviewで波及範囲を明確化)。診断機構
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &program.types);
-    // milestone 30: メソッド表(struct名→メソッド名→Type::Fn)を構築する。codegen経路
-    // (codegen.rsのgenerate_package)の登録ループと同じだが、パラメータ型は
-    // `resolve_type_ann`(full_checkerの縮退解決)で作る——full_checker側の呼び出し引数の
-    // 型も縮退するので、両者を同じ型空間に揃えて突き合わせられるようにするため
-    // (codegenはresolve_type_nodeで完全解決するが、それと突き合わせると縮退した引数型で
-    // 誤検知する。milestone 29のstruct-litフィールド検査と同じ配慮)。**フィールドが勝つ**のは
-    // 参照時のlookup順のみ(infer_member/Callアームがフィールドを先に見る)——メソッド自体は
-    // 無条件で登録する。TS版`declareMethod`はさらにフィールド衝突(`method-field-conflict`)・
-    // 重複メソッド(`duplicate-method`)を宣言時に診断で弾くが、それらは未移植=次段階
-    // (該当する誤ったコードは無診断で素通り。full_checkerのdefer方針どおり)。
-    // レシーバが未宣言/非struct/pkg修飾なら登録しない(誤った名前で登録しないため素通り)
+    // milestone 30/31: メソッド表(struct名→メソッド名→Type::Fn)を構築する
+    // (`declare_method`。milestone 31から宣言時の4診断つき)
     for f in &program.fns {
-        let Some(recv) = &f.receiver else { continue };
-        let TypeNode::Name { name: bare, pkg: None, .. } = &recv.type_node else { continue };
-        if ctx.type_ctx.lookup_struct(bare).is_none() {
-            continue;
-        }
-        let recv_ty = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
-        let mut params = vec![recv_ty];
-        params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
-        let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
-        // mainパッケージ単一ファイルなので struct 名は無修飾のまま(declare_methodの
-        // qualify_struct_nameはmain時に無修飾——lookup側も無修飾のstruct.nameで引く)
-        ctx.type_ctx.declare_method(bare, &f.name, Type::Fn { params, ret: Box::new(ret) });
+        declare_method(&mut ctx, f);
     }
     // milestone 30: import alias(`import "mathutil"`→`mathutil`、`import "mesh/json"`→`json`)を
     // ANYとしてscopes[0]へ登録する。full_checkerはimport/パッケージを解決しないが、登録しないと
@@ -1013,10 +1071,13 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
             }
         }
     }
+    // milestone 31: メソッド本体もここで検査する(TS版`checkPackage`の
+    // `for (const fn of program.fns) checkFn(ctx, fn)`と同じ——レシーバの有無で分けない)。
+    // milestone 30まではメソッド本体を丸ごとスキップしていたため、メソッドの中の
+    // 未定義名・型不一致・引数不一致が一切検出されない大きな穴になっていた
+    // (`check_fn`がレシーバをスコープへ宣言するようになったのとセット)
     for f in &program.fns {
-        if f.receiver.is_none() {
-            check_fn(&mut ctx, f);
-        }
+        check_fn(&mut ctx, f);
     }
     ctx.diagnostics
 }
@@ -1741,5 +1802,115 @@ mod tests {
         // undefined-nameにならない(pkg修飾の中身の検査は次段階)
         let diags = check("import \"mathutil\"\nfn main() {\n    x := mathutil.add(1, 2)\n    print(x)\n}\n");
         assert_eq!(diags, vec![]);
+    }
+
+    // ---- milestone 31: メソッド呼び出しの引数照合・メソッド本体の検査・宣言時診断 ----
+
+    // User + 引数を1つ取るメソッド(引数照合のテスト用)
+    const USER_G: &str = "struct User {\n    name: string\n    age: int\n}\nfn (u: User) greet(prefix: string) string {\n    return prefix + u.name\n}\n";
+
+    #[test]
+    fn メソッド呼び出しの引数個数が違うとargument_countを報告する() {
+        // レシーバはparams[0]なので照合対象から外れる(「1個」であって2個ではない)
+        let diags = check(&format!("{USER_G}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.greet())\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ArgumentCount);
+        assert_eq!(diags[0].message, "expected 1 argument(s), got 0");
+    }
+
+    #[test]
+    fn メソッド呼び出しの引数型が違うとtype_mismatchを報告する() {
+        let diags = check(&format!("{USER_G}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.greet(3))\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "argument 1: cannot use int as string");
+    }
+
+    #[test]
+    fn 正しい引数のメソッド呼び出しは診断を出さない() {
+        // struct型の引数・メソッドチェーン(戻り値がstruct)も含めて誤検知しないこと
+        let src = "struct Point {\n    x: int\n}\nfn (p: Point) plus(other: Point) int {\n    return p.x + other.x\n}\nfn (p: Point) scaled(k: int) Point {\n    return Point{x: p.x * k}\n}\nfn main() {\n    p := Point{x: 1}\n    print(p.plus(p))\n    print(p.scaled(2).plus(p))\n}\n";
+        assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn メソッド本体の未定義名を検出する() {
+        // milestone 30まではメソッド本体を丸ごと検査していなかったため無診断だった
+        let diags = check(&format!("{USER_G}fn (u: User) broken() string {{\n    return u.name + missingName\n}}\nfn main() {{\n    print(\"x\")\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+        // 文言はTS版(expressions.ts)と同じ`undefined: 'x'`
+        assert_eq!(diags[0].message, "undefined: 'missingName'");
+    }
+
+    #[test]
+    fn メソッド本体でレシーバとパラメータが参照できる() {
+        // レシーバをスコープへ宣言していないと`u`自身がundefined-nameになる
+        assert_eq!(check(&format!("{USER_G}fn main() {{\n    print(\"x\")\n}}\n")), vec![]);
+    }
+
+    #[test]
+    fn メソッド本体の中のメソッド呼び出しも照合される() {
+        let src = "struct Counter {\n    n: int\n}\nfn (c: Counter) plus(other: Counter) int {\n    return c.n + other.n\n}\nfn (c: Counter) callsOther() int {\n    return c.plus(3)\n}\nfn main() {\n    print(\"x\")\n}\n";
+        let diags = check(src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "argument 1: cannot use int as Counter");
+    }
+
+    #[test]
+    fn 非structのレシーバはinvalid_receiver_typeを報告する() {
+        let diags = check("fn (x: int) scalarRecv() {\n}\nfn main() {\n    print(\"x\")\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidReceiverType);
+        assert_eq!(diags[0].message, "method receiver must be a struct type, got int");
+    }
+
+    #[test]
+    fn フィールドと同名のメソッドはmethod_field_conflictを報告する() {
+        let diags = check("struct User {\n    name: string\n}\nfn (u: User) name() string {\n    return u.name\n}\nfn main() {\n    print(\"x\")\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MethodFieldConflict);
+        assert_eq!(diags[0].message, "User already has a field named 'name'");
+    }
+
+    #[test]
+    fn 同名メソッドの重複はduplicate_methodを報告する() {
+        let diags = check(&format!(
+            "{USER_G}fn (u: User) greet(prefix: string) string {{\n    return prefix\n}}\nfn main() {{\n    print(\"x\")\n}}\n"
+        ));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DuplicateMethod);
+        assert_eq!(diags[0].message, "User already has a method named 'greet'");
+    }
+
+    #[test]
+    fn 組み込み関数名のメソッドはbuiltin_redeclaredを報告する() {
+        // メソッド名のときだけTS版は専用の文言("cannot be used as a method name")を使う
+        let diags = check("struct User {\n    name: string\n}\nfn (u: User) len() int {\n    return 1\n}\nfn main() {\n    print(\"x\")\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::BuiltinRedeclared);
+        assert_eq!(diags[0].message, "'len' is a builtin function and cannot be used as a method name");
+    }
+
+    #[test]
+    fn 戻り値なし関数でのreturn値はvoid_used_as_valueを報告する() {
+        // milestone 22以来、TS版が`void-used-as-value`を出すケースでtype-mismatchを
+        // 出していた(位置・文言もTS版とずれていた)——milestone 31で揃えた
+        let diags = check("fn nothing() {\n    return 1\n}\nfn main() {\n    nothing()\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::VoidUsedAsValue);
+        assert_eq!(diags[0].message, "this function has no return value");
+        // 位置は`return`ではなく値の式(TS版statements.ts)
+        assert_eq!(diags[0].pos.col, 12);
+    }
+
+    #[test]
+    fn 戻り値の型不一致の文言と位置を揃えた() {
+        let diags = check("fn f() int {\n    return \"no\"\n}\nfn main() {\n    print(f())\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "cannot return \"no\" as int");
+        assert_eq!(diags[0].pos.col, 12);
     }
 }

@@ -42,6 +42,10 @@ pub enum DiagnosticCode {
     MissingFields,
     DuplicateField,
     MethodNotCalled,
+    InvalidReceiverType,
+    MethodFieldConflict,
+    DuplicateMethod,
+    VoidUsedAsValue,
 }
 
 impl DiagnosticCode {
@@ -68,6 +72,10 @@ impl DiagnosticCode {
             DiagnosticCode::MissingFields => "missing-fields",
             DiagnosticCode::DuplicateField => "duplicate-field",
             DiagnosticCode::MethodNotCalled => "method-not-called",
+            DiagnosticCode::InvalidReceiverType => "invalid-receiver-type",
+            DiagnosticCode::MethodFieldConflict => "method-field-conflict",
+            DiagnosticCode::DuplicateMethod => "duplicate-method",
+            DiagnosticCode::VoidUsedAsValue => "void-used-as-value",
         }
     }
 }

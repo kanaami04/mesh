@@ -900,17 +900,28 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      診断コード`method-not-called`追加。**回帰対応**: Member/メソッドがtargetを推論するように
      なりpkg修飾アクセスのtarget(`mathutil`等)がundefined-nameになったため、import aliasを
      ANYとしてscopeへ登録して解消。テスト441→447件。TS版と`mesh check`完全一致・全example回帰なし。詳細はtodo.md参照
-   - 残る候補: **milestone 31以降でstruct卒業を継続**——メソッド呼び出しの引数個数・型照合・
-     宣言時診断(`method-field-conflict`/`duplicate-method`/`name-conflicts-with-package`——
-     milestone 30のcode reviewで未移植と判明、下記メモ参照)・判別可能union構築・pkg修飾struct/
-     pkg修飾呼び出しの中身・配列/map型のモデル化(collection builtin要素型検査とセット)。
+   - ✅ **milestone 31(2026-07-25)でstructメソッドを卒業**。milestone 30がdeferした
+     メソッド呼び出しの引数照合(`params[0]`=レシーバを落として個数・型を照合。milestone 26の
+     自由関数側と`check_args_against`へ共通化)に加え、調査中に発見した**メソッド本体の
+     未検査**(`check_program`の最終ループがレシーバ付きを除外していた——本体の未定義名・
+     型不一致が一切検出されない穴)を`check_fn`のレシーバ宣言とセットで解消、さらに
+     TS版`declareMethod`の宣言時診断4種(invalid-receiver-type / builtin-redeclared〈メソッド名
+     専用文言〉/ method-field-conflict / duplicate-method)を`declare_method`へ移植。
+     **副産物**: メソッド本体を検査するようになって顕在化したmilestone 22以来のTS非互換
+     メッセージ2件も修正(undefined-nameの文言・return文の位置/文言/`void-used-as-value`)。
+     診断コード4種追加、テスト448→460件。詳細はtodo.md参照
+   - 残る候補: **milestone 32以降でstruct卒業を継続**——判別可能union構築・pkg修飾struct/
+     pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
+     `narrow-required`はunionがANYへ潰れる限り発火しない)・配列/map型のモデル化
+     (collection builtin要素型検査とセット)。
      その後: `mesh run`/`build`ゲート統合+RustCLI整備・generics推論(`generic-inference-failed`)・
      parser/lexerのDiagnosticCode統合。
-     - **milestone 30 code reviewで記録した既知の限界(いずれも未移植の宣言時診断・
-       下80点でブロック対象外)**: (1)struct宣言のフィールドと同名メソッド→TS版は
-       `method-field-conflict`だがRust版は無診断、(2)同名メソッドの重複→TS版は`duplicate-method`
-       だがRust版は無診断、(3)import aliasと同名のfn/const→TS版は`name-conflicts-with-package`
-       だがRust版は`already-declared`(誤ったコード)を出しそのfn/constの引数照合が素通りする。
+     - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
+       TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出し
+       そのfn/constの引数照合が素通りする(milestone 30のcode review記録のうち唯一残った項目)、
+       (2)型注釈の`unknown-type`が未移植のため、未知の型名のレシーバ(`fn (y: Bogus) f()`)は
+       TS版の`unknown-type`+`invalid-receiver-type`のどちらも出ない、
+       (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)。
        いずれも稀な入力で、struct卒業を進める中でまとめて対応する候補
 
 **参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
