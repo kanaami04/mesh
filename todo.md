@@ -2461,6 +2461,43 @@
                 (fn/const)自体の名前衝突検査・missing-main/invalid-main-signature・
                 演算子の妥当性検査(invalid-operation等)・argument-count・
                 mesh run/buildへのゲート統合・struct以降の言語機能の診断
+        - [x] **milestone 23: トップレベル宣言(fn/const)自体の名前衝突検査**
+              ✅ 2026-07-24実装。milestone 22で「対象外」としていた項目の1つを解消。
+              - TS版`src/checker/modules.ts`の`checkPackage`を読むと、トップレベルの
+                fn/const名も普通のローカル変数と同じ`declareBinding`でscopes[0]へ
+                登録している(前方参照・相互再帰を許すため、全fnのシグネチャを先に
+                登録してから本体を検査する)ことが分かったため、milestone 22時点で
+                別集合`top_level_names: HashSet<String>`として特別扱いしていた設計を
+                やめ、`ctx.declare()`でscopes[0]へ実際に登録する方式に統一した
+                (`rust/src/full_checker.rs`の`check_program`/`check_top_level_const`)。
+                この統一により、reserved-word/builtin-redeclared/already-declared/
+                shadowingの4検査がローカル変数と全く同じ経路で自動的に効くようになった
+                (以前は誤検知回避のためのIdent解決の特別扱いと、shadowing判定の特別扱いを
+                それぞれ個別に書いていたが、両方とも不要になり削除できた——コードが
+                むしろシンプルになった)
+              - 順序はTS版と同じ: 全関数の名前を先に登録(シグネチャの型照合は
+                milestone 22と同じくまだ対象外なのでANYで登録)→トップレベル定数を
+                検査+登録(値の型注釈があればそちらを、無ければ値から推論した型で
+                登録)→各関数の本体を検査
+              - テスト7件新規(重複関数宣言→already-declared・組み込み名の関数宣言→
+                builtin-redeclared・予約語の関数宣言→reserved-word・定数と関数の名前
+                衝突→already-declared・異なるstructの同名メソッド→誤検知なし・
+                メソッド名と同名のローカル変数→誤検知なし・トップレベル定数の型が
+                参照側でも伝播することの確認)。387→394件、全件パス。
+                `cargo clippy --all-targets -- -D warnings`クリーン
+              - **`/code-review`(5並列エージェント)で発見・修正した実バグ1件**:
+                `program.fns`には自由関数とstructのメソッド(`receiver`付き)が同じ配列に
+                混在しているが、トップレベル名の事前登録ループ(`ctx.declare()`)が
+                receiverの有無を見ずに両方登録していたため、**異なるstructが同名メソッドを
+                持つ**(TS版・実際のMesh言語仕様では正当——メソッドの名前空間は自由関数と
+                完全分離)だけで`already-declared`の誤検知になっていた
+                (`examples/struct_methods.mesh`相当のコードが壊れる実害あり)。
+                milestone 22時点の`top_level_names`(単なる集合、重複挿入は無害)から
+                `ctx.declare()`(衝突を実際に検査)へ切り替えたことで初めて表面化した
+                バグ——TS版`checker/functions.ts`の`declareMethod`が別の`methodTable`に
+                登録し`scopes[0]`には触れない設計と突き合わせて発覚。トップレベル名の
+                登録・本体検査どちらもレシーバ付き関数(メソッド)をスキップするよう修正
+                (structはmilestone 22/23とも対象外なので、スキップが正しい扱い)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
