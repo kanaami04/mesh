@@ -732,9 +732,9 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   スコープ縮小(json.Valueを本物の自己参照型として再定義すること・`json.Value`の
   2階層以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
   struct参照)は引き続きtodo.mdに記録済みの通り残る。**次の対象はkanayamaと相談し
-  「Rustのdiagnostics/CLIを埋める」ことに決定(2026-07-24)**——詳細と着手プラン
-  (milestone 22)は下記「次のフェーズ: フルchecker移植」節を参照。まだ実装は
-  始めていない(次のセッションでの着手を想定した申し送り事項)
+  「Rustのdiagnostics/CLIを埋める」ことに決定(2026-07-24)**——詳細と進捗
+  (milestone 22)は下記「次のフェーズ: フルchecker移植」節を参照。同日のうちに
+  milestone 22(第一歩)まで実装済み
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/
@@ -771,11 +771,14 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
 - **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 
-## 次のフェーズ: フルchecker移植(2026-07-24、まだ未着手・申し送り)
+## 次のフェーズ: フルchecker移植(2026-07-24提起。milestone 22〈第一歩〉は実装済み)
 
 kanayamaに「TSからRustにはどのくらい移植できましたか?もうTSで実装するのはいいかな」と
-聞かれ、現状を調査して報告した結果、「Rustのdiagnostics/CLIを埋める」方針に合意
-(このセッションでは調査と設計合意のみ行い、実装は次のセッションに送る)。
+聞かれ、現状を調査して報告した結果、「Rustのdiagnostics/CLIを埋める」方針に合意。
+同じセッション内でmilestone 22(下記「最初の一歩」1〜3)まで実装済み——
+`rust/src/diagnostic_codes.rs`・`rust/src/full_checker.rs`が新設され、
+`mesh check <file.mesh>`がスカラーのMeshに対して実際に動く。詳細・実装判断は
+todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時点の記録として残す。
 
 **現状調査で分かったこと(2026-07-24時点)**:
 - 行数: TS実装 9,393行(`src/checker/`2,903行込み)/ Rust実装 10,523行。テスト数:
@@ -818,23 +821,24 @@ kanayamaに「TSからRustにはどのくらい移植できましたか?もうTS
   未定——`full_checker.rs`のような別名を暫定案として提示したが、まだkanayamaと
   最終確認していない。着手時に決めること
 
-**milestone 22として合意した最初の一歩**(まだ未着手):
-1. 診断コード基盤の移植: `src/diagnostic-codes.ts`(498行、`DiagnosticCode`という
-   107種の文字列リテラルunion+`Fix`/`Diagnostic`インターフェース+
-   `DIAGNOSTIC_EXPLANATIONS`という`mesh explain`用の説明文マップ)を`rust/src/`へ
-   移植。ほとんどはコード名+説明文の機械的な書き写しだが、この最初の一歩では
-   milestone 22で実際に使うコードだけ実装し、残りは後続milestoneで機能を足すたびに
-   埋めていく形でよいか(全107件を先に埋めるか)は要検討
-2. 最小スコープ(元のcodegen移植のmilestone 1相当=スカラーのみ)でフルcheckerの
-   骨格を通す。TS版`src/checker/`の分割(`context.ts`基盤+`types-resolve.ts`+
-   `narrowing.ts`+`expressions.ts`+`match-select.ts`+`calls.ts`+`generics.ts`+
-   `builtins.ts`+`functions.ts`+`statements.ts`+`modules.ts`)を参考に、
-   まずは変数宣言・型不一致・未定義名程度の少数の診断コードだけ通す
-3. CLIに`mesh check`相当のモードを生やし、`file.mesh:line:col: error[code]:
-   message`の形で実際に出力されるところまで確認する
-4. アーキテクチャが正しいと分かった時点で、機能ごとに広げていく
+**milestone 22として合意した最初の一歩**(1〜3は実装済み・2026-07-24。詳細はtodo.md参照):
+1. ✅ 診断コード基盤の移植: 実際には「milestone 22で使う7種だけ列挙型として移植」を
+   選択した(全107件を先に埋めると、未使用variantが`cargo clippy -D warnings`の
+   dead-code警告でCIが落ちるため不可能だった——「要検討」としていた点への回答)。
+   `DIAGNOSTIC_EXPLANATIONS`は`mesh explain`が無いためまだ移植していない
+2. ✅ 最小スコープ(元のcodegen移植のmilestone 1相当=スカラーのみ)でフルcheckerの
+   骨格を通した(`rust/src/full_checker.rs`)。変数宣言・型不一致・未定義名の
+   7診断コードだけを実装(トップレベル宣言自体の名前衝突・missing-main・
+   invalid-operation・argument-count等は未実装のまま次のmilestone以降へ)
+3. ✅ CLIに`mesh check <file.mesh>`を追加し、`file:line:col: error[code]: message`
+   の形で実際に出力されるところまで確認した。**まだ単一ファイルのみ**
+   (import/パッケージはfull_checkerのスコープ外なので`load_modules`は使っていない)。
+   `mesh run`/`build`へのゲート統合(診断0件を確認してからcodegenへ進む)も未着手
+4. 次はこのアーキテクチャを土台に機能ごとに広げていく
    (既存21マイルストーンと同じ進め方——1機能ずつ実装・テスト・TS版とのbyte-for-byte
-   比較・todo.md記録・PR・code review・squash merge)
+   比較・todo.md記録・PR・code review・squash merge)。候補: トップレベル宣言の
+   名前衝突・main関数の形・struct/フィールド関連の診断・`mesh run`/`build`への
+   ゲート統合・parser.rs/lexer.rsの既存コードをDiagnosticCodeへ統合
 
 **参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
 説明)・`src/checker/context.ts`(`CheckerCtx`の構造・診断のpush方式・スコープ管理・

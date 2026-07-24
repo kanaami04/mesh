@@ -2374,24 +2374,93 @@
         JSには`encodeTodo`の呼び出しだけがあり定義が無くランタイムエラーになることを
         実機確認したため撤回——デモの「TS版・Rust版どちらでも動く」という前提を優先し、
         既存の手書き`toJson()`のまま据え置いた。詳細はdesign-agenda.md J節が一次情報源
-  - [ ] **フルchecker(診断)+CLI移植** — 2026-07-24提起・方針合意のみ、**未着手**
-        (次のセッションへの申し送り)。kanayamaに「TS→Rustの移植状況、もうTSでの実装は
-        いいかな」と聞かれ調査した結果、言語機能(コード生成)は21マイルストーンで
-        ほぼ移植済みだが、TS版`src/checker/`(2,903行・診断コード107種。F-13実装時の
-        「約87種」から機能追加で増えている)相当の
+  - [ ] **フルchecker(診断)+CLI移植** — 2026-07-24提起・方針合意。**milestone 22(第一歩)は
+        実装済み**、フルcheckerとしての本格的な広がりは引き続き未着手。kanayamaに
+        「TS→Rustの移植状況、もうTSでの実装はいいかな」と聞かれ調査した結果、言語機能
+        (コード生成)は21マイルストーンでほぼ移植済みだが、TS版`src/checker/`
+        (2,903行・診断コード107種。F-13実装時の「約87種」から機能追加で増えている)相当の
         「型エラーを位置・コード付きで報告するフルchecker」と、TS版`mesh run/build/
         check/test/fmt/explain/card`相当のCLIサブコマンド群がRust側に丸ごと欠けている
         ことが判明。「Rustのdiagnostics/CLIを埋める」方針で合意し、まずフルcheckerから
-        着手することも合意した。**設計方針・milestone 22の具体的な範囲・参考にすべき
-        TS側資料は[docs/handoff.md](docs/handoff.md)の「次のフェーズ: フルchecker移植」節に
-        詳しく書いた(このtodo.mdエントリは要約のみ)**——アーキテクチャは「新しい
-        フルcheckerフェーズをcodegenの前段に追加し、`Vec<Diagnostic>`に積んで走査を
-        続ける設計にする(パーサのパニックモード復帰と同じ発想)。既存の
-        `checker.rs`(最小リゾルバ)+`codegen.rs`はほぼそのまま温存し、フルcheckerが
-        診断0件を確認した後にしか呼ばれないフェーズ2として使う」という方針で合意。
-        milestone 22は診断コード基盤(`diagnostic-codes.ts`移植)+最小スコープ
-        (スカラーのみ)でのフルcheckerの骨格+`mesh check`のCLI疎通確認、というところから
-        始める予定
+        着手することも合意した。**設計方針の詳細は[docs/handoff.md](docs/handoff.md)の
+        「次のフェーズ: フルchecker移植」節参照(このtodo.mdエントリは要約のみ)**——
+        アーキテクチャは「新しいフルcheckerフェーズをcodegenの前段に追加し、
+        `Vec<Diagnostic>`に積んで走査を続ける設計にする(パーサのパニックモード復帰と
+        同じ発想)。既存の`checker.rs`(最小リゾルバ)+`codegen.rs`はほぼそのまま温存し、
+        フルcheckerが診断0件を確認した後にしか呼ばれないフェーズ2として使う」という
+        方針で合意。
+        - [x] **milestone 22: 診断コード基盤+フルcheckerの骨格(スカラーのみ)+
+              `mesh check`疎通確認** ✅ 2026-07-24実装。
+              - `rust/src/diagnostic_codes.rs`(新規): TS版`diagnostic-codes.ts`
+                (107種)のうち、この一歩で実際に検査する7種
+                (reserved-word/builtin-redeclared/already-declared/shadowing/
+                undefined-name/type-mismatch/immutable-assignment)だけを列挙型
+                `DiagnosticCode`として移植。**残り100種は先に定義しない**——未使用の
+                variantは`cargo clippy --all-targets -- -D warnings`のdead-code警告で
+                CIが落ちるため、対応する検査を後続milestoneで足すたびに追加していく
+                他ない(「全107件を先に埋めるか」という前回の未決事項への回答)。
+                同じ理由でparser.rs/lexer.rsの既存`CompileError.code: &'static str`
+                (構文・字句カテゴリ)もこの列挙型へはまだ統合していない
+                (統合はそちら側を移行するタイミング)。`DIAGNOSTIC_EXPLANATIONS`
+                (`mesh explain`用)も同様に今回は移植せず見送り
+              - `rust/src/full_checker.rs`(新規): 既存`checker.rs`(最小リゾルバ、
+                診断を出さない)とは別物として新設した、診断を`Vec<Diagnostic>`へ
+                積む方式のchecker。スコープは元のcodegen移植milestone 1と同じ
+                「スカラーのMesh」——struct/map/配列/channel/並行処理/import/
+                ジェネリクスは対象外。トップレベル関数名をscopeとは別に
+                `top_level_names`として集めておくことで、他の関数を呼ぶだけの
+                正しいコードがundefined-nameに誤検知されるのを防いでいる
+                (テストで実際に踏んだ後に対策——回帰テストとして残した)。
+              - **TS版から見落としかけた設計判断を実装中に発見・踏襲**: C風forの
+                ヘッダ変数(`for i := 0; i < 3; i++`)は`mut`を書かないのが通例だが、
+                `i++`(IncDec)が書けなければならない。TS版`checker/statements.ts`の
+                `for`ケースが`stmt.init.mutable = true`で明示的に上書きしている
+                (B-4決定「デフォルト不変の唯一の構造的例外」)のと同じ特例を
+                `check_for_init`として実装——最初はこれを見落として自前のテスト
+                (forヘッダのinit変数はbody内から参照できる)が落ち、TS版のコメントを
+                読んで気づいた
+              - CLI: `mesh check <file.mesh>`を追加(`rust/src/main.rs`)。
+                `file:line:col: error[code]: message`形式で診断を出力、diagnostics
+                空なら終了コード0。**単一ファイルのみ**(full_checkerの現スコープに
+                合わせ、`load_modules`を介したimport解決はまだ行わない)。
+                `mesh run`/`build`への統合(0診断を確認してからcodegenへ進むゲート化)
+                は次のmilestone以降——今回はCLI疎通確認まで
+              - テスト21件新規(full_checker.rs)。366→387件、全件パス。
+                `cargo clippy --all-targets -- -D warnings`クリーン
+              - **`/code-review`(5並列エージェント)で発見・修正した実バグ7件**:
+                1. `Expr::Binary`が比較・論理演算子(`==`/`<`/`&&`等)も左辺の型を
+                   そのまま返しており、`x: bool = a > b`のような正しいコードが
+                   type-mismatchの誤検知になっていた——結果は演算子だけで常にbool
+                2. `for`/`range for`/関数のヘッダ(init変数・range変数・パラメータ)と
+                   本体を1段のスコープに潰していたため、本体側でヘッダと同名を
+                   再宣言したときshadowingではなくalready-declaredになっていた
+                   (TS版`checker/statements.ts`/`functions.ts`と実際に突き合わせて発覚。
+                   ヘッダ用スコープ+check_block経由の本体用ネストスコープという
+                   2段構成に修正)
+                3. トップレベル定数(F-9c)の初期値式が一切検査されておらず、
+                   `x: int = "oops"`のような明白な型不一致がすり抜けていた
+                4. `return`の値が関数の宣言済み戻り値型と照合されておらず、
+                   `fn f() int { return "oops" }`がすり抜けていた
+                5. トップレベルのfn/const名がscopeとは別集合(`top_level_names`)に
+                   あるため、`declare()`のshadowing判定がこの集合を見ておらず、
+                   ローカル変数でトップレベル関数名を隠しても検知できなかった
+                6. `docs/handoff.md`「Rust移植の現状」節の「まだ実装は始めていない」
+                   という古い一文を、同PRで書き換えた「次のフェーズ」節が
+                   「実装済み」と書き換えたのに直さず放置していた(ドキュメント内矛盾)
+                7. `diagnostic_codes.rs`の設計判断コメントが「全107件を先に定義すると
+                   clippyのdead-code警告で落ちる」と書いていたが実測すると誤り
+                   (pub enumはdead-code対象外)——技術的な必然という誤った説明を、
+                   正確な理由(実装の無い変体を先回りして定義しない、という設計判断)に
+                   訂正
+                - レビュー中に副作用として、1エージェントがメインの作業ツリーで
+                  `git reset --hard`相当を実行し上記1〜6の未コミット修正が一時的に
+                  消える事故があった(reflogで検知・全て再適用・再検証済み)。
+                  以後、git操作を伴うレビューエージェントはworktree限定にする等の
+                  対策が要検討
+              - **意図的なスコープ外(次のmilestone以降)**: トップレベル宣言
+                (fn/const)自体の名前衝突検査・missing-main/invalid-main-signature・
+                演算子の妥当性検査(invalid-operation等)・argument-count・
+                mesh run/buildへのゲート統合・struct以降の言語機能の診断
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
