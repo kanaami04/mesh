@@ -17,8 +17,11 @@
 // (argument-count/builtin-arg-type——下記`infer_builtin_call`参照)、milestone 29で
 // 名前付きstructのモデル化+structリテラルのフィールド検証(unknown-field/missing-fields/
 // duplicate-field/型不一致——型「解決」は既存`checker.rs`を再利用、診断「発行」だけ再実装。
-// 下記`type_ctx`/`resolve_type_ann`/`infer_struct_lit`参照)を追加。
-// フィールドアクセス(`u.name`)の型解決・メソッド・判別可能union構築・pkg修飾struct・
+// 下記`type_ctx`/`resolve_type_ann`/`infer_struct_lit`参照)、milestone 30で
+// structのフィールドアクセス読み取り(`u.name`→型/unknown-field/method-not-called、
+// 下記`infer_member`参照)+メソッド解決(method_table構築・`u.method()`呼び出しの解決、
+// Callアーム参照)を追加。
+// メソッド呼び出しの引数個数・型照合・判別可能union構築・pkg修飾struct・
 // 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
@@ -189,6 +192,40 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             {
                 return infer_builtin_call(ctx, name, args, *pos);
             }
+            // milestone 30: メソッド呼び出し(`u.method(args)`)。calleeがMemberで
+            // targetがstruct、nameがフィールドでなければメソッドとして解決する。ここで
+            // interceptしないと、bareのフィールドアクセス(infer_member)がメソッド名を
+            // method-not-calledと誤判定してしまう(呼び出しているのに)。TS版`inferCall`の
+            // recv.method分岐に対応。**引数の個数・型照合はこの一歩では対象外**(struct型の
+            // 引数照合はmilestone 31。引数式は未定義名検出のため必ず推論する)
+            if let Expr::Member { target, name, pos: mpos } = &**callee {
+                let tgt = infer_expr(ctx, target);
+                if let Type::Struct { name: sname, fields: fcell, .. } = &tgt {
+                    let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                    if !field_names.iter().any(|n| n == name) {
+                        // フィールドではない——メソッドとして解決を試みる(retだけ読んでborrowを閉じる)
+                        let method_ret = match ctx.type_ctx.lookup_method(sname, name) {
+                            Some(Type::Fn { ret, .. }) => Some(widen_field_type((**ret).clone())),
+                            _ => None,
+                        };
+                        for a in args {
+                            infer_expr(ctx, a);
+                        }
+                        return match method_ret {
+                            Some(ret) => ret,
+                            None => {
+                                // フィールドでもメソッドでもない——unknown-field(メソッド呼び出し文言)
+                                let fnames = if field_names.is_empty() { "none".to_string() } else { field_names.join(", ") };
+                                ctx.error(*mpos, DiagnosticCode::UnknownField, format!("{} has no field or method '{name}' (fields: {fnames})", types::type_to_string(&tgt)));
+                                ANY
+                            }
+                        };
+                    }
+                    // フィールド名だった(関数値フィールドの呼び出し等)——generic経路へ落ちる
+                    // (フィールド型はwidenでANYになるので引数照合は効かない=defer)
+                }
+                // struct以外/フィールド呼び出し——generic経路へ(下でcalleeを推論しなおす)
+            }
             let callee_ty = infer_expr(ctx, callee);
             let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
             // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
@@ -216,6 +253,10 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 29: 名前付きstructリテラルのフィールド検証。pkg修飾・判別可能union構築は
         // 次段階(下記infer_struct_litがANYを返す)
         Expr::StructLit { name, pkg, fields, pos } => infer_struct_lit(ctx, name, pkg.as_deref(), fields, *pos),
+        // milestone 30: structのフィールドアクセス読み取り(`u.name`)。field→型・
+        // メソッド名→method-not-called・未知→unknown-field。呼び出し形(`u.method()`)は
+        // Call側で先にinterceptするのでここには来ない(bareのメンバー参照のみ)
+        Expr::Member { target, name, pos } => infer_member(ctx, target, name, *pos),
         // array/map/channel/match/is/spawn/select/prop/orElse/無名関数など:
         // まだ対象外なので中へは踏み込まない
         _ => ANY,
@@ -231,6 +272,39 @@ fn is_checkable_field_type(t: &Type) -> bool {
         t,
         Type::Array(_) | Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_)
     )
+}
+
+// structフィールドの型を読み取り側へ返す際、full_checkerが縮退させる型(配列/map/chan/
+// 関数/union)はANYへ畳む——milestone 27のinvariant(コレクションは常にANY)を保ち、
+// `u.items`(配列フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・
+// literalはそのまま返す(ネストしたstructフィールドアクセスが効く)
+fn widen_field_type(t: Type) -> Type {
+    if is_checkable_field_type(&t) { t } else { ANY }
+}
+
+// structのフィールドアクセス読み取り(`u.name`)の型解決(milestone 30)。TS版
+// `memberFieldType`(src/checker/calls.ts)のstruct分岐の移植。field→型・
+// 宣言済みメソッド名→method-not-called・それ以外→unknown-field。target が struct 以外
+// (union/scalar/any)はこの一歩ではANY(union の narrow-required・not-a-struct は次段階)
+fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
+    let tgt = infer_expr(ctx, target);
+    let Type::Struct { name: sname, fields: fcell, .. } = &tgt else {
+        return ANY;
+    };
+    let Some(fs) = fcell.get() else {
+        return ANY;
+    };
+    if let Some(f) = fs.iter().find(|f| f.name == name) {
+        return widen_field_type(f.type_.clone());
+    }
+    // フィールドではない——メソッドなら method-not-called、そうでなければ unknown-field
+    if ctx.type_ctx.lookup_method(sname, name).is_some() {
+        ctx.error(pos, DiagnosticCode::MethodNotCalled, format!("'{name}' is a method — call it like {name}(...)"));
+        return ANY;
+    }
+    let field_names = fs.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+    ctx.error(pos, DiagnosticCode::UnknownField, format!("{} has no field '{name}' (fields: {field_names})", types::type_to_string(&tgt)));
+    ANY
 }
 
 // 名前付きstructリテラル(`User{...}`)のフィールド検証(milestone 29)。TS版
@@ -842,6 +916,36 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // リテラル検証が無診断で素通りする(code reviewで波及範囲を明確化)。診断機構
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &program.types);
+    // milestone 30: メソッド表(struct名→メソッド名→Type::Fn)を構築する。codegen経路
+    // (codegen.rsのgenerate_package)の登録ループと同じだが、パラメータ型は
+    // `resolve_type_ann`(full_checkerの縮退解決)で作る——full_checker側の呼び出し引数の
+    // 型も縮退するので、両者を同じ型空間に揃えて突き合わせられるようにするため
+    // (codegenはresolve_type_nodeで完全解決するが、それと突き合わせると縮退した引数型で
+    // 誤検知する。milestone 29のstruct-litフィールド検査と同じ配慮)。フィールドが勝つ
+    // (フィールドと同名のメソッドはメソッド表に入れない)——TS版declareMethodと同じ。
+    // レシーバが未宣言/非struct/pkg修飾なら登録しない(誤った名前で登録しないため素通り)
+    for f in &program.fns {
+        let Some(recv) = &f.receiver else { continue };
+        let TypeNode::Name { name: bare, pkg: None, .. } = &recv.type_node else { continue };
+        if ctx.type_ctx.lookup_struct(bare).is_none() {
+            continue;
+        }
+        let recv_ty = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
+        let mut params = vec![recv_ty];
+        params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
+        let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+        // mainパッケージ単一ファイルなので struct 名は無修飾のまま(declare_methodの
+        // qualify_struct_nameはmain時に無修飾——lookup側も無修飾のstruct.nameで引く)
+        ctx.type_ctx.declare_method(bare, &f.name, Type::Fn { params, ret: Box::new(ret) });
+    }
+    // milestone 30: import alias(`import "mathutil"`→`mathutil`、`import "mesh/json"`→`json`)を
+    // ANYとしてscopes[0]へ登録する。full_checkerはimport/パッケージを解決しないが、登録しないと
+    // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
+    // 誤検知される——milestone 30でMember/メソッド呼び出しがtargetを推論するようになり顕在化。
+    // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)
+    for imp in &program.imports {
+        ctx.scopes[0].insert(imp.alias.clone(), Binding { ty: ANY, mutable: false });
+    }
     // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
     // 定数を検査+登録し、最後に関数本体を検査する。
@@ -1559,5 +1663,56 @@ mod tests {
             "{USER}fn (u: User) describe() string {{\n    return u.name\n}}\nfn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.name)\n    print(u.describe())\n}}\n"
         );
         assert_eq!(check(&src), vec![]);
+    }
+
+    // ---- milestone 30: structのフィールドアクセス + メソッド ----
+
+    // User + describe()メソッド付き
+    const USER_M: &str = "struct User {\n    name: string\n    age: int\n}\nfn (u: User) describe() string {\n    return u.name\n}\n";
+
+    #[test]
+    fn 未知のフィールド読みはunknown_fieldを報告する() {
+        let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.nmae)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UnknownField);
+        assert_eq!(diags[0].message, "User has no field 'nmae' (fields: name, age)");
+    }
+
+    #[test]
+    fn メソッドを呼ばずに参照するとmethod_not_calledを報告する() {
+        let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    x := u.describe\n    print(x)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MethodNotCalled);
+        assert_eq!(diags[0].message, "'describe' is a method — call it like describe(...)");
+    }
+
+    #[test]
+    fn 存在しないメソッド呼び出しはunknown_fieldを報告する() {
+        let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    u.bogus()\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UnknownField);
+        assert_eq!(diags[0].message, "User has no field or method 'bogus' (fields: name, age)");
+    }
+
+    #[test]
+    fn 正しいフィールド読みとメソッド呼び出しは診断を出さない() {
+        let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    print(u.name)\n    print(u.age)\n    print(u.describe())\n}}\n"));
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn フィールドの型が読み取りに伝播する() {
+        // u.name は string 型として伝播——`u.name + 1`(string + int)はinvalid-operationになる
+        let diags = check(&format!("{USER_M}fn main() {{\n    u := User{{name: \"a\", age: 1}}\n    x := u.name + 1\n    print(x)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+    }
+
+    #[test]
+    fn pkg修飾アクセスは誤検知しない() {
+        // import alias(mathやjson)はANYとして登録されるので、pkg.func(...) のtargetが
+        // undefined-nameにならない(pkg修飾の中身の検査は次段階)
+        let diags = check("import \"mathutil\"\nfn main() {\n    x := mathutil.add(1, 2)\n    print(x)\n}\n");
+        assert_eq!(diags, vec![]);
     }
 }

@@ -41,6 +41,7 @@ pub enum DiagnosticCode {
     UnknownField,
     MissingFields,
     DuplicateField,
+    MethodNotCalled,
 }
 
 impl DiagnosticCode {
@@ -66,6 +67,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnknownField => "unknown-field",
             DiagnosticCode::MissingFields => "missing-fields",
             DiagnosticCode::DuplicateField => "duplicate-field",
+            DiagnosticCode::MethodNotCalled => "method-not-called",
         }
     }
 }
