@@ -659,19 +659,36 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (裸union循環、引き続き拒否)・`type Status = "active" | "active"`
   (dedup、以前はRust版だけpanicしていた)をRust版・TS版両方で確認済み。
   詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの19マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 20(mesh/ioパッケージの移植)完了
+  (2026-07-24)**。milestone 19完了後、kanayamaと相談しmesh/io → mesh/http →
+  デモアプリ開発、の順で進めることに合意し、mesh/ioから着手。TS版
+  `mesh/io`(`src/stdlib.ts`)は`args() []string`・`readFile(path: string)
+  string | error`の2関数のみでtypes/constsは空——json.Valueのような自己参照/
+  不透明structのワークアラウンドが一切不要な、型システム上もっとも単純な
+  組み込みパッケージ。ランタイム(`io$args`/`io$readFile`)は既存のPRELUDE
+  定数に移植済みで追加作業不要。欠けていたのはcheckerのimport解決
+  (`rust/src/modules.rs`の組み込みパッケージ早期continueが`"mesh/json"`の
+  1文字列比較にハードコードされており`import "mesh/io"`が誤って「ネストした
+  パッケージパス非対応」エラーになっていた——新設`BUILTIN_PACKAGE_PATHS`へ
+  一般化)と、新設`io_stdlib_symbols()`(`json_stdlib_symbols`と同形)を
+  `register_package("io", ...)`で登録するだけ。自由関数の生成JS名は
+  importパスのaliasから自動的に`io$args`/`io$readFile`になるため、
+  json.Value構築時のような追加のcodegen側特別扱いは不要だった。テスト
+  360→362件、既存の全22 exampleがbyte-for-byte一致のまま回帰無し。
+  `io.args()`・`io.readFile(path)`(存在しないパスでerror・実在ファイルの
+  内容取得・`?`での伝播)をRust版・TS版両方で実行し確認済み。詳細はtodo.mdの
+  当該項目が一次情報源
+- **次にやるなら**: 確認済みの20マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
   検証 → resolve_method_targetのフィールド名判定統一 → struct宣言時点の
-  `__proto__`ガード → 自己参照型のサポート)が全て完了——TS版リファレンス
-  実装の主要機能をRust版がひととおり移植し終え、既知の限界として記録されて
-  いたものは全て解消した。細かな意図的なスコープ縮小(json.Valueを本物の
-  自己参照型として再定義すること・`json.Value`の2階層以上のdestructure・
-  ジェネリック関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson
-  struct参照)は引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと
-  相談して決める
+  `__proto__`ガード → 自己参照型のサポート → mesh/ioパッケージの移植)が
+  全て完了。kanayamaと合意した次の順序はmesh/http → デモアプリ開発。細かな
+  意図的なスコープ縮小(json.Valueを本物の自己参照型として再定義すること・
+  `json.Value`の2階層以上のdestructure・ジェネリック関数・cross-file/
+  cross-packageのjson struct参照)は引き続きtodo.mdに記録済みの通り残る。
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

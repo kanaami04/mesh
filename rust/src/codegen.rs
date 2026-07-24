@@ -126,10 +126,11 @@ impl Codegen {
     // TS版compileModulesと同じ)、import依存グラフの依存順(importされる側が先)にソート
     // してから1パッケージずつ処理する
     fn generate_all_modules(&mut self, modules: &[ModuleUnit]) -> CodegenResult<String> {
-        // 組み込みパッケージ(milestone 9・`mesh/json`)を、ユーザーパッケージの処理が
-        // 始まる前に登録しておく(依存グラフのソート対象には現れない——
-        // topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
+        // 組み込みパッケージ(milestone 9・`mesh/json`、milestone 20・`mesh/io`)を、
+        // ユーザーパッケージの処理が始まる前に登録しておく(依存グラフのソート対象には
+        // 現れない——topo_sort_packagesはpackagesに無い名前への参照を無視するため無害)
         self.ctx.register_package("json", json_stdlib_symbols());
+        self.ctx.register_package("io", io_stdlib_symbols());
 
         let mut packages: Vec<(String, Vec<&ModuleUnit>)> = Vec::new();
         for m in modules {
@@ -1495,6 +1496,23 @@ impl Codegen {
     }
 }
 
+// mesh/io(組み込みパッケージ、milestone 20)のシグネチャ定義。`.mesh`ソースを持たない——
+// TS版`stdlib.ts`のBUILTIN_PACKAGES("mesh/io"エントリ)に相当し、この定義から直接
+// `checker::PackageSymbols`へ登録する(generate_all_modules参照)。ランタイムの実体
+// (io$args/io$readFile)は既にprelude側に実装済み(H-2実装時にruntime.ts全体を移植済み
+// のため、ここではシグネチャの登録だけでよい)。json.Valueのような自己参照/不透明structの
+// ワークアラウンドは一切不要——型はどちらも単純(引数無しの配列返却・string引数の
+// string|error返却)で、型システム上の罠は無い
+fn io_stdlib_symbols() -> checker::PackageSymbols {
+    fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn { params, ret: Box::new(ret) }
+    }
+    let mut fns = HashMap::new();
+    fns.insert("args".to_string(), fn_ty(vec![], Type::Array(Box::new(types::STRING))));
+    fns.insert("readFile".to_string(), fn_ty(vec![types::STRING], types::union_of(vec![types::STRING, types::ERROR])));
+    checker::PackageSymbols { types: HashMap::new(), fns, consts: HashMap::new() }
+}
+
 // mesh/json(組み込みパッケージ、milestone 9)のシグネチャ定義。`.mesh`ソースを持たない——
 // TS版`stdlib.ts`のBUILTIN_PACKAGESに相当し、この定義から直接`checker::PackageSymbols`へ
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
@@ -2390,6 +2408,28 @@ mod tests {
         ]);
         assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
         assert!(js.contains("(await json$stringify(v))"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_io組み込みパッケージの関数呼び出しが解決できる() {
+        // milestone 20: mesh/ioは.messソースを持たない組み込みパッケージ(io_stdlib_symbols)。
+        // json.Valueのような自己参照/不透明structのワークアラウンドは不要——型は単純な
+        // 配列返却・string|error返却のみ
+        let js = gen_body(
+            "import \"mesh/io\"\nfn main() {\n  args := io.args()\n  print(len(args))\n  content := io.readFile(\"a.txt\") or err => \"missing: \" + str(err)\n  print(content)\n}",
+        );
+        assert!(js.contains("(await io$args())"), "got: {js}");
+        assert!(js.contains("(await io$readFile(\"a.txt\"))"), "got: {js}");
+    }
+
+    #[test]
+    fn mesh_ioとユーザーパッケージのimportが共存できる() {
+        let js = gen_modules_body(&[
+            ("main", "main.mesh", "import \"mesh/io\"\nimport \"mathutil\"\nfn main() {\n  print(mathutil.add(1, 2), len(io.args()))\n}"),
+            ("mathutil", "mathutil/ops.mesh", OPS_MESH),
+        ]);
+        assert!(js.contains("(await mathutil$add(1, 2))"), "got: {js}");
+        assert!(js.contains("(await io$args())"), "got: {js}");
     }
 
     #[test]

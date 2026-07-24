@@ -2211,6 +2211,40 @@
           再定義するのを見送っているだけ」という正確な説明に修正した。
         - **milestone 19のスコープ外**: json.Valueを本物の自己参照判別可能
           unionへ再定義すること(上記参照、次のmilestone候補)。
+  - [x] **checker+codegen milestone 20(mesh/ioパッケージの移植)**
+        ✅ 2026-07-24実装。milestone 19完了後、kanayamaと相談しmesh/io →
+        mesh/http → デモアプリ開発、の順で進めることに合意し、mesh/ioから着手。
+        調査の結果、TS版`mesh/io`(`src/stdlib.ts`)のシグネチャは`args() []
+        string`・`readFile(path: string) string | error`の2関数のみで
+        `types`/`consts`は空——json.Valueのような自己参照/不透明structの
+        ワークアラウンドが一切不要な、型システム上もっとも単純な組み込み
+        パッケージと判明。ランタイム側(`io$args`/`io$readFile`)は既存の
+        PRELUDE定数に一言一句移植済みで追加作業不要と確認済み。欠けていたのは
+        checker/codegen側の2箇所だけだった:
+        - `rust/src/modules.rs`: `load_dependencies`の組み込みパッケージ早期
+          continueが`"mesh/json"`の1文字列比較にハードコードされており、
+          `import "mesh/io"`が(`/`を含むため)「ネストしたパッケージパスは
+          非対応」という誤ったエラーになっていた。新設`pub const
+          BUILTIN_PACKAGE_PATHS: &[&str] = &["mesh/json", "mesh/io"]`へ
+          一般化。
+        - `rust/src/codegen.rs`: 新設`io_stdlib_symbols()`(`json_stdlib_symbols`
+          と同形、TS版`stdlib.ts`の"mesh/io"エントリの移植)を
+          `generate_all_modules`で`register_package("io", ...)`により登録。
+          自由関数の生成JS名(`fn_js_name`、pkg修飾なら`"{pkg}${name}"`)が
+          importパスの末尾セグメント(alias、parser.rsが既に処理済み)経由で
+          自動的に`io$args`/`io$readFile`になるため、json.Value構築時の
+          `struct_ty`/`union_ty`のような追加のcodegen側特別扱いは一切不要
+          だった。
+        - 新規ユニットテスト`modules.rs`1件(mesh/ioがファイルシステムを
+          見ずに解決できることの回帰防止、mesh/jsonと同じ理由)+`codegen.rs`
+          2件(mesh/io単体での関数呼び出し解決・ユーザーパッケージとの共存)。
+          360→362件、全件パス。`cargo clippy --all-targets -- -D warnings`
+          クリーン。既存の全22 exampleを再度byte-for-byte確認(回帰無し)。
+          `io.args()`(空配列)・`io.readFile(path)`(存在しないパスで
+          `error`、実在するファイルで内容取得・`?`での伝播)の3パターンを
+          Rust版・TS版両方で実行し、同じ出力・同じ挙動になることを確認済み。
+        - **milestone 20のスコープ外**: 無し(mesh/ioの2関数を完全にカバー)。
+          次はmesh/httpに着手する予定(kanayamaと合意した順序)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
