@@ -5,19 +5,19 @@
 // 合意した設計)。TS版`src/checker/`のcontext.ts(スコープ/宣言の基盤)+
 // expressions.ts(識別子解決)+statements.ts(変数宣言/代入検査)のごく一部に相当する。
 //
-// **milestone 22のスコープ(意図的な最初の一歩)**: 元のcodegen移植のmilestone 1と同じ
-// 「スカラーのMesh」(struct/map/配列/channel/並行処理/import/ジェネリクスは対象外)。
-// 診断コードも「変数宣言・型不一致・未定義名」のごく少数(diagnostic_codes.rs参照)だけを
-// この一歩で実装する。トップレベル宣言(fn/const)自体の名前衝突検査
-// (builtin-redeclared等)・main関数の形検査(missing-main等)・演算子の妥当性検査
-// (invalid-operation等)は対象外——アーキテクチャが正しいと分かった時点で、
+// **スコープ(意図的な段階的拡張)**: 元のcodegen移植のmilestone 1と同じ「スカラーの
+// Mesh」(struct/map/配列/channel/並行処理/import/ジェネリクスは対象外)。診断コードも
+// 「変数宣言・型不一致・未定義名」のごく少数(diagnostic_codes.rs参照)だけを実装する。
+// milestone 23でトップレベル宣言(fn/const)自体の名前衝突検査を追加(下記
+// `check_program`参照)。main関数の形検査(missing-main等)・演算子の妥当性検査
+// (invalid-operation等)は引き続き対象外——アーキテクチャが正しいと分かった時点で、
 // 機能ごとに広げていく方針(既存21マイルストーンと同じ進め方)。
 
 use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, TypeNode};
 use crate::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use crate::token::Pos;
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)
 const RESERVED: &[&str] = &[
@@ -31,15 +31,13 @@ struct Binding {
 }
 
 pub struct FullCheckerCtx {
+    // scopes[0]がトップレベル(fn/const名の置き場)、それ以降が通常の関数ローカルスコープ。
+    // TS版`checker/modules.ts`のcheckPackageもトップレベルのfn/constを普通の
+    // declareBindingでscopes[0]へ登録しており(milestone 22時点では別集合
+    // `top_level_names`で代用していたが、milestone 23でこの統一設計へ寄せた)、
+    // ローカル変数と全く同じdeclare()を通ることで予約語・組み込み名衝突・重複宣言・
+    // shadowingの検査が自動的に効くようになる
     scopes: Vec<HashMap<String, Binding>>,
-    // トップレベルのfn/const名。この一歩では「呼べる/参照できる」ことだけ知っていればよく
-    // (シグネチャ照合は対象外)、型はANYで十分——ここに入れておかないと、同じファイル内の
-    // 他の関数を呼ぶだけの正しいコードがundefined-nameの誤検知になってしまう。
-    // TS版はトップレベル関数をscopes[0]へ普通にdeclareBindingするため(`checker/modules.ts`)
-    // 「外側スコープ(関数名を含む)」というshadowing判定に自然に乗るが、Rust版は別集合に
-    // 分けているぶんdeclare()側でも明示的にこの集合を見る必要がある(見落として実装時に
-    // 一度スコープアウトさせてしまった)
-    top_level_names: HashSet<String>,
     // 今検査中の関数の戻り値型のスタック(無名関数はmilestone 22の対象外なので実際には
     // 深さ1までしか積まれないが、TS版`ctx.retStack`と同じ形にしておく)
     ret_stack: Vec<Type>,
@@ -48,7 +46,7 @@ pub struct FullCheckerCtx {
 
 impl FullCheckerCtx {
     fn new() -> Self {
-        FullCheckerCtx { scopes: vec![HashMap::new()], top_level_names: HashSet::new(), ret_stack: Vec::new(), diagnostics: Vec::new() }
+        FullCheckerCtx { scopes: vec![HashMap::new()], ret_stack: Vec::new(), diagnostics: Vec::new() }
     }
 
     fn push_scope(&mut self) {
@@ -85,9 +83,10 @@ impl FullCheckerCtx {
             return;
         }
         // シャドーイング禁止(TS版と同じ2026-07-17決定): 外側スコープ(トップレベルの
-        // fn/const名を含む——TS版コメント「外側スコープ(関数名を含む)」と同じ扱い)に
-        // 同名があれば、更新し忘れて`:=`してしまっただけの疑いが強いバグとして拒否する
-        if self.lookup(name).is_some() || self.top_level_names.contains(name) {
+        // fn/const名を含む——TS版コメント「外側スコープ(関数名を含む)」と同じ扱い。
+        // トップレベル名もscopes[0]にいるのでlookup()が自然に見つける)に同名があれば、
+        // 更新し忘れて`:=`してしまっただけの疑いが強いバグとして拒否する
+        if self.lookup(name).is_some() {
             self.error(pos, DiagnosticCode::Shadowing, format!("'{name}' shadows an outer binding — use '=' to update it, or pick a different name"));
             return;
         }
@@ -135,8 +134,11 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         }
         Expr::Ident { name, pos } => {
             if let Some(b) = ctx.lookup(name) {
+                // トップレベルのfn/const名もscopes[0]にBindingとして入っている
+                // (check_programが本体検査より前に登録する)ので、ここは組み込み関数と
+                // 通常のローカル変数/トップレベル名を区別せず同じ経路で解決できる
                 b.ty.clone()
-            } else if crate::checker::is_builtin(name) || ctx.top_level_names.contains(name) {
+            } else if crate::checker::is_builtin(name) {
                 ANY
             } else {
                 ctx.error(*pos, DiagnosticCode::UndefinedName, format!("'{name}' is not defined"));
@@ -346,30 +348,42 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     ctx.pop_scope();
 }
 
-// トップレベル定数(F-9c)自体の名前衝突検査(builtin-redeclared等)はmilestone 22の
-// 対象外(ファイル冒頭コメント参照)だが、値の式は他の変数宣言と同じく
-// type-mismatch/undefined-nameの対象——ここだけ見落とすと、この一歩が実装したと
-// 謳う2つの診断が定数の初期値だけすり抜けてしまう
+// トップレベル定数(F-9c)。値の式はローカル変数宣言と同じくtype-mismatch/undefined-name
+// の対象(見落とすと定数の初期値だけすり抜けてしまう)。最後にTS版`checker/modules.ts`と
+// 同じ「型注釈があればそちら、無ければ値から推論」の優先順位でscopes[0]へdeclareする——
+// これによりmilestone 23で追加した名前衝突検査(reserved-word/builtin-redeclared/
+// already-declared/shadowing)がローカル変数と同じdeclare()経由で自動的に効く
 fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
     let value_ty = infer_expr(ctx, &c.value);
-    let Some(type_node) = &c.type_node else {
-        return; // 型注釈が無ければ値から推論するだけ(TS版と同じ)——比較対象が無い
+    let final_ty = match &c.type_node {
+        Some(type_node) => {
+            let declared = resolve_scalar_type(type_node);
+            if !types::assignable(&value_ty, &declared) {
+                ctx.error(
+                    c.pos,
+                    DiagnosticCode::TypeMismatch,
+                    format!("cannot assign a value of type '{}' to '{}' of type '{}'", types::type_to_string(&value_ty), c.name, types::type_to_string(&declared)),
+                );
+            }
+            declared
+        }
+        None => value_ty,
     };
-    let declared = resolve_scalar_type(type_node);
-    if !types::assignable(&value_ty, &declared) {
-        ctx.error(
-            c.pos,
-            DiagnosticCode::TypeMismatch,
-            format!("cannot assign a value of type '{}' to '{}' of type '{}'", types::type_to_string(&value_ty), c.name, types::type_to_string(&declared)),
-        );
-    }
+    ctx.declare(&c.name, final_ty, c.pos, false);
 }
 
 // このProgram(単一ファイル。milestone 22はimport/パッケージ対象外)を検査し、
 // 見つかった診断を返す。空なら「(このスコープの範囲で)問題なし」の意味
 pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     let mut ctx = FullCheckerCtx::new();
-    ctx.top_level_names = program.fns.iter().map(|f| f.name.clone()).chain(program.consts.iter().map(|c| c.name.clone())).collect();
+    // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
+    // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
+    // 定数を検査+登録し、最後に関数本体を検査する。シグネチャ全体(引数/戻り値の型)の
+    // 照合はmilestone 22と同じくこの一歩の対象外なので、関数の型はANYで登録する
+    // (「名前として存在する」ことだけをここで表現する)
+    for f in &program.fns {
+        ctx.declare(&f.name, ANY, f.pos, false);
+    }
     for c in &program.consts {
         check_top_level_const(&mut ctx, c);
     }
@@ -469,11 +483,37 @@ mod tests {
 
     #[test]
     fn トップレベル関数名を再宣言するとshadowingになる() {
-        // 回帰テスト: top_level_namesが通常のscopeとは別集合になっているため、
-        // declare()のshadowing判定にこの集合も含めないと見落とす
         let diags = check("fn helper() int { return 1 }\nfn main() {\n    helper := 5\n    print(helper)\n}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::Shadowing);
+    }
+
+    #[test]
+    fn 重複したトップレベル関数宣言はalready_declaredになる() {
+        let diags = check("fn helper() int { return 1 }\nfn helper() int { return 2 }\nfn main() {\n    print(helper())\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::AlreadyDeclared);
+    }
+
+    #[test]
+    fn 組み込み関数名のトップレベル関数宣言はbuiltin_redeclaredになる() {
+        let diags = check("fn print() {\n}\nfn main() {\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::BuiltinRedeclared);
+    }
+
+    #[test]
+    fn 予約語のトップレベル関数宣言はreserved_wordになる() {
+        let diags = check("fn await() {\n}\nfn main() {\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::ReservedWord);
+    }
+
+    #[test]
+    fn トップレベル定数とトップレベル関数の名前衝突もalready_declaredになる() {
+        let diags = check("helper := 1\nfn helper() int { return 2 }\nfn main() {\n    print(helper)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::AlreadyDeclared);
     }
 
     #[test]
