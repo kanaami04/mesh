@@ -1877,8 +1877,47 @@
           `u.nmae = "b"`(代入)・`print(u.nmae)`(読み取り)・`f := u.describe`
           (メソッド名の値参照)の3パターンをRust版・TS版両方でコンパイルし、
           いずれも同じ理由・同じメッセージ・同じ位置情報で拒否することを確認済み。
+        - **5エージェントのcode reviewで発見・即修正した2件**(実行確認済み):
+          1. **実害のある回帰(git historyレビュー発見)**: `mesh/json`の
+             `json.Value`(milestone 9、`codegen.rs`の`json_stdlib_symbols`)は、
+             Rust版が表現できない自己参照型のため、自己参照する再帰位置
+             (`obj.entries`の値・`arr.items`の要素)を意図的に「空フィールドの
+             不透明な殻」(`fields: vec![]`)として表す——これは未解決の型名への
+             フォールバックと同じ表現を流用したもの。今回の新しい検証がこれを
+             「本当に空のstruct」と区別できず、milestone 9で「2階層以上の入れ子
+             destructureはchecker側の型推論の精度が落ちるだけ(実行時テストは
+             動く)」と意図的にスコープを縮小していた箇所への**書き込み**
+             (`val.s = "..."`のような2階層以上ネストしたjson値への代入、以前は
+             無検証で普通に動いていた)まで、誤って`unknown-field`で拒否する
+             回帰を作り込んでいた。`validate_struct_field`に`json.Value`かつ
+             空フィールドの場合だけの特例(ANYと同じ扱い)を追加して解消
+             (他の空フィールドstructは引き続き厳密に検証する、この不透明structの
+             専用ケースに限定)。
+          2. **メッセージ規約からの逸脱(code-comments準拠レビュー発見)**:
+             `validate_struct_field`内の(呼び出し元の既存ガードにより実際には
+             到達しない)非struct分岐のエラーメッセージが、対象の型ではなく
+             フィールド名を主語にしており(`'{name}' is not a struct field`)、
+             `resolve_struct_lit_member`等の他の「対象の型を名指しする」到達
+             不能ガードの慣習から外れていた。`types::type_to_string`で対象の型を
+             名指しする形に修正し、他の到達不能ガードと同じ「安全ガード」コメントも
+             追加。
+          **記録に留めた1件**(過去PRコメント・git historyレビュー双方が独立発見・
+          このPRが導入したものではないと確認済み): `resolve_method_target`
+          (`gen_call`/`gen_spawn`が使うメソッド呼び出し解決、milestone 5・PR #20
+          由来)は今回統一した`validate_struct_field`を使わず独自のフィールド/
+          メソッド名判定を持っており、`u.discribe()`のようなtypoされた呼び出しは
+          `codegen: 'User' has no method 'discribe'`という別の(TS版の
+          `unknown-field`メッセージとは異なる)文言になる。無診断で素通りする
+          わけではなく実害は無いため今回は修正せず、「読み書き共通の検証」という
+          このPRの統一が完全ではない(3箇所目の独立したフィールド名判定が残る)
+          という事実を次のmilestone候補として記録するに留める。
+          追加の回帰テスト`codegen.rs`1件(json.Valueの不透明な再帰位置への
+          書き込みが今まで通り動くこと)。341→342件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example
+          を再度byte-for-byte確認(回帰無し)。
         - **milestone 15のスコープ外(意図的)**: pkg修飾struct literalの厳密検証・
-          struct宣言時点の`__proto__`ガード・自己参照型は引き続き対象外
+          struct宣言時点の`__proto__`ガード・自己参照型・`resolve_method_target`の
+          フィールド名判定統一(上記「記録に留めた1件」参照)は引き続き対象外
           (次のmilestone候補、順に対応していく予定)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 

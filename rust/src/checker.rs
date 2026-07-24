@@ -566,9 +566,27 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
 // なっていた——TS版と同じくmethod_tableを実際に確認し、メソッド名ならmethod-not-called
 // 相当、そうでなければunknown-field相当のメッセージを出し分ける
 pub fn validate_struct_field(target_ty: &Type, name: &str, ctx: &CheckerCtx, pos: Pos) -> Result<Type, String> {
+    // 安全ガード: 呼び出し元(gen_lvalue/gen_exprのMember分岐)が既に`Type::Struct`で
+    // あることを確認してから呼ぶため、この分岐には実際には到達しない。code review指摘
+    // (メッセージが対象の型ではなくフィールド名を主語にしていた)を受け、
+    // resolve_struct_lit_member/check_arith_op等の他の「対象の型を名指しする」
+    // 到達不能ガードと同じ形に揃えた
     let Type::Struct { fields, name: struct_name, .. } = target_ty else {
-        return Err(format!("checker: '{name}' is not a struct field ({}:{})", pos.line, pos.col));
+        return Err(format!("checker: '{}' is not a struct ({}:{})", types::type_to_string(target_ty), pos.line, pos.col));
     };
+    // git historyレビュー発覚・実行確認済みの回帰: `mesh/json`のjson.Value(milestone 9・
+    // codegen.rsのjson_stdlib_symbols)は、自己参照する再帰位置(`arr.items`の要素・
+    // `obj.entries`の値)をRust版が表現できない自己参照型のため、意図的に「空フィールドの
+    // 不透明な殻」として表す(struct宣言の未解決名フォールバックと同じ`fields: vec![]`表現を
+    // 流用している)。これを他の「本当に空のstruct」や「未解決の型名」と同じに扱うと、
+    // milestone 9で「2階層以上の入れ子destructureは意図的にスコープ外(実行時テストは
+    // 動くがchecker側の型推論の精度だけ落ちる)」としていた箇所への書き込み
+    // (`val.s = "..."`のような2階層以上ネストしたjson値への代入)まで、以前は動いていたのに
+    // このmilestoneの新しい検証で誤って`unknown-field`にしてしまっていた。ANYと同じ扱いに
+    // する(この不透明structだけの特例——他の空フィールドstructは引き続き厳密に検証する)
+    if struct_name == "json.Value" && fields.is_empty() {
+        return Ok(ANY);
+    }
     if let Some(f) = fields.iter().find(|f| f.name == name) {
         return Ok(f.type_.clone());
     }

@@ -3055,4 +3055,18 @@ mod tests {
         assert!(js.contains("u.name = \"b\";"), "got: {js}");
         assert!(js.contains("__print(u.name);"), "got: {js}");
     }
+
+    #[test]
+    fn json_valueの不透明な再帰位置への書き込みは今まで通りコンパイルできる() {
+        // git historyレビュー発覚・実行確認済みの回帰: json.Valueの自己参照する再帰位置
+        // (`obj.entries`の値等、milestone 9で意図的に空フィールドの不透明な殻として
+        // 表現している)への書き込みが、この milestone の新しい検証で誤って
+        // unknown-fieldになっていた——2階層以上の入れ子destructureはchecker側の型推論の
+        // 精度が落ちるだけでrun時テストは動く、というmilestone 9の意図的なスコープ縮小の
+        // 範囲内なので、書き込みも今まで通り通す
+        let js = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  if v is { kind: \"obj\" } {\n    for k, val := range v.entries {\n      if val is { kind: \"str\" } {\n        val.s = \"patched\"\n        print(val.s)\n      }\n    }\n  }\n}",
+        );
+        assert!(js.contains("val.s = \"patched\""), "got: {js}");
+    }
 }

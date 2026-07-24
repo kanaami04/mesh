@@ -532,10 +532,16 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   新設`validate_struct_field`(TS版`memberFieldType`のstruct分岐の移植)を
   `gen_lvalue`(代入先)と`gen_expr`(読み取り)の両方から共有して呼ぶ形に統一し、
   両方とも正しく`unknown-field`/`method-not-called`を出し分けるようにした。
-  テスト334→341件(+7)、既存の全example(22本)がbyte-for-byte一致のまま
-  回帰無し。`u.nmae = "b"`・`print(u.nmae)`・`f := u.describe`の3パターンを
-  Rust版・TS版両方でコンパイルし、同じ理由・同じメッセージ・同じ位置情報で
-  拒否されることも確認済み。詳細はtodo.mdの当該項目が一次情報源
+  **code reviewで実害のある回帰を発見・修正**: `mesh/json`の`json.Value`
+  (milestone 9)は自己参照する再帰位置を意図的に「空フィールドの不透明な殻」で
+  表しており、新しい検証がこれを「本当に空のstruct」と区別できず、milestone 9で
+  意図的にスコープ縮小していた2階層以上のネストしたjson値への書き込みまで
+  誤って`unknown-field`にしてしまっていた——`json.Value`かつ空フィールドの
+  場合だけの特例を追加して解消。テスト334→342件(+8)、既存の全example(22本)が
+  byte-for-byte一致のまま回帰無し。`u.nmae = "b"`・`print(u.nmae)`・
+  `f := u.describe`の3パターンをRust版・TS版両方でコンパイルし、同じ理由・
+  同じメッセージ・同じ位置情報で拒否されることも確認済み。詳細はtodo.mdの
+  当該項目が一次情報源
 - **次にやるなら**: 確認済みの15マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
