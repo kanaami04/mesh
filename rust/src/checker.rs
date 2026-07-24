@@ -552,6 +552,56 @@ pub fn validate_struct_lit_fields(member: &Type, display_name: &str, fields: &[S
     Ok(())
 }
 
+// structのフィールドアクセス(読み・書き共通)の妥当性検証。TS版`memberFieldType`
+// (src/checker/calls.ts:117-133、structの分岐のみ移植——union/非struct分岐は
+// 呼び出し元codegen.rsの既存ガード〈`Type::Struct`であることの確認〉が引き続き担う。
+// codegen.rsの2箇所〈gen_lvalueのMember・gen_exprのMember〉から共有して呼ぶことで、
+// TS版が読み書き両方で同じ関数を再利用するのと同じ構図にする)。
+// **既知の限界として記録されていた穴(PR #17以来)を解消**: 代入先(`u.nmae = ...`)は
+// フィールド名が宣言済みのfieldsと一切照合されずtypoが無診断でコンパイルされていた
+// (JSの新規プロパティとして黙って書き込まれ、実際のフィールドは変わらない)。
+// 読み取り側(`u.nmae`)は既にフィールド有無を見ていたが、無かった場合を無条件に
+// 「メソッド名の値参照」と決め打っており(`method_table`を実際には確認していなかった)、
+// 真にtypoしただけの場合でも常に「'nmae' is a method」という誤ったメッセージに
+// なっていた——TS版と同じくmethod_tableを実際に確認し、メソッド名ならmethod-not-called
+// 相当、そうでなければunknown-field相当のメッセージを出し分ける
+pub fn validate_struct_field(target_ty: &Type, name: &str, ctx: &CheckerCtx, pos: Pos) -> Result<Type, String> {
+    // 安全ガード: 呼び出し元(gen_lvalue/gen_exprのMember分岐)が既に`Type::Struct`で
+    // あることを確認してから呼ぶため、この分岐には実際には到達しない。code review指摘
+    // (メッセージが対象の型ではなくフィールド名を主語にしていた)を受け、
+    // resolve_struct_lit_member/check_arith_op等の他の「対象の型を名指しする」
+    // 到達不能ガードと同じ形に揃えた
+    let Type::Struct { fields, name: struct_name, .. } = target_ty else {
+        return Err(format!("checker: '{}' is not a struct ({}:{})", types::type_to_string(target_ty), pos.line, pos.col));
+    };
+    // git historyレビュー発覚・実行確認済みの回帰: `mesh/json`のjson.Value(milestone 9・
+    // codegen.rsのjson_stdlib_symbols)は、自己参照する再帰位置(`arr.items`の要素・
+    // `obj.entries`の値)をRust版が表現できない自己参照型のため、意図的に「空フィールドの
+    // 不透明な殻」として表す(struct宣言の未解決名フォールバックと同じ`fields: vec![]`表現を
+    // 流用している)。これを他の「本当に空のstruct」や「未解決の型名」と同じに扱うと、
+    // milestone 9で「2階層以上の入れ子destructureは意図的にスコープ外(実行時テストは
+    // 動くがchecker側の型推論の精度だけ落ちる)」としていた箇所への書き込み
+    // (`val.s = "..."`のような2階層以上ネストしたjson値への代入)まで、以前は動いていたのに
+    // このmilestoneの新しい検証で誤って`unknown-field`にしてしまっていた。ANYと同じ扱いに
+    // する(この不透明structだけの特例——他の空フィールドstructは引き続き厳密に検証する)
+    if struct_name == "json.Value" && fields.is_empty() {
+        return Ok(ANY);
+    }
+    if let Some(f) = fields.iter().find(|f| f.name == name) {
+        return Ok(f.type_.clone());
+    }
+    if ctx.lookup_method(struct_name, name).is_some() {
+        return Err(format!("checker: '{name}' is a method — call it like {name}(...) ({}:{})", pos.line, pos.col));
+    }
+    Err(format!(
+        "checker: {} has no field '{name}' (fields: {}) ({}:{})",
+        types::type_to_string(target_ty),
+        fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
+        pos.line,
+        pos.col
+    ))
+}
+
 // struct型の内部識別名にパッケージを織り込む(TS版`types-resolve.ts`と同じ、ドット区切り)。
 // mainパッケージは無修飾のまま(既存milestone 1〜5の単一ファイル挙動と完全互換)
 pub fn qualify_struct_name(pkg: &str, name: &str) -> String {
@@ -1577,6 +1627,44 @@ mod tests {
         let is_none = Expr::Is { operand: Box::new(ident("y")), target: name_type("none"), pos: pos() };
         let cmp_y = Expr::Binary { op: TokenType::Gt, left: Box::new(ident("y")), right: Box::new(int_lit("0")), pos: pos() };
         assert!(infer_binary(&ctx, TokenType::OrOr, &is_none, &cmp_y, pos()).is_ok());
+    }
+
+    // ---- milestone 15: 読み/書き共通のstructフィールドアクセス検証 ----
+
+    #[test]
+    fn validate_struct_fieldは宣言済みフィールドなら型を返す() {
+        let user = Type::Struct {
+            name: "User".into(),
+            fields: vec![types::StructField { name: "name".into(), type_: STRING }],
+            is_error_type: false,
+        };
+        let ctx = CheckerCtx::new();
+        let ty = validate_struct_field(&user, "name", &ctx, pos()).unwrap();
+        assert!(types::type_equals(&ty, &STRING));
+    }
+
+    #[test]
+    fn validate_struct_fieldはtypoしたフィールド名をunknown_fieldとしてerrにする() {
+        // PR #17以来の既知の限界(代入先のフィールド名は一切照合されない)を解消
+        let user = Type::Struct {
+            name: "User".into(),
+            fields: vec![types::StructField { name: "name".into(), type_: STRING }],
+            is_error_type: false,
+        };
+        let ctx = CheckerCtx::new();
+        let err = validate_struct_field(&user, "nmae", &ctx, pos()).unwrap_err();
+        assert!(err.contains("User has no field 'nmae' (fields: name)"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_struct_fieldはメソッド名の値参照をmethod_not_calledとしてerrにする() {
+        // 以前はmethod_tableを実際に確認せず、未検出のフィールドを常に「メソッド名」
+        // 扱いしていた——typoと真のメソッド名参照を区別できていなかった
+        let user = Type::Struct { name: "User".into(), fields: vec![], is_error_type: false };
+        let mut ctx = CheckerCtx::new();
+        ctx.declare_method("User", "describe", Type::Fn { params: vec![], ret: Box::new(STRING) });
+        let err = validate_struct_field(&user, "describe", &ctx, pos()).unwrap_err();
+        assert!(err.contains("'describe' is a method — call it like describe(...)"), "got: {err}");
     }
 
     #[test]

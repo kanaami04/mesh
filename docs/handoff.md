@@ -518,15 +518,39 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   だけでは検出できず——code reviewが実際にTS版と突き合わせて発見した)。
   これでTS版`checkArithOp`+二項演算子まわりの主要な妥当性検査(算術・比較・
   論理・等価)をひととおり移植し終えた。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの14マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 15(読み/書き共通のstructフィールドアクセス検証)
+  完了(2026-07-24)**。milestone 12でstruct literal「構築」側だけ直した
+  フィールド検証の残りのうち「`gen_lvalue`の代入先フィールド名検証」
+  (PR #17以来の既知の限界)に着手。TS版`memberFieldType`(`src/checker/
+  calls.ts:117-147`)を読むと、TS版はフィールドの読み・書き両方を同じ関数で
+  検証しており、「代入先だけ未検証」という以前の見立ては不正確で、**読み取り
+  側にも別の実バグがあった**と判明——`u.nmae = "b"`(代入)は無診断でJSの
+  新規プロパティとして黙って書き込まれる(静かに壊れた挙動)一方、
+  `print(u.nmae)`(読み取り)は実は既に拒否していたものの、未検出のフィールドを
+  無条件に「メソッド名の値参照」と決め打っており(`method_table`を実際には
+  確認していなかった)、単なるtypoでも常に誤解を招くメッセージになっていた。
+  新設`validate_struct_field`(TS版`memberFieldType`のstruct分岐の移植)を
+  `gen_lvalue`(代入先)と`gen_expr`(読み取り)の両方から共有して呼ぶ形に統一し、
+  両方とも正しく`unknown-field`/`method-not-called`を出し分けるようにした。
+  **code reviewで実害のある回帰を発見・修正**: `mesh/json`の`json.Value`
+  (milestone 9)は自己参照する再帰位置を意図的に「空フィールドの不透明な殻」で
+  表しており、新しい検証がこれを「本当に空のstruct」と区別できず、milestone 9で
+  意図的にスコープ縮小していた2階層以上のネストしたjson値への書き込みまで
+  誤って`unknown-field`にしてしまっていた——`json.Value`かつ空フィールドの
+  場合だけの特例を追加して解消。テスト334→342件(+8)、既存の全example(22本)が
+  byte-for-byte一致のまま回帰無し。`u.nmae = "b"`・`print(u.nmae)`・
+  `f := u.describe`の3パターンをRust版・TS版両方でコンパイルし、同じ理由・
+  同じメッセージ・同じ位置情報で拒否されることも確認済み。詳細はtodo.mdの
+  当該項目が一次情報源
+- **次にやるなら**: 確認済みの15マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
-  フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査)が
-  全て完了——TS版リファレンス実装の主要機能をRust版がひととおり移植し終えた。
-  細かな既知の限界・意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上の
-  destructure・ジェネリック関数・`mesh/io`/`mesh/http`・
-  cross-file/cross-packageのjson struct参照・`gen_lvalue`の代入先フィールド名
-  検証・struct宣言時点の`__proto__`ガード・pkg修飾struct literalの厳密検証 等)は
+  フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
+  読み/書き共通のstructフィールドアクセス検証)が全て完了——TS版リファレンス
+  実装の主要機能をRust版がひととおり移植し終えた。細かな既知の限界・意図的な
+  スコープ縮小(自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック
+  関数・`mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
+  struct宣言時点の`__proto__`ガード・pkg修飾struct literalの厳密検証 等)は
   引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/

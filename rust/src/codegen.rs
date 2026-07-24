@@ -866,9 +866,15 @@ impl Codegen {
                 // 修飾(`math.x = ...`)はまだ実装が無く「未解決の識別子」としてANYへ落ちるので、
                 // ここで弾かないと`math.x = ...`のような実行時ReferenceErrorになるJSを
                 // 静かに生成してしまう
-                if !matches!(checker::infer_expr(&self.ctx, target), Type::Struct { .. }) {
+                let target_ty = checker::infer_expr(&self.ctx, target);
+                if !matches!(target_ty, Type::Struct { .. }) {
                     return Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col));
                 }
+                // milestone 15・PR #17以来の既知の限界を解消: 代入先のフィールド名も
+                // struct literal構築(milestone 12)と同じくtypoを検出する
+                // (以前は`u.nmae = ...`のようなtypoが無診断でコンパイルされ、JSの
+                // 新規プロパティとして黙って書き込まれていた)
+                checker::validate_struct_field(&target_ty, name, &self.ctx, *pos)?;
                 let target_js = self.gen_expr(target)?;
                 Ok(format!("{target_js}.{name}"))
             }
@@ -1025,15 +1031,18 @@ impl Codegen {
             // フィールドのときだけ素の`.name`を出す——パッケージ修飾(`math.add`)はまだ
             // 実装が無く「未解決の識別子」としてANYへ落ちるので、ここで弾かないと
             // 実行時ReferenceErrorになるJSを静かに生成してしまう。メソッド名(フィールドでは
-            // ない名前)を値として参照する式もTS版と同じく対象外のまま(呼び出し式側でだけ解決)
+            // ない名前)を値として参照する式もTS版と同じく対象外のまま(呼び出し式側でだけ解決)。
+            // milestone 15: フィールド未検出時に無条件で「メソッド名の値参照」と決め打って
+            // いた(method_tableを実際には見ていなかった)ため、単なるtypoでも常に
+            // 誤解を招くメッセージになっていた——validate_struct_fieldで実際に
+            // method_tableを確認し、真にメソッド名ならmethod-not-called相当、
+            // そうでなければunknown-field相当のメッセージを出し分ける
             Expr::Member { target, name, pos } => {
                 let target_ty = checker::infer_expr(&self.ctx, target);
-                let Type::Struct { fields, .. } = &target_ty else {
+                if !matches!(target_ty, Type::Struct { .. }) {
                     return Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col));
-                };
-                if !fields.iter().any(|f| &f.name == name) {
-                    return Err(format!("codegen: '{name}' is a method — call it, it cannot be referenced as a value ({}:{})", pos.line, pos.col));
                 }
+                checker::validate_struct_field(&target_ty, name, &self.ctx, *pos)?;
                 Ok(format!("{}.{name}", self.gen_expr(target)?))
             }
             // 生成JSにはstruct名自体は現れない(TS版と同じ、プレーンなobject literal)。
@@ -3004,5 +3013,60 @@ mod tests {
             "fn main() {\n  m := map<string, int>{\"a\": 1}\n  v := m[\"a\"]\n  if v is none || v > 0 {\n    print(\"ok\")\n  }\n}",
         );
         assert!(js2.contains("(v > 0)"), "got: {js2}");
+    }
+
+    // ---- milestone 15: 読み/書き共通のstructフィールドアクセス検証 ----
+
+    #[test]
+    fn 代入先のtypoしたフィールド名は明確なerrになる() {
+        // PR #17以来の既知の限界(代入先のフィールド名は宣言済みfieldsと一切照合されず、
+        // typoがJSの新規プロパティとして黙って書き込まれ、実際のフィールドは変わらない
+        // ままだった)を解消
+        let err = gen_js(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  u.nmae = \"b\"\n  print(u.name)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("User has no field 'nmae' (fields: name)"), "got: {err}");
+    }
+
+    #[test]
+    fn 読み取り側のtypoしたフィールド名も同じunknown_fieldメッセージになる() {
+        // 以前は「'nmae' is a method — call it, it cannot be referenced as a value」という
+        // 誤ったメッセージだった(method_tableを実際には確認せず、未検出のフィールドを
+        // 常にメソッド名の値参照だと決め打っていたため)
+        let err = gen_js("struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  print(u.nmae)\n}").unwrap_err();
+        assert!(err.contains("User has no field 'nmae' (fields: name)"), "got: {err}");
+    }
+
+    #[test]
+    fn メソッド名を呼び出さず値として参照するとmethod_not_calledになる() {
+        let err = gen_js(
+            "struct User {\n  name: string\n}\nfn (u: User) describe() string {\n  return u.name\n}\nfn main() {\n  u := User{name: \"a\"}\n  f := u.describe\n  print(f)\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("'describe' is a method — call it like describe(...)"), "got: {err}");
+    }
+
+    #[test]
+    fn 正常なフィールドの読み書きは今まで通りコンパイルできる() {
+        let js = gen_body(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  u.name = \"b\"\n  print(u.name)\n}",
+        );
+        assert!(js.contains("u.name = \"b\";"), "got: {js}");
+        assert!(js.contains("__print(u.name);"), "got: {js}");
+    }
+
+    #[test]
+    fn json_valueの不透明な再帰位置への書き込みは今まで通りコンパイルできる() {
+        // git historyレビュー発覚・実行確認済みの回帰: json.Valueの自己参照する再帰位置
+        // (`obj.entries`の値等、milestone 9で意図的に空フィールドの不透明な殻として
+        // 表現している)への書き込みが、この milestone の新しい検証で誤って
+        // unknown-fieldになっていた——2階層以上の入れ子destructureはchecker側の型推論の
+        // 精度が落ちるだけでrun時テストは動く、というmilestone 9の意図的なスコープ縮小の
+        // 範囲内なので、書き込みも今まで通り通す
+        let js = gen_body(
+            "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  if v is { kind: \"obj\" } {\n    for k, val := range v.entries {\n      if val is { kind: \"str\" } {\n        val.s = \"patched\"\n        print(val.s)\n      }\n    }\n  }\n}",
+        );
+        assert!(js.contains("val.s = \"patched\""), "got: {js}");
     }
 }

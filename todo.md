@@ -492,8 +492,9 @@
           (kanayama確認済み、2026-07-22)。将来、error/json以降のmilestoneで診断機構を
           本格的に入れる際にまとめて対応する候補
           **→ (1)はchecker+codegen milestone 12(struct literalのフィールド検証、
-          2026-07-24)で解消。(2)(gen_lvalueの代入先フィールド名検証)・(3)(struct宣言
-          時点の`__proto__`ガード)は milestone 12のスコープ外のまま未対応で残る**
+          2026-07-24)で解消。(2)(gen_lvalueの代入先フィールド名検証)は
+          checker+codegen milestone 15(2026-07-24)で解消(§該当項目参照)。
+          (3)(struct宣言時点の`__proto__`ガード)は引き続き未対応で残る**
   - [x] **checker+codegen milestone 3(`?`/`or`/`error struct`)** ✅ 2026-07-22実装
         (kanayamaと確認済みの順序——struct/メソッド → error/json → 配列/map → 並行処理 →
         モジュール——の3番目)。`error type X = A | B`(union形式)・`json struct`/`json type`・
@@ -1837,6 +1838,87 @@
           Rust版がひととおり移植し終えた。関連する既知の限界として、`gen_lvalue`
           の代入先フィールド名検証・pkg修飾struct literalの厳密検証・
           自己参照型等は引き続きtodo.mdに記録済みの通り残る。
+  - [x] **checker+codegen milestone 15(読み/書き共通のstructフィールドアクセス検証)**
+        ✅ 2026-07-24実装。milestone 14完了後、kanayamaと相談し、milestone 12で
+        構築(struct literal)側だけ直したフィールド検証の残り2件のうち
+        「`gen_lvalue`の代入先フィールド名検証」(PR #17以来の既知の限界)に着手。
+        TS版`memberFieldType`(`src/checker/calls.ts:117-147`)を読むと、TS版は
+        フィールドの**読み・書き両方**を同じ関数で検証しており、Rust版の
+        「代入先だけ未検証」という以前の見立ては実は不正確で、**読み取り側にも
+        別の実バグがあった**と判明した——実機確認で発覚:
+        - 代入(`u.nmae = "b"`): TS版は`unknown-field`で拒否。Rust版は無診断で
+          `u.nmae = "b"`をそのままJSへ通し、`u`オブジェクトに新規プロパティ`nmae`が
+          黙って生えるだけで、本来のフィールド`name`は変わらない(静かに壊れた挙動)。
+        - 読み取り(`print(u.nmae)`): Rust版は実は既に拒否していたが、
+          未検出のフィールドを無条件に「メソッド名の値参照」と決め打っており
+          (`method_table`を実際には確認していなかった)、単なるtypoでも常に
+          `'nmae' is a method — call it, it cannot be referenced as a value`という
+          誤解を招くメッセージになっていた(TS版は正しく`User has no field 'nmae'
+          (fields: name)`という`unknown-field`メッセージになる)。
+        - `checker.rs`: 新設`validate_struct_field(target_ty, name, ctx, pos)
+          -> Result<Type, String>`(TS版`memberFieldType`のstruct分岐のみ移植——
+          union/非struct分岐は呼び出し元codegen.rsの既存ガード〈`Type::Struct`で
+          あることの確認〉が引き続き担う、スコープを広げすぎないため)。
+          宣言済みフィールドなら型を返す・無ければ`ctx.lookup_method`で実際に
+          メソッド名かどうか確認し、メソッドなら`method-not-called`相当
+          (`'{name}' is a method — call it like {name}(...)`)、そうでなければ
+          `unknown-field`相当(`{struct} has no field '{name}' (fields: ...)`)を返す。
+        - `codegen.rs`: `gen_lvalue`のMember分岐(代入先)と`gen_expr`のMember分岐
+          (読み取り)の両方から共有して呼ぶ——TS版が読み書き両方で同じ関数を
+          再利用するのと同じ構図。`gen_expr`側の既存の「未検出=常にメソッド」
+          という誤ったメッセージをこの共有関数の正確な出し分けへ置き換えた。
+        - 新規ユニットテスト`checker.rs`3件(宣言済みフィールドは型を返す・
+          typoしたフィールド名はunknown-field・メソッド名の値参照は
+          method-not-called)+`codegen.rs`4件(代入先/読み取り側それぞれの
+          typoが同じunknown-fieldメッセージになること・メソッド名の値参照が
+          method-not-calledになること・正常な読み書きが今まで通り動くこと)。
+          334→341件、全件パス。`cargo clippy --all-targets -- -D warnings`
+          クリーン。既存の全example(22本)を再度byte-for-byte確認(回帰無し)。
+          `u.nmae = "b"`(代入)・`print(u.nmae)`(読み取り)・`f := u.describe`
+          (メソッド名の値参照)の3パターンをRust版・TS版両方でコンパイルし、
+          いずれも同じ理由・同じメッセージ・同じ位置情報で拒否することを確認済み。
+        - **5エージェントのcode reviewで発見・即修正した2件**(実行確認済み):
+          1. **実害のある回帰(git historyレビュー発見)**: `mesh/json`の
+             `json.Value`(milestone 9、`codegen.rs`の`json_stdlib_symbols`)は、
+             Rust版が表現できない自己参照型のため、自己参照する再帰位置
+             (`obj.entries`の値・`arr.items`の要素)を意図的に「空フィールドの
+             不透明な殻」(`fields: vec![]`)として表す——これは未解決の型名への
+             フォールバックと同じ表現を流用したもの。今回の新しい検証がこれを
+             「本当に空のstruct」と区別できず、milestone 9で「2階層以上の入れ子
+             destructureはchecker側の型推論の精度が落ちるだけ(実行時テストは
+             動く)」と意図的にスコープを縮小していた箇所への**書き込み**
+             (`val.s = "..."`のような2階層以上ネストしたjson値への代入、以前は
+             無検証で普通に動いていた)まで、誤って`unknown-field`で拒否する
+             回帰を作り込んでいた。`validate_struct_field`に`json.Value`かつ
+             空フィールドの場合だけの特例(ANYと同じ扱い)を追加して解消
+             (他の空フィールドstructは引き続き厳密に検証する、この不透明structの
+             専用ケースに限定)。
+          2. **メッセージ規約からの逸脱(code-comments準拠レビュー発見)**:
+             `validate_struct_field`内の(呼び出し元の既存ガードにより実際には
+             到達しない)非struct分岐のエラーメッセージが、対象の型ではなく
+             フィールド名を主語にしており(`'{name}' is not a struct field`)、
+             `resolve_struct_lit_member`等の他の「対象の型を名指しする」到達
+             不能ガードの慣習から外れていた。`types::type_to_string`で対象の型を
+             名指しする形に修正し、他の到達不能ガードと同じ「安全ガード」コメントも
+             追加。
+          **記録に留めた1件**(過去PRコメント・git historyレビュー双方が独立発見・
+          このPRが導入したものではないと確認済み): `resolve_method_target`
+          (`gen_call`/`gen_spawn`が使うメソッド呼び出し解決、milestone 5・PR #20
+          由来)は今回統一した`validate_struct_field`を使わず独自のフィールド/
+          メソッド名判定を持っており、`u.discribe()`のようなtypoされた呼び出しは
+          `codegen: 'User' has no method 'discribe'`という別の(TS版の
+          `unknown-field`メッセージとは異なる)文言になる。無診断で素通りする
+          わけではなく実害は無いため今回は修正せず、「読み書き共通の検証」という
+          このPRの統一が完全ではない(3箇所目の独立したフィールド名判定が残る)
+          という事実を次のmilestone候補として記録するに留める。
+          追加の回帰テスト`codegen.rs`1件(json.Valueの不透明な再帰位置への
+          書き込みが今まで通り動くこと)。341→342件、全件パス。
+          `cargo clippy --all-targets -- -D warnings`クリーン。既存の全example
+          を再度byte-for-byte確認(回帰無し)。
+        - **milestone 15のスコープ外(意図的)**: pkg修飾struct literalの厳密検証・
+          struct宣言時点の`__proto__`ガード・自己参照型・`resolve_method_target`の
+          フィールド名判定統一(上記「記録に留めた1件」参照)は引き続き対象外
+          (次のmilestone候補、順に対応していく予定)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
