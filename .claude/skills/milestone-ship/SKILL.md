@@ -106,6 +106,26 @@ git checkout main && git fetch --prune origin && git merge --ff-only origin/main
 
 squash merge のみ(リポジトリ設定でmerge commit/rebase mergeは無効)。
 
+### 5-b. 積み上げ(stacked)PRの注意 — 2026-07-24に踏んだ落とし穴
+
+milestone N+1 が未マージの N のコードに依存する場合、開発中は N+1 を N のブランチの上に
+積む(`gh pr create --base <Nのブランチ>`)。だが**マージ時が危険**:
+
+- **`gh pr merge <親> --squash --delete-branch` で親ブランチを消すと、その上に積んだ子PRが
+  自動で main へ張り替わらず CLOSED になることがある**(2026-07-24に実際に発生)。GitHubの
+  auto-retarget は当てにしない。
+- **安全な順序**(親をマージする前に子を main へ逃がす):
+  1. 子PRの base を先に main へ張り替える: `gh pr edit <子> --base main`
+  2. 子ブランチを main に rebase して親由来の重複コミットを落とす:
+     `git checkout <子> && git fetch origin && git rebase origin/main && git push --force-with-lease`
+     (squashで入った親の変更は「適用済み」として自動スキップされる)
+  3. 親をマージ(`gh pr merge <親> --squash --delete-branch`)→ CI再確認 → 子をマージ
+- **既にCLOSEDになった子の復旧**: 消えた base ブランチを元コミットで復元
+  (`git push origin <old-sha>:refs/heads/<親ブランチ名>`)→ `gh pr reopen <子>` →
+  `gh pr edit <子> --base main` → 一時ブランチ削除 → 子を main に rebase して force-push。
+- **そもそも積まない**選択肢も有効: 各マイルストーンPRを main ベースにして、前のPRが
+  マージされ次第 `git rebase origin/main` で次を追従させる(依存が浅ければこちらが単純)。
+
 ## このスキルが守る不変条件
 
 - **検証なしでコミットしない**(rust-test + clippy + TS版突き合わせ)。
