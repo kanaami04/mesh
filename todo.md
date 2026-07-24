@@ -2108,7 +2108,109 @@
           pick a different name`)・同じ位置情報で拒否することを確認済み。
         - **milestone 18のスコープ外**: 無し(union宣言のメンバー・is式・match
           パターンの3箇所全ての無名{...}を統一的にカバーできた)。残る既知の限界は
-          自己参照型のみ。
+          自己参照型のみ(→ milestone 19で解消)。
+  - [x] **checker+codegen milestone 19(自己参照型のサポート)**
+        ✅ 2026-07-24実装。milestone 18完了後、残る唯一の既知の限界だった自己参照型
+        (`examples/tree.mesh`が`checker: self-referential/cyclic type definitions
+        are not yet supported`でコンパイル不能)にkanayamaの明示的な指示
+        (「自己参照型やりましょう」)で着手。`rust/src/types.rs`冒頭のコメントに
+        milestone 2以来ずっと記されていた設計上の宿題——TS版はstructのfields/
+        unionのmembersを「後から埋める」knot-tying(オブジェクト参照の共有グラフ、
+        `src/checker/types-resolve.ts`の`resolveAlias`)で自己参照型を表現するが、
+        Rust版は所有権ベースの木構造(`Vec<StructField>`/`Vec<Type>`を直接所有)
+        にしていたため、値が自分自身を含む真の循環をそもそも構築できなかった——
+        に対応した。
+        - **設計**: `Type::Struct.fields`を`Rc<OnceCell<Vec<StructField>>>`へ、
+          `Type::Union`を新設`UnionBody{members, discriminant_tag}`を包む
+          `Rc<OnceCell<UnionBody>>`へ変更(`OnceCell`を選んだ理由: 実際の使われ方が
+          「解決時に一度だけ書き込み、以降は読み取り専用」であり、`RefCell`より
+          意図が正確で実行時borrowパニックのリスクも無いため)。`Rc<T>`は`T`が
+          `Clone`でなくても常に`Clone`なので、`Type`全体の
+          `#[derive(Debug, Clone)]`はそのまま機能する。既存値用の非knot-tying
+          コンストラクタヘルパ`types::struct_ty`/`types::union_ty`を新設。
+        - `resolve_type_decls`(checker.rs)を全面書き換え: 「DFSで循環を問答無用で
+          拒否→固定点反復」方式(`find_type_decl_cycle`/`visit_for_cycle`、削除)を
+          廃止し、TS版`resolveAlias`と同じ「名前ごとにオンデマンド+memo化で
+          再帰的に解決する」方式(新設`resolve_named_type`)へ置き換えた。
+          struct/union宣言それぞれ「空の`Rc<OnceCell<_>>`を先にctx.struct_types/
+          union_typesへ登録 → その後フィールド/メンバーを解決」の2段階
+          (knot-tying)で、自己参照する宣言を解決中に自分自身の名前を再度参照しても
+          既に登録済みの(まだ空かもしれない)同じRcのcloneが返るようにした。
+          依存する型を先に解決する新設`ensure_deps_resolved`は、既存の
+          `collect_referenced_names`(元は循環検出専用だったヘルパ、TypeNodeの
+          全バリアントを正しく辿りpkg修飾名を除外するロジックを持つ)を再利用。
+          「structを挟まない裸のunion同士の相互参照」(`type A = B | none
+          type B = A | error`)だけは、TS版resolveAliasのunsafeチェック
+          (`union_of`でflattenする**前**の生メンバーに、解決中の他unionの
+          未setのplaceholderがそのまま混ざっていないか)を移植し、引き続き
+          `type alias cycle`のErrにする——tree.mesh自身のコメントが明言する
+          既存のスコープ制限と一致(TS版も同じ制限を持つ)。
+        - `type_equals`/`type_to_string`(types.rs)に、TS版`typeEquals`/
+          `typeToString`の`seen`ガード(「比較中/表示中の値を覚えておく」循環
+          ガード、以前はBox木は循環し得ないため省略していた)を`Rc::ptr_eq`
+          identity比較で追加——自己参照するunion同士の構造的比較・表示が無限
+          再帰しスタックオーバーフローすることを設計段階の手計算で確認し、追加。
+          `type_equals`は無名struct同士の比較分岐だけ(union分岐は必ずstruct
+          経由でしか循環し得ないため不要、TS版typeEqualsも同じ)、
+          `type_to_string`は無名struct分岐・union分岐の両方(単一値の
+          トラバーサルなので自己参照unionが構造体フィールド越しに自分自身へ
+          直接re-entrantしうるため)。
+        - 副次効果として、以前は一律で拒否されていたstruct-struct相互参照
+          (`struct A{b:B} struct B{a:A}`)・直接の自己参照(`struct Node{next:
+          Node}`、unionで包まない形)も正しく解決できるようになった(TS版も
+          元々これらを拒否していないことを実機確認済み)——tree.meshの型に限らず、
+          自己参照型全般のサポートとして波及範囲が広がった。
+        - json.Value(milestone 9、`arr.items`/`obj.entries`を空フィールドの
+          不透明な殻として表す特別扱い、milestone 15/16のcode reviewで2回
+          regressionの原因になった)を本物の自己参照判別可能unionへ再定義する
+          ボーナス案は今回のスコープに含めず(`json_stdlib_symbols`の書き換え
+          自体は必要になったため機械的に新コンストラクタへ追随させたが、
+          不透明な殻の解消自体は次のmilestone候補として提案するに留める——
+          コア機能〈自己参照型サポート自体〉をブロック・複雑化させないため)。
+        - 新規/更新テスト: `types.rs`2件(自己参照structの`type_equals`が
+          無限再帰しないこと・自己参照する無名structのunionの`type_equals`/
+          `type_to_string`が無限再帰しないこと)、`checker.rs`(相互循環struct・
+          自己参照struct・tree.mesh相当の自己参照union・裸union循環の拒否、
+          いずれも実際に解決できる/引き続き拒否されることを確認するよう既存
+          テストを書き換え)、`codegen.rs`(examples/tree.mesh相当のフル
+          プログラムがコンパイルできること・裸union循環は引き続き拒否
+          されること)。354→358件、全件パス。`cargo clippy --all-targets -- -D
+          warnings`クリーン。**既存の全22 example(`tree.mesh`含む——これまで
+          唯一の除外対象だったが、今回から他の21本と同列にbyte-for-byte確認
+          対象に含まれるようになった)を再度確認し回帰無し**。`tree.mesh`の
+          実際の出力(`6`/`3`)がRust版・TS版で一致することを確認済み。加えて
+          `struct A{b:B} struct B{a:A}`(相互循環)・`type A = B|none type
+          B = A|error`(裸union循環、引き続き拒否)の2パターンもRust版・TS版
+          両方で同じ結果(前者は両方ともコンパイル成功、後者は両方とも同じ
+          `type alias cycle`エラーメッセージ・位置情報で拒否)になることを
+          確認済み。
+        - **5エージェントのcode reviewで発見・即修正した1件**(実行確認済み、
+          bug-scanエージェントが実際に再現して発見): union宣言のメンバーが
+          互いに`type_equals`で等しく解決される場合(例: `type Status =
+          "active" | "active"`)、`union_of`がdedupして1メンバーだけ残すため
+          Unionではない素の型(この例では`Literal`)を返す。`resolve_named_type`
+          が「union宣言は必ず`Type::Union`へ解決される」という前提で無条件に
+          destructureしていたため、この場合に`unreachable!()`へ到達し
+          panicしていた(TS版に同じプログラムを通しても・milestone 18時点の
+          Rust版でもコンパイルできていた、純粋にこのmilestoneで作り込んだ
+          regression)。TS版`resolveAlias`を読み直すと、flattenedがUnionで
+          なくても`union`という自分自身のknot-tying identityオブジェクトは
+          保ったまま`union.members = [flattened]`という1要素配列にするだけで、
+          決して素の型に「なる」ことはないと判明——同じ設計をRust版でも再現し、
+          `final_ty`がUnionでなければ1要素の`UnionBody`として包むよう修正。
+          回帰テスト`checker.rs`1件追加。358→359件、全件パス。`cargo clippy
+          --all-targets -- -D warnings`クリーン。既存の全22 exampleを再度
+          byte-for-byte確認(回帰無し)。`type Status = "active" | "active"`を
+          Rust版・TS版両方でコンパイルし、どちらも正常にコンパイルできる
+          ことを確認済み(以前はRust版だけpanicしていた)。
+          あわせて、code-comments準拠レビューエージェントが発見した3箇所の
+          古いコメント(`checker.rs`の`assignable_allowing_opaque_json_value`・
+          `validate_struct_field`、`codegen.rs`の`json_stdlib_symbols`——
+          いずれも「Rust版は自己参照型を表現できない」という、このmilestone
+          自体が解消した前提のまま残っていた)を、「json.Valueを本物の自己参照型として
+          再定義するのを見送っているだけ」という正確な説明に修正した。
+        - **milestone 19のスコープ外**: json.Valueを本物の自己参照判別可能
+          unionへ再定義すること(上記参照、次のmilestone候補)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
