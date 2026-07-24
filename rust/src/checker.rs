@@ -1018,12 +1018,12 @@ fn no_flags(result: Type) -> BinaryInfo {
 // __idiv/__imod/__iarithの要否を決める。
 // milestone 13: 算術演算子(+ - * / %)はTS本体の`invalid-operation`診断に相当する
 // 明確なErrを返せるようにした(このリゾルバ自身は診断を出さないので、milestone 2以来
-// 一貫している「TS本体は診断、Rustは明確なErr」パターン)。比較/論理演算子
-// (&&/||/==/!=/< <= > >=)の妥当性検査は別カテゴリの診断(not-bool/incomparable-types等)
-// のため引き続き対象外——常にBOOLを返すだけで済ませる
-// milestone 14: &&/||(not-bool)・==/!=(use-is-none/incomparable-types)・
-// < <= > >=(incomparable-types)もTS版と同じ妥当性検査を行うようにした
-// (milestone 13で算術演算子だけ先に対応済み。§計画参照)
+// 一貫している「TS本体は診断、Rustは明確なErr」パターン)。
+// **訂正(2026-07-24、code-comments準拠エージェント指摘)**: milestone 13時点では
+// 比較/論理演算子(&&/||/==/!=/< <= > >=)の妥当性検査を別カテゴリの診断
+// (not-bool/incomparable-types等)として対象外にしていたが、milestone 14で
+// &&/||(not-bool)・==/!=(use-is-none/incomparable-types)・< <= > >=
+// (incomparable-types)もTS版と同じ妥当性検査を行うようにした(以下参照)。
 pub fn infer_binary(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr, pos: Pos) -> Result<BinaryInfo, String> {
     match op {
         TokenType::AndAnd | TokenType::OrOr => check_logical_op(ctx, op, left, right),
@@ -1043,17 +1043,38 @@ pub fn infer_binary(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr, 
 }
 
 // &&/||の妥当性検査。TS版`case "&&"/"||"`(src/checker/expressions.ts:555-570)の
-// isBoolean検査部分の移植(narrowing〈pushScope/applyFacts〉は対象外のまま——
-// 診断を出さないこのリゾルバの既存スコープ方針と同じ)。TS版と同じく、左右それぞれの
-// オペランド自身の位置(`expr.left.pos`/`expr.right.pos`)をErrに使う——全体の`pos`
-// ではない
+// isBoolean検査部分の移植。TS版と同じく、左右それぞれのオペランド自身の位置
+// (`expr.left.pos`/`expr.right.pos`)をErrに使う——全体の`pos`ではない。
+// **code review発覚・実行確認済みの回帰**: 左辺が`x is T`のとき、TS版は
+// `collectFacts`/`pushScope`/`applyFacts`で右辺をその絞り込み後の事実で検査する
+// (`&&`ならthen側、`||`ならDe Morganでelse側)——`if n is int && n > 0 {...}`の
+// ようなF-6でテスト済みの実在パターン。milestone 7以来「&&/||との複合条件での
+// narrowingは対象外」としてきたが、それは検査自体が無かったから無害だっただけで、
+// このmilestoneで右辺を実際に検査するようになった結果、この種の正当なコードが
+// 誤って`incomparable-types`等でErrになる新しい回帰を生んでいた。Expr::Select/
+// Expr::Matchのアーム推論と同じ「使い捨てのスクラッチctx」技法で、右辺の検査だけ
+// narrowing後の事実を使う(単純なidentオペランドのみ対応——gen_ifのnarrowingと
+// 同じ範囲、多段フィールドパス等は対象外のまま)
 fn check_logical_op(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr) -> Result<BinaryInfo, String> {
     let lt = infer_expr(ctx, left);
     if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
         let p = left.pos();
         return Err(format!("checker: '{op}' requires bool operands, got {} ({}:{})", types::type_to_string(&lt), p.line, p.col));
     }
-    let rt = infer_expr(ctx, right);
+    let scratch;
+    let right_ctx: &CheckerCtx = if let Expr::Is { operand, target, .. } = left
+        && let Expr::Ident { name, .. } = &**operand
+    {
+        let subject_ty = infer_expr(ctx, operand);
+        let (then_ty, else_ty) = narrow_for_is(ctx, &subject_ty, target);
+        let mut c = ctx.clone();
+        c.declare(name, if op == TokenType::AndAnd { then_ty } else { else_ty });
+        scratch = c;
+        &scratch
+    } else {
+        ctx
+    };
+    let rt = infer_expr(right_ctx, right);
     if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {
         let p = right.pos();
         return Err(format!("checker: '{op}' requires bool operands, got {} ({}:{})", types::type_to_string(&rt), p.line, p.col));
@@ -1151,16 +1172,34 @@ fn check_arith_op(op: TokenType, left: &Type, right: &Type, pos: Pos) -> Result<
 }
 
 // 単項`-`の妥当性検査。TS版`case "unary"`(src/checker/expressions.ts:292-301)の
-// isNumeric検査部分の移植——同じcaseにある`!`の検査(`not-bool`診断)は比較/論理演算子と
-// 同じ別カテゴリのため対象外のまま(§計画参照)。git historyレビューで指摘・実行確認済み:
-// unary`-`はcheck_arith_opと全く同じ`invalid-operation`診断を共有するため、今回の
-// 算術演算子の妥当性検査から漏らすと`y := -x`(xが未絞り込みのunion型等)が
-// 静かに素通りしてしまう
+// isNumeric検査部分の移植。git historyレビューで指摘・実行確認済み: unary`-`は
+// check_arith_opと全く同じ`invalid-operation`診断を共有するため、今回の算術演算子の
+// 妥当性検査から漏らすと`y := -x`(xが未絞り込みのunion型等)が静かに素通りしてしまう。
+// 同じcaseにある`!`の検査(`not-bool`診断)は下の`check_logical_not`参照——milestone 13
+// 時点では「比較/論理演算子と同じ別カテゴリ」として対象外にしていたが、milestone 14が
+// その別カテゴリ自体を実装したため、`!`もあわせて対象に含めた
 pub fn check_unary_minus(operand: &Type, pos: Pos) -> Result<(), String> {
     if types::is_numeric(operand) {
         Ok(())
     } else {
         Err(format!("checker: unary '-' requires int or float, got {} ({}:{})", types::type_to_string(operand), pos.line, pos.col))
+    }
+}
+
+// 単項`!`の妥当性検査。TS版`case "unary"`(src/checker/expressions.ts:293-297)の
+// `!`分岐(not-bool診断)の移植。**code review発覚・実行確認済みの回帰**:
+// milestone 14で`&&`/`||`のnot-bool検査(`check_logical_op`)を実装した際、同じ
+// `not-bool`診断を共有する兄弟演算子である単項`!`を見落としていた(milestone 13の
+// `check_unary_minus`のコメントが「比較/論理演算子と同じ別カテゴリのため対象外」と
+// 書いていたのに、そのカテゴリ自体をこのPRで実装したことに気付かず更新していなかった
+// ——PR #28の「unary`-`/`++`/`--`が兄弟演算子として見落とされていた」指摘と全く同じ
+// 構図)。`if !x { ... }`(xが未絞り込みのint等)がJSの暗黙のbool変換で静かに
+// 素通りしていた
+pub fn check_logical_not(operand: &Type, pos: Pos) -> Result<(), String> {
+    if types::type_equals(operand, &BOOL) || matches!(operand, Type::Any) {
+        Ok(())
+    } else {
+        Err(format!("checker: '!' requires bool, got {} ({}:{})", types::type_to_string(operand), pos.line, pos.col))
     }
 }
 
@@ -1510,6 +1549,34 @@ mod tests {
         assert!(check_comparison_op(&Type::Any, &user, pos()).is_ok());
         let err = check_comparison_op(&user, &user, pos()).unwrap_err();
         assert!(err.contains("cannot compare User with User"), "got: {err}");
+    }
+
+    #[test]
+    fn check_logical_notは非bool_operandでerrになりanyには常に許可される() {
+        // code review発覚・実行確認済みの回帰: `&&`/`||`のnot-bool検査を実装した際、
+        // 同じ診断を共有する兄弟演算子`!`を見落としていた
+        assert!(check_logical_not(&BOOL, pos()).is_ok());
+        assert!(check_logical_not(&Type::Any, pos()).is_ok());
+        let err = check_logical_not(&INT, pos()).unwrap_err();
+        assert!(err.contains("'!' requires bool, got int"), "got: {err}");
+    }
+
+    #[test]
+    fn 論理演算子の左辺のis式によるnarrowingは右辺の検査に反映される() {
+        // code review発覚・実行確認済みの回帰: `x is int && x > 0`のような
+        // TS版でテスト済みの正当なコード(F-6: &&は左のisが右辺に効く)が、milestone 14の
+        // 検査追加によって誤ってincomparable-typesになっていた。&&はthen側(絞り込み後)、
+        // ||はDe Morganでelse側の事実を右辺の検査に使う
+        let mut ctx = CheckerCtx::new();
+        ctx.declare("x", types::union_of(vec![INT, ERROR]));
+        let is_int = Expr::Is { operand: Box::new(ident("x")), target: name_type("int"), pos: pos() };
+        let cmp = Expr::Binary { op: TokenType::Gt, left: Box::new(ident("x")), right: Box::new(int_lit("0")), pos: pos() };
+        assert!(infer_binary(&ctx, TokenType::AndAnd, &is_int, &cmp, pos()).is_ok());
+
+        ctx.declare("y", types::union_of(vec![INT, NONE]));
+        let is_none = Expr::Is { operand: Box::new(ident("y")), target: name_type("none"), pos: pos() };
+        let cmp_y = Expr::Binary { op: TokenType::Gt, left: Box::new(ident("y")), right: Box::new(int_lit("0")), pos: pos() };
+        assert!(infer_binary(&ctx, TokenType::OrOr, &is_none, &cmp_y, pos()).is_ok());
     }
 
     #[test]
