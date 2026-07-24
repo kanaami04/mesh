@@ -612,19 +612,66 @@ pub fn validate_struct_field(target_ty: &Type, name: &str, ctx: &CheckerCtx, pos
     if struct_name == "json.Value" && fields.is_empty() {
         return Ok(ANY);
     }
+    match lookup_struct_member(fields, ctx, struct_name, name) {
+        StructMember::Field(ty) => Ok(ty.clone()),
+        StructMember::Method => Err(format!("checker: '{name}' is a method — call it like {name}(...) ({}:{})", pos.line, pos.col)),
+        StructMember::Unknown => Err(format!(
+            "checker: {} has no field '{name}' (fields: {}) ({}:{})",
+            types::type_to_string(target_ty),
+            fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
+            pos.line,
+            pos.col
+        )),
+    }
+}
+
+// milestone 17・PR #30のcode review指摘(「resolve_method_targetのフィールド名判定
+// 統一」)を受けた対応: `codegen.rs`の`resolve_method_target`(呼び出し先が
+// `recv.method(...)`のメソッド呼び出しかどうかの判定)が、この関数と同じ「フィールドが
+// 勝つ→method_tableを見る」判定を独自に再実装しており、未知の名前だった場合の
+// メッセージがTS版と食い違っていた(`codegen: 'User' has no method 'discribe'`——
+// TS版は`unknown-field`診断で`User has no field or method 'discribe' (fields: name)`、
+// フィールドが1つも無いstructなら`(fields: none)`)。TS版自身、読み/書き
+// (`memberFieldType`)と呼び出し先解決(`inferCall`のrecv.method(args)分岐)とで
+// メッセージの文言そのものが違う(「has no field」と「has no field or method」+
+// フィールド無しの"none"表示)ため、2つの関数を1つに統合するのではなく、
+// 「フィールドか・メソッドか・どちらでもないか」の判定結果だけをここに集約し、
+// 各呼び出し元(`validate_struct_field`と`codegen.rs`のcall-site解決)がそれぞれの
+// TS版の文言でエラーを組み立てる
+pub enum StructMember<'a> {
+    Field(&'a Type),
+    Method,
+    Unknown,
+}
+
+pub fn lookup_struct_member<'a>(fields: &'a [types::StructField], ctx: &CheckerCtx, struct_name: &str, name: &str) -> StructMember<'a> {
     if let Some(f) = fields.iter().find(|f| f.name == name) {
-        return Ok(f.type_.clone());
+        return StructMember::Field(&f.type_);
     }
     if ctx.lookup_method(struct_name, name).is_some() {
-        return Err(format!("checker: '{name}' is a method — call it like {name}(...) ({}:{})", pos.line, pos.col));
+        return StructMember::Method;
     }
-    Err(format!(
-        "checker: {} has no field '{name}' (fields: {}) ({}:{})",
-        types::type_to_string(target_ty),
-        fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
-        pos.line,
-        pos.col
-    ))
+    StructMember::Unknown
+}
+
+// codegen.rsの`resolve_method_target`(呼び出し先が`recv.method(...)`のメソッド呼び出しか
+// どうかの判定)から使う。TS版`inferCall`のrecv.method(args)分岐
+// (src/checker/calls.ts:81-102)の「フィールドが勝つ→method_table→どちらにも無ければ
+// unknown-field(呼び出し用の文言。フィールドが1つも無ければ"none"と表示)」をそのまま
+// 移植——`validate_struct_field`とは成功/失敗の意味が違う(フィールドが見つかったら
+// 「メソッド呼び出しではない」という意味でtrue/falseの`false`を返すだけで、エラーには
+// しない)ため別関数にする。戻り値: メソッド呼び出しとして扱うべきなら`Ok(true)`、
+// フィールド(またはその他、呼び出し元が通常のcallとして扱う)なら`Ok(false)`
+pub fn resolve_method_call_target(fields: &[types::StructField], ctx: &CheckerCtx, struct_name: &str, name: &str, pos: Pos) -> Result<bool, String> {
+    match lookup_struct_member(fields, ctx, struct_name, name) {
+        StructMember::Field(_) => Ok(false), // フィールドが勝つ——メソッド呼び出しではない
+        StructMember::Method => Ok(true),
+        StructMember::Unknown => {
+            let field_names = fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
+            let field_names = if field_names.is_empty() { "none".to_string() } else { field_names };
+            Err(format!("checker: {struct_name} has no field or method '{name}' (fields: {field_names}) ({}:{})", pos.line, pos.col))
+        }
+    }
 }
 
 // struct型の内部識別名にパッケージを織り込む(TS版`types-resolve.ts`と同じ、ドット区切り)。
