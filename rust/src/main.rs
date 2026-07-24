@@ -97,7 +97,8 @@ fn run_check(path_arg: Option<&String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // codegen経路(下記generate)と同じく、check前にjson structのデコーダを合成する。
+    // codegen経路(上記main()内のsynthesize呼び出し)と同じく、check前にjson structの
+    // デコーダを合成する。
     // これをやらないと`json struct`が生成する`decode*`関数をfull_checkerが知らず、
     // それを呼ぶ正当なコードが誤ってundefined-nameになる(examples/json_decode.mesh)
     if let Err(e) = synthesize_json_decoders(&mut program) {
