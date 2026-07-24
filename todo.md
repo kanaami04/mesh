@@ -2498,6 +2498,36 @@
                 登録し`scopes[0]`には触れない設計と突き合わせて発覚。トップレベル名の
                 登録・本体検査どちらもレシーバ付き関数(メソッド)をスキップするよう修正
                 (structはmilestone 22/23とも対象外なので、スキップが正しい扱い)
+        - [x] **milestone 24: main関数の形の検査(missing-main / invalid-main-signature)**
+              ✅ 2026-07-24実装。milestone 22で「対象外」としていたエントリポイント検査を追加。
+              kanayamaと次のmilestone候補(main関数の形/演算子の妥当性検査/argument-count/
+              run・buildへのゲート統合)を相談し、最も小さく自己完結する「main関数の形」を選択。
+              - TS版`src/checker/modules.ts`の`requireMain`分岐(`checkPackage`末尾)を
+                `full_checker.rs`の`check_program`へ移植。TS版は
+                `requireMain = pkg === "main" && !testMode`だが、full_checkerは単一ファイル
+                (=mainパッケージ)専用でテストモード未対応なので**常に要求**する
+                (依存先パッケージ・`mesh test`はスコープ外——足すときにフラグ化)。
+                レシーバ無しの`fn main`を探し、無ければ1:1(ファイル先頭)を指して
+                `missing-main`、あれば引数ありor戻り値ありで`invalid-main-signature`
+              - 検査の位置はTS版と同じく「トップレベル定数の検査後・各関数本体の検査前」
+                (前方参照のため関数名は先に登録済み)。`f.receiver.is_none()`でメソッドを
+                除外する点もTS版(`!f.receiver`)と一致——`fn (r: R) main()`は
+                エントリポイントの`main`ではない
+              - 診断コード2種(`MissingMain`/`InvalidMainSignature`)を
+                `diagnostic_codes.rs`へ追加。メッセージ・コード・位置(main.pos/1:1)は
+                TS版と完全一致することを、`nomain`/`main(x:int)`/`main() int`/正常mainの
+                4パターンでRust版・TS版両CLIの`mesh check`出力を突き合わせて確認済み
+              - **既存テスト1件を修正**: `戻り値の型不一致はtype_mismatchを報告する`は
+                main無しのソース(`fn helper() int { return "oops" }`)を使っていたため、
+                今回のmissing-mainが上乗せされ診断2件になった——空の`fn main() {}`を
+                添えてtype-mismatchを切り出す形に修正(TS版でもmain無し単一ファイルは
+                missing-mainを併発するので、テストが以前は不完全だった)。
+                新規テスト5件(missing-main・引数ありmain・戻り値ありmain・正常な空main・
+                レシーバ付きmainはエントリポイント扱いされずmissing-main)。
+                394→399件、全件パス。`cargo clippy --all-targets -- -D warnings`クリーン
+              - **注**: このマシンは初期状態で`cc`リンカが無く`cargo`ビルドが通らなかったため
+                `apt-get install gcc`で解消してから検証した(コードではなく環境の問題。
+                docs/setup.mdが一次情報源)
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

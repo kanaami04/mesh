@@ -29,6 +29,8 @@ pub enum DiagnosticCode {
     UndefinedName,
     TypeMismatch,
     ImmutableAssignment,
+    MissingMain,
+    InvalidMainSignature,
 }
 
 impl DiagnosticCode {
@@ -42,6 +44,8 @@ impl DiagnosticCode {
             DiagnosticCode::UndefinedName => "undefined-name",
             DiagnosticCode::TypeMismatch => "type-mismatch",
             DiagnosticCode::ImmutableAssignment => "immutable-assignment",
+            DiagnosticCode::MissingMain => "missing-main",
+            DiagnosticCode::InvalidMainSignature => "invalid-main-signature",
         }
     }
 }

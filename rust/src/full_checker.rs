@@ -397,6 +397,29 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     for c in &program.consts {
         check_top_level_const(&mut ctx, c);
     }
+    // エントリポイント検査(TS版`checker/modules.ts`のrequireMain分岐)。TS版では
+    // `requireMain = pkg === "main" && !testMode`だが、full_checkerは単一ファイル
+    // (=mainパッケージ)専用でテストモードも未対応なので、ここでは常に要求する
+    // (依存先パッケージ・`mesh test`はスコープ外——足すときにフラグ化する)。
+    // レシーバ無しの`fn main`を探し、無ければ1:1(ファイル先頭)を指してmissing-main、
+    // あれば引数ありor戻り値ありでinvalid-main-signature(エントリポイントは
+    // 引数を取らず何も返さない)
+    match program.fns.iter().find(|f| f.name == "main" && f.receiver.is_none()) {
+        None => ctx.error(
+            Pos { line: 1, col: 1 },
+            DiagnosticCode::MissingMain,
+            "missing 'fn main()' — Mesh programs start from main",
+        ),
+        Some(main) => {
+            if !main.params.is_empty() || main.ret.is_some() {
+                ctx.error(
+                    main.pos,
+                    DiagnosticCode::InvalidMainSignature,
+                    "'fn main()' must take no parameters and return nothing",
+                );
+            }
+        }
+    }
     for f in &program.fns {
         if f.receiver.is_none() {
             check_fn(&mut ctx, f);
@@ -561,7 +584,9 @@ mod tests {
 
     #[test]
     fn 戻り値の型不一致はtype_mismatchを報告する() {
-        let diags = check("fn helper() int {\n    return \"oops\"\n}\n");
+        // main無しだとmissing-mainが上乗せされるため、type-mismatchを切り出せるよう
+        // 空のmainを添える(TS版でもmain無し単一ファイルはmissing-mainを併発する)
+        let diags = check("fn helper() int {\n    return \"oops\"\n}\nfn main() {}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
     }
@@ -630,5 +655,45 @@ mod tests {
     fn forヘッダのinit変数はbody内から参照できる() {
         let diags = check("fn main() {\n    for i := 0; i < 3; i++ {\n        print(i)\n    }\n}\n");
         assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn main無しはmissing_mainを報告する() {
+        let diags = check("fn helper() int { return 1 }\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MissingMain);
+        // ファイル先頭(1:1)を指す
+        assert_eq!(diags[0].pos, Pos { line: 1, col: 1 });
+    }
+
+    #[test]
+    fn mainに引数があるとinvalid_main_signatureを報告する() {
+        let diags = check("fn main(x: int) {\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidMainSignature);
+    }
+
+    #[test]
+    fn mainに戻り値があるとinvalid_main_signatureを報告する() {
+        let diags = check("fn main() int {\n    return 0\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidMainSignature);
+    }
+
+    #[test]
+    fn 正しい空のmainはエントリポイント診断を出さない() {
+        let diags = check("fn main() {}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn レシーバ付きのmainはエントリポイントとみなされずmissing_mainになる() {
+        // メソッドの名前空間は自由関数と完全分離——`fn (r: R) main()`は
+        // エントリポイントの`main`ではない(TS版も`!f.receiver`で除外する)。
+        // structはfull_checkerのスコープ外なのでメソッド本体は検査されないが、
+        // 名前だけは「自由関数のmainが無い」と判定されmissing-mainになるべき
+        let diags = check("fn (r: R) main() {}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MissingMain);
     }
 }
