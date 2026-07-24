@@ -1609,7 +1609,7 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
     checker::PackageSymbols { types, fns, consts: HashMap::new() }
 }
 
-// mesh/http(組み込みパッケージ、milestone 20)のシグネチャ定義。TS版`stdlib.ts`の
+// mesh/http(組み込みパッケージ、milestone 21)のシグネチャ定義。TS版`stdlib.ts`の
 // BUILTIN_PACKAGESの"mesh/http"エントリに相当。json_stdlib_symbolsと違い、
 // Request/Responseは自己参照しない普通の名前付きstructなのでknot-tying不要
 // (struct_tyの非knot-tying経路でそのまま作れる)。ランタイムの実体(http$listen、
@@ -2532,7 +2532,7 @@ mod tests {
 
     #[test]
     fn mesh_http組み込みパッケージの関数呼び出しとresponse構築が解決できる() {
-        // milestone 20: mesh/httpは.meshソースを持たない組み込みパッケージ(http_stdlib_symbols)。
+        // milestone 21: mesh/httpは.meshソースを持たない組み込みパッケージ(http_stdlib_symbols)。
         // ランタイムの実体(http$listen)はruntime.tsのPRELUDE側に既に実装済みなので、ここでは
         // シグネチャ解決(pkg修飾型注釈・struct literal構築・関数呼び出し)だけを確認する
         let js = gen_body(
