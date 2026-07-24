@@ -2857,3 +2857,103 @@ describe("H-2: json struct(検証つきJSONデコードの自動生成)", () => 
     expect(out).toBe("alice\n");
   });
 });
+
+describe("design-agenda J節: json structのエンコード(H-2の裏返し)", () => {
+  test("フラットなstructを正しくエンコードできる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct User {
+      name: string
+      age: int
+    }
+    fn main() {
+      u := User{name: "alice", age: 30}
+      print(json.stringify(encodeUser(u)))
+    }`);
+    expect(out).toBe('{"name":"alice","age":30}\n');
+  });
+
+  test("ネストしたjson struct・配列・optionalフィールドを組み合わせて正しくエンコードできる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct Address {
+      city: string
+      zip: string
+    }
+    json struct Person {
+      name: string
+      address: Address
+      tags: string[]
+      nickname: string | none
+    }
+    fn main() {
+      p := Person{name: "alice", address: Address{city: "Tokyo", zip: "100-0001"}, tags: ["a", "b"], nickname: "al"}
+      print(json.stringify(encodePerson(p)))
+
+      p2 := Person{name: "bob", address: Address{city: "Osaka", zip: "500-0001"}, tags: [], nickname: none}
+      print(json.stringify(encodePerson(p2)))
+    }`);
+    expect(out).toBe(
+      '{"name":"alice","address":{"city":"Tokyo","zip":"100-0001"},"tags":["a","b"],"nickname":"al"}\n' +
+        '{"name":"bob","address":{"city":"Osaka","zip":"500-0001"},"tags":[],"nickname":null}\n',
+    );
+  });
+
+  test("配列フィールドの要素がjson struct(ネスト配列)の場合も、配列自体がoptionalの場合も正しく動く", () => {
+    const out = runSource(`import "mesh/json"
+    json struct Item {
+      sku: string
+      qty: int
+    }
+    json struct Cart {
+      items: Item[]
+      notes: string[] | none
+    }
+    fn main() {
+      c := Cart{items: [Item{sku: "a1", qty: 2}, Item{sku: "b2", qty: 5}], notes: ["fragile"]}
+      print(json.stringify(encodeCart(c)))
+
+      c2 := Cart{items: [], notes: none}
+      print(json.stringify(encodeCart(c2)))
+    }`);
+    expect(out).toBe(
+      '{"items":[{"sku":"a1","qty":2},{"sku":"b2","qty":5}],"notes":["fragile"]}\n' + '{"items":[],"notes":null}\n',
+    );
+  });
+
+  test("encode→decodeのラウンドトリップで元の値が復元できる", () => {
+    const out = runSource(`import "mesh/json"
+    json struct Address {
+      city: string
+    }
+    json struct Person {
+      name: string
+      age: int
+      address: Address
+      tags: string[]
+      nickname: string | none
+    }
+    fn main() {
+      original := Person{name: "alice", age: 30, address: Address{city: "Tokyo"}, tags: ["a", "b"], nickname: "al"}
+      v := encodePerson(original)
+      roundTrip := decodePerson(v)
+      if roundTrip is error { print("failed: " + str(roundTrip)); return }
+      print(roundTrip.name, roundTrip.age, roundTrip.address.city, roundTrip.tags, roundTrip.nickname)
+    }`);
+    expect(out).toBe("alice 30 Tokyo [a b] al\n");
+  });
+
+  test("複数パッケージ: exportしたjson structのencode関数を他パッケージから呼べる", () => {
+    const out = runModules([
+      {
+        pkg: "main",
+        file: "app.mesh",
+        source: `import "mesh/json"\nimport "models"\nfn main() {\n\tu := models.User{name: "alice"}\n\tprint(json.stringify(models.encodeUser(u)))\n}`,
+      },
+      {
+        pkg: "models",
+        file: "models/models.mesh",
+        source: `import "mesh/json"\nexport json struct User {\n\tname: string\n}`,
+      },
+    ]);
+    expect(out).toBe('{"name":"alice"}\n');
+  });
+});

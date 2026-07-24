@@ -5,7 +5,7 @@
 
 import { checkModules, type Diagnostic, type ParsedModule, type TestInfo } from "./checker";
 import { generateModules } from "./codegen";
-import { synthesizeJsonDecoders } from "./json-decode";
+import { synthesizeJsonDecoders, synthesizeJsonEncoders } from "./json-decode";
 import { parse } from "./parser";
 import { CompileError, MultiCompileError } from "./token";
 
@@ -35,6 +35,8 @@ export function compileModules(modules: ModuleSource[], opts?: { testMode?: bool
       // H-2: 'json struct'から decode<Name> を合成する(checkの前 — 生成した関数も
       // 普通のFnDeclとして以降の型検査・codegenにそのまま乗せる)
       synthesizeJsonDecoders(program);
+      // design-agenda.md J節: 同じ'json struct'から encode<Name> も合成する(H-2の裏返し)
+      synthesizeJsonEncoders(program);
       parsed.push({ pkg: m.pkg, file: m.file, program });
     } catch (e) {
       // 構文エラーからの復帰(パーサ側)で複数件集まっていればMultiCompileError、

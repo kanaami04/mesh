@@ -1,14 +1,21 @@
 // H-2(2026-07-21): `json struct X { ... }` は decode<X>(v: json.Value) X | error を自動生成する。
+// design-agenda.md J節(2026-07-24提起・kanayamaと討議のうえ選択肢(a)を採用): 同じ
+// `json struct`宣言から、逆方向の encode<X>(x: X) json.Value も自動生成する(decode<X>との
+// 対称性を優先——H-2時点はデコードのみで、demo/todo-api実装でエンコード側の欠落が
+// ボイラープレートとして顕在化した)。エンコードは検証を伴わない(Mesh側は既に型付き
+// なので失敗し得ない)ため、戻り値はunionではなく素の`json.Value`。
 //
 // アプローチ: 生JSを手組みするのではなく、Meshの構文レベルのAST(Stmt/Expr)を合成し、
 // 通常のFnDeclとしてprogram.fnsへ追加する。こうすることで、以降のcheck/codegenの経路は
 // 一切変更せずそのまま流用でき(生成した関数も普通の関数として型検査・コード生成される)、
 // json.field/json.asString等のヘルパー(stdlib.ts+runtime.ts)を'?'で繋ぐだけの
-// 「手書きデコーダと全く同じ形」のコードを機械的に組み立てる。
+// 「手書きデコーダと全く同じ形」のコードを機械的に組み立てる。エンコード側も同じ
+// 「AST合成」方式で、json.Value{kind:...}のstruct literalを組み立てる。
 //
-// 対応するフィールド型(v1スコープ): int/float/string/bool、他のjson struct(同一ファイル内)
-// への参照、それらの配列、それらの'T | none'。それ以外(素のstruct・map・一般unionなど)は
-// 合成時にエラーにし、手書きデコーダ(json.field等を直接使う)を書くよう誘導する。
+// 対応するフィールド型(v1スコープ、デコード・エンコード共通): int/float/string/bool、
+// 他のjson struct(同一ファイル内)への参照、それらの配列、それらの'T | none'。それ以外
+// (素のstruct・map・一般unionなど)は合成時にエラーにし、手書きの変換(json.field等を
+// 直接使うデコーダ/json.Value{...}を直接組み立てるエンコーダ)を書くよう誘導する。
 
 import type { Block, Expr, FnDecl, Program, Stmt, TypeDecl, TypeNode } from "./ast";
 import { CompileError, MultiCompileError } from "./token";
@@ -310,4 +317,201 @@ export function synthesizeJsonDecoders(program: Program): void {
   }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new MultiCompileError(errors); // compiler.ts側は既にこれを処理できる
+}
+
+// ---- ここからJ節: エンコード方向(decodeの裏返し) ----
+
+function jsonValueTypeNode(pos: Pos): TypeNode {
+  return { kind: "name", name: "Value", pkg: "json", pos };
+}
+function jsonValueStructLit(kindValue: string, extraFields: { name: string; value: Expr; pos: Pos }[], pos: Pos): Expr {
+  return {
+    kind: "structLit",
+    name: "Value",
+    pkg: "json",
+    fields: [{ name: "kind", value: stringLit(kindValue, pos), pos }, ...extraFields],
+    pos,
+  };
+}
+
+function unsupportedEncodeFieldError(structName: string, fieldName: string, reason: string, pos: Pos): CompileError {
+  return new CompileError(
+    `'json struct ${structName}' can't auto-encode field '${fieldName}': ${reason}`,
+    pos,
+    "json-struct-unsupported-field",
+  );
+}
+
+// primitive/nested な型の値(valueExpr)をjson.Value式1つに変換する(genSimpleDecodeExprの裏返し)
+function genSimpleEncodeExpr(valueExpr: Expr, t: TypeNode & { kind: "name" }, pos: Pos): Expr {
+  if (t.name === "int" || t.name === "float") return jsonValueStructLit("num", [{ name: "n", value: valueExpr, pos }], pos);
+  if (t.name === "string") return jsonValueStructLit("str", [{ name: "s", value: valueExpr, pos }], pos);
+  if (t.name === "bool") return jsonValueStructLit("bool", [{ name: "b", value: valueExpr, pos }], pos);
+  // nested json struct
+  return callExpr(identExpr(`encode${t.name}`, pos), [valueExpr], pos);
+}
+
+// 配列(arrExpr: elem[])を、accNameという名前のjson.Value[]変数へループで組み立てる文一式
+// (genArrayDecodeStmtsの裏返し。デコードと違い「途中で失敗する」ことが無いので、
+// targetMode/'?'伝播のようなdecode側の分岐は不要——常にループで素直に組み立てるだけでよい)
+function genArrayEncodeStmts(arrExpr: Expr, elem: TypeNode & { kind: "name" }, accName: string, pos: Pos, uid: string): Stmt[] {
+  const itemVar = `__eitem_${uid}`;
+  const stmts: Stmt[] = [];
+  stmts.push(typedVarDecl(accName, arrayType(jsonValueTypeNode(pos), pos), { kind: "arrayLit", elems: [], pos }, true, pos));
+  const loopBody = block([
+    exprStmt(callExpr(identExpr("push", pos), [identExpr(accName, pos), genSimpleEncodeExpr(identExpr(itemVar, pos), elem, pos)], pos), pos),
+  ]);
+  stmts.push(rangeForStmt(["_", itemVar], arrExpr, loopBody, pos));
+  return stmts;
+}
+
+// 1フィールド分の「値の取り出し+エンコード」文一式を作る(genFieldStmtsの裏返し)。
+// 戻り値のresultExprは、呼び出し元がmap literalのentryへそのまま埋め込める式
+// (statementが不要な単純な場合は式1つ、配列/optionalはstatementで一時変数に組み立ててから
+// その変数への参照を返す)
+function genFieldEncodeStmts(
+  structName: string,
+  xExpr: Expr,
+  fieldName: string,
+  t: TypeNode,
+  jsonStructNames: Set<string>,
+  pos: Pos,
+): { stmts: Stmt[]; resultExpr: Expr } {
+  const fieldAccess = memberExpr(xExpr, fieldName, pos);
+
+  if (isSimple(t, jsonStructNames)) {
+    return { stmts: [], resultExpr: genSimpleEncodeExpr(fieldAccess, t as TypeNode & { kind: "name" }, pos) };
+  }
+
+  if (t.kind === "array") {
+    if (!isSimple(t.elem, jsonStructNames)) {
+      throw unsupportedEncodeFieldError(
+        structName,
+        fieldName,
+        "array element type isn't supported for automatic encoding (only int/float/string/bool or a nested 'json struct')",
+        pos,
+      );
+    }
+    const accName = `__earr_${fieldName}`;
+    const stmts = genArrayEncodeStmts(fieldAccess, t.elem as TypeNode & { kind: "name" }, accName, pos, fieldName);
+    return { stmts, resultExpr: jsonValueStructLit("arr", [{ name: "items", value: identExpr(accName, pos), pos }], pos) };
+  }
+
+  const inner = optionalInner(t);
+  if (inner) {
+    if (!isSimple(inner, jsonStructNames) && inner.kind !== "array") {
+      throw unsupportedEncodeFieldError(
+        structName,
+        fieldName,
+        "the non-'none' side of this optional field isn't supported for automatic encoding",
+        pos,
+      );
+    }
+    if (inner.kind === "array" && !isSimple(inner.elem, jsonStructNames)) {
+      throw unsupportedEncodeFieldError(
+        structName,
+        fieldName,
+        "array element type isn't supported for automatic encoding (only int/float/string/bool or a nested 'json struct')",
+        pos,
+      );
+    }
+    const fieldValVar = `__efv_${fieldName}`;
+    const resultVar = `__ef_${fieldName}`;
+    const stmts: Stmt[] = [];
+    stmts.push(shortVarDecl(fieldValVar, fieldAccess, pos));
+    stmts.push(typedVarDecl(resultVar, jsonValueTypeNode(pos), jsonValueStructLit("null", [], pos), true, pos));
+    const fieldValIdent = identExpr(fieldValVar, pos);
+    const innerStmts =
+      inner.kind === "array"
+        ? [
+            ...genArrayEncodeStmts(fieldValIdent, inner.elem as TypeNode & { kind: "name" }, `__earr_${fieldName}`, pos, fieldName),
+            assignStmt(
+              resultVar,
+              jsonValueStructLit("arr", [{ name: "items", value: identExpr(`__earr_${fieldName}`, pos), pos }], pos),
+              pos,
+            ),
+          ]
+        : [assignStmt(resultVar, genSimpleEncodeExpr(fieldValIdent, inner as TypeNode & { kind: "name" }, pos), pos)];
+    stmts.push(ifStmt(notExpr(isExpr(fieldValIdent, nameType("none", pos), pos), pos), block(innerStmts), pos));
+    return { stmts, resultExpr: identExpr(resultVar, pos) };
+  }
+
+  throw unsupportedEncodeFieldError(
+    structName,
+    fieldName,
+    "only int/float/string/bool, a nested 'json struct', an array of those, or 'T | none' of those are " +
+      "supported — write a hand-written encoder (building json.Value{...} directly) for this field instead",
+    pos,
+  );
+}
+
+// 1つのjson struct宣言から encode<Name> のFnDeclを合成する
+function synthesizeEncoderFn(td: TypeDecl, jsonStructNames: Set<string>): FnDecl {
+  if (td.node.kind !== "structType") {
+    // parserが"json type"を弾いているので通常は到達しない(synthesizeDecoderFnと同じ防御)
+    throw new CompileError(
+      `'json' can only mark a 'struct' declaration, not this type shape`,
+      td.pos,
+      "json-type-not-supported",
+    );
+  }
+  const pos = td.pos;
+  const xParam = "x";
+  const xExpr = identExpr(xParam, pos);
+  const stmts: Stmt[] = [];
+  const mapEntries: { key: Expr; value: Expr; pos: Pos }[] = [];
+  for (const f of td.node.fields) {
+    const { stmts: fieldStmts, resultExpr } = genFieldEncodeStmts(td.name, xExpr, f.name, f.type, jsonStructNames, f.pos);
+    stmts.push(...fieldStmts);
+    mapEntries.push({ key: stringLit(f.name, f.pos), value: resultExpr, pos: f.pos });
+  }
+  const entriesExpr: Expr = {
+    kind: "mapLit",
+    key: { kind: "name", name: "string", pos },
+    value: jsonValueTypeNode(pos),
+    entries: mapEntries,
+    pos,
+  };
+  stmts.push(returnStmt(jsonValueStructLit("obj", [{ name: "entries", value: entriesExpr, pos }], pos), pos));
+  return {
+    kind: "fnDecl",
+    name: `encode${td.name}`,
+    receiver: null,
+    typeParams: [],
+    params: [{ name: xParam, type: { kind: "name", name: td.name, pos }, pos }],
+    ret: jsonValueTypeNode(pos),
+    body: block(stmts),
+    exported: td.exported,
+    pos,
+  };
+}
+
+// program中の全 json struct から encode<Name> 関数群を合成し、program.fnsへ追加する。
+// synthesizeJsonDecodersと対の関数(呼び出し元のcompiler.tsで両方呼ぶ)。デコード成功に
+// 必要な制約(import・対応フィールド型)はエンコードでも同じなので、decode成功後なら
+// 通常はエンコードも成功するが、関数として独立して自己完結させる(decode側の実装都合に
+// 依存しない)ため同じ検査をここでも行う
+export function synthesizeJsonEncoders(program: Program): void {
+  const jsonStructDecls = program.types.filter((t) => t.isJson);
+  if (jsonStructDecls.length === 0) return;
+  const hasJsonImport = program.imports.some((i) => i.path === "mesh/json");
+  if (!hasJsonImport) {
+    throw new CompileError(
+      "'json struct' needs 'import \"mesh/json\"' (the generated encoder builds json.Value{...})",
+      jsonStructDecls[0].pos,
+      "json-struct-missing-import",
+    );
+  }
+  const jsonStructNames = new Set(jsonStructDecls.map((t) => t.name));
+  const errors: CompileError[] = [];
+  for (const td of jsonStructDecls) {
+    try {
+      program.fns.push(synthesizeEncoderFn(td, jsonStructNames));
+    } catch (e) {
+      if (e instanceof CompileError) errors.push(e);
+      else throw e;
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new MultiCompileError(errors);
 }

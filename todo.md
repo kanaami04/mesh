@@ -2355,8 +2355,25 @@
         - **デモ実装中に見つかった控え項目**: `json struct`の自動生成はデコード方向
           (`decodeX`)のみでエンコード方向(`X` → `json.Value`)が無く、`toJson()`相当を
           毎回手で書く必要があった(Go/Rustはderive/タグで両方向を自動生成するのに対し
-          非対称)。討議未着手のため実装はせず、[design-agenda.md J節](docs/design-agenda.md)
-          に選択肢だけ記録した。他に優先度の高いものが無ければ次の候補
+          非対称)。討議のうえ[design-agenda.md J節](docs/design-agenda.md)で選択肢(a)を
+          採用・実装済み(下記「json structのエンコード方向」参照)
+  - [x] **json structのエンコード方向(design-agenda.md J節)** ✅ 2026-07-24実装。デモアプリ
+        開発中に見つかった穴(上記)を、kanayamaとの討議のうえ選択肢(a)=`decodeX`と対になる
+        自由関数`encodeX(x: X) json.Value`の自動生成で解消。H-2と同じ「Meshの構文レベルAST
+        (Stmt/Expr)を合成し通常のFnDeclとして注入する」方式を`src/json-decode.ts`に
+        `synthesizeJsonEncoders`として追加し、`compiler.ts`で`synthesizeJsonDecoders`の
+        直後に呼ぶ。対応フィールド型・エラー(`json-struct-unsupported-field`/
+        `json-struct-missing-import`)はデコード側と対称(`isSimple`/`optionalInner`を
+        共有)。エンコードは検証不要(Mesh側は既に型付き)なので戻り値は素の`json.Value`。
+        テスト10件追加(checker 5件・e2e 5件: フラット・ネスト+配列+optional・サポート外
+        フィールド拒否・import漏れ拒否・複数パッケージexport・encode→decodeラウンドトリップ)。
+        500件全件パス、`tsc --noEmit`クリーン、既存の全example再実行で回帰無し。
+        **Rust移植版は対象外**(`rust/src/json_decode.rs`はデコード部分のみの移植のまま、
+        並行開発中の移植版がTS側の新機能に即座に追随する義務は無い——CLAUDE.md参照)。
+        `demo/todo-api/main.mesh`を新機能へ切り替える版を試作したが、Rust版が生成する
+        JSには`encodeTodo`の呼び出しだけがあり定義が無くランタイムエラーになることを
+        実機確認したため撤回——デモの「TS版・Rust版どちらでも動く」という前提を優先し、
+        既存の手書き`toJson()`のまま据え置いた。詳細はdesign-agenda.md J節が一次情報源
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
