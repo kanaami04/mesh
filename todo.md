@@ -2624,13 +2624,25 @@
                 (str→string, len→int, round→int 等)。コレクション/union戻り値
                 (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す。
               - 診断コード`builtin-arg-type`を追加(`argument-count`はmilestone 26で既存)。
-              - 新規テスト7件(個数不一致・len非文字列・round非float・コレクション組み込みへの
-                スカラー・正しい呼び出し・配列/map引数で誤検知なし・組み込み引数の未定義名検出)。
-                422→429件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を9パターンで
-                突き合わせコード・メッセージ・位置まで完全一致、実コレクションを使う正当な
-                プログラムで誤検知が無いことも両CLIで確認。既存exampleも回帰なし。
+              - 新規テスト7件+code review修正で2件(計9件)。422→431件、全件パス。
+                `cargo clippy`クリーン。TS版と`mesh check`を突き合わせコード・メッセージ・位置まで
+                完全一致、実コレクションを使う正当なプログラムで誤検知が無いことも両CLIで確認。
+                既存exampleも回帰なし。
+              - **code reviewで発見・即修正した2件**(いずれも実行して両CLIで再現確認):
+                (1) **false positive**: `trim`/`upper`/`lower`・`toInt`・`split`両引数・`join`区切りの
+                文字列引数検査が`is_stringy`(ANYを含まない)のみでANY免除を欠いていたため、
+                struct/メソッド/ジェネリック由来の実string(full_checkerではANYに潰れる)を渡すと
+                `trim(s.name)`等が誤って`builtin-arg-type`になっていた(TS版は無診断)。
+                len/round等と同じ`&& !matches!(_, Type::Any)`免除を5箇所へ追加。
+                (2) **false negative(精密化)**: `reduce`は常にANYを返していたが、accumulator型は
+                callback(Type::Fn、milestone 26で追跡済み)から計算できるスカラー。TS版と同じく
+                `f.params[0]`(無ければ初期値の型)を返すよう修正し、`round(reduce(xs,add,0))`が
+                TS版と同じく`builtin-arg-type`になるようにした(`map`は配列戻り値なので他の
+                配列返し組み込みと同様ANY据え置き)。あわせて古いコメント2件も訂正
+                (「関数型もANY」は誤り——関数型はType::Fnで追跡され`push(add,4)`は正しく発火。
+                milestone 26テストの「calleeがANY」も現状に合わせて更新)。
               - **スコープ外**: コレクション要素型・添字型・callback署名の検査
-                (配列/map/channel/関数型のモデル化とセット)、pkg修飾された組み込み。
+                (配列/map/channel型のモデル化とセット)、pkg修飾された組み込み。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

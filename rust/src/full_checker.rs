@@ -325,9 +325,12 @@ fn expect_arity(ctx: &mut FullCheckerCtx, name: &str, got: usize, want: usize, p
 }
 
 // 「引数がANYでなければ builtin-arg-type を積む」——コレクション系組み込みの引数検査の
-// 縮退形。full_checkerのスカラースコープでは配列/map/channel/関数型はANYへ潰れるので、
-// TS版の `arr.kind === "array"` ガードは「ANYなら素通り」に縮退する。実際のコレクションを
-// 渡す典型ケース(型がANY)は無診断、スカラーを誤って渡した場合だけ発火(TS版と一致)
+// 縮退形。full_checkerのスカラースコープでは配列/map/channelはANYへ潰れるので、TS版の
+// `arr.kind === "array"` ガードは「ANYなら素通り」に縮退する。実際のコレクションを渡す
+// 典型ケース(型がANY)は無診断、スカラーを誤って渡した場合だけ発火(TS版と一致)。
+// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——`push(add, 4)`の
+// ように関数値をコレクション組み込みへ渡すと`push() requires an array, got fn(...)`が出る
+// (これもTS版と一致——TS版も`arr.kind !== "any"`なら同じエラーを出す)
 fn require_kind(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) {
     if !matches!(arg_ty, Type::Any) {
         ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
@@ -336,14 +339,17 @@ fn require_kind(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: Stri
 
 // 組み込み関数呼び出しの検査(milestone 27)。TS版`inferBuiltinCall`
 // (src/checker/builtins.ts)の移植。
-// **スカラースコープでの縮退**: 配列/map/channel/関数型はfull_checkerでは常にANYなので、
-// TS版がコレクション種別でガードする「要素型・添字型・callback署名」の検査
-// (type-mismatch/invalid-index-type/callback-signature-mismatch)は実際には到達せず、
+// **スカラースコープでの縮退**: 配列/map/channelはfull_checkerでは常にANYなので、
+// TS版がコレクション種別(`arr.kind === "array"`等)でガードする「要素型・添字型・callback署名」の
+// 検査(type-mismatch/invalid-index-type/callback-signature-mismatch)は実際には到達せず、
 // コレクションをモデル化する将来のmilestoneで拾う。この一歩で実際に効くのは
 // (1)全組み込みのarity(argument-count)、(2)スカラー引数の型検査(builtin-arg-type)——
 // `len(5)`・`contains(5, x)`・`round(3)`のようにスカラーを渡した場合のエラー、
-// (3)スカラー戻り値型(str→string, len→int, round→int 等)。コレクション/union戻り値
-// (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す。
+// (3)スカラー戻り値型(str→string, len→int, round→int 等)。配列を返す組み込み
+// (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す(配列型は未モデル化)。
+// ただしreduceの戻り値だけはaccumulator型でスカラーになりうるためcallbackから計算する
+// (下記reduceアーム参照)。**関数型はANYではなくType::Fnとして追跡される**ので、
+// コレクション組み込みへ関数値を渡すとrequire_kindが正しく発火する(TS版と一致)。
 fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
     // 引数はarityに関わらず全て推論する(未定義名検査のため)
     let at: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
@@ -423,10 +429,12 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
         }
         "split" => {
             if expect_arity(ctx, name, n, 2, pos) {
-                if !types::is_stringy(&at[0]) {
+                // is_stringyはANYを含まないので明示的にANYを免除(struct/メソッド由来の実stringが
+                // full_checkerではANYに潰れるため——免除しないと誤検知。code reviewで発覚)
+                if !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
                     ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("split() requires a string, got {}", ts(&at[0])));
                 }
-                if !types::is_stringy(&at[1]) {
+                if !types::is_stringy(&at[1]) && !matches!(at[1], Type::Any) {
                     ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("split() separator must be a string, got {}", ts(&at[1])));
                 }
             }
@@ -435,20 +443,23 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
         "join" => {
             if expect_arity(ctx, name, n, 2, pos) {
                 require_kind(ctx, &at[0], args[0].pos(), format!("join() requires an array, got {}", ts(&at[0])));
-                if !types::is_stringy(&at[1]) {
+                if !types::is_stringy(&at[1]) && !matches!(at[1], Type::Any) {
                     ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("join() separator must be a string, got {}", ts(&at[1])));
                 }
             }
             STRING
         }
         "trim" | "upper" | "lower" => {
-            if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) {
+            // is_stringyはANYを含まないので明示的にANYを免除する(len/round等と同じ)——
+            // full_checkerではstruct/メソッド/pkg/ジェネリック由来の実stringもANYに潰れるため、
+            // 免除しないと`trim(s.name)`(s.nameは実string)を誤検知する(code reviewで発覚)
+            if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("{name}() requires a string, got {}", ts(&at[0])));
             }
             STRING
         }
         "toInt" => {
-            if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) {
+            if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("toInt() requires a string, got {}", ts(&at[0])));
             }
             ANY // 本来 int | error
@@ -487,7 +498,15 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 3, pos) {
                 require_kind(ctx, &at[0], args[0].pos(), format!("reduce() requires an array, got {}", ts(&at[0])));
             }
-            ANY
+            // reduceの戻り値はaccumulator型でスカラーになりうる(map/filter等の配列戻り値と違い
+            // モデル化できる)。Type::Fnはmilestone 26で追跡済みなので、TS版と同じく
+            // callbackの第1引数型(f.params[0])を返す——fnでなければ初期値(args[2])の型、
+            // それも無ければANY(TS版 `f.kind==="fn" && f.params.length===2 ? f.params[0] : args[2] ?? ANY`)。
+            // これにより `round(reduce(xs, add, 0))`(reduce→int)のような後続検査がTS版と一致する
+            match at.get(1) {
+                Some(Type::Fn { params, .. }) if params.len() == 2 => params[0].clone(),
+                _ => at.get(2).cloned().unwrap_or(ANY),
+            }
         }
         _ => ANY,
     }
@@ -1227,8 +1246,9 @@ mod tests {
 
     #[test]
     fn 組み込み関数の呼び出しはargument_count対象外で誤検知しない() {
-        // 組み込み(print等)はcalleeがANYになるためmilestone 26の対象外——
-        // 可変長のprintに複数引数を渡しても誤検知しない
+        // milestone 27で組み込みはintercept経由で検査するようになったが、printは可変長
+        // なのでarity検査せず、複数引数でも誤検知しない(milestone 26時点では「calleeがANY」
+        // が理由だったが、milestone 27でinfer_builtin_callがprintをVOIDとして素通しする形に変わった)
         let diags = check("fn main() {\n    print(1, 2, 3)\n}\n");
         assert_eq!(diags, vec![]);
     }
@@ -1307,5 +1327,25 @@ mod tests {
         let diags = check("fn main() {\n    x := str(missing)\n    print(x)\n}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn any由来の文字列を文字列組み込みへ渡しても誤検知しない() {
+        // 回帰(code reviewで発覚): ジェネリック関数の結果(ANYに潰れる)は実際にはstringでも
+        // full_checkerではANY。trim/toInt/split/joinの文字列引数検査がANYを免除していなかったため、
+        // `trim(s)`(sはANY由来の実string)を誤ってbuiltin-arg-typeにしていた。TS版は無診断。
+        let diags = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    s := identity(\"hi\")\n    t := trim(s)\n    parts := split(s, \",\")\n    n := toInt(s)\n    print(\"${t} ${parts} ${n}\")\n}\n");
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn reduceの戻り値はaccumulator型になり後続の型検査に効く() {
+        // 回帰(code reviewで発覚): reduceは常にANYを返していたが、accumulator型は
+        // callback(Type::Fn、milestone 26で追跡済み)から計算できるスカラー。
+        // reduce(xs, add, 0)→int を round に渡すとTS版と同じくbuiltin-arg-typeが出る
+        let diags = check("fn add(acc: int, x: int) int {\n    return acc + x\n}\nfn main() {\n    mut xs: int[] = [1, 2, 3]\n    total := reduce(xs, add, 0)\n    y := round(total)\n    print(y)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::BuiltinArgType);
+        assert_eq!(diags[0].message, "round() requires a float, got int");
     }
 }
