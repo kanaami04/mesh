@@ -491,16 +491,43 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   (22本)がbyte-for-byte一致のまま回帰無し。`<-ch`/map読み取り/`true - false`/
   `bools[0]++`の各パターンをRust版・TS版両方でコンパイルし、同じ理由・同じ
   位置情報で拒否されることまで確認済み。詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの13マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 14(比較/論理/等価演算子の妥当性検査)完了
+  (2026-07-24)**。milestone 13で意図的にスコープ外としていた残り3カテゴリ
+  (`&&`/`||`の`not-bool`・`==`/`!=`の`use-is-none`/`incomparable-types`・
+  `< <= > >=`の`incomparable-types`)を、kanayamaから「妥当性検査の部分全て
+  やってしまいましょう」という依頼を受けてまとめて実装。TS版`checkArithOp`
+  周辺の該当ロジック(milestone 13の調査時に既読)をそのまま移植——`infer_binary`
+  の`match`を`check_logical_op`/`check_equality_op`/`check_comparison_op`へ
+  分割し、型互換性は既存の`types::assignable`/`is_numeric`/`is_stringy`を
+  再利用。**code reviewで最重要の回帰を発見・修正**: `check_logical_op`が
+  左辺`x is T`によるnarrowingを考慮しておらず、`if n is int && n > 0 {...}`
+  のようなTS版の実テスト(F-6)で検証済みの正当なコードが誤って拒否されて
+  いた——milestone 13以前は右辺を検査すること自体が無かったため無害だった
+  ものが、右辺を実際に検査するこのmilestoneで初めて実害のある回帰になった。
+  `Expr::Select`/`Expr::Match`と同じスクラッチctx技法で`checker.rs`側を
+  修正しただけでは不十分で、`codegen.rs`の`Expr::Binary`(`&&`/`||`)にも
+  `gen_if`と同じnarrowing(push_scope/declare/pop_scope)を追加する必要が
+  あった(codegenが右辺を実際に生成する際に独立して`infer_binary`を
+  再実行するため)。あわせて単項`!`の`not-bool`検査漏れ(PR #28の「兄弟演算子の
+  見落とし」と全く同じ構図)も発見・修正。テスト322→334件(+12)。
+  **このmilestoneが今までで最も回帰リスクが高かった**(`&&`/`||`/`==`/`!=`/
+  `< <= > >=`は全exampleで最も広範囲に使われる演算子カテゴリ)が、既存の
+  全example(22本)がbyte-for-byte一致のまま回帰無しだった(narrowingを
+  伴わない単純な使い方は既存exampleがカバーしており、narrowingを伴う
+  compound conditionを使うexampleが無かったため、この回帰は既存example
+  だけでは検出できず——code reviewが実際にTS版と突き合わせて発見した)。
+  これでTS版`checkArithOp`+二項演算子まわりの主要な妥当性検査(算術・比較・
+  論理・等価)をひととおり移植し終えた。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの14マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
-  フィールド検証 → 算術演算子の妥当性検査)が全て完了——TS版リファレンス実装の
-  主要機能をRust版がひととおり移植し終えた。細かな既知の限界・意図的なスコープ
-  縮小(自己参照型・`json.Value`の2階層以上のdestructure・ジェネリック関数・
-  `mesh/io`/`mesh/http`・cross-file/cross-packageのjson struct参照・
-  `gen_lvalue`の代入先フィールド名検証・struct宣言時点の`__proto__`ガード・
-  比較演算子/`&&`/`||`/`==`/`!=`の妥当性検査 等)は引き続きtodo.mdに記録済みの
-  通り残る。次の対象はkanayamaと相談して決める
+  フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査)が
+  全て完了——TS版リファレンス実装の主要機能をRust版がひととおり移植し終えた。
+  細かな既知の限界・意図的なスコープ縮小(自己参照型・`json.Value`の2階層以上の
+  destructure・ジェネリック関数・`mesh/io`/`mesh/http`・
+  cross-file/cross-packageのjson struct参照・`gen_lvalue`の代入先フィールド名
+  検証・struct宣言時点の`__proto__`ガード・pkg修飾struct literalの厳密検証 等)は
+  引き続きtodo.mdに記録済みの通り残る。次の対象はkanayamaと相談して決める
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

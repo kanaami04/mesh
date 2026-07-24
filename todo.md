@@ -1751,6 +1751,92 @@
           除算の`division-by-zero`診断(Rust版は既に実行時の`__idiv`/`__imod`が
           ゼロ除算をpanicで検出しており、milestone 1由来——正しさの観点では
           既に担保済みのため、コンパイル時の早期発見という利便性の差のみ)。
+  - [x] **checker+codegen milestone 14(比較/論理/等価演算子の妥当性検査)**
+        ✅ 2026-07-24実装。milestone 13完了後、kanayamaから「妥当性検査の部分
+        全てやってしまいましょう」と依頼を受け、milestone 13で意図的にスコープ外と
+        していた残り3カテゴリ(`&&`/`||`の`not-bool`・`==`/`!=`の`use-is-none`/
+        `incomparable-types`・`< <= > >=`の`incomparable-types`)をまとめて実装。
+        - **TS版の該当ロジック**(`src/checker/expressions.ts:555-608`、milestone 13の
+          調査時に既に読んでいた箇所): `&&`/`||`は左右それぞれのオペランドが
+          bool(またはANY)であることを要求し、それぞれ**自分自身の位置**
+          (`expr.left.pos`/`expr.right.pos`、二項式全体の位置ではない)でエラーに
+          する。`==`/`!=`はリテラル`none`との比較(`x == none`)を、型を問わず
+          常にErrにする(P1: narrowingが効く`is none`に一本化する言語ルールそのもの
+          ——構文上`Expr::None`が直接現れるかどうかだけを見る、型推論は不要)。
+          それ以外の`==`/`!=`は双方向assignable(どちらかの型がもう一方に代入
+          できれば比較可能)でなければErr。`< <= > >=`は両方numeric・両方stringy・
+          どちらかANYのいずれかでなければErr。
+        - `checker.rs`: `infer_binary`の`match`を分割し、新設`check_logical_op`
+          (`&&`/`||`)・`check_equality_op`(`==`/`!=`)・`check_comparison_op`
+          (`< <= > >=`)へ振り分ける。`check_equality_op`は`Expr::None`の構文的
+          検出が必要なため`ctx`+`Expr`を直接受け取り、`check_comparison_op`は
+          既存の`check_arith_op`と同じく解決済み`Type`のみを受け取る(値そのものは
+          不要なため)。型互換性は既存の`types::assignable`/`is_numeric`/
+          `is_stringy`をそのまま再利用——新しい代入規則は追加していない。
+        - `codegen.rs`は変更不要——milestone 13で`Expr::Binary`/`gen_compound_value`
+          両方の`infer_binary`呼び出しに`?`が既に付いているため、新しいErrは
+          自動的に伝播する。
+        - 新規ユニットテスト`checker.rs`5件(論理演算子の非bool検査・左右どちらの
+          エラーも検出できること・等価演算子のリテラルnone検査・双方向assignable
+          検査・順序比較の数値/文字列/ANY判定)+`codegen.rs`4件(非bool論理演算子・
+          リテラルnoneとの等価比較・比較不能な型同士の等価/順序比較・正常な
+          論理/等価/順序比較が今まで通りコンパイルできること)。322→330件、全件
+          パス。`cargo clippy --all-targets -- -D warnings`クリーン。既存の全
+          example(22本、`&&`/`||`/`==`/`!=`/`< <= > >=`を最も広範囲に使う演算子
+          カテゴリ全てを新規検証対象にしたため今までで最も回帰リスクが高かったが、
+          全てbyte-for-byte一致で回帰無しを確認——理由はmilestone 12/13と同じ
+          (既存の全exampleは既にTS版のこれらの検査を通過しているプログラムの
+          ため)。`x && true`(非bool)・`x == none`(リテラルnone比較)・
+          `User == 5`(比較不能な等価)・`User < User`(比較不能な順序比較)の
+          4パターンをRust版・TS版両方でコンパイルし、同じ理由(`not-bool`/
+          `use-is-none`/`incomparable-types`)・同じ位置情報で拒否することを
+          確認済み(いずれも`expr.pos`の慣習がRust版パーサーの`Expr::Binary.pos`と
+          既に一致していたため、位置の調整は不要だった)。
+        - **5エージェントのcode reviewで発見・即修正した3件**(実行確認済み):
+          1. **最重要・最も重大な指摘(git historyレビュー・過去PRコメント
+             レビュー双方が独立に発見)**: `check_logical_op`/`check_comparison_op`
+             が左辺の`x is T`によるnarrowingを一切考慮していなかったため、
+             `if n is int && n > 0 {...}`のようなTS版の実テスト
+             (F-6: `&&`は左のisが右辺に効く、`tests/checker.test.ts:949-958`)で
+             検証済みの正当なコードが、milestone 14で右辺を実際に検査するように
+             なった結果`incomparable-types`等で誤って拒否されるようになっていた
+             (milestone 13以前は右辺を検査すること自体が無かったため無害だった
+             ものが、このPRで初めて実害のある回帰になった)。`Expr::Select`/
+             `Expr::Match`のアーム推論と同じ「使い捨てのスクラッチctx」技法で、
+             `check_logical_op`が左辺`is`の絞り込み結果(`&&`ならthen側、`||`は
+             De Morganでelse側)を右辺の型検査に反映するよう修正。さらに
+             **codegen側にも同じ絞り込みが必要**だと判明——`checker.rs`側の
+             修正だけでは、codegenが右辺を実際に生成する際の`self.gen_expr`が
+             独立して`self.ctx`(未絞り込みのまま)で`infer_binary`を再実行して
+             しまうため、右辺の中でさらに算術/比較する式(`n > 0`自体等)が
+             生成段階で改めて誤ってErrになっていた。`gen_if`の単純な
+             `if x is T {...}`と同じnarrowing技法(push_scope/declare/pop_scope)
+             を`codegen.rs`の`Expr::Binary`(`&&`/`||`)にも追加して解消。
+          2. **PR #28の「兄弟演算子の見落とし」と全く同じ構図(3エージェント
+             独立指摘)**: 単項`!`はTS版で`&&`/`||`と全く同じ`not-bool`診断を
+             共有するのに、milestone 13時点の「比較/論理演算子と同じ別カテゴリ
+             のため対象外」というコメントが、その別カテゴリ自体を実装した
+             このmilestoneで更新されず、`!`の検査を見落としていた
+             (`if !x {...}`のxが未絞り込みのintのような場合が無診断で素通り)。
+             新設`check_logical_not`を`Expr::Unary`の`!`分岐へ配線し解消。
+          3. 上記2件の見落としを生んだ古いコメント(milestone 13時点で
+             「比較/論理演算子の妥当性検査は別カテゴリのため引き続き対象外」と
+             書いたまま、直後にmilestone 14の新しいコメントと矛盾していた
+             箇所)を訂正。
+          新規回帰テスト`checker.rs`3件(`check_logical_not`・`&&`/`||`の
+          narrowing反映2パターン)+`codegen.rs`2件(単項`!`のnot-bool・
+          `&&`/`||`のnarrowingがコード生成にも反映されること)。330→334件、
+          全件パス。`cargo clippy --all-targets -- -D warnings`クリーン。
+          既存の全example(22本)を再度byte-for-byte確認(回帰無し)、
+          `n is int && n > 0`・`v is none || v > 0`・`flag is bool && flag`・
+          `!x`(非bool)の4パターンをRust版・TS版両方でコンパイル・実行し、
+          いずれも同じ結果(前者3つは正常動作、最後は`not-bool`で拒否)に
+          なることを確認済み。
+        - **milestone 14のスコープ外**: 無し——これでTS版`checkArithOp`+
+          二項演算子まわりの主要な妥当性検査(算術・比較・論理・等価)を
+          Rust版がひととおり移植し終えた。関連する既知の限界として、`gen_lvalue`
+          の代入先フィールド名検証・pkg修飾struct literalの厳密検証・
+          自己参照型等は引き続きtodo.mdに記録済みの通り残る。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

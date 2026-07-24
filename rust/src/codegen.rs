@@ -898,6 +898,35 @@ impl Codegen {
             Expr::Bool { value, .. } => Ok(value.to_string()),
             Expr::None { .. } => Ok("null".to_string()), // noneの実行時表現はnull
             Expr::Ident { name, .. } => Ok(name.clone()),
+            // milestone 14 code review発覚・実行確認済みの回帰: `x is int && x > 0`のような
+            // 複合条件は、右辺(および右辺の中でさらに算術/比較する式)の型検査・コード生成の
+            // 両方に左辺のnarrowing結果を反映しないと、TS版でテスト済みの正当なコード
+            // (F-6: `&&`は左のisが右辺に効く、De Morganで`||`はelse側)が誤ってErrになる。
+            // check_logical_op自身の内部スクラッチctxはinfer_expr経由の推論だけを守り
+            // (Errを飲み込むため無害)、ここではcodegenが右辺を実際に生成する際に
+            // self.ctxそのものを一時的に絞り込む——gen_ifの単純な`if x is T {...}`と
+            // 同じnarrowing技法(push_scope/declare/pop_scope)をここでも使う。
+            // 単純なidentオペランドのみ対応(gen_ifと同じ範囲、多段フィールドパス等は対象外)
+            Expr::Binary { op, left, right, pos } if matches!(op, TokenType::AndAnd | TokenType::OrOr) => {
+                let l = self.gen_expr(left)?;
+                let popped = if let Expr::Is { operand, target, .. } = left.as_ref()
+                    && let Expr::Ident { name, .. } = operand.as_ref()
+                {
+                    let subject_ty = checker::infer_expr(&self.ctx, operand);
+                    let (then_ty, else_ty) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
+                    self.ctx.push_scope();
+                    self.ctx.declare(name, if *op == TokenType::AndAnd { then_ty } else { else_ty });
+                    true
+                } else {
+                    false
+                };
+                checker::infer_binary(&self.ctx, *op, left, right, *pos)?;
+                let r = self.gen_expr(right)?;
+                if popped {
+                    self.ctx.pop_scope();
+                }
+                Ok(format!("({l} {} {r})", return_op_str(op)))
+            }
             Expr::Binary { op, left, right, pos } => {
                 let info = checker::infer_binary(&self.ctx, *op, left, right, *pos)?;
                 let l = self.gen_expr(left)?;
@@ -919,12 +948,16 @@ impl Codegen {
                 };
                 Ok(format!("({l} {js_op} {r})"))
             }
-            // milestone 13: 単項`-`もcheck_arith_opと同じ`invalid-operation`診断を
-            // 共有するため妥当性検査する(`!`は別カテゴリの`not-bool`診断のため対象外)
+            // milestone 13: 単項`-`はcheck_arith_opと同じ`invalid-operation`診断を共有する
+            // ため妥当性検査する。milestone 14・code review発覚: `!`も兄弟演算子として
+            // 同じ`not-bool`診断を共有するため、`&&`/`||`のnot-bool検査実装時に見落とさず
+            // あわせて検査する(§計画参照)
             Expr::Unary { op, operand, pos } => {
+                let operand_ty = checker::infer_expr(&self.ctx, operand);
                 if *op == TokenType::Minus {
-                    let operand_ty = checker::infer_expr(&self.ctx, operand);
                     checker::check_unary_minus(&operand_ty, *pos)?;
+                } else if *op == TokenType::Bang {
+                    checker::check_logical_not(&operand_ty, *pos)?;
                 }
                 Ok(format!("({op}{})", self.gen_expr(operand)?))
             }
@@ -2903,5 +2936,73 @@ mod tests {
         );
         assert!(js.contains("(-x)"), "got: {js}");
         assert!(js.contains("z++;"), "got: {js}");
+    }
+
+    // ---- milestone 14: 比較/論理/等価演算子の妥当性検査 ----
+
+    #[test]
+    fn 非bool_operandでの論理演算子はerrになる() {
+        let err = gen_js("fn main() {\n  x := 1\n  if x && true {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err.contains("'&&' requires bool operands, got int"), "got: {err}");
+    }
+
+    #[test]
+    fn リテラルnoneとの等価比較はerrになる() {
+        // P1: `x == none`は`is none`に一本化する言語ルールそのもの
+        let err = gen_js("fn main() {\n  x := 1\n  if x == none {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err.contains("use 'is none'"), "got: {err}");
+        let err2 = gen_js("fn main() {\n  x := 1\n  if none != x {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err2.contains("use 'is none'"), "got: {err2}");
+    }
+
+    #[test]
+    fn 比較不能な型同士の等価比較や順序比較はerrになる() {
+        let err = gen_js(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  if u == 5 {\n    print(\"yes\")\n  }\n}",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot compare User with int"), "got: {err}");
+
+        let err2 = gen_js(
+            "struct User {\n  name: string\n}\nfn main() {\n  u := User{name: \"a\"}\n  v := User{name: \"b\"}\n  if u < v {\n    print(\"yes\")\n  }\n}",
+        )
+        .unwrap_err();
+        assert!(err2.contains("cannot compare User with User"), "got: {err2}");
+    }
+
+    #[test]
+    fn 正常な論理_等価_順序比較は今まで通りコンパイルできる() {
+        let js = gen_body(
+            "fn main() {\n  x := 3\n  ok := x > 1 && x < 10\n  same := x == 3\n  print(ok)\n  print(same)\n}",
+        );
+        assert!(js.contains("((x > 1) && (x < 10))"), "got: {js}");
+        assert!(js.contains("(x === 3)"), "got: {js}");
+    }
+
+    #[test]
+    fn 非bool_operandでの単項notはerrになる() {
+        // code review発覚・実行確認済みの回帰: `&&`/`||`のnot-bool検査実装時に
+        // 同じ診断を共有する兄弟演算子`!`を見落としていた(PR #28のunary`-`/`++`/`--`と
+        // 全く同じ構図)
+        let err = gen_js("fn main() {\n  x := 5\n  if !x {\n    print(\"yes\")\n  }\n}").unwrap_err();
+        assert!(err.contains("'!' requires bool, got int"), "got: {err}");
+    }
+
+    #[test]
+    fn 論理演算子の左辺のis式によるnarrowingは右辺のコード生成にも反映される() {
+        // code review発覚・実行確認済みの回帰: `x is int && x > 0`のような複合条件は、
+        // 右辺の型検査だけでなくcodegenが右辺を実際に生成する際にも左辺のnarrowingを
+        // 反映しないと、右辺の中でさらに算術/比較する式が誤ってincomparable-types等に
+        // なる(gen_ifの単純な`if x is T {...}`と同じnarrowing技法を&&/||でも使う)
+        let js = gen_body(
+            "fn f() int | error {\n  return 1\n}\nfn main() {\n  x := f()\n  if x is int && x > 0 {\n    print(\"positive\")\n  }\n}",
+        );
+        assert!(js.contains("if ((Number.isInteger(x) && (x > 0)))"), "got: {js}");
+
+        // De Morgan: ||はelse側(絞り込みの否定)の事実を右辺の検査/生成に使う
+        let js2 = gen_body(
+            "fn main() {\n  m := map<string, int>{\"a\": 1}\n  v := m[\"a\"]\n  if v is none || v > 0 {\n    print(\"ok\")\n  }\n}",
+        );
+        assert!(js2.contains("(v > 0)"), "got: {js2}");
     }
 }
