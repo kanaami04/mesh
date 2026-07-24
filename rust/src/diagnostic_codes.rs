@@ -31,6 +31,11 @@ pub enum DiagnosticCode {
     ImmutableAssignment,
     MissingMain,
     InvalidMainSignature,
+    InvalidOperation,
+    IncomparableTypes,
+    NotBool,
+    UseIsNone,
+    DivisionByZero,
 }
 
 impl DiagnosticCode {
@@ -46,6 +51,11 @@ impl DiagnosticCode {
             DiagnosticCode::ImmutableAssignment => "immutable-assignment",
             DiagnosticCode::MissingMain => "missing-main",
             DiagnosticCode::InvalidMainSignature => "invalid-main-signature",
+            DiagnosticCode::InvalidOperation => "invalid-operation",
+            DiagnosticCode::IncomparableTypes => "incomparable-types",
+            DiagnosticCode::NotBool => "not-bool",
+            DiagnosticCode::UseIsNone => "use-is-none",
+            DiagnosticCode::DivisionByZero => "division-by-zero",
         }
     }
 }

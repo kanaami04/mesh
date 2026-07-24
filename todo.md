@@ -2528,6 +2528,44 @@
               - **注**: このマシンは初期状態で`cc`リンカが無く`cargo`ビルドが通らなかったため
                 `apt-get install gcc`で解消してから検証した(コードではなく環境の問題。
                 docs/setup.mdが一次情報源)
+        - [x] **milestone 25: 演算子の妥当性検査(invalid-operation ほか)**
+              ✅ 2026-07-24実装。kanayamaと候補(演算子の妥当性検査/argument-count/
+              run・buildへのゲート統合)を相談し、codegen側(milestone 13/14)で
+              移植済みロジックを診断側へ写すだけで済み設計判断がほぼ不要な「演算子の
+              妥当性検査」を選択。
+              - TS版`src/checker/expressions.ts`の`inferBinary`+`checkArithOp`、
+                `case "unary"`、`src/checker/statements.ts`の`case "incDec"`を
+                `full_checker.rs`へ移植。codegen側の同ロジックは`checker.rs`に
+                `Result<_, String>`で即失敗する形で既にあるが、full_checkerは
+                診断(コード+メッセージ+位置)を積んで走査を続ける設計なので流用せず
+                書き写した(full_checkerは元々独自の`infer_expr`を持つ)。
+              - 追加した診断コード5種: `invalid-operation`(算術`+ - * / %`の型不一致・
+                単項`-`のnumeric以外・`++`/`--`のnumeric以外)・`incomparable-types`
+                (`==`/`!=`/`< <= > >=`の比較不能)・`not-bool`(`&&`/`||`/単項`!`の
+                bool以外)・`use-is-none`(`x == none`は`is none`へ一本化)・
+                `division-by-zero`(リテラルの`/0`・`%0`)。
+              - **narrowingは不要と判明**: TS版は`&&`/`||`の右辺検査で左辺`x is T`の
+                絞り込みを適用する(F-6、codegen milestone 14がスクラッチctxで対処した
+                回帰)が、絞り込み対象のunion型はfull_checkerのスカラースコープでは
+                `resolve_scalar_type`でANYに潰れ、ANYは全チェックの安全弁を素通りする
+                ため、絞り込みの有無で結果が変わらない(コメントに明記)。
+              - **副産物: 文字列リテラル型のモデル化**: `1 < "a"`の診断で相手の型が
+                TS版では`"a"`(リテラル型)と表示されるのに、full_checkerは
+                `Expr::String`を`STRING`本体へ潰していたため`string`と表示されズレていた。
+                codegen側`checker.rs`・TS版と同じく`Expr::String`を`Type::Literal(value)`に、
+                mut宣言時のみ`widen_literal`する(TS版`statements.ts`の
+                `stmt.mutable ? widenLiteral(t) : t`と同じ)よう修正して一致させた。
+              - **落とし穴**: `use TokenType::*`はグロブが`TokenType::Type`(typeキーワードの
+                バリアント)を取り込んで`Type`enumを隠すため、必要なバリアントだけ明示
+                インポートに変更(ビルドエラーで即発覚)。
+              - 新規テスト13件(8演算子ケース + strヒント有無の対 + ゼロ剰余 + 正当な
+                演算は診断なし)。399→412件、全件パス。`cargo clippy`クリーン。
+                8演算子エラー + ヒント有無 + 正当プログラム(誤検知なし)を
+                Rust版・TS版両CLIの`mesh check`で突き合わせ、コード・メッセージ・位置まで
+                完全一致することを確認済み。
+              - **スコープ外(意図的)**: 比較演算子の結果の使われ方以外の高度な検査は無し。
+                struct/フィールド関連の診断・argument-count・run/buildへのゲート統合は
+                引き続き次のmilestone候補
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

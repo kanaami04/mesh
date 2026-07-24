@@ -8,14 +8,17 @@
 // **スコープ(意図的な段階的拡張)**: 元のcodegen移植のmilestone 1と同じ「スカラーの
 // Mesh」(struct/map/配列/channel/並行処理/import/ジェネリクスは対象外)。診断コードも
 // 「変数宣言・型不一致・未定義名」のごく少数(diagnostic_codes.rs参照)だけを実装する。
-// milestone 23でトップレベル宣言(fn/const)自体の名前衝突検査を追加(下記
-// `check_program`参照)。main関数の形検査(missing-main等)・演算子の妥当性検査
-// (invalid-operation等)は引き続き対象外——アーキテクチャが正しいと分かった時点で、
-// 機能ごとに広げていく方針(既存21マイルストーンと同じ進め方)。
+// milestone 23でトップレベル宣言(fn/const)自体の名前衝突検査(下記`check_program`参照)、
+// milestone 24でmain関数の形検査(missing-main/invalid-main-signature)、
+// milestone 25で演算子の妥当性検査(invalid-operation/incomparable-types/not-bool/
+// use-is-none/division-by-zero——下記`infer_binary`/`check_arith`/`infer_unary`参照)を追加。
+// struct/フィールド関連の診断・argument-count・run/buildへのゲート統合は引き続き対象外
+// ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
+// 同じ進め方)。
 
 use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, TypeNode};
 use crate::diagnostic_codes::{Diagnostic, DiagnosticCode};
-use crate::token::Pos;
+use crate::token::{Pos, TokenType};
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
 use std::collections::HashMap;
 
@@ -121,7 +124,11 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
     match expr {
         Expr::Int { .. } => INT,
         Expr::Float { .. } => FLOAT,
-        Expr::String { .. } => STRING,
+        // 文字列リテラルは(STRINGではなく)リテラル型。TS版`checkExprSingle`・
+        // codegen側checker.rsの`infer_expr`と同じ——`1 < "a"`の診断で相手の型が
+        // `string`ではなく`"a"`と表示される等、TS版とのメッセージ一致に効く。
+        // mut宣言時の型はShortVarDeclでwiden_literalする(TS版statements.tsと同じ)
+        Expr::String { value, .. } => Type::Literal(value.clone()),
         Expr::Bool { .. } => BOOL,
         Expr::None { .. } => NONE,
         Expr::Interp { segments, .. } => {
@@ -145,21 +152,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 ANY
             }
         }
-        Expr::Binary { op, left, right, .. } => {
-            let left_ty = infer_expr(ctx, left);
-            infer_expr(ctx, right);
-            // 比較・論理演算子は被演算子の型によらず結果は常にbool(妥当性検査自体は
-            // milestone 22の対象外だが、結果の型は演算子だけで決まるので取り違えると
-            // `x: bool = a > b`のような正しいコードがtype-mismatchの誤検知になる)。
-            // それ以外(算術演算子)は左辺の型をそのまま伝播する——int/floatの昇格規則等の
-            // 妥当性検査はmilestone 22の対象外
-            use crate::token::TokenType::*;
-            match op {
-                EqEq | NotEq | Lt | Gt | Le | Ge | AndAnd | OrOr => BOOL,
-                _ => left_ty,
-            }
-        }
-        Expr::Unary { operand, .. } => infer_expr(ctx, operand),
+        Expr::Binary { op, left, right, pos } => infer_binary(ctx, *op, left, right, *pos),
+        Expr::Unary { op, operand, pos } => infer_unary(ctx, *op, operand, *pos),
         Expr::Call { callee, args, .. } => {
             infer_expr(ctx, callee);
             for a in args {
@@ -172,6 +166,123 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 22の対象外なので中へは踏み込まない
         _ => ANY,
     }
+}
+
+// 二項演算の妥当性検査+結果型の推論(milestone 25)。TS版`inferBinary`+`checkArithOp`
+// (src/checker/expressions.ts)の移植。codegen側のmilestone 13/14で同じロジックを既に
+// `checker.rs`へ移植済みだが、あちらは診断を出さず`Result<_, String>`で即失敗する設計
+// (最小リゾルバ)。こちらは診断(コード+メッセージ+位置)を積んで走査を続ける。
+// **narrowingは不要**: TS版は`&&`/`||`の右辺検査で左辺`x is T`の絞り込みを適用する
+// (F-6)が、絞り込みの対象になるのはunion型だけで、full_checkerのスカラースコープでは
+// union型は`resolve_scalar_type`でANYに潰れる——ANYはnot-bool/incomparable-types等の
+// 全チェックの安全弁を素通りするので、絞り込みの有無で結果が変わらない
+// (codegen milestone 14がスクラッチctxで対処した回帰は、そもそもここでは起きない)
+fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Expr, pos: Pos) -> Type {
+    // グロブ`use TokenType::*`は`TokenType::Type`(typeキーワード)を取り込んで
+    // `Type`enumを隠すため、必要なバリアントだけ明示的にインポートする
+    use TokenType::{AndAnd, EqEq, Ge, Gt, Le, Lt, NotEq, OrOr};
+    // &&/||: 左右それぞれがbool(またはANY)であること。位置は全体ではなく各オペランド自身
+    if op == AndAnd || op == OrOr {
+        let lt = infer_expr(ctx, left);
+        if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
+            ctx.error(left.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&lt)));
+        }
+        let rt = infer_expr(ctx, right);
+        if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {
+            ctx.error(right.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&rt)));
+        }
+        return BOOL;
+    }
+
+    let lt = infer_expr(ctx, left);
+    let rt = infer_expr(ctx, right);
+
+    // ==/!=: noneとの比較は narrowing の効く`is none`へ一本化する(P1)。それ以外は双方向assignable
+    if op == EqEq || op == NotEq {
+        if matches!(left, Expr::None { .. }) || matches!(right, Expr::None { .. }) {
+            // TS版はfix(`==`→`is`)も付けるが、Diagnosticにfixフィールドがまだ無い
+            // (milestone 22スコープ外)ため、コード・メッセージ・位置のみ一致させる
+            ctx.error(pos, DiagnosticCode::UseIsNone, "use 'is none' to test for none (== does not narrow the type)");
+            return BOOL;
+        }
+        if !types::assignable(&lt, &rt) && !types::assignable(&rt, &lt) {
+            ctx.error(pos, DiagnosticCode::IncomparableTypes, format!("cannot compare {} with {}", types::type_to_string(&lt), types::type_to_string(&rt)));
+        }
+        return BOOL;
+    }
+
+    // < <= > >=: 両方numeric・両方stringy・どちらかANYのいずれか
+    if matches!(op, Lt | Le | Gt | Ge) {
+        let ok = (types::is_numeric(&lt) && types::is_numeric(&rt))
+            || (types::is_stringy(&lt) && types::is_stringy(&rt))
+            || matches!(lt, Type::Any)
+            || matches!(rt, Type::Any);
+        if !ok {
+            ctx.error(pos, DiagnosticCode::IncomparableTypes, format!("cannot compare {} with {}", types::type_to_string(&lt), types::type_to_string(&rt)));
+        }
+        return BOOL;
+    }
+
+    // 算術演算(+ - * / %)
+    check_arith(ctx, op, &lt, right, &rt, pos)
+}
+
+// 算術演算(+ - * / %)の妥当性検査+結果型。TS版`checkArithOp`の移植。
+// right_exprはリテラル0除算検査に使う実AST(型だけでは "0" という値まで分からない)。
+// int/floatの分類フラグ(intDiv/intMod/intArith)はcodegenの関心事なので、
+// 診断だけを担うfull_checkerでは結果型のみ返す
+fn check_arith(ctx: &mut FullCheckerCtx, op: TokenType, left: &Type, right_expr: &Expr, right: &Type, pos: Pos) -> Type {
+    use TokenType::{Percent, Plus, Slash};
+    if op == Plus && types::is_stringy(left) && types::is_stringy(right) {
+        return STRING;
+    }
+    if types::is_numeric(left) && types::is_numeric(right) {
+        let is_int = types::type_equals(left, &INT) && types::type_equals(right, &INT);
+        // リテラルの0で割る/剰余するのは実行するまでもなくバグ。コンパイル時に弾く
+        if is_int
+            && matches!(op, Slash | Percent)
+            && let Expr::Int { value, pos: rpos } = right_expr
+            && value == "0"
+        {
+            let word = if op == Slash { "division" } else { "modulo" };
+            ctx.error(*rpos, DiagnosticCode::DivisionByZero, format!("integer {word} by zero"));
+        }
+        // 「どちらかANY」の安全弁はis_numeric分岐の中と外の2箇所にある——is_numeric(ANY)は
+        // 常にtrueなので、`ANY op 構造体`のような片方だけANYの組み合わせは最初の分岐
+        // (両方numeric)を満たさず外側で拾われる(TS版checkArithOpと同じ2段構え)
+        if matches!(left, Type::Any) || matches!(right, Type::Any) {
+            return ANY;
+        }
+        return if is_int { INT } else { FLOAT };
+    }
+    if matches!(left, Type::Any) || matches!(right, Type::Any) {
+        return ANY;
+    }
+    // 不正な演算(型不一致・未絞り込みのunion型への算術等)。TS版と同じく op=='+' で
+    // 片側がstring本体のときだけ「str()で変換を」のヒントを添える(TS本体のこの診断で唯一のhint)
+    let hint = if op == Plus && (types::type_equals(left, &STRING) || types::type_equals(right, &STRING)) {
+        " (hint: use str() to convert values to string)"
+    } else {
+        ""
+    };
+    ctx.error(pos, DiagnosticCode::InvalidOperation, format!("invalid operation: {} {op} {}{hint}", types::type_to_string(left), types::type_to_string(right)));
+    ANY
+}
+
+// 単項演算子(! / -)の妥当性検査(milestone 25)。TS版`case "unary"`の移植——
+// `!`はnot-bool・単項`-`はinvalid-operationで、算術二項演算子と同じ`invalid-operation`を共有する
+fn infer_unary(ctx: &mut FullCheckerCtx, op: TokenType, operand: &Expr, pos: Pos) -> Type {
+    let t = infer_expr(ctx, operand);
+    if op == TokenType::Bang {
+        if !types::type_equals(&t, &BOOL) && !matches!(t, Type::Any) {
+            ctx.error(pos, DiagnosticCode::NotBool, format!("'!' requires bool, got {}", types::type_to_string(&t)));
+        }
+        return BOOL;
+    }
+    if !types::is_numeric(&t) {
+        ctx.error(pos, DiagnosticCode::InvalidOperation, format!("unary '-' requires int or float, got {}", types::type_to_string(&t)));
+    }
+    t
 }
 
 fn check_block(ctx: &mut FullCheckerCtx, block: &Block) {
@@ -188,6 +299,10 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         Stmt::ShortVarDecl { names, values, mutable, pos } => {
             for (name, value) in names.iter().zip(values.iter()) {
                 let ty = infer_expr(ctx, value);
+                // mut宣言はリテラル型を広げる(`mut s := "a"`のsはstring型——後で
+                // `s = "b"`と別リテラルを代入できるように)。TS版statements.tsの
+                // `stmt.mutable ? widenLiteral(t) : t`と同じ
+                let ty = if *mutable { types::widen_literal(ty) } else { ty };
                 ctx.declare(name, ty, *pos, *mutable);
             }
         }
@@ -209,19 +324,20 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 check_assign_target(ctx, target, &value_ty);
             }
         }
-        Stmt::IncDec { target, pos, .. } => {
+        Stmt::IncDec { target, op, pos } => {
+            // TS版`case "incDec"`と同じ順序: まず対象の型を推論(identなら未定義名も検査)し、
+            // int/floatでなければinvalid-operation(算術二項演算子と共有する診断)、
+            // そのあとidentなら可変性を検査する
+            let t = infer_expr(ctx, target);
+            if !types::is_numeric(&t) {
+                ctx.error(*pos, DiagnosticCode::InvalidOperation, format!("'{op}' requires int or float, got {}", types::type_to_string(&t)));
+            }
             if let Expr::Ident { name, .. } = target {
-                match ctx.lookup(name) {
-                    None => {
-                        infer_expr(ctx, target);
-                    }
-                    Some(b) if !b.mutable => {
-                        ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' was declared without 'mut' and cannot be reassigned"));
-                    }
-                    _ => {}
+                // 借用を跨がないよう可変性をboolへ落としてからctx.errorを呼ぶ
+                let immutable = matches!(ctx.lookup(name), Some(b) if !b.mutable);
+                if immutable {
+                    ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' was declared without 'mut' and cannot be reassigned"));
                 }
-            } else {
-                infer_expr(ctx, target); // index/member代入はmilestone 22対象外——式だけ検査
             }
         }
         Stmt::ExprStmt { expr, .. } => {
@@ -695,5 +811,128 @@ mod tests {
         let diags = check("fn (r: R) main() {}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::MissingMain);
+    }
+
+    // ---- milestone 25: 演算子の妥当性検査 ----
+
+    #[test]
+    fn 型不一致な算術はinvalid_operationを報告する() {
+        let diags = check("fn main() {\n    x := true - false\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(diags[0].message, "invalid operation: bool - bool");
+    }
+
+    #[test]
+    fn 文字列連結でない加算のstrヒント() {
+        // op=='+' かつ片側がstring**本体**のときだけTS版はstr()ヒントを添える。
+        // 文字列リテラル("a")はリテラル型でtype_equals(_, STRING)がfalseなのでヒント無し
+        // (TS版も同じ挙動——mut宣言でwidenされたstring型のときだけヒントが出る)。
+        // ここではmut変数(string型)を使ってヒントが出る側を検証する
+        let diags = check("fn main() {\n    mut m := \"b\"\n    x := 1 + m\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(diags[0].message, "invalid operation: int + string (hint: use str() to convert values to string)");
+    }
+
+    #[test]
+    fn 加算の右辺が文字列リテラルのときはヒントを出さない() {
+        // 上のテストの対(リテラルはstring本体ではないのでヒント無し、TS版と一致)
+        let diags = check("fn main() {\n    x := 1 + \"a\"\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "invalid operation: int + \"a\"");
+    }
+
+    #[test]
+    fn 比較不能な型の比較はincomparable_typesを報告する() {
+        // 文字列リテラルの型は`string`ではなく`"a"`と表示される(TS版と一致)
+        let diags = check("fn main() {\n    b := 1 < \"a\"\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::IncomparableTypes);
+        assert_eq!(diags[0].message, "cannot compare int with \"a\"");
+    }
+
+    #[test]
+    fn 比較不能な型の等価比較もincomparable_typesを報告する() {
+        let diags = check("fn main() {\n    b := 1 == \"a\"\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::IncomparableTypes);
+    }
+
+    #[test]
+    fn noneとの等価比較はuse_is_noneを報告する() {
+        let diags = check("fn main() {\n    if 1 == none {\n        print(\"x\")\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UseIsNone);
+    }
+
+    #[test]
+    fn bool以外への論理演算子はnot_boolを報告する() {
+        let diags = check("fn main() {\n    b := 1 && true\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::NotBool);
+        assert_eq!(diags[0].message, "'&&' requires bool operands, got int");
+    }
+
+    #[test]
+    fn 単項否定のbool以外はnot_boolを報告する() {
+        let diags = check("fn main() {\n    b := !5\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::NotBool);
+        assert_eq!(diags[0].message, "'!' requires bool, got int");
+    }
+
+    #[test]
+    fn 単項マイナスのnumeric以外はinvalid_operationを報告する() {
+        let diags = check("fn main() {\n    x := -\"a\"\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(diags[0].message, "unary '-' requires int or float, got \"a\"");
+    }
+
+    #[test]
+    fn numeric以外のインクリメントはinvalid_operationを報告する() {
+        let diags = check("fn main() {\n    mut s := \"a\"\n    s++\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(diags[0].message, "'++' requires int or float, got string");
+    }
+
+    #[test]
+    fn リテラルのゼロ除算はdivision_by_zeroを報告する() {
+        let diags = check("fn main() {\n    x := 1 / 0\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DivisionByZero);
+        assert_eq!(diags[0].message, "integer division by zero");
+    }
+
+    #[test]
+    fn リテラルのゼロ剰余もdivision_by_zeroを報告する() {
+        let diags = check("fn main() {\n    x := 1 % 0\n    print(x)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DivisionByZero);
+        assert_eq!(diags[0].message, "integer modulo by zero");
+    }
+
+    #[test]
+    fn 正当な演算は診断を出さない() {
+        // 算術・文字列連結・浮動小数点・論理混在・比較・単項・mut文字列再代入・inc/decを一通り
+        let diags = check(
+            "fn main() {\n\
+            \x20   a := 1 + 2 * 3\n\
+            \x20   b := \"x\" + \"y\"\n\
+            \x20   c := 1.5 / 2.0\n\
+            \x20   d := true && false || !true\n\
+            \x20   e := a < 10\n\
+            \x20   f := b < \"z\"\n\
+            \x20   mut s := \"hi\"\n\
+            \x20   s = \"bye\"\n\
+            \x20   mut n := 0\n\
+            \x20   n++\n\
+            \x20   n = -n\n\
+            \x20   print(\"${a} ${c} ${d} ${e} ${f} ${s} ${n}\")\n\
+            }\n",
+        );
+        assert_eq!(diags, vec![]);
     }
 }
