@@ -1,8 +1,9 @@
 // 複数ファイル/複数パッケージの発見。TS版`cli.ts`の`loadModules`/`loadDependencies`の移植。
 // ここはファイルI/O層の処理であり、checker.rs/codegen.rsの「診断を出さない」設計とは
 // 無関係——存在しないディレクトリ・空パッケージ・ネストしたパスは単純な明確なErr
-// (TS版のconsole.error+process.exitに相当)。組み込みパッケージ(`mesh/json`・`mesh/io`)は
-// `.mesh`ソースを持たないため、ここでは早期continueするだけ(BUILTIN_PACKAGE_PATHS参照)
+// (TS版のconsole.error+process.exitに相当)。組み込みパッケージ(`mesh/json`・`mesh/io`・
+// `mesh/http`)は`.mesh`ソースを持たないため、ここでは早期continueするだけ
+// (BUILTIN_PACKAGE_PATHS参照)
 
 use crate::parser::parse;
 use std::collections::{HashSet, VecDeque};
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 // `.mesh`ソースを持たない組み込みパッケージのimportパス一覧(TS版`stdlib.ts`の
 // `BUILTIN_PACKAGES`のキーと同じ)。ここに無いパスは通常通りディスク上のディレクトリを
 // 探しに行く
-pub const BUILTIN_PACKAGE_PATHS: &[&str] = &["mesh/json", "mesh/io"];
+pub const BUILTIN_PACKAGE_PATHS: &[&str] = &["mesh/json", "mesh/io", "mesh/http"];
 
 #[derive(Debug)]
 pub struct ModuleSource {
@@ -53,10 +54,10 @@ fn load_dependencies(root: &Path, initial_queue: Vec<String>) -> Result<Vec<Modu
         if !loaded.insert(path.clone()) {
             continue;
         }
-        // 組み込みパッケージ(milestone 9の`mesh/json`・milestone 20の`mesh/io`)は
-        // `.mesh`ソースを持たない——ディスク上のディレクトリを探しに行かず、依存キューにも
-        // 何も積まない(checker/codegen側で直接手組みのPackageSymbolsとして登録する、
-        // stdlib.ts参照)
+        // 組み込みパッケージ(milestone 9の`mesh/json`・milestone 20の`mesh/io`・
+        // milestone 21の`mesh/http`)は`.mesh`ソースを持たない——ディスク上のディレクトリを
+        // 探しに行かず、依存キューにも何も積まない(checker/codegen側で直接手組みの
+        // PackageSymbolsとして登録する、stdlib.ts参照)
         if BUILTIN_PACKAGE_PATHS.contains(&path.as_str()) {
             continue;
         }
@@ -142,6 +143,16 @@ mod tests {
         fs::write(root.join("main.mesh"), "import \"mesh/io\"\nfn main() {}\n").unwrap();
         let modules = load_modules(&root.join("main.mesh")).unwrap();
         assert_eq!(modules.len(), 1, "mesh/ioはModuleSourceを持たない");
+        assert_eq!(modules[0].pkg, "main");
+    }
+
+    #[test]
+    fn load_modulesは組み込みパッケージmesh_httpをファイルシステムを見ずに解決する() {
+        // mesh_jsonと同じ回帰防止(milestone 21)
+        let root = temp_dir("builtin_http_pkg");
+        fs::write(root.join("main.mesh"), "import \"mesh/http\"\nfn main() {}\n").unwrap();
+        let modules = load_modules(&root.join("main.mesh")).unwrap();
+        assert_eq!(modules.len(), 1, "mesh/httpはModuleSourceを持たない");
         assert_eq!(modules[0].pkg, "main");
     }
 

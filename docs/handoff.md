@@ -687,17 +687,38 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   実在ファイルの内容取得・`?`での伝播)・"io"/"json"という名前のユーザー
   パッケージ(TS版と同じ理由で拒否)をRust版・TS版両方で実行し確認済み。
   詳細はtodo.mdの当該項目が一次情報源
-- **次にやるなら**: 確認済みの20マイルストーン(struct/メソッド → error/json →
+- **checker+codegen milestone 21(`mesh/http`)完了(2026-07-24)**。milestone 20完了後、
+  kanayamaと合意した順序(mesh/io → mesh/http → デモアプリ開発)の通り、kanayamaの
+  明示的な指示(「mesh/httpを実装しましょう」)で着手。TS版のC-6続き実装(2026-07-21)で
+  `mesh/http`のランタイム本体(`http$listen`・`node:http`の動的import等)は既に
+  `src/runtime.ts`のPRELUDEへ入っており、Rust版codegenはこのファイルを`include_str!`で
+  milestone 9(json)から丸ごと共有しているため、Rust側で新規JS実装は不要——
+  `json_stdlib_symbols`/`io_stdlib_symbols`と同じ「型シグネチャの登録だけ」のパターンを
+  そのまま踏襲できた。新設`http_stdlib_symbols()`(`codegen.rs`)で`Request`
+  {method/path/query/headers/body}・`Response`{status/body/headers}を名前付きstruct
+  (自己参照しないためmilestone 19の`Rc<OnceCell<_>>`knot-tyingは不要)として、
+  `listen: fn(string, fn(Request) Response) none | error`を関数として登録し
+  `generate_all_modules`で`register_package("http", ...)`するだけ。パッケージ修飾型注釈・
+  struct literal構築・自由関数呼び出しはmilestone 6/16の既存の汎用経路がコード変更無しで
+  そのまま通ることを確認済み。`modules.rs`はmilestone 20で新設された`BUILTIN_PACKAGE_PATHS`
+  に`"mesh/http"`を追加するだけで済み、組み込みパッケージ名衝突の検査(milestone 20で追加)も
+  自動的にhttpをカバーした。テスト363→366件。**実機確認**: `req.method`/`path`/`query`を読み
+  `http.Response`を構築する実プログラムをRust版・TS版CLI両方でJSへコンパイルし生成JSが
+  byte-for-byte一致することを確認、さらに両方のJSを実際に`node`で起動し`curl`で
+  `POST /hello?query`(200・カスタムヘッダ・補間済みbody)と`GET /missing`(404)の両方に
+  対して同一のレスポンスを返すことを確認済み。詳細はtodo.mdの当該項目が一次情報源
+- **次にやるなら**: 確認済みの21マイルストーン(struct/メソッド → error/json →
   配列/map → 並行処理 → モジュール → match/is式・判別可能union → error type
   〈union形式〉→ json struct → filter/map/reduce → defer → struct literalの
   フィールド検証 → 算術演算子の妥当性検査 → 比較/論理/等価演算子の妥当性検査 →
   読み/書き共通のstructフィールドアクセス検証 → pkg修飾struct literalの厳密
   検証 → resolve_method_targetのフィールド名判定統一 → struct宣言時点の
-  `__proto__`ガード → 自己参照型のサポート → mesh/ioパッケージの移植)が
-  全て完了。kanayamaと合意した次の順序はmesh/http → デモアプリ開発。細かな
-  意図的なスコープ縮小(json.Valueを本物の自己参照型として再定義すること・
-  `json.Value`の2階層以上のdestructure・ジェネリック関数・cross-file/
-  cross-packageのjson struct参照)は引き続きtodo.mdに記録済みの通り残る。
+  `__proto__`ガード → 自己参照型のサポート → mesh/ioパッケージの移植 →
+  `mesh/http`)が全て完了。kanayamaと合意した順序(mesh/io → mesh/http →
+  デモアプリ開発)通り、次はデモアプリ開発。細かな意図的なスコープ縮小
+  (json.Valueを本物の自己参照型として再定義すること・`json.Value`の2階層
+  以上のdestructure・ジェネリック関数・cross-file/cross-packageのjson
+  struct参照)は引き続きtodo.mdに記録済みの通り残る。
 - **今回の設計判断**(詳細はtodo.mdの各マイルストーン項目に書いてある。ここは要約のみ):
   `CompileError`を`Box`で包む(clippy::result_large_err対策)/
   TS の`CompileError`↔`MultiCompileError`の型分けは`Vec<CompileError>`に統一/

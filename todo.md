@@ -2269,6 +2269,52 @@
           エージェントが発見)も修正した。
         - **milestone 20のスコープ外**: 無し(mesh/ioの2関数を完全にカバー)。
           次はmesh/httpに着手する予定(kanayamaと合意した順序)。
+  - [x] **checker+codegen milestone 21(`mesh/http`)** ✅ 2026-07-24実装。milestone 20完了後、
+        kanayamaと合意した順序(mesh/io → mesh/http → デモアプリ開発)の通り、kanayamaの明示的な
+        指示(「mesh/httpを実装しましょう」)で着手。TS版のC-6続き実装(2026-07-21、上記参照)で
+        `mesh/http`のランタイム本体(`http$listen`・`node:http`の動的import等)は既に
+        `src/runtime.ts`のPRELUDEへ実装済みで、Rust版codegenはこのファイルを`include_str!`で
+        丸ごと共有している(milestone 9のjson実装時から)ため、Rust側で新規JS実装は一切不要——
+        `mesh/json`(json_stdlib_symbols)・`mesh/io`(io_stdlib_symbols)と同じ「型シグネチャの
+        登録だけ」のパターンをそのまま踏襲できた。
+        - **`rust/src/codegen.rs`**: 新設`http_stdlib_symbols()`(`json_stdlib_symbols`の隣)。
+          `Request`{method/path/query/headers/body: 全てstring、headersだけmap<string,string>}・
+          `Response`{status: int、body: string、headers: map<string,string>}を名前付きstructとして
+          登録——`json.Value`と違いRequest/Responseは自己参照しない普通の構造なので、milestone 19の
+          `Rc<OnceCell<_>>`knot-tyingは不要(`types::struct_ty`の非knot-tying経路でそのまま作れる)。
+          `listen: fn(string, fn(Request) Response) none | error`を`fns`へ登録。
+          `generate_all_modules`で`self.ctx.register_package("http", http_stdlib_symbols())`を
+          `"json"`/`"io"`の登録と並べて追加。
+        - **`rust/src/modules.rs`**: milestone 20で新設された`BUILTIN_PACKAGE_PATHS`
+          (組み込みパッケージのimportパス一覧)に`"mesh/http"`を追加するだけで済んだ——
+          無いと`mesh/http`は`/`を含むパスとして「ネストしたパッケージパスは非対応」の
+          誤ったエラーになる(mesh/json/mesh/io実装時と同じ回帰パターン)。milestone 20で
+          この配列経由の一般化と、組み込みパッケージ名と衝突するユーザーパッケージ名を拒否する
+          検査(`generate_all_modules`)が既に入っていたため、`"http"`という名前のユーザー
+          パッケージが誤って組み込みを上書きするケースも自動的にカバーされた
+          (回帰テストを1パターン追加しただけで済んだ)。
+        - パッケージ修飾型注釈(`req: http.Request`)・pkg修飾struct literal構築
+          (`http.Response{...}`)・pkg修飾自由関数呼び出し(`http.listen(...)`)は、いずれも
+          milestone 6(複数パッケージ対応)・milestone 16(pkg修飾側のフィールド検証)で
+          既に汎用実装済みの経路(`resolve_type_node`・`Expr::StructLit`のpkg分岐・`gen_call`の
+          pkg修飾自由関数分岐)がそのまま通ることを確認済み——json/io実装と同様、コード変更
+          なしで動いた。
+        - 新規テスト`codegen.rs`2件(`mesh_http組み込みパッケージの関数呼び出しとresponse構築が
+          解決できる`・`mesh_httpとユーザーパッケージのimportが共存できる`、いずれも
+          `mesh_json`版と同型)・`modules.rs`1件(`mesh/http`がファイルシステムを見ずに
+          組み込み解決されることの回帰防止、`mesh_json`版と同型)。あわせて既存の
+          「組み込みパッケージ名衝突」テスト(milestone 20で新設)へhttpパターンを1件追加。
+          363→366件、全件パス。`cargo clippy --all-targets -- -D warnings`クリーン。
+        - **実機確認**: `handler`が`req.method`/`req.path`/`req.query`を読み`http.Response`を
+          構築して返すプログラムを、Rust版CLI(`cargo run -- file.mesh --emit-js`)とTS版CLI
+          (`bun run mesh build --emit-js`)の両方でJSへコンパイルし、**生成JSがbyte-for-byte
+          一致**することを確認。さらにRust版・TS版それぞれが生成したJSを実際に`node`で起動し、
+          `curl`で`POST /hello?x=1`(200・カスタムヘッダ`X-From: mesh`・
+          `hello POST x=1`という補間済みbody)と`GET /missing`(404・`not found`)の両方に対して
+          両者が同一のレスポンスを返すことを確認済み(起動したサーバープロセスは確認後に
+          全てkill済み)。
+        - **milestone 21のスコープ外**: `mesh/dom`との同居エラー検査(TS版もdesign止まりで
+          未実装、features.md参照)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
