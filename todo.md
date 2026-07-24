@@ -2606,6 +2606,43 @@
                 413→420件、全件パス。`cargo clippy`クリーン。TS版と`mesh check`を
                 4パターン(不足/過多/型不一致/正常)で突き合わせコード・メッセージ・位置まで
                 完全一致を確認。既存exampleも回帰なし
+        - [x] **milestone 27: 組み込み関数の検査(argument-count / builtin-arg-type)**
+              ✅ 2026-07-25実装。milestone 26で「次回」としていた組み込み関数
+              (`print`/`len`/`push`/`str`/…27個)の検査。TS版`src/checker/builtins.ts`の
+              `inferBuiltinCall`(巨大switch)を`full_checker.rs`の新設`infer_builtin_call`へ移植。
+              - `Expr::Call`で裸のIdentが組み込み名なら先にintercept(組み込みはshadow
+                不可なので必ず組み込み呼び出し)。
+              - **スカラースコープでの縮退**: 配列/map/channel/関数型はfull_checkerでは
+                すべてANYに潰れるため、TS版が`arr.kind === "array"`等でガードする要素型・
+                添字型・callback署名の検査(type-mismatch/invalid-index-type/
+                callback-signature-mismatch)は到達せず、コレクションをモデル化する将来の
+                milestoneで拾う。この一歩で実際に効くのは(1)全組み込みのarity
+                (argument-count、`str() expects 1 argument(s), got 2`等)、(2)スカラー引数の
+                型検査(builtin-arg-type、`len(5)`→"requires string, array or map"・
+                `round(3)`→"requires a float"・`contains(5,x)`→"requires an array"等——
+                具体スカラーを渡した場合だけ発火、TS版と一致)、(3)スカラー戻り値型
+                (str→string, len→int, round→int 等)。コレクション/union戻り値
+                (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す。
+              - 診断コード`builtin-arg-type`を追加(`argument-count`はmilestone 26で既存)。
+              - 新規テスト7件+code review修正で2件(計9件)。422→431件、全件パス。
+                `cargo clippy`クリーン。TS版と`mesh check`を突き合わせコード・メッセージ・位置まで
+                完全一致、実コレクションを使う正当なプログラムで誤検知が無いことも両CLIで確認。
+                既存exampleも回帰なし。
+              - **code reviewで発見・即修正した2件**(いずれも実行して両CLIで再現確認):
+                (1) **false positive**: `trim`/`upper`/`lower`・`toInt`・`split`両引数・`join`区切りの
+                文字列引数検査が`is_stringy`(ANYを含まない)のみでANY免除を欠いていたため、
+                struct/メソッド/ジェネリック由来の実string(full_checkerではANYに潰れる)を渡すと
+                `trim(s.name)`等が誤って`builtin-arg-type`になっていた(TS版は無診断)。
+                len/round等と同じ`&& !matches!(_, Type::Any)`免除を5箇所へ追加。
+                (2) **false negative(精密化)**: `reduce`は常にANYを返していたが、accumulator型は
+                callback(Type::Fn、milestone 26で追跡済み)から計算できるスカラー。TS版と同じく
+                `f.params[0]`(無ければ初期値の型)を返すよう修正し、`round(reduce(xs,add,0))`が
+                TS版と同じく`builtin-arg-type`になるようにした(`map`は配列戻り値なので他の
+                配列返し組み込みと同様ANY据え置き)。あわせて古いコメント2件も訂正
+                (「関数型もANY」は誤り——関数型はType::Fnで追跡され`push(add,4)`は正しく発火。
+                milestone 26テストの「calleeがANY」も現状に合わせて更新)。
+              - **スコープ外**: コレクション要素型・添字型・callback署名の検査
+                (配列/map/channel型のモデル化とセット)、pkg修飾された組み込み。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
