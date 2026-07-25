@@ -3220,8 +3220,43 @@
               - **検証**(TS版と突き合わせ): リポジトリ内の全`.mesh`27ファイル + 新規プローブ32本
                 (新診断8種を1つずつ発火させるもの・判別可能union/名前付きstruct union/
                 chan/map由来のunion/mutなsubject/入れ子match/メソッド内match/select既定アーム
-                など誤検知を狙うもの)の**計59ファイルで`mesh check`の出力・終了コードが完全一致**。
+                など誤検知を狙うもの)の**計63ファイルで`mesh check`の出力・終了コードを比較**
+                (code reviewの3件を直したあとに再測定)。差が出るのは未移植の診断
+                〈`type-alias-cycle`・`unknown-type`〉が絡む3ファイルのみで、いずれも
+                **Rust側だけに出る診断は0件**=検出漏れ側。
                 examples全22件の`mesh run`の標準出力・終了コードも一致。
+        - [x] **milestone 40: 走査の穴を塞ぎ切る(`?`/spawn/無名関数)+ `?`と`or`の9診断**
+              ✅ 2026-07-26実装。撤去条件(2)の続き。
+              - **`infer_expr`のcatch-all(`_ => ANY`)が消えた**——`Expr`の全変種を網羅した
+                ので、どの式にも必ず踏み込む。milestone 22でスカラーだけを見て残りをANYへ
+                落としていたのが出発点で、33/34(コレクション)・39(match/select)・
+                40(`?`/spawn/無名関数)で塞ぎ切った形。**catch-allは復活させないこと**:
+                新しい式をASTへ足すとここがコンパイルエラーになり、「検査するか、しないなら
+                理由を書いてANYを返す」という判断を必ず強制できる(黙って未検査のまま
+                出荷される事故が、この移植で最も繰り返した失敗だった)。
+              - 今回踏み込んだ3つ: **`?`(prop)** の被演算子と文脈、**`spawn`/`detach`** の
+                中の呼び出し(引数がまるごと未検査だった)、**無名関数の本体**
+                (filter/transform/reduceのコールバックはこの形なので実コードの相当部分)。
+              - 追加した診断9種(44→53種): `prop-context-not-string` /
+                `prop-requires-failure-union` / `prop-nothing-to-propagate` /
+                `prop-context-structured-error` / `prop-return-type-mismatch` /
+                `or-never-fails` / `or-requires-binding` / `or-no-success-value` /
+                `or-fallback-type-mismatch`。milestone 34で「両辺を推論するだけ」に
+                していた`or`がようやく診断を出すようになった。
+              - **TS版との意図的な差**: `?`の文脈が文字列かの検査(`prop-context-not-string`)で
+                **ANYを免除する**。TS版は免除しないが、full_checkerは未モデル化の型をANYへ
+                縮退させるので免除しないと誤検知になる(なお現在のparserは`?`の文脈を
+                文字列リテラル/補間に限っているため、この診断はTS版でも実質到達不能)。
+              - `union_without`/`assignable`/`or_binding_type`はいずれも「union bodyは解決済み」
+                前提なので、milestone 39の`safe_to_compare`門番をここにも通した。
+              - 新規テスト5件(552→557件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計84ファイルで`mesh check`の
+                出力・終了コードを比較。差が出るのは未移植の診断(`unknown-type`・
+                `type-alias-cycle`)が絡む3ファイルのみで、**Rust側だけに出る診断は0件**
+                (=検出漏れ側)。examples全22件の`mesh run`も一致。プローブは9診断を
+                1つずつ発火させるものに加え、メソッド内の`?`・無名関数の中の`?`
+                (ret_stackの入れ子)・mapの読みに対する`or`・`detach`・引数位置の`or`など
+                誤検知を狙うものを用意した。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3229,9 +3264,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 39まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 40まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 44種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 53種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

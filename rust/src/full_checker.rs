@@ -203,10 +203,13 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     }
 }
 
-// milestone 22のスコープ(スカラーのMesh)に含まれる式だけ型を推論しつつ未定義名を検査する。
-// スコープ外の式(struct/array/map/channel/spawn/match/is/...)は中まで再帰せずANYへ
-// フォールバックする——それらの内部にある未定義名の見落としは、対応する構文が
-// milestone 22の対象に入るタイミングで解消する
+// 式の型を推論しつつ診断を出す。**milestone 40で`Expr`の全変種を網羅した**——
+// つまりcatch-allの`_ => ANY`が無くなり、どの式にも必ず踏み込む。
+// milestone 22ではスカラーだけを見て残りをANYへ落としていたのが出発点で、
+// 33/34(コレクション)・39(match/select)・40(`?`/`or`/spawn/無名関数)で塞ぎ切った。
+// **catch-allを復活させないこと**: 新しい式をASTへ足したらここがコンパイルエラーになり、
+// 「検査するか、しないなら理由を書いてANYを返す」という判断を必ず強制できる
+// (黙って未検査のまま出荷される事故が、この移植で最も繰り返した失敗だった)
 fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
     match expr {
         Expr::Int { .. } => INT,
@@ -406,28 +409,40 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // 移植として次段階に回し、ここでは「両辺を推論して型を伝播させる」ことだけ行う。
         // 式の型は失敗メンバーを除いた「成功側」(TS版の`rest`)——`age := m["a"] or 0`が
         // intになり、後続の検査が効くようになる
-        Expr::OrElse { left, right, binding, pos } => {
-            let left_ty = infer_expr(ctx, left);
-            // 束縛形(`or e => ...`)は失敗値をeに束縛して右辺を評価する。宣言しないと
-            // 右辺のeがundefined-nameの誤検知になる
-            ctx.push_scope();
-            if let Some(name) = binding
-                && name != "_"
-            {
-                ctx.declare(name, crate::checker::or_binding_type(&left_ty), *pos, false);
-            }
-            infer_expr(ctx, right);
-            ctx.pop_scope();
-            success_type_of(&left_ty)
-        }
+        Expr::OrElse { left, right, binding, pos } => infer_or_else(ctx, left, right, binding.as_deref(), *pos),
         // milestone 39: match式・select式。TS版`checker/match-select.ts`の移植。
         // **アーム本体を走査するようになった**のがこのmilestoneの本題——今まで
         // `_ => ANY`で素通りしていたため、matchのアームの中にある未定義名も型不一致も
         // まるごと検出漏れになっていた(Meshはunion路線なのでmatchの中に本文が集まる)
         Expr::Match { subject, arms, pos } => infer_match(ctx, subject, arms, *pos),
         Expr::Select { arms, default_arm, pos } => infer_select(ctx, arms, default_arm.as_deref(), *pos),
-        // spawn/prop(`?`)/無名関数など: まだ対象外なので中へは踏み込まない
-        _ => ANY,
+        // milestone 40: `?`(失敗伝播)。TS版`expressions.ts`のpropケースの移植
+        Expr::Prop { operand, context, pos } => infer_prop(ctx, operand, context.as_deref(), *pos),
+        // milestone 40: `spawn f()` / `detach f()`。中の呼び出しを走査する(今まで
+        // spawnした関数の引数がまるごと未検査だった)。式の型はTS版と同じで、
+        // 戻り値なしならvoid、そうでなければ`chan<T>`(受取口)
+        Expr::Spawn { call, .. } => {
+            let ret = infer_expr(ctx, call);
+            if types::type_equals(&ret, &VOID) { VOID } else { Type::Chan(Box::new(ret)) }
+        }
+        // milestone 40: 無名関数式。**本体を検査する**のが主眼——filter/transform/reduceへ
+        // 渡すコールバックは無名関数なので、ここを走査しないと実コードの相当部分が
+        // 検査対象から漏れる(TS版`fnExpr`はfnTypeを返しつつ`checkFn`で本体も検査する)
+        Expr::FnExpr { params, ret, body, .. } => {
+            let param_tys: Vec<Type> = params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)).collect();
+            let ret_ty = ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+            // パラメータ用スコープ+本体スコープ(check_blockが自分でpushする)の2段構成は
+            // `check_fn`と同じ理由(本体でのパラメータ名の再宣言をshadowingとして扱うため)
+            ctx.push_scope();
+            for (p, pt) in params.iter().zip(param_tys.iter()) {
+                ctx.declare(&p.name, pt.clone(), p.pos, false);
+            }
+            ctx.ret_stack.push(ret_ty.clone());
+            check_block(ctx, body);
+            ctx.ret_stack.pop();
+            ctx.pop_scope();
+            Type::Fn { params: param_tys, ret: Box::new(ret_ty) }
+        }
     }
 }
 
@@ -467,15 +482,6 @@ fn is_fully_modeled(t: &Type) -> bool {
 // そのまま返す(`u.cells[0]`や`u.counts["k"]`のようなネストしたアクセスに型が伝播する)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
-}
-
-// `or`式の結果型(TS版`expressions.ts`の`rest` = 失敗メンバーを除いたunion)。
-// unionでなければそのまま(TS版はその場合`or-never-fails`を報告するが、その診断は次段階)
-fn success_type_of(t: &Type) -> Type {
-    let Type::Union { body } = t else { return t.clone() };
-    let Some(ub) = body.get() else { return ANY };
-    let rest: Vec<Type> = ub.members.iter().filter(|m| !crate::checker::is_failure_type(m)).cloned().collect();
-    if rest.is_empty() { ANY } else { types::union_of(rest) }
 }
 
 // 添字アクセス(`xs[0]` / `m["k"]`)の解決結果。`read`は式としての型(mapは`V | none`)、
@@ -1492,6 +1498,126 @@ fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
 // **channel/mapのモデル化とセットで必要になった**——recvが`T | closed`、map読みが`V | none`を
 // 返すようになったため、絞り込みが無いと`if v is closed { break }`の後で`total + v`が
 // 誤って`invalid-operation`になる(実装中にexamplesで検出)
+// milestone 40: `?`(失敗伝播)。TS版`expressions.ts`のpropケースの移植。
+// 成功メンバーだけを残した型を返し、失敗メンバーは呼び出し元へ伝播する——その伝播先
+// (囲む関数の戻り値型)と食い違っていれば`prop-return-type-mismatch`。
+//
+// **ANYは常に免除する**(TS版はANYでも文脈の文字列性を咎めるが、full_checkerは
+// 未モデル化の型をANYへ縮退させるので、そこで診断を出すと誤検知になる)。
+fn infer_prop(ctx: &mut FullCheckerCtx, operand: &Expr, context: Option<&Expr>, pos: Pos) -> Type {
+    let t = infer_expr(ctx, operand);
+    if let Some(cx) = context {
+        let ct = infer_expr(ctx, cx);
+        if !types::is_stringy(&ct) && !matches!(ct, Type::Any) {
+            ctx.error(cx.pos(), DiagnosticCode::PropContextNotString, format!("'?' context must be a string, got {}", types::type_to_string(&ct)));
+        }
+    }
+    if matches!(t, Type::Any) || !safe_to_compare(&t) {
+        return ANY;
+    }
+    let Type::Union { body } = &t else {
+        ctx.error(pos, DiagnosticCode::PropRequiresFailureUnion, format!("'?' needs a union with none/error/an error type, got {}", types::type_to_string(&t)));
+        return t;
+    };
+    let members = body.get().expect("safe_to_compareで解決済みを確認済み").members.clone();
+    let failures: Vec<Type> = members.iter().filter(|m| crate::checker::is_failure_type(m)).cloned().collect();
+    if failures.is_empty() {
+        ctx.error(pos, DiagnosticCode::PropNothingToPropagate, format!("'?' has nothing to propagate — {} has no none/error/error type", types::type_to_string(&t)));
+    }
+    // 文脈つきは失敗を必ずerrorへ変換して伝播するので、メッセージを持たない構造化error
+    // (F-2後半)は文脈つきでは伝播できない
+    let structured: Vec<&Type> = failures.iter().filter(|f| matches!(f, Type::Struct { is_error_type: true, .. })).collect();
+    if context.is_some() && !structured.is_empty() {
+        let names = structured.iter().map(|t| types::type_to_string(t)).collect::<Vec<_>>().join(" | ");
+        ctx.error(
+            pos,
+            DiagnosticCode::PropContextStructuredError,
+            format!("'?' with context can't convert {names} to a message — use plain '?' (no context) to propagate it as-is, or handle it with 'is'/'match' first"),
+        );
+    } else {
+        let ret = ctx.ret_stack.last().cloned().unwrap_or(VOID);
+        // 文脈つきなら伝播するのは常にerror。素の`?`は失敗メンバーをそのまま伝播
+        let propagated: Vec<Type> = if context.is_some() {
+            if failures.is_empty() { Vec::new() } else { vec![ERROR] }
+        } else {
+            failures.clone()
+        };
+        // 戻り値型が未解決なら突き合わせない(assignableは解決済み前提で`.expect()`する)
+        if safe_to_compare(&ret) {
+            for f in &propagated {
+                if !types::assignable(f, &ret) {
+                    ctx.error(
+                        pos,
+                        DiagnosticCode::PropReturnTypeMismatch,
+                        format!(
+                            "'?' propagates {}, but this function returns {} — add '{}' to the return type or handle it with 'is'",
+                            types::type_to_string(f),
+                            types::type_to_string(&ret),
+                            types::type_to_string(f)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    types::union_without(t, crate::checker::is_failure_type)
+}
+
+// milestone 40: `or`(失敗時のフォールバック)。TS版`expressions.ts`のorElseケースの移植。
+// milestone 34では「両辺を推論して型を伝播させる」だけだった4診断をここで足す
+fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: Option<&str>, pos: Pos) -> Type {
+    let t = infer_expr(ctx, left);
+    // 右辺の評価(束縛形なら失敗値を束縛してから)。TS版の`checkRight`と同じで、
+    // どの分岐に入っても**必ず一度だけ**評価する——右辺の中の未定義名等を見落とさないため
+    fn check_right(ctx: &mut FullCheckerCtx, left_ty: &Type, right: &Expr, binding: Option<&str>, pos: Pos) -> Type {
+        match binding {
+            Some(name) if name != "_" => {
+                ctx.push_scope();
+                let bt = if safe_to_compare(left_ty) { crate::checker::or_binding_type(left_ty) } else { ANY };
+                ctx.declare(name, bt, pos, false);
+                let r = infer_expr(ctx, right);
+                ctx.pop_scope();
+                r
+            }
+            _ => infer_expr(ctx, right),
+        }
+    }
+    if matches!(t, Type::Any) || !safe_to_compare(&t) {
+        check_right(ctx, &t, right, binding, pos);
+        return ANY;
+    }
+    let has_failure = match &t {
+        Type::Union { body } => body.get().expect("解決済み").members.iter().any(crate::checker::is_failure_type),
+        _ => false,
+    };
+    if !has_failure {
+        ctx.error(pos, DiagnosticCode::OrNeverFails, format!("left side of 'or' never fails — it is {}", types::type_to_string(&t)));
+        check_right(ctx, &t, right, binding, pos);
+        return t;
+    }
+    // Go式の明示性(2026-07-19決定): none以外の失敗(error/構造化error)を含むなら束縛形が必須。
+    // 捨てる場合も`or _ => ...`と書かせて「握りつぶし」を字面に残す
+    let has_non_none_failure = match &t {
+        Type::Union { body } => body.get().expect("解決済み").members.iter().any(|m| !matches!(m, Type::None) && crate::checker::is_failure_type(m)),
+        _ => false,
+    };
+    if has_non_none_failure && binding.is_none() {
+        ctx.error(pos, DiagnosticCode::OrRequiresBinding, "'or' would silently discard an error — bind it ('or e => ...') or discard it explicitly ('or _ => ...')");
+    }
+    let rest = types::union_without(t.clone(), crate::checker::is_failure_type);
+    if types::type_equals(&rest, &VOID) {
+        ctx.error(pos, DiagnosticCode::OrNoSuccessValue, "left side of 'or' has no success value — handle it with 'is' instead");
+        check_right(ctx, &t, right, binding, pos);
+        return ANY;
+    }
+    let r = check_right(ctx, &t, right, binding, pos);
+    // 右辺がANYへ縮退している場合はassignableが常に真になるので誤検知しない
+    if safe_to_compare(&r) && safe_to_compare(&rest) && !types::assignable(&r, &rest) {
+        ctx.error(right.pos(), DiagnosticCode::OrFallbackTypeMismatch, format!("'or' fallback must be {}, got {}", types::type_to_string(&rest), types::type_to_string(&r)));
+    }
+    rest
+}
+
 // milestone 39: match式。TS版`checker/match-select.ts`の`inferMatch`の移植。
 //
 // この一歩の主眼は診断そのものより**アーム本体を走査すること**にある——それまで
@@ -2162,6 +2288,74 @@ mod tests {
 
 
     // --- milestone 39: match / select -------------------------------------------------
+
+
+    // --- milestone 40: ? / or / spawn / 無名関数 ---------------------------------------
+
+    #[test]
+    fn propは失敗を伝播し戻り値型と突き合わせる() {
+        // 囲む関数の戻り値型にerrorが無い
+        let mismatch = check("fn f() int | error {\n    return 1\n}\n\nfn run() int {\n    n := f()?\n    return n\n}\n\nfn main() {\n    print(str(run()))\n}\n");
+        assert_eq!(mismatch.len(), 1, "{mismatch:?}");
+        assert_eq!(mismatch[0].code, DiagnosticCode::PropReturnTypeMismatch);
+        // 戻り値型にerrorを足せば無診断
+        assert_eq!(check("fn f() int | error {\n    return 1\n}\n\nfn run() int | error {\n    n := f()?\n    return n\n}\n\nfn main() {\n    print(str(run() or e => 0))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn propはunion以外と失敗無しunionを弾く() {
+        let not_union = check("fn add(a: int, b: int) int {\n    return a + b\n}\n\nfn run() int | error {\n    n := add(1, 2)?\n    return n\n}\n\nfn main() {\n    print(str(run() or e => 0))\n}\n");
+        assert_eq!(not_union.len(), 1, "{not_union:?}");
+        assert_eq!(not_union[0].code, DiagnosticCode::PropRequiresFailureUnion);
+        let nothing = check("fn f() int | string {\n    return 1\n}\n\nfn run() int | error {\n    n := f()?\n    return 1\n}\n\nfn main() {\n    print(str(run() or e => 0))\n}\n");
+        assert_eq!(nothing.len(), 1, "{nothing:?}");
+        assert_eq!(nothing[0].code, DiagnosticCode::PropNothingToPropagate);
+    }
+
+    #[test]
+    fn 文脈つきpropは構造化errorを変換できない() {
+        // 文脈つきは失敗を必ずerrorへ変換するので、メッセージを持たない構造化errorは伝播できない
+        let diags = check("error struct NotFound {\n    id: string\n}\n\nfn find(id: string) string | NotFound {\n    return NotFound{id: id}\n}\n\nfn run() string | error {\n    s := find(\"a\") ? \"while finding\"\n    return s\n}\n\nfn main() {\n    print(run() or e => \"x\")\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::PropContextStructuredError);
+    }
+
+    #[test]
+    fn orの4診断() {
+        let never = check("fn add(a: int, b: int) int {\n    return a + b\n}\n\nfn main() {\n    n := add(1, 2) or 0\n    print(str(n))\n}\n");
+        assert_eq!(never.len(), 1, "{never:?}");
+        assert_eq!(never[0].code, DiagnosticCode::OrNeverFails);
+        // errorを含むunionのフォールバックは束縛形が必須(握りつぶしを字面に残す)
+        let binding = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    n := f() or 0\n    print(str(n))\n}\n");
+        assert_eq!(binding.len(), 1, "{binding:?}");
+        assert_eq!(binding[0].code, DiagnosticCode::OrRequiresBinding);
+        // 成功メンバーが残らない
+        let no_success = check("fn f() none | error {\n    return none\n}\n\nfn main() {\n    n := f() or _ => 0\n    print(str(n))\n}\n");
+        assert!(no_success.iter().any(|d| d.code == DiagnosticCode::OrNoSuccessValue), "{no_success:?}");
+        // フォールバックの型が成功側と合わない
+        let fallback = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    n := f() or e => \"oops\"\n    print(str(n))\n}\n");
+        assert_eq!(fallback.len(), 1, "{fallback:?}");
+        assert_eq!(fallback[0].code, DiagnosticCode::OrFallbackTypeMismatch);
+        // noneだけの失敗なら束縛無しでよい(mapの読みがこの形)
+        assert_eq!(check("fn main() {\n    m := map<string, int>{\"a\": 1}\n    n := m[\"b\"] or 0\n    print(str(n))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn spawnと無名関数の中も走査する() {
+        // spawnした呼び出しの引数(今まで未検査だった)
+        let spawned = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    spawn work(bogus)\n}\n");
+        assert_eq!(spawned.len(), 1, "{spawned:?}");
+        assert_eq!(spawned[0].code, DiagnosticCode::UndefinedName);
+        // 無名関数の本体(filter/transform/reduceのコールバックがこの形)
+        let cb = check("fn main() {\n    xs := [1, 2, 3]\n    ys := filter(xs, fn(x: int) bool {\n        return bogus\n    })\n    print(str(len(ys)))\n}\n");
+        assert_eq!(cb.len(), 1, "{cb:?}");
+        assert_eq!(cb[0].code, DiagnosticCode::UndefinedName);
+        // 正しく書けば無診断(spawnの戻り値はchan<T>として受け取れる)
+        assert_eq!(
+            check("fn compute(n: int) int {\n    return n * 2\n}\n\nfn main() {\n    ch := spawn compute(3)\n    v := <-ch\n    print(match v {\n        int => str(v)\n        closed => \"closed\"\n    })\n}\n"),
+            vec![]
+        );
+    }
 
     #[test]
     fn matchのアーム本体を走査する() {
