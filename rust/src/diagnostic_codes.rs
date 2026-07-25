@@ -55,6 +55,8 @@ pub enum DiagnosticCode {
     RangeArity,
     CallbackSignatureMismatch,
     CannotInferType,
+    NotAChannel,
+    CompoundAssignOnMap,
 }
 
 impl DiagnosticCode {
@@ -94,6 +96,8 @@ impl DiagnosticCode {
             DiagnosticCode::RangeArity => "range-arity",
             DiagnosticCode::CallbackSignatureMismatch => "callback-signature-mismatch",
             DiagnosticCode::CannotInferType => "cannot-infer-type",
+            DiagnosticCode::NotAChannel => "not-a-channel",
+            DiagnosticCode::CompoundAssignOnMap => "compound-assign-on-map",
         }
     }
 }
