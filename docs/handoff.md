@@ -959,8 +959,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
      値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・
      `or`の4診断・match/selectの中身の走査。**CLIの残り**: `mesh card`/`explain`。
-     その後: full_checkerの複数ファイル対応・generics推論(`generic-inference-failed`)・
-     parser/lexerのDiagnosticCode統合。
+     その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
+     (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
+     1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出し
        そのfn/constの引数照合が素通りする(milestone 30のcode review記録のうち唯一残った項目)、
