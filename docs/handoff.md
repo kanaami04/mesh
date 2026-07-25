@@ -929,10 +929,22 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      no-match(コード誤り)」または「全候補残存→ambiguousの誤検知」の2通りに壊れていた
      (milestone 29の`is_checkable_field_type`ガードをこの絞り込みにも適用して解消)。
      詳細はtodo.md参照
-   - 残る候補: **milestone 33以降でstruct卒業を継続**——pkg修飾struct/
+   - ✅ **milestone 33(2026-07-25)で配列型のモデル化**(コレクション卒業の第一歩)。
+     milestone 27以来の「配列/map/channelは常にANY」というinvariantを**配列に限って外した**
+     ——ほぼ全マイルストーンが「コレクションがANYなので到達しない」と先送りしてきた根っこ。
+     型注釈の再帰解決・配列リテラル・添字(`invalid-index-type`/`not-indexable`)・要素への代入・
+     range-for(`range-arity`/`not-rangeable`)・配列を取る組み込みの要素型検査+高階組み込みの
+     コールバック署名(`callback-signature-mismatch`)+戻り値型の精密化を実装。あわせて
+     `is_checkable_field_type`を**再帰判定`is_fully_modeled`**へ置き換え(`int[]`は突き合わせて
+     よいが要素がANYへ潰れる`map<..>[]`は駄目、というmilestone 29/32の穴の一般化)。
+     `cannot-infer-type`は誤検知を避けるため**空配列リテラル限定**で移植。診断コード6種追加、
+     テスト470→485件。**map/channelは引き続きANY**(次段階)。**code reviewで3件修正**
+     (intのrangeで余分な名前を宣言→undefined-name見落とし/`cannot-infer-type`の抑止が
+     名前単位で誤検知/配列要素代入の診断位置)。詳細はtodo.md参照
+   - 残る候補: **milestone 34以降**——map/channelのモデル化(`map key must be K`・
+     `compound-assign-on-map`・`not-a-channel`等。配列と同じ手順)・pkg修飾struct/
      pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
-     `narrow-required`はmatch/isが未実装でnarrowingが要らない間は発火しない)・
-     `cannot-infer-type`・配列/map型のモデル化(collection builtin要素型検査とセット)。
+     `narrow-required`はmatch/isが未実装でnarrowingが要らない間は発火しない)。
      その後: `mesh run`/`build`ゲート統合+RustCLI整備・generics推論(`generic-inference-failed`)・
      parser/lexerのDiagnosticCode統合。
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
@@ -941,8 +953,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        (2)型注釈の`unknown-type`が未移植のため、未知の型名のレシーバ(`fn (y: Bogus) f()`)は
        TS版の`unknown-type`+`invalid-receiver-type`のどちらも出ない、
        (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)、
-       (4)`cannot-infer-type`(`s := Status{foo: 1}`のようにANYへ落ちた値の宣言。
-       milestone 32で確認)。いずれも稀な入力で、struct卒業を進める中でまとめて対応する候補
+       (4)`cannot-infer-type`は空配列リテラル限定(milestone 33)——`s := Status{foo: 1}`のように
+       他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
+       `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ。いずれもモデル化を
+       進める中でまとめて対応する候補
 
 **参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
 説明)・`src/checker/context.ts`(`CheckerCtx`の構造・診断のpush方式・スコープ管理・

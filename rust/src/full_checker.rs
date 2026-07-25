@@ -25,9 +25,13 @@
 // `check_program`の最終ループがレシーバ付き関数を丸ごとスキップしていた穴。`check_fn`が
 // レシーバをスコープへ宣言するのとセット)+宣言時の4診断(下記`declare_method`)。
 // milestone 32で判別可能unionの構築検証(union名で書いたstructリテラルのメンバー特定+
-// フィールド検証。下記`resolve_union_lit_member`)。
-// pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・
-// 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
+// フィールド検証。下記`resolve_union_lit_member`)。**milestone 33で配列をモデル化**——
+// milestone 27以来の「コレクションは常にANY」というinvariantを配列に限って外し、
+// 配列リテラル・添字・要素代入・range-for・配列を取る組み込み(要素型/コールバック署名/
+// 戻り値型)を検査する(下記`resolve_type_ann`のArrayアーム・`is_fully_modeled`・
+// `require_array`参照)。
+// **map/channelは引き続きANY**(次段階)。pkg修飾struct・非structへのメンバーアクセス
+// (not-a-struct)・run/buildへのゲート統合も引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -126,10 +130,9 @@ impl FullCheckerCtx {
 
 // 型注釈を解決する。スカラー(int/float/...)+ milestone 29から**名前付きstruct**
 // (type_ctxのレジストリ経由)を解決する。**配列/map/channel/union/関数型/pkg修飾型は
-// 引き続きANY**——milestone 27の「コレクションは常にANY」という前提を保つため意図的に
-// 縮退させる(structのフィールドがコレクションでも、フィールドアクセス側でANYへ畳むので
-// この前提は崩れない)。ANYフォールバックは診断を出さない(未対応構文を誤りとして
-// 報告しないため)。
+// 引き続きANY**(milestone 33で**配列だけ**この縮退から卒業した——下記Arrayアーム)。
+// 縮退させた型はレジストリ側の完全解決された型と突き合わせてはいけない(`is_fully_modeled`
+// 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     match node {
         TypeNode::Name { name, pkg: None, .. } => match name.as_str() {
@@ -146,6 +149,11 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
                 _ => ANY,
             },
         },
+        // milestone 33: 配列だけコレクションのANY縮退から卒業させる(map/channelは次段階)。
+        // 要素型は再帰的に解決する——要素がmap等でANYへ潰れた場合は`Type::Array(ANY)`に
+        // なるが、その「中にANYを含む型」はレジストリ側の完全解決された型と突き合わせては
+        // いけない(下記`is_fully_modeled`が弾く)
+        TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_ann(tc, elem))),
         _ => ANY,
     }
 }
@@ -268,7 +276,57 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // メソッド名→method-not-called・未知→unknown-field。呼び出し形(`u.method()`)は
         // Call側で先にinterceptするのでここには来ない(bareのメンバー参照のみ)
         Expr::Member { target, name, pos } => infer_member(ctx, target, name, *pos),
-        // array/map/channel/match/is/spawn/select/prop/orElse/無名関数など:
+        // milestone 33: 配列リテラル(`[1, 2, 3]` / `int[]{}`)。TS版`expressions.ts`の
+        // arrayLitケースの移植——要素型が明示されていればそれ、無ければ**先頭要素の型を
+        // widenしたもの**(`["a","b"]`は`"a"[]`ではなく`string[]`)を要素型とし、
+        // 残りの要素を照合する
+        Expr::ArrayLit { elems, elem_type, .. } => {
+            let declared = elem_type.as_ref().map(|node| resolve_type_ann(&ctx.type_ctx, node));
+            let elem = match &declared {
+                Some(t) => t.clone(),
+                None => match elems.first() {
+                    // 空配列は要素型不明(TS版と同じくANY要素の配列)。宣言に使われた場合の
+                    // `cannot-infer-type`は`Stmt::ShortVarDecl`側で報告する
+                    None => return Type::Array(Box::new(ANY)),
+                    Some(first) => types::widen_literal(infer_expr(ctx, first)),
+                },
+            };
+            // 明示型があれば先頭要素も照合対象(推論経由なら先頭は基準なのでスキップ)
+            let rest = if declared.is_some() { &elems[..] } else { &elems[1..] };
+            for e in rest {
+                let t = infer_expr(ctx, e);
+                // 要素型がANY縮退を含むなら突き合わせない(milestone 29/32と同じ配慮)
+                if is_fully_modeled(&elem) && !types::assignable(&t, &elem) {
+                    ctx.error(e.pos(), DiagnosticCode::TypeMismatch, format!("array element must be {}, got {}", types::type_to_string(&elem), types::type_to_string(&t)));
+                }
+            }
+            Type::Array(Box::new(elem))
+        }
+        // milestone 33: 添字アクセス(`xs[0]` / `s[0]`)。TS版`expressions.ts`のindexケースの
+        // 移植。mapはまだ未モデル化(型注釈もリテラルもANY)なのでmap分岐には到達せず、
+        // ANYコンテナとして黙って素通りする(map対応は次段階)
+        Expr::Index { target, index, pos } => {
+            let tgt = infer_expr(ctx, target);
+            let idx = infer_expr(ctx, index);
+            // 添字の型検査は**コンテナが配列/文字列と分かっている場合だけ**行う。
+            // TS版はmapを先に分岐して`map key must be K`を出すが、full_checkerではmapが
+            // まだANYへ潰れるため、ANYコンテナで添字を検査するとmapの文字列キーを
+            // `invalid-index-type`と誤検知してしまう(実装中にexamplesで検出)
+            let container_known = matches!(tgt, Type::Array(_)) || types::is_stringy(&tgt);
+            if container_known && !matches!(idx, Type::Any) && (!types::is_numeric(&idx) || types::type_equals(&idx, &FLOAT)) {
+                ctx.error(index.pos(), DiagnosticCode::InvalidIndexType, format!("index must be int, got {}", types::type_to_string(&idx)));
+            }
+            match &tgt {
+                Type::Array(elem) => (**elem).clone(),
+                t if types::is_stringy(t) => STRING,
+                Type::Any => ANY,
+                other => {
+                    ctx.error(*pos, DiagnosticCode::NotIndexable, format!("cannot index into {}", types::type_to_string(other)));
+                    ANY
+                }
+            }
+        }
+        // map/channel/match/is/spawn/select/prop/orElse/無名関数など:
         // まだ対象外なので中へは踏み込まない
         _ => ANY,
     }
@@ -279,16 +337,31 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
 // レジストリ側(checker.rsが完全解決)の型と突き合わせると誤検知するので検査しない。
 // スカラー・struct・literal・none/closed等はfull_checker側の値の型が信頼できるので検査する
 fn is_checkable_field_type(t: &Type) -> bool {
-    !matches!(
-        t,
-        Type::Array(_) | Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_)
-    )
+    is_fully_modeled(t)
 }
 
-// structフィールドの型を読み取り側へ返す際、full_checkerが縮退させる型(配列/map/chan/
-// 関数/union)はANYへ畳む——milestone 27のinvariant(コレクションは常にANY)を保ち、
-// `u.items`(配列フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・
-// literalはそのまま返す(ネストしたstructフィールドアクセスが効く)
+// full_checkerがその型を**完全に**モデル化できているか(内部のどこにもANY縮退が無いか)。
+// レジストリ側(checker.rsが完全解決)の宣言型と、full_checker側の値の型を突き合わせて
+// よいかの判定に使う——縮退した型を突き合わせると必ず不一致になり誤検知になる
+// (milestone 29/32のcode reviewで2度踏んだ穴)。milestone 33で配列をモデル化したことで
+// 「配列か否か」という粗い判定では足りなくなった(`int[]`は突き合わせてよいが、
+// 要素がANYへ潰れる`map<string,int>[]`は駄目)ため、再帰的な判定に置き換えている
+fn is_fully_modeled(t: &Type) -> bool {
+    match t {
+        Type::Any => false,
+        // まだモデル化していない型(map/channel/関数/union/型パラメータ)。resolve_type_annは
+        // これらをANYへ縮退させるので、レジストリ側の型と突き合わせられない
+        Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_) => false,
+        Type::Array(elem) => is_fully_modeled(elem),
+        _ => true,
+    }
+}
+
+// structフィールドの型を読み取り側へ返す際、full_checkerが完全にはモデル化できない型
+// (map/chan/関数/union、および要素がそれらへ潰れる配列)はANYへ畳む——`u.rows`
+// (`map<..>[]`フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・literal・
+// **要素まで解決できる配列**(milestone 33)はそのまま返す(`u.cells[0]`のような
+// ネストしたアクセスに型が伝播する)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
 }
@@ -682,32 +755,48 @@ fn expect_arity(ctx: &mut FullCheckerCtx, name: &str, got: usize, want: usize, p
     true
 }
 
-// 「引数がANYでなければ builtin-arg-type を積む」——コレクション系組み込みの引数検査の
-// 縮退形。full_checkerのスカラースコープでは配列/map/channelはANYへ潰れるので、TS版の
-// `arr.kind === "array"` ガードは「ANYなら素通り」に縮退する。実際のコレクションを渡す
-// 典型ケース(型がANY)は無診断、スカラーを誤って渡した場合だけ発火(TS版と一致)。
-// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——`push(add, 4)`の
-// ように関数値をコレクション組み込みへ渡すと`push() requires an array, got fn(...)`が出る
-// (これもTS版と一致——TS版も`arr.kind !== "any"`なら同じエラーを出す)
+// 「引数がANYでなければ builtin-arg-type を積む」——**まだモデル化していないコレクション**
+// (map/channel)を取る組み込み(delete/keys/values/close)の引数検査の縮退形。それらの型は
+// full_checkerではANYへ潰れるので、TS版の`m.kind === "map"`ガードは「ANYなら素通り」に
+// 縮退する。実際のmap/channelを渡す典型ケースは無診断、スカラーを誤って渡した場合だけ
+// 発火する(TS版と一致)。**配列はmilestone 33でモデル化したので`require_array`を使う**。
+// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——関数値を
+// コレクション組み込みへ渡すと`... requires a map, got fn(...)`が出る(TS版と一致)
 fn require_kind(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) {
     if !matches!(arg_ty, Type::Any) {
         ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
     }
 }
 
-// 組み込み関数呼び出しの検査(milestone 27)。TS版`inferBuiltinCall`
-// (src/checker/builtins.ts)の移植。
-// **スカラースコープでの縮退**: 配列/map/channelはfull_checkerでは常にANYなので、
-// TS版がコレクション種別(`arr.kind === "array"`等)でガードする「要素型・添字型・callback署名」の
-// 検査(type-mismatch/invalid-index-type/callback-signature-mismatch)は実際には到達せず、
-// コレクションをモデル化する将来のmilestoneで拾う。この一歩で実際に効くのは
-// (1)全組み込みのarity(argument-count)、(2)スカラー引数の型検査(builtin-arg-type)——
-// `len(5)`・`contains(5, x)`・`round(3)`のようにスカラーを渡した場合のエラー、
-// (3)スカラー戻り値型(str→string, len→int, round→int 等)。配列を返す組み込み
-// (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す(配列型は未モデル化)。
-// ただしreduceの戻り値だけはaccumulator型でスカラーになりうるためcallbackから計算する
-// (下記reduceアーム参照)。**関数型はANYではなくType::Fnとして追跡される**ので、
-// コレクション組み込みへ関数値を渡すとrequire_kindが正しく発火する(TS版と一致)。
+// milestone 33: 配列を要求する組み込みの共通処理。配列なら要素型を返し(呼び出し側が
+// 要素型の検査に使う)、ANY(未モデル化のコレクション等)なら黙って`None`、それ以外は
+// TS版と同じ`builtin-arg-type`。配列をモデル化したことで、TS版の`arr.kind === "array"`
+// ガードがそのまま移植できるようになった(milestone 27では全てANYへ潰れて到達しなかった)
+fn require_array(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) -> Option<Type> {
+    match arg_ty {
+        Type::Array(elem) => Some((**elem).clone()),
+        Type::Any => None,
+        _ => {
+            ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
+            None
+        }
+    }
+}
+
+// 組み込み関数呼び出しの検査(milestone 27で導入、milestone 33で配列対応)。
+// TS版`inferBuiltinCall`(src/checker/builtins.ts)の移植。
+// **効く検査**: (1)全組み込みのarity(argument-count)、(2)引数の型検査(builtin-arg-type)——
+// `len(5)`・`contains(5, x)`・`round(3)`のようにスカラーを誤って渡した場合、
+// (3)戻り値型(str→string, len→int, sort→同じ配列型, map→callback戻り値の配列 等)、
+// (4)**配列を取る組み込みの要素型検査**(`push`/`contains`/`indexOf`のtype-mismatch、
+// `get`のinvalid-index-type、`sort`/`join`の要素型)と**高階組み込みのcallback署名検査**
+// (`filter`/`map`/`reduce`のcallback-signature-mismatch)——milestone 33で配列をモデル化する
+// までは「コレクションは常にANY」で到達しなかった経路(下記`require_array`参照)。
+// **まだ縮退している型**: map/channel。これらを引数に取る組み込み(delete/keys/values/close)は
+// 引き続き`require_kind`(ANYなら素通り)で、戻り値も要素型不明のまま
+// (`keys`/`values`は`any[]`)——map/channelのモデル化は次のmilestone。
+// **関数型はANYではなくType::Fnとして追跡される**ので、コレクション組み込みへ関数値を
+// 渡すと`push() requires an array, got fn(...)`が正しく出る(TS版と一致)。
 fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
     // 引数はarityに関わらず全て推論する(未定義名検査のため)
     let at: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
@@ -720,14 +809,22 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             STRING
         }
         "len" => {
-            if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
+            // milestone 33: 配列がモデル化されたので明示的に許す(map/channelは引き続きANY)
+            if expect_arity(ctx, name, n, 1, pos)
+                && !types::is_stringy(&at[0])
+                && !matches!(at[0], Type::Any | Type::Array(_))
+            {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("len() requires string, array or map, got {}", ts(&at[0])));
             }
             INT
         }
         "push" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("push() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("push() requires an array, got {}", ts(&at[0])))
+                && is_fully_modeled(&elem)
+                && !types::assignable(&at[1], &elem)
+            {
+                ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("cannot push {} into {}", ts(&at[1]), ts(&at[0])));
             }
             VOID
         }
@@ -750,20 +847,34 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             VOID
         }
         "contains" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("contains() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("contains() requires an array, got {}", ts(&at[0])))
+                && is_fully_modeled(&elem)
+                && !types::assignable(&at[1], &elem)
+            {
+                ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("contains() second argument must be {}, got {}", ts(&elem), ts(&at[1])));
             }
             BOOL
         }
         "indexOf" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("indexOf() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("indexOf() requires an array, got {}", ts(&at[0])))
+                && is_fully_modeled(&elem)
+                && !types::assignable(&at[1], &elem)
+            {
+                ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("indexOf() second argument must be {}, got {}", ts(&elem), ts(&at[1])));
             }
-            ANY // 本来 int | none
+            types::union_of(vec![INT, NONE])
         }
         "get" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("get() requires an array, got {}", ts(&at[0])));
+            // F-9d: 範囲外を型で強制する安全な読み(`elem | none`を返す)
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("get() requires an array, got {}", ts(&at[0])))
+            {
+                if !types::type_equals(&at[1], &INT) && !matches!(at[1], Type::Any) {
+                    ctx.error(args[1].pos(), DiagnosticCode::InvalidIndexType, format!("index must be int, got {}", ts(&at[1])));
+                }
+                return types::union_of(vec![elem, NONE]);
             }
             ANY
         }
@@ -771,19 +882,28 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 1, pos) {
                 require_kind(ctx, &at[0], args[0].pos(), format!("keys() requires a map, got {}", ts(&at[0])));
             }
-            ANY // 本来 []K
+            Type::Array(Box::new(ANY)) // 本来 []K(mapのモデル化は次段階)
         }
         "values" => {
             if expect_arity(ctx, name, n, 1, pos) {
                 require_kind(ctx, &at[0], args[0].pos(), format!("values() requires a map, got {}", ts(&at[0])));
             }
-            ANY // 本来 []V
+            Type::Array(Box::new(ANY)) // 本来 []V(mapのモデル化は次段階)
         }
         "sort" => {
-            if expect_arity(ctx, name, n, 1, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("sort() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 1, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("sort() requires an array, got {}", ts(&at[0])))
+                && !types::is_numeric(&elem)
+                && !types::is_stringy(&elem)
+                && !matches!(elem, Type::Any)
+            {
+                ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("sort() requires int[], float[] or string[], got {}", ts(&at[0])));
             }
-            ANY
+            // 非破壊(新しい配列を返す)。引数が配列ならその型をそのまま返す
+            match at.first() {
+                Some(t @ Type::Array(_)) => t.clone(),
+                _ => ANY,
+            }
         }
         "split" => {
             if expect_arity(ctx, name, n, 2, pos) {
@@ -796,11 +916,16 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
                     ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("split() separator must be a string, got {}", ts(&at[1])));
                 }
             }
-            ANY // 本来 []string
+            Type::Array(Box::new(STRING))
         }
         "join" => {
             if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("join() requires an array, got {}", ts(&at[0])));
+                if let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("join() requires an array, got {}", ts(&at[0])))
+                    && !types::is_stringy(&elem)
+                    && !matches!(elem, Type::Any)
+                {
+                    ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("join() requires string[], got {}", ts(&at[0])));
+                }
                 if !types::is_stringy(&at[1]) && !matches!(at[1], Type::Any) {
                     ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("join() separator must be a string, got {}", ts(&at[1])));
                 }
@@ -840,21 +965,75 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             }
             VOID
         }
+        // milestone 33: 高階関数はコールバックの署名も検査する(TS版のcallback-signature-mismatch)。
+        // 配列がモデル化され、関数型はmilestone 26から`Type::Fn`で追跡されているので、
+        // TS版のロジックがそのまま移植できるようになった
         "filter" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("filter() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("filter() requires an array, got {}", ts(&at[0])))
+            {
+                match &at[1] {
+                    Type::Fn { params, ret } => {
+                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !types::assignable(&elem, &params[0])) {
+                            ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("filter() callback must take a single {} parameter", ts(&elem)));
+                        }
+                        if !types::type_equals(ret, &BOOL) && !matches!(**ret, Type::Any) {
+                            ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("filter() callback must return bool, got {}", ts(ret)));
+                        }
+                    }
+                    Type::Any => {}
+                    other => ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("filter() second argument must be a function, got {}", ts(other))),
+                }
             }
-            ANY
+            // 絞り込むだけなので要素型は変わらない
+            match at.first() {
+                Some(t @ Type::Array(_)) => t.clone(),
+                _ => ANY,
+            }
         }
         "map" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("map() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("map() requires an array, got {}", ts(&at[0])))
+            {
+                match &at[1] {
+                    Type::Fn { params, .. } => {
+                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !types::assignable(&elem, &params[0])) {
+                            ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("map() callback must take a single {} parameter", ts(&elem)));
+                        }
+                    }
+                    Type::Any => {}
+                    other => ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("map() second argument must be a function, got {}", ts(other))),
+                }
             }
-            ANY
+            // 要素型はコールバックの戻り値型になる
+            match at.get(1) {
+                Some(Type::Fn { ret, .. }) => Type::Array(ret.clone()),
+                _ => Type::Array(Box::new(ANY)),
+            }
         }
         "reduce" => {
-            if expect_arity(ctx, name, n, 3, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("reduce() requires an array, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 3, pos)
+                && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("reduce() requires an array, got {}", ts(&at[0])))
+            {
+                match &at[1] {
+                    Type::Fn { params, ret } if params.len() != 2 => {
+                        let _ = ret;
+                        ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, "reduce() callback must take (accumulator, element)");
+                    }
+                    Type::Fn { params, ret } => {
+                        if is_fully_modeled(&params[0]) && !types::assignable(&at[2], &params[0]) {
+                            ctx.error(args[2].pos(), DiagnosticCode::TypeMismatch, format!("reduce() initial value must be {}, got {}", ts(&params[0]), ts(&at[2])));
+                        }
+                        if is_fully_modeled(&elem) && is_fully_modeled(&params[1]) && !types::assignable(&elem, &params[1]) {
+                            ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("reduce() callback's second parameter must accept {}", ts(&elem)));
+                        }
+                        if is_fully_modeled(ret) && is_fully_modeled(&params[0]) && !types::assignable(ret, &params[0]) {
+                            ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("reduce() callback must return {} (the accumulator type), got {}", ts(&params[0]), ts(ret)));
+                        }
+                    }
+                    Type::Any => {}
+                    other => ctx.error(args[1].pos(), DiagnosticCode::BuiltinArgType, format!("reduce() second argument must be a function, got {}", ts(other))),
+                }
             }
             // reduceの戻り値はaccumulator型でスカラーになりうる(map/filter等の配列戻り値と違い
             // モデル化できる)。Type::Fnはmilestone 26で追跡済みなので、TS版と同じく
@@ -882,12 +1061,38 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     match stmt {
         // names/valuesは1:1対応が前提(Go風多重代入はF-9で廃止済み。パーサが数を揃える)
         Stmt::ShortVarDecl { names, values, mutable, pos } => {
-            for (name, value) in names.iter().zip(values.iter()) {
-                let ty = infer_expr(ctx, value);
+            // TS版`statements.ts`と同じ順序: **文全体の値を先に全部検査してから**名前を宣言する
+            // (宣言を挟むと`a, b := 1, a`のような右辺の未定義名を見落とす)。
+            // `already_errored`も**文単位**で判定する——名前ごとに取り直すと、先の値で
+            // undefined-nameが出ていても後の名前にcannot-infer-typeを重ねて出してしまう
+            // (`a, b := undefinedThing, []`。code reviewで発覚・両CLIで再現確認)
+            let diags_before = ctx.diagnostics.len();
+            let value_tys: Vec<Type> = values.iter().map(|v| infer_expr(ctx, v)).collect();
+            let already_errored = ctx.diagnostics.len() > diags_before;
+            for (i, name) in names.iter().enumerate() {
+                let ty = value_tys.get(i).cloned().unwrap_or(ANY);
                 // mut宣言はリテラル型を広げる(`mut s := "a"`のsはstring型——後で
                 // `s = "b"`と別リテラルを代入できるように)。TS版statements.tsの
                 // `stmt.mutable ? widenLiteral(t) : t`と同じ
                 let ty = if *mutable { types::widen_literal(ty) } else { ty };
+                // milestone 33: 空の配列リテラル(`xs := []`)は要素型が決まらないので
+                // 型注釈を要求する(TS版`cannot-infer-type`)。**TS版の`containsAny`を
+                // そのまま移植すると誤検知の山になる**——full_checkerはmap/channel/union/
+                // pkg修飾など多くをANYへ縮退させており、TS版なら具体型がつく値
+                // (`m := {"a": 1}`等)まで「推論できない」と報告してしまうため。
+                // 空配列リテラルという**この診断の本来の引き金**だけに絞って移植する
+                // (他の形は、対応する型をモデル化するmilestoneで広げていく)。
+                // 値の検査で既に診断が出ている場合は二重に出さない(TS版の`alreadyErrored`)
+                if name != "_"
+                    && !already_errored
+                    && matches!(values.get(i), Some(Expr::ArrayLit { elems, elem_type: None, .. }) if elems.is_empty())
+                {
+                    ctx.error(
+                        *pos,
+                        DiagnosticCode::CannotInferType,
+                        format!("cannot infer a complete type for '{name}' (got {}) — add a type annotation, e.g. '{name}: T[] = []'", types::type_to_string(&ty)),
+                    );
+                }
                 ctx.declare(name, ty, *pos, *mutable);
             }
         }
@@ -903,10 +1108,10 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
             ctx.declare(name, declared, *pos, *mutable);
         }
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign { targets, values, pos, .. } => {
             for (target, value) in targets.iter().zip(values.iter()) {
                 let value_ty = infer_expr(ctx, value);
-                check_assign_target(ctx, target, &value_ty);
+                check_assign_target(ctx, target, &value_ty, *pos);
             }
         }
         Stmt::IncDec { target, op, pos } => {
@@ -973,10 +1178,43 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::RangeFor { names, subject, body, pos } => {
             // for文と同じ理由でヘッダ(range変数)とbodyは別スコープにする
-            infer_expr(ctx, subject);
+            let subject_ty = infer_expr(ctx, subject);
             ctx.push_scope();
-            for n in names {
-                ctx.declare(n, ANY, *pos, false);
+            // milestone 33: 配列とintのrangeは型と名前の個数まで検査する(TS版
+            // `statements.ts`のrangeForケース)。mapは未モデル化でANYのまま——
+            // ANYは従来どおり全ての名前をANYで宣言して素通りさせる
+            match &subject_ty {
+                Type::Array(elem) => {
+                    if names.len() != 2 {
+                        ctx.error(*pos, DiagnosticCode::RangeArity, "range over an array needs two names: 'for a, b := range ...' (use _ to ignore one)");
+                    }
+                    let elem = (**elem).clone();
+                    ctx.declare(names.first().map(String::as_str).unwrap_or("_"), INT, *pos, false);
+                    ctx.declare(names.get(1).map(String::as_str).unwrap_or("_"), elem, *pos, false);
+                }
+                t if types::type_equals(t, &INT) => {
+                    if names.len() != 1 {
+                        ctx.error(*pos, DiagnosticCode::RangeArity, "range over an int takes exactly one name: 'for i := range n'");
+                    }
+                    // **宣言するのは1つ目の名前だけ**(TS版`statements.ts`のintブランチは
+                    // `stmt.names[0]`しか宣言しない)。余分な名前を宣言してしまうと、
+                    // `for i, x := range 5 { print(x) }`でTS版が出す`undefined-name`を
+                    // 見落とす(code reviewで発覚・両CLIで再現確認)
+                    if let Some(first) = names.first() {
+                        ctx.declare(first, INT, *pos, false);
+                    }
+                }
+                Type::Any => {
+                    for n in names {
+                        ctx.declare(n, ANY, *pos, false);
+                    }
+                }
+                other => {
+                    ctx.error(subject.pos(), DiagnosticCode::NotRangeable, format!("cannot range over {}", types::type_to_string(other)));
+                    for n in names {
+                        ctx.declare(n, ANY, *pos, false);
+                    }
+                }
             }
             check_block(ctx, body);
             ctx.pop_scope();
@@ -993,9 +1231,21 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     }
 }
 
-fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type) {
+fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos) {
+    // milestone 33: 配列要素への代入(`xs[0] = v`)は、添字読みと同じ経路で要素型を得て
+    // 値を照合する(TS版`statements.ts`のassignケース——targetの型をcheckExprで求め、
+    // それをexpectedとして使う)。mapはまだ未モデル化でANYになるため素通りする。
+    // **位置は代入文自身**(TS版は`stmt.pos`で報告する)——targetの位置を使うと
+    // `a, xs[0] = 2, "no"`のような複数代入でTS版と列がずれる(code reviewで発覚)
+    if matches!(target, Expr::Index { .. }) {
+        let elem_ty = infer_expr(ctx, target);
+        if is_fully_modeled(&elem_ty) && !types::assignable(value_ty, &elem_ty) {
+            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&elem_ty)));
+        }
+        return;
+    }
     let Expr::Ident { name, pos } = target else {
-        infer_expr(ctx, target); // index/member代入はmilestone 22対象外——式だけ検査
+        infer_expr(ctx, target); // member代入(フィールド)はinfer_member側で検証済み
         return;
     };
     match ctx.lookup(name) {
@@ -1789,8 +2039,8 @@ mod tests {
 
     #[test]
     fn 配列map引数の組み込みは誤検知しない() {
-        // 配列/mapはスカラースコープでANYに潰れるため、push/contains/lenは無診断
-        // (要素型検査はコレクションをモデル化する将来のmilestone)
+        // milestone 33で配列をモデル化した後は「ANYに潰れるから無診断」ではなく、
+        // `xs: int[]`に対して要素型まで合っているから無診断(mapは引き続きANY)
         let diags = check("fn main() {\n    mut xs: int[] = [1, 2, 3]\n    push(xs, 4)\n    b := contains(xs, 2)\n    n := len(xs)\n    print(\"${b} ${n}\")\n}\n");
         assert_eq!(diags, vec![]);
     }
@@ -2204,6 +2454,175 @@ mod tests {
         let diags = check(&format!("{RESP}fn main() {{\n    x := Resp{{kind: \"notFound\"}} + 1\n    print(x)\n}}\n"));
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+    }
+
+    // ---- milestone 33: 配列型のモデル化 ----
+
+    #[test]
+    fn 配列リテラルの要素型不一致はtype_mismatchを報告する() {
+        // 要素型は先頭要素をwidenしたもの(`["a","b"]`は`"a"[]`ではなく`string[]`)
+        let diags = check("fn main() {\n    xs := [1, \"a\"]\n    print(xs)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "array element must be int, got \"a\"");
+    }
+
+    #[test]
+    fn 添字の型と添字できない対象を検査する() {
+        let bad_index = check("fn main() {\n    xs := [1, 2]\n    print(xs[\"k\"])\n}\n");
+        assert_eq!(bad_index.len(), 1);
+        assert_eq!(bad_index[0].code, DiagnosticCode::InvalidIndexType);
+        assert_eq!(bad_index[0].message, "index must be int, got \"k\"");
+
+        let not_indexable = check("fn main() {\n    n := 5\n    print(n[0])\n}\n");
+        assert_eq!(not_indexable.len(), 1);
+        assert_eq!(not_indexable[0].code, DiagnosticCode::NotIndexable);
+        assert_eq!(not_indexable[0].message, "cannot index into int");
+
+        // 文字列の添字は文字列を返す(TS版と同じ)——誤検知しない
+        assert_eq!(check("fn main() {\n    s := \"ab\"\n    print(s[0])\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn mapの添字は誤検知しない() {
+        // mapはまだ未モデル化(ANY)。ANYコンテナのときは添字の型検査自体を行わない——
+        // 行うと文字列キーが誤ってinvalid-index-typeになる(実装中にexamplesで検出)
+        assert_eq!(check("fn main() {\n    m := map<string, int>{\"a\": 1}\n    print(m[\"a\"] or 0)\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn 配列要素への代入の型を検査する() {
+        let diags = check("fn main() {\n    mut xs := [1, 2]\n    xs[0] = \"no\"\n    print(xs)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "cannot assign \"no\" to int");
+    }
+
+    #[test]
+    fn 配列を取る組み込みが要素型を検査する() {
+        let push = check("fn main() {\n    xs := [1]\n    push(xs, \"no\")\n}\n");
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(push[0].message, "cannot push \"no\" into int[]");
+
+        let contains = check("fn main() {\n    xs := [1]\n    print(contains(xs, \"no\"))\n}\n");
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].message, "contains() second argument must be int, got \"no\"");
+
+        let sort_bools = check("fn main() {\n    print(sort([true, false]))\n}\n");
+        assert_eq!(sort_bools.len(), 1);
+        assert_eq!(sort_bools[0].code, DiagnosticCode::BuiltinArgType);
+        assert_eq!(sort_bools[0].message, "sort() requires int[], float[] or string[], got bool[]");
+    }
+
+    #[test]
+    fn 高階組み込みのコールバック署名を検査する() {
+        let filter_ret = check("fn double(n: int) int {\n    return n * 2\n}\nfn main() {\n    print(filter([1], double))\n}\n");
+        assert_eq!(filter_ret.len(), 1);
+        assert_eq!(filter_ret[0].code, DiagnosticCode::CallbackSignatureMismatch);
+        assert_eq!(filter_ret[0].message, "filter() callback must return bool, got int");
+
+        let map_param = check("fn twoArgs(a: string, b: int) string {\n    return a\n}\nfn main() {\n    print(map([1], twoArgs))\n}\n");
+        assert_eq!(map_param.len(), 1);
+        assert_eq!(map_param[0].code, DiagnosticCode::CallbackSignatureMismatch);
+        assert_eq!(map_param[0].message, "map() callback must take a single int parameter");
+    }
+
+    #[test]
+    fn 高階組み込みの戻り値型が伝播する() {
+        // map()の要素型はコールバックの戻り値型——`sort(map(xs, label))`はstring[]なのでOK、
+        // `round(...)`のようなスカラー検査には配列として弾かれる
+        assert_eq!(
+            check("fn label(n: int) string {\n    return str(n)\n}\nfn main() {\n    print(join(sort(map([1, 2], label)), \",\"))\n}\n"),
+            vec![]
+        );
+        let joined_ints = check("fn main() {\n    print(join([1, 2], \",\"))\n}\n");
+        assert_eq!(joined_ints.len(), 1);
+        assert_eq!(joined_ints[0].message, "join() requires string[], got int[]");
+    }
+
+    #[test]
+    fn range_forは配列の添字と要素を宣言する() {
+        // 要素型が伝播するので`v + 1`(string + int)がinvalid-operationになる
+        let diags = check("fn main() {\n    for i, v := range [\"a\"] {\n        print(v + 1)\n        print(i)\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+
+        let arity = check("fn main() {\n    for i := range [1, 2] {\n        print(i)\n    }\n}\n");
+        assert_eq!(arity.len(), 1);
+        assert_eq!(arity[0].code, DiagnosticCode::RangeArity);
+
+        let not_rangeable = check("fn main() {\n    for i, v := range \"str\" {\n        print(i)\n        print(v)\n    }\n}\n");
+        assert_eq!(not_rangeable.len(), 1);
+        assert_eq!(not_rangeable[0].code, DiagnosticCode::NotRangeable);
+        assert_eq!(not_rangeable[0].message, "cannot range over \"str\""); // 文字列リテラル型のまま(TS版と一致)
+    }
+
+    #[test]
+    fn 配列型の引数照合が効く() {
+        let diags = check("fn take(xs: int[]) int {\n    return len(xs)\n}\nfn main() {\n    print(take([\"a\"]))\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "argument 1: cannot use string[] as int[]");
+    }
+
+    #[test]
+    fn 空配列リテラルはcannot_infer_typeを報告する() {
+        let diags = check("fn main() {\n    xs := []\n    print(xs)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::CannotInferType);
+        assert_eq!(diags[0].message, "cannot infer a complete type for 'xs' (got any[]) — add a type annotation, e.g. 'xs: T[] = []'");
+        // 型注釈があれば当然OK
+        assert_eq!(check("fn main() {\n    xs: int[] = []\n    push(xs, 1)\n    print(len(xs))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn 要素が縮退する配列は突き合わせない() {
+        // `map<string,int>[]`は要素がANYへ潰れるので、レジストリ側の完全解決された型と
+        // 突き合わせると誤検知する——is_fully_modeledで再帰的に判定してスキップする
+        let src = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
+        assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn int_rangeは1つ目の名前しか宣言しない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): 余分な名前まで宣言していたため、
+        // TS版が出す`undefined-name`を見落としていた(TS版statements.tsのintブランチは
+        // `stmt.names[0]`しか宣言しない)
+        let diags = check("fn main() {\n    for i, x := range 5 {\n        print(x)\n        print(i)\n    }\n}\n");
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].code, DiagnosticCode::RangeArity);
+        assert_eq!(diags[1].code, DiagnosticCode::UndefinedName);
+        assert_eq!(diags[1].message, "undefined: 'x'");
+    }
+
+    #[test]
+    fn cannot_infer_typeの抑止は文単位で判定する() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): `already_errored`を名前ごとに
+        // 取り直していたため、先の値のundefined-nameがあっても後の名前に
+        // cannot-infer-typeを重ねて出していた(TS版は文単位の`alreadyErrored`で抑止)
+        let diags = check("fn main() {\n    a, b := undefinedThing, []\n    print(a)\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn 配列要素代入の診断位置は代入文自身() {
+        // 回帰(code reviewで発覚): targetの位置で報告していたため、複数代入で
+        // TS版(stmt.pos)と列がずれていた
+        let diags = check("fn main() {\n    mut a := 1\n    mut xs := [1, 2]\n    a, xs[0] = 2, \"no\"\n    print(a)\n    print(xs)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].pos.col, 5); // `a, xs[0] = ...`の先頭(TS版と一致)
+    }
+
+    #[test]
+    fn structのフィールドとメソッド越しの配列も型が伝播する() {
+        let src = "struct Row {\n    cells: string[]\n}\nfn (r: Row) first() string {\n    return r.cells[0]\n}\nfn main() {\n    r := Row{cells: [\"x\"]}\n    print(r.first())\n    push(r.cells, 1)\n}\n";
+        let diags = check(src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "cannot push int into string[]");
     }
 
     #[test]
