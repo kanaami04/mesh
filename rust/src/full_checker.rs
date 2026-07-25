@@ -69,8 +69,11 @@ pub struct FullCheckerCtx {
     // ローカル変数と全く同じdeclare()を通ることで予約語・組み込み名衝突・重複宣言・
     // shadowingの検査が自動的に効くようになる
     scopes: Vec<HashMap<String, Binding>>,
-    // 今検査中の関数の戻り値型のスタック(無名関数はmilestone 22の対象外なので実際には
-    // 深さ1までしか積まれないが、TS版`ctx.retStack`と同じ形にしておく)
+    // 今検査中の関数の戻り値型のスタック(TS版`ctx.retStack`と同じ形)。
+    // **milestone 40で実際に深さ2以上になる**——無名関数の本体を検査するようになり、
+    // その中の`?`は「囲む関数」ではなく**無名関数自身**の戻り値型と突き合わせる
+    // (milestone 22時点では「無名関数は対象外なので深さ1まで」と書いていた。code reviewで
+    // その記述が古くなっていると指摘され更新)
     ret_stack: Vec<Type>,
     diagnostics: Vec<Diagnostic>,
     // milestone 29: struct/union型のレジストリ。型「解決」は既存の`checker.rs`
