@@ -413,6 +413,14 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
 // 特定できなければ`None`(診断は必要に応じて出し済み。呼び出し元はANYへフォールバックする)。
 fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &str, fields: &[StructLitField], field_types: &[Type], pos: Pos) -> Option<Type> {
     let Type::Union { body } = union_ty else { return None };
+    // **bodyが未設定なら黙って諦める**: `checker.rs`の`resolve_named_type`はknot-tyingのため
+    // 空のOnceCellを先に`declare_union`し、中身(`cell.set`)は解決が全部成功した後で入れる。
+    // つまりタグ不足(`compute_discriminant_tag`のErr)等で解決に失敗したunionは
+    // **レジストリには居るがbodyだけ空**という状態で残る——ここで拾えるのはそのケース。
+    // TS版も宣言時に`discriminated-union-tag-required`で報告済みなので二重報告しない
+    // (full_checkerは型宣言側の診断が未移植なので、実際には無診断=検出漏れになる。
+    // なおresolve_type_declsは最初のErrで走査全体を打ち切るため、それ以降に宣言された型も
+    // 巻き添えで未登録になる——check_program冒頭のコメントに記した既存の限界)
     let ub = body.get()?;
     let struct_members: Vec<&Type> = ub.members.iter().filter(|m| matches!(m, Type::Struct { .. })).collect();
     let anonymous_members: Vec<&Type> = struct_members.iter().filter(|m| matches!(m, Type::Struct { name, .. } if name == types::ANONYMOUS_STRUCT_NAME)).copied().collect();
@@ -420,9 +428,9 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
     // (1) 無名`{...}`メンバーが2個以上 = F-7の判別可能union。**書かれたタグフィールドの
     // 値だけ**でメンバーを特定する(フィールド集合は一切見ない)
     if anonymous_members.len() >= 2 {
-        // タグ不足のunion宣言自体はresolve_type_declsが既にErrにしている(こちらはその
-        // Errを握り潰してレジストリ未登録=ここに来ない)。TS版も宣言時に報告済みとして
-        // 二重報告を避けるため黙って諦める
+        // タグが無い(=判別可能unionとして成立していない)なら黙って諦める。上のbody未設定
+        // ガードで大半は先に弾かれるが、TS版もここは「宣言時に報告済み」として二重報告を
+        // 避けている(TS版コメント: "型宣言自体がタグ不足で既にエラー報告済み")
         let tag_name = ub.discriminant_tag.as_ref()?;
         let tag_value = fields
             .iter()
