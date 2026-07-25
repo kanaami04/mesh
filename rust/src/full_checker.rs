@@ -1693,13 +1693,7 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
     // milestone 30/31: メソッド表(struct名→メソッド名→Type::Fn)を構築する
     // (`declare_method`。milestone 31から宣言時の4診断つき)
-    for (i, (_, program)) in files.iter().enumerate() {
-        let start = ctx.diagnostics.len();
-        for f in &program.fns {
-            declare_method(&mut ctx, f);
-        }
-        spans.push((start, ctx.diagnostics.len(), i));
-    }
+    // (メソッド表と関数シグネチャは同じループで登録する——下記参照)
     // milestone 30: import alias(`import "mathutil"`→`mathutil`、`import "mesh/json"`→`json`)を
     // ANYとしてscopes[0]へ登録する。full_checkerはimport/パッケージを解決しないが、登録しないと
     // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
@@ -1733,10 +1727,16 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // structはmilestone 22/23とも対象外なので、メソッドは名前登録・本体検査どちらも
     // 単純にスキップする(誤って自由関数と同じ扱いにすると、別々のstructの同名メソッドが
     // already-declaredの誤検知になる)
+    // **1ファイルにつき1回のループ**でメソッド表と自由関数シグネチャの両方を登録する
+    // (TS版`checkPackage`も`for (const fn of program.fns)`の中で`declareMethod`と
+    // `declareBinding`へ振り分ける)。メソッドと自由関数で2周に分けると、同じファイルに
+    // 両方の宣言時診断があるとき**報告順がソース順と食い違う**(code reviewで発覚)
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for f in &program.fns {
-            if f.receiver.is_none() {
+            if f.receiver.is_some() {
+                declare_method(&mut ctx, f);
+            } else {
                 let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
                 ctx.declare(&f.name, ty, f.pos, false);
             }
@@ -1757,10 +1757,17 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // レシーバ無しの`fn main`を探し、無ければ1:1(ファイル先頭)を指してmissing-main、
     // あれば引数ありor戻り値ありでinvalid-main-signature(エントリポイントは
     // 引数を取らず何も返さない)
+    // **`require_main`が偽なら`fn main`の検査自体を丸ごと飛ばす**(TS版`checker/modules.ts`も
+    // `if (opts.requireMain) { ... }`でブロック全体を包む)。有無だけを飛ばして形の検査を
+    // 残すと、mainパッケージ以外にある`main`という名前のただの関数
+    // (`export fn main(n: int) int`——importして`util.main(3)`と呼ぶのは正当)が
+    // `invalid-main-signature`で弾かれる誤検知になる(code reviewで発覚・両CLIで再現確認)
     let main_start = ctx.diagnostics.len();
+    // `fn main`を宣言しているファイル(TS版は`invalid-main-signature`をそのファイルに紐づける)。
+    // 見つからない場合(missing-main)はパッケージ全体の性質なので先頭ファイルに属させる
+    let main_file_idx = files.iter().position(|(_, p)| p.fns.iter().any(|f| f.name == "main" && f.receiver.is_none())).unwrap_or(0);
     match files.iter().flat_map(|(_, p)| p.fns.iter()).find(|f| f.name == "main" && f.receiver.is_none()) {
-        // mainパッケージ以外は`fn main`を要求しない(TS版のrequireMain)
-        None if !require_main => {}
+        _ if !require_main => {}
         None => ctx.error(
             Pos { line: 1, col: 1 },
             DiagnosticCode::MissingMain,
@@ -1781,9 +1788,7 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // milestone 30まではメソッド本体を丸ごとスキップしていたため、メソッドの中の
     // 未定義名・型不一致・引数不一致が一切検出されない大きな穴になっていた
     // (`check_fn`がレシーバをスコープへ宣言するようになったのとセット)
-    // missing-main/invalid-main-signatureは先頭ファイルに属させる(パッケージ全体の性質なので
-    // 特定のファイルには紐づかない——TS版もパッケージ単位で1件だけ出す)
-    spans.push((main_start, ctx.diagnostics.len(), 0));
+    spans.push((main_start, ctx.diagnostics.len(), main_file_idx));
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for f in &program.fns {
@@ -2904,6 +2909,43 @@ mod tests {
         assert_eq!(out[0].1[0].message, "undefined: 'undefinedA'");
         assert_eq!(out[1].0, "b.mesh");
         assert_eq!(out[1].1[0].message, "undefined: 'undefinedB'");
+    }
+
+    #[test]
+    fn require_mainが偽ならmainの形は検査しない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): `require_main`は「無くてもよい」だけを
+        // 制御しており、`main`という名前の**ただの関数**(依存パッケージが
+        // `export fn main(n: int) int`を持ち`util.main(3)`と呼ぶのは正当)まで
+        // invalid-main-signatureで弾いていた。TS版は`if (opts.requireMain)`でブロック全体を包む
+        let p = parse("export fn main(n: int) int {\n    return n * 2\n}\n").unwrap();
+        assert_eq!(check_package(&[("util.mesh".to_string(), &p)], false), vec![]);
+        // mainパッケージ(require_main=true)なら従来どおり形を検査する
+        let out = check_package(&[("main.mesh".to_string(), &p)], true);
+        assert_eq!(out[0].1[0].code, DiagnosticCode::InvalidMainSignature);
+    }
+
+    #[test]
+    fn 宣言時診断の順序はソース順になる() {
+        // 回帰(code reviewで発覚): メソッド表と自由関数シグネチャを2周に分けて登録していたため、
+        // 同じファイルに両方の宣言時診断があると報告順がソース順と食い違っていた
+        // (TS版は1つのループで振り分ける)
+        let p = parse("fn helper() int {\n    return 1\n}\nfn helper() int {\n    return 2\n}\nfn (n: int) bad() {\n}\nfn main() {\n}\n").unwrap();
+        let out = check_package(&[("a.mesh".to_string(), &p)], true);
+        let codes: Vec<DiagnosticCode> = out[0].1.iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![DiagnosticCode::AlreadyDeclared, DiagnosticCode::InvalidReceiverType]);
+    }
+
+    #[test]
+    fn invalid_main_signatureはmainを宣言したファイルに紐づく() {
+        // 回帰(code reviewで発覚): パッケージ全体の性質として一律に先頭ファイルへ
+        // 紐づけていたため、mainが2番目以降のファイルにあると無関係なファイルが指された
+        // (TS版は`withMain.file`に紐づける)
+        let a = parse("fn helper() int {\n    return 1\n}\n").unwrap();
+        let b = parse("fn main(n: int) {\n}\n").unwrap();
+        let out = check_package(&[("a.mesh".to_string(), &a), ("b.mesh".to_string(), &b)], true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "b.mesh");
+        assert_eq!(out[0].1[0].code, DiagnosticCode::InvalidMainSignature);
     }
 
     #[test]

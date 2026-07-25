@@ -130,7 +130,13 @@ impl LoadFailure {
 // エントリファイルと、そこからimportで辿れるパッケージを全部読んでパースする。
 // 構文エラーはこの時点で報告して`Err`を返す(型検査まで進めない)
 fn parse_all(file: &str) -> Result<ParsedModules, LoadFailure> {
-    let sources = load_modules(Path::new(file)).map_err(LoadFailure::Discover)?;
+    parse_modules(load_modules(Path::new(file)).map_err(LoadFailure::Discover)?)
+}
+
+// 読み込み済みのソース列をパースし、json structのデコーダを合成する。
+// `mesh test`も含め**全サブコマンドがここを通る**(milestone 28で踏んだ
+// 「`mesh check`だけ合成を忘れていた」というドリフトを構造的に防ぐ)
+fn parse_modules(sources: Vec<mesh::modules::ModuleSource>) -> Result<ParsedModules, LoadFailure> {
     let mut units = Vec::with_capacity(sources.len());
     let mut source_map = HashMap::new();
     for m in &sources {
@@ -316,27 +322,26 @@ fn run_test(target: &str, json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // パース + json structのデコーダ合成(他のサブコマンドと同じ前処理)
-    let mut units = Vec::with_capacity(sources.len());
-    let mut source_map = HashMap::new();
-    for m in &sources {
-        let name = m.file.display().to_string();
-        source_map.insert(name.clone(), m.source.clone());
-        match parse(&m.source) {
-            Ok(mut program) => {
-                if let Err(e) = synthesize_json_decoders(&mut program) {
-                    eprintln!("{name}: {e}");
-                    return ExitCode::FAILURE;
-                }
-                units.push(ModuleUnit { pkg: m.pkg.clone(), file: name, program });
-            }
-            Err(errors) => {
-                eprint!("{}", format_compile_errors(&name, &errors, &m.source));
-                return ExitCode::FAILURE;
-            }
+    // パース + json structのデコーダ合成(他のサブコマンドと同じ前処理を`parse_modules`で共有——
+    // milestone 28で踏んだ「checkだけ合成を忘れる」ドリフトを構造的に防ぐため)
+    let parsed = match parse_modules(sources) {
+        Ok(p) => p,
+        // **`--json`のときは構文エラーもJSONで返す**(milestone 35の`mesh check --json`と同じ
+        // 契約。エージェントが機械的にパースするので、構文エラーのときだけ素のテキストに
+        // なると自己修正ループが壊れる。code reviewで発覚)
+        Err(LoadFailure::Parse { file: f, errors, .. }) if json => {
+            let diags: Vec<JsonDiag> = errors
+                .iter()
+                .map(|e| JsonDiag { file: &f, line: e.pos.line, col: e.pos.col, code: e.code.to_string(), message: &e.message })
+                .collect();
+            println!("{}", json_report(target, &diags));
+            return ExitCode::FAILURE;
         }
-    }
-    let parsed = ParsedModules { units, sources: source_map };
+        Err(f) => {
+            f.report();
+            return ExitCode::FAILURE;
+        }
+    };
 
     // テストの発見と、型検査(**mainを要求しない**——テストだけのパッケージにmainは無い。
     // TS版の`testMode`と同じ)。診断はどちらもゲートとして扱う

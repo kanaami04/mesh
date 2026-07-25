@@ -38,13 +38,15 @@ pub fn discover_in(pkg: &str, file: &str, program: &Program) -> DiscoveredTests 
     // エイリアス越しでも判定できるように——TS版もresolveType後にtypeEqualsで比べている)
     let mut ctx = CheckerCtx::new();
     let _ = crate::checker::resolve_type_decls(&mut ctx, &program.types);
-    let expected = types::union_of(vec![NONE, ERROR]);
     for f in &program.fns {
         if f.receiver.is_some() || !f.name.starts_with("test") {
             continue;
         }
         let ret = resolve_return_type(&ctx, &f.ret);
-        if !f.params.is_empty() || !types::type_equals(&ret, &expected) {
+        // 判定不能(型宣言の解決が失敗してunionの中身が埋まっていない)なら診断を出さず、
+        // テストとしては受け入れる——**誤検知ではなく検出漏れ側に倒す**という既定方針どおり
+        let ret_ok = is_none_or_error(&ret).unwrap_or(true);
+        if !f.params.is_empty() || !ret_ok {
             let params: Vec<String> = f.params.iter().map(|p| types::type_to_string(&crate::checker::resolve_type_node(&ctx, &p.type_node))).collect();
             diagnostics.push(Diagnostic {
                 pos: f.pos,
@@ -63,9 +65,27 @@ pub fn discover_in(pkg: &str, file: &str, program: &Program) -> DiscoveredTests 
     DiscoveredTests { tests, diagnostics }
 }
 
-// voidの戻り値は`Type::Void`になる——`() none | error`との比較で使うので公開はしない
-#[allow(dead_code)]
-fn _unused(_t: &Type) {}
+// 戻り値が`none | error`かを**パニックせずに**判定する。
+// `Some(true/false)`が判定結果、`None`は「判定できない」。
+//
+// **`types::type_equals`を直接使わない理由**: あちらは`Type::Union`のbody(OnceCell)が
+// 必ず埋まっている前提で`.expect()`する。ところが`resolve_type_decls`はknot-tyingのため
+// 「空のunionを先に登録してから中身を埋める」ので、**裸のunion循環などで解決が失敗すると
+// 中身が空のまま登録が残る**。そこへ`type_equals`を通すとpanicする——実際に
+// `type A = B | int` / `type B = A | string`を戻り値に持つテスト関数でクラッシュした
+// (code reviewで発覚)。full_checker側は同じ未解決unionを`OnceCell::get()`のOptionで
+// 安全に扱っており、この関数もそれに揃える
+fn is_none_or_error(t: &Type) -> Option<bool> {
+    let Type::Union { body } = t else { return Some(false) };
+    // 未解決(解決が途中で失敗した)——判定しない
+    let ub = body.get()?;
+    if ub.members.len() != 2 {
+        return Some(false);
+    }
+    // メンバーはプリミティブなので、ここでの比較はpanicしない
+    let has = |target: &Type| ub.members.iter().any(|m| types::type_equals(m, target));
+    Some(has(&NONE) && has(&ERROR))
+}
 
 #[cfg(test)]
 mod tests {
@@ -124,6 +144,17 @@ mod tests {
         let program = parse("fn testAdds() none | error {\n    return none\n}\n").unwrap();
         let d = discover_in("mathutil", "mathutil/ops_test.mesh", &program);
         assert_eq!(d.tests[0].js_name, "mathutil$testAdds");
+    }
+
+    #[test]
+    fn 解決できない型宣言があってもパニックしない() {
+        // 回帰(code reviewで発覚): 裸のunion循環があると`resolve_type_decls`がErrになり、
+        // knot-tyingで登録済みのunionは中身が空のまま残る。そこへ`types::type_equals`を
+        // 通すと`.expect()`でpanicしていた(`mesh test`がクラッシュしてJSONも診断も出ない)。
+        // 判定不能として扱い、診断は出さずにテストとして受け入れる(検出漏れ側)
+        let d = discover("a_test.mesh", "type A = B | int\ntype B = A | string\n\nfn testX() A {\n    return none\n}\n");
+        assert_eq!(d.diagnostics, vec![]);
+        assert_eq!(d.tests.len(), 1);
     }
 
     #[test]

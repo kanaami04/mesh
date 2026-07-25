@@ -3079,6 +3079,31 @@
                 テスト無し・panicするテスト・シグネチャ違反・型エラー・ディレクトリ指定・
                 存在しないターゲット)で出力と終了コードが完全一致。全exampleの
                 `check`/`run`/`fmt`も回帰なし。
+              - **code reviewで発見・即修正した3件**(いずれも両CLIで再現確認):
+                (1)**`mesh test --json`が構文エラーのときだけ素のテキストを返していた**——
+                `run_test`が`parse_all`を再利用せず自前のパースループを持っていたため、
+                milestone 35で`mesh check --json`に入れた「構文エラーもJSONで返す」契約が
+                抜けていた。共通の`parse_modules`へ切り出して解消(milestone 28の
+                「checkだけ合成を忘れる」ドリフトを構造的に防ぐ意味もある)。
+                (2)**`require_main`が偽でも`invalid-main-signature`を出していた**(誤検知)——
+                依存パッケージが`export fn main(n: int) int`を持ち`util.main(3)`と呼ぶのは
+                正当なのに弾いていた。TS版は`if (opts.requireMain)`でブロック全体を包むので、
+                同じく検査ごと飛ばす形にした。**milestone 35から入っていた既存の誤検知**で、
+                このPRのcheck_package化で表面化しやすくなっていた。
+                (3)**`test_discovery`が未解決のunionで`type_equals`を呼びパニックしていた**——
+                裸のunion循環があると解決が失敗し、knot-tyingで登録済みのunionは中身が
+                空のまま残る。そこへ`.expect()`する`type_equals`を通すとクラッシュし、
+                `mesh test`が診断もJSONも出さずに落ちていた。判定不能を`None`で返す
+                専用の述語に置き換え、判定できないときは診断を出さない(検出漏れ側)。
+                あわせて、宣言時診断の順序(メソッドと自由関数を2周に分けていたためソース順と
+                食い違っていた)と、`invalid-main-signature`のファイル帰属(一律に先頭ファイルへ
+                紐づけていた——TS版は`main`を宣言したファイル)もTS版に揃えた。
+                回帰テスト4件追加、524→528件。
+              - **既知の限界**: 裸のunion循環があるファイルでは、TS版が
+                `type-alias-cycle`+`invalid-test-signature`を位置付きで報告するのに対し、
+                Rust版はcodegen側リゾルバのエラー文(`checker: type alias cycle involving 'B'`、
+                位置なし)を出す。`type-alias-cycle`はfull_checkerに未移植の診断で、
+                終了コードは両方1で一致する。
               - **次段階**: `mesh card`/`explain`の移植(CLIの残り)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
