@@ -100,8 +100,8 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
 
 - **アーキテクチャ**: `rust/src/token.rs`(Pos/TokenType/Token/CompileError)・
   `lexer.rs`・`ast.rs`・`parser.rs`・`types.rs`・`checker.rs`・`codegen.rs`。
-  lib+binハイブリッドのCargoプロジェクト(`cargo run -- file.mesh`でASTを表示、
-  `cargo run -- file.mesh --emit-js`で生成JSを標準出力へ書き出す)
+  lib+binハイブリッドのCargoプロジェクト。CLIは milestone 35 でTS版と同じサブコマンド構成
+  (`run`/`build`/`check`/`ast`)になった(旧来の`cargo run -- file.mesh [--emit-js]`も互換で残す)
 - **`parser.ts`(1217行)を全面移植完了(2026-07-22)**。詳細は todo.md の各マイルストーン
   項目が一次情報源(ここは要約のみ): lexer全体(`fffd0d9`)→ parser核サブセット→
   struct/type宣言+判別可能union+match/is式・文字列補間(+スタックオーバーフロー対策の
@@ -1055,10 +1055,12 @@ bun run mesh card                       # 言語カードを出力
 # Rust移植版(rust/) — 動かない場合はセットアップを docs/setup.md で確認
 mise run rust-test      # = cd rust && cargo test
 mise run rust-check     # = cd rust && cargo clippy --all-targets
-(cd rust && cargo run -- ../examples/hello.mesh)              # AST疎通確認CLI
-(cd rust && cargo run -- ../examples/hello.mesh --emit-js)    # 生成JSを標準出力へ(milestone 1の
-                                                               # スカラーサブセットのみ。struct/map/
-                                                               # channel等は「未対応」エラーになる)
+(cd rust && cargo run -- run   ../examples/hello.mesh)         # コンパイルして即実行(milestone 35)
+(cd rust && cargo run -- build ../examples/hello.mesh -o out.mjs)
+(cd rust && cargo run -- check ../examples/hello.mesh [--json]) # 型検査のみ(ソース行+^つき)
+(cd rust && cargo run -- ast   ../examples/hello.mesh)         # ASTを表示(移植用のデバッグ支援)
+# `run`/`build`/`check`はいずれもcodegenの前にfull_checkerを通す(milestone 35のゲート統合)。
+# `fmt`/`test`/`card`/`explain`はまだTS版のみ
 ```
 
 ## 用語集(初見だと分かりにくい決定)
