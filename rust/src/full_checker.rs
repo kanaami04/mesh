@@ -1534,6 +1534,10 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
     let mut covered: Vec<Type> = Vec::new();
     let mut arm_types: Vec<Type> = Vec::new();
     let mut saw_wildcard = false;
+    // 判定できないパターンが1つでもあれば網羅性検査を行わない——そのパターンが
+    // 実際には何をカバーしていたのか分からない以上、「足りない」と言い切れない
+    // (pkg修飾型のパターンなどが該当しうる。誤検知ではなく検出漏れ側)
+    let mut undecidable_any = false;
 
     for arm in arms {
         if saw_wildcard {
@@ -1554,9 +1558,23 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
                     saw_wildcard = true;
                 }
                 MatchPattern::Type(node) => {
+                    // **未知の型名は判定しない**。`checker::resolve_type_node`は解決できない
+                    // 名前を「フィールド0個の殻struct」へフォールバックさせる(codegen用の
+                    // 寛容な設計)。それをそのまま使うと`struct_pattern_matches`の
+                    // 「パターンのフィールドが全て一致するか」が**空集合に対して真**になり、
+                    // 殻structが**あらゆるstructメンバーに一致**してしまう——タイポした型名の
+                    // アームが全メンバーをcoveredにし、正当なアームが
+                    // `unreachable-pattern`の誤検知になる(code reviewで発覚・両CLIで再現確認)。
+                    // TS版はここで`unknown-type`を出すが、その診断は未移植なので黙って諦める
+                    if !pattern_type_is_known(&ctx.type_ctx, node) {
+                        undecidable = true;
+                        undecidable_any = true;
+                        continue;
+                    }
                     let pt = crate::checker::resolve_type_node(&ctx.type_ctx, node);
                     if !safe_to_compare(&pt) {
                         undecidable = true;
+                        undecidable_any = true;
                         continue;
                     }
                     // 判別可能union: `{ kind: "ok" }`のような部分構造パターンは、書かれた
@@ -1626,6 +1644,7 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
     // 網羅性検査: unionの全メンバーがカバーされているか(`_`があれば常に網羅)
     if let Some(ms) = &members
         && !saw_wildcard
+        && !undecidable_any
     {
         let missing: Vec<String> = ms.iter().filter(|m| !covered.iter().any(|c| types::type_equals(c, m))).map(types::type_to_string).collect();
         if !missing.is_empty() {
@@ -1698,6 +1717,28 @@ fn struct_pattern_matches(member: &Type, pattern: &Type) -> bool {
     };
     let (Some(mfs), Some(pfs)) = (mf.get(), pf.get()) else { return false };
     pfs.iter().all(|p| mfs.iter().find(|m| m.name == p.name).is_some_and(|m| types::type_equals(&m.type_, &p.type_)))
+}
+
+// パターンに書かれた型注釈を`checker::resolve_type_node`で解決してよいか——つまり
+// **そこに現れる名前が全て実在する型か**の判定。実在しない名前は殻struct
+// (フィールド0個)へフォールバックされ、構造的な部分一致でどんなstructにも一致して
+// しまうため、解決する前にここで止める(上記`infer_match`のコメント参照)。
+// pkg修飾型も殻structへ落ちうるので判定不能扱いにする(TS版は`unknown-package-type`等を
+// 出すが、いずれも未移植)
+fn pattern_type_is_known(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> bool {
+    match node {
+        TypeNode::Name { pkg: Some(_), .. } => false,
+        TypeNode::Name { name, pkg: None, .. } => {
+            matches!(name.as_str(), "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed") || tc.lookup_struct(name).is_some() || tc.lookup_union(name).is_some()
+        }
+        TypeNode::Literal { .. } => true,
+        TypeNode::StructType { fields, .. } => fields.iter().all(|f| pattern_type_is_known(tc, &f.type_node)),
+        TypeNode::Union { members, .. } => members.iter().all(|m| pattern_type_is_known(tc, m)),
+        TypeNode::Array { elem, .. } | TypeNode::Chan { elem, .. } => pattern_type_is_known(tc, elem),
+        TypeNode::MapType { key, value, .. } => pattern_type_is_known(tc, key) && pattern_type_is_known(tc, value),
+        // 関数型など残りは保守的に判定不能
+        _ => false,
+    }
 }
 
 // `types::type_equals`/`types::union_of`へ渡しても**パニックしない**かの判定。
@@ -2211,6 +2252,20 @@ mod tests {
         let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    match r {\n        string => print(str(r + 1))\n        int => print(\"int\")\n        error => print(\"err\")\n    }\n}\n");
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].code, DiagnosticCode::ImpossiblePattern);
+    }
+
+
+    #[test]
+    fn 未知の型名のパターンは判定しない() {
+        // 回帰(code reviewで発覚): `resolve_type_node`は解決できない名前を
+        // 「フィールド0個の殻struct」へ落とすので、そのまま構造的部分一致にかけると
+        // **あらゆるstructメンバーに一致**し、正当なアームが`unreachable-pattern`の
+        // 誤検知になっていた。判定不能として飛ばし、網羅性検査も止める(検出漏れ側)
+        let src = "struct Ok {\n    user: string\n}\n\nstruct Err {\n    msg: string\n}\n\ntype Result = Ok | Err\n\nfn f() Result {\n    return Ok{user: \"a\"}\n}\n\nfn main() {\n    r := f()\n    match r {\n        Bogus => print(\"bogus\")\n        Ok => print(\"ok\")\n        Err => print(\"err\")\n    }\n}\n";
+        assert_eq!(check(src), vec![], "未知の型名で誤検知が出ている");
+        // 網羅性検査も止まる(判定不能なパターンが何をカバーしていたか分からないため)
+        let only_bogus = "struct Ok {\n    user: string\n}\n\nstruct Err {\n    msg: string\n}\n\ntype Result = Ok | Err\n\nfn f() Result {\n    return Ok{user: \"a\"}\n}\n\nfn main() {\n    r := f()\n    match r {\n        Bogus => print(\"bogus\")\n    }\n}\n";
+        assert_eq!(check(only_bogus), vec![]);
     }
 
     #[test]
