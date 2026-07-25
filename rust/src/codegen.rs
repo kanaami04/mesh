@@ -549,7 +549,7 @@ impl Codegen {
         // 元のcall式自身の`pos`を使う(TS版genDeferStmtの`{ ...call, ... }`と同じ——
         // calleeの解決不能エラーやgen_call内部のpanic位置情報が、defer文の位置ではなく
         // 元の呼び出し式自身の位置を指すようにする)
-        let Expr::Call { callee, args, pos: call_pos } = call else {
+        let Expr::Call { callee, args, pos: call_pos, .. } = call else {
             return Err(format!(
                 "codegen: 'defer' must be followed by a function or method call, e.g. 'defer f(x)' ({}:{})",
                 pos.line, pos.col
@@ -592,7 +592,7 @@ impl Codegen {
             invoke_args.push(Expr::Ident { name: temp, pos: a.pos() });
         }
 
-        let shadow_call = Expr::Call { callee: Box::new(invoke_callee), args: invoke_args, pos: *call_pos };
+        let shadow_call = Expr::Call { callee: Box::new(invoke_callee), args: invoke_args, pos: *call_pos, multiline: false };
         let invoke_js = self.gen_call(&shadow_call)?;
 
         *self.defer_used.last_mut().expect("inside a function body") = true;
@@ -1078,7 +1078,7 @@ impl Codegen {
             // error struct(error type X = ...で宣言されたstruct)のインスタンスだけ
             // __errTagで実行時マーカーを付ける(TS版のexpr.isErrorInstanceと同じ判定を
             // ctx.lookup_structの結果から行う)
-            Expr::StructLit { name, pkg, fields, pos } => {
+            Expr::StructLit { name, pkg, fields, pos, .. } => {
                 // pkg修飾(`mathutil.Point{...}`、milestone 6)ならパッケージのレジストリから
                 // 引く——未import/未exportなら実行時にプロパティが噛み合わない壊れたJSを
                 // 静かに生成せず、ここで明確なErrにする
@@ -1268,7 +1268,7 @@ impl Codegen {
     }
 
     fn gen_call(&mut self, expr: &Expr) -> CodegenResult<String> {
-        let Expr::Call { callee, args, pos } = expr else { unreachable!("caller guarantees Expr::Call") };
+        let Expr::Call { callee, args, pos, .. } = expr else { unreachable!("caller guarantees Expr::Call") };
 
         // 組み込み関数はランタイムの同期ヘルパへ直接変換
         if let Expr::Ident { name, .. } = &**callee

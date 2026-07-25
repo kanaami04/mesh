@@ -179,6 +179,39 @@ fn json出力は構文エラーでもjsonのまま() {
 }
 
 #[test]
+fn fmtは正規形を標準出力へ出す() {
+    // インデントをタブへ、空行は正規化(TS版と同じ規則)
+    let path = temp_mesh("fmt", "fn main() {\n      print(1)\n\n      print(2)\n}\n");
+    let p = path.display().to_string();
+    let out = mesh(&["fmt", &p]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "fn main() {\n\tprint(1)\n\tprint(2)\n}\n");
+    // 元ファイルは書き換わらない
+    assert!(std::fs::read_to_string(&path).unwrap().contains("      print(1)"));
+}
+
+#[test]
+fn fmt_wは元ファイルへ書き戻す() {
+    let path = temp_mesh("fmt-w", "fn main() {\n      print(1)\n}\n");
+    let p = path.display().to_string();
+    let out = mesh(&["fmt", &p, "-w"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn main() {\n\tprint(1)\n}\n");
+}
+
+#[test]
+fn fmtは構文エラーをstderrへ出して書き戻さない() {
+    let path = temp_mesh("fmt-syntax", "fn main() {\n    x := \n}\n");
+    let p = path.display().to_string();
+    let before = std::fs::read_to_string(&path).unwrap();
+    let out = mesh(&["fmt", &p, "-w"]);
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("error[syntax-error]"), "stderr: {}", out.stderr);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "壊れたソースを書き潰してはいけない");
+}
+
+#[test]
 fn 引数不足やサブコマンド無しはusageを出す() {
     let no_args = mesh(&[]);
     assert_eq!(no_args.code, 1);

@@ -44,7 +44,7 @@ fn member_expr(target: Expr, name: &str, pos: Pos) -> Expr {
     Expr::Member { target: Box::new(target), name: name.to_string(), pos }
 }
 fn call_expr(callee: Expr, args: Vec<Expr>, pos: Pos) -> Expr {
-    Expr::Call { callee: Box::new(callee), args, pos }
+    Expr::Call { multiline: false, callee: Box::new(callee), args, pos }
 }
 fn prop_expr(operand: Expr, pos: Pos) -> Expr {
     Expr::Prop { operand: Box::new(operand), context: None, pos }
@@ -59,7 +59,7 @@ fn json_call(fn_name: &str, args: Vec<Expr>, pos: Pos) -> Expr {
     call_expr(member_expr(ident_expr("json", pos), fn_name, pos), args, pos)
 }
 fn block(stmts: Vec<Stmt>) -> Block {
-    Block { stmts }
+    Block { stmts, multiline: false }
 }
 fn short_var_decl(name: &str, value: Expr, pos: Pos) -> Stmt {
     Stmt::ShortVarDecl { names: vec![name.to_string()], values: vec![value], mutable: false, pos }
@@ -89,7 +89,7 @@ fn array_type(elem: TypeNode, pos: Pos) -> TypeNode {
     TypeNode::Array { elem: Box::new(elem), pos }
 }
 fn union_type(members: Vec<TypeNode>, pos: Pos) -> TypeNode {
-    TypeNode::Union { members, pos }
+    TypeNode::Union { members, pos, multiline: false }
 }
 
 fn unsupported_field_error(struct_name: &str, field_name: &str, reason: &str) -> String {
@@ -144,7 +144,7 @@ fn gen_array_decode_stmts(raw_array_expr: Expr, elem: &TypeNode, target: &str, t
     };
     let mut stmts = Vec::new();
     stmts.push(short_var_decl(&raw_arr_name, raw_array_expr, pos));
-    stmts.push(typed_var_decl(&acc_name, array_type(elem.clone(), pos), Expr::ArrayLit { elems: vec![], elem_type: None, pos }, true, pos));
+    stmts.push(typed_var_decl(&acc_name, array_type(elem.clone(), pos), Expr::ArrayLit { multiline: false, elems: vec![], elem_type: None, pos }, true, pos));
     let loop_body = block(vec![
         short_var_decl(&decoded_var, gen_simple_decode_expr(ident_expr(&item_var, pos), elem, pos), pos),
         expr_stmt(call_expr(ident_expr("push", pos), vec![ident_expr(&acc_name, pos), ident_expr(&decoded_var, pos)], pos), pos),
@@ -237,7 +237,7 @@ fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
         stmts.extend(field_stmts);
         field_values.push(StructLitField { name: f.name.clone(), value: ident_expr(&result_var, f.pos), pos: f.pos });
     }
-    stmts.push(return_stmt(Some(Expr::StructLit { name: td.name.clone(), pkg: None, fields: field_values, pos }), pos));
+    stmts.push(return_stmt(Some(Expr::StructLit { multiline: false, name: td.name.clone(), pkg: None, fields: field_values, pos }), pos));
     Ok(FnDecl {
         name: format!("decode{}", td.name),
         receiver: None,

@@ -218,7 +218,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         }
         Expr::Binary { op, left, right, pos } => infer_binary(ctx, *op, left, right, *pos),
         Expr::Unary { op, operand, pos } => infer_unary(ctx, *op, operand, *pos),
-        Expr::Call { callee, args, pos } => {
+        Expr::Call { callee, args, pos, .. } => {
             // milestone 27: 組み込み関数呼び出し(`print`/`len`/...)を先にintercept。
             // 名前が組み込みならユーザーはそれをshadowできない(declare()が拒否する)ため、
             // 裸のIdentが組み込み名と一致すれば必ず組み込み呼び出し
@@ -290,7 +290,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         }
         // milestone 29: 名前付きstructリテラルのフィールド検証。pkg修飾・判別可能union構築は
         // 次段階(下記infer_struct_litがANYを返す)
-        Expr::StructLit { name, pkg, fields, pos } => infer_struct_lit(ctx, name, pkg.as_deref(), fields, *pos),
+        Expr::StructLit { name, pkg, fields, pos, .. } => infer_struct_lit(ctx, name, pkg.as_deref(), fields, *pos),
         // milestone 30: structのフィールドアクセス読み取り(`u.name`)。field→型・
         // メソッド名→method-not-called・未知→unknown-field。呼び出し形(`u.method()`)は
         // Call側で先にinterceptするのでここには来ない(bareのメンバー参照のみ)

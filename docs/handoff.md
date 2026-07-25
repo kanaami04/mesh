@@ -1058,10 +1058,11 @@ mise run rust-check     # = cd rust && cargo clippy --all-targets
 (cd rust && cargo run -- run   ../examples/hello.mesh)         # コンパイルして即実行(milestone 35)
 (cd rust && cargo run -- build ../examples/hello.mesh -o out.mjs)
 (cd rust && cargo run -- check ../examples/hello.mesh [--json]) # 型検査のみ(ソース行+^つき)
+(cd rust && cargo run -- fmt   ../examples/hello.mesh [-w])    # 正規形へ整形(milestone 36)
 (cd rust && cargo run -- ast   ../examples/hello.mesh)         # ASTを表示(移植用のデバッグ支援)
 # `run`/`build`/`check`はいずれもcodegenの前にfull_checkerを通す(milestone 35のゲート統合。
 # 全モジュールを1本ずつ検査し、診断はTS版と同じくstderrへ出す)。
-# `fmt`/`test`/`card`/`explain`はまだTS版のみ
+# `test`/`card`/`explain`はまだTS版のみ
 ```
 
 ## 用語集(初見だと分かりにくい決定)

@@ -28,7 +28,9 @@ const MAX_PARSE_ERRORS: usize = 50;
 pub fn parse(source: &str) -> Result<Program, Vec<CompileError>> {
     let lex_output = lex(source, None).map_err(|e| vec![*e])?;
     let mut parser = Parser::new(lex_output.tokens);
-    let program = parser.parse_program();
+    let mut program = parser.parse_program();
+    // milestone 36: コメントは`mesh fmt`が使う(checker/codegenは参照しない)
+    program.comments = lex_output.comments;
     if parser.errors.is_empty() {
         Ok(program)
     } else {
@@ -43,7 +45,9 @@ pub fn parse(source: &str) -> Result<Program, Vec<CompileError>> {
 pub fn parse_ignoring_errors(source: &str) -> Result<Program, CompileError> {
     let lex_output = lex(source, None).map_err(|e| *e)?;
     let mut parser = Parser::new(lex_output.tokens);
-    Ok(parser.parse_program())
+    let mut program = parser.parse_program();
+    program.comments = lex_output.comments;
+    Ok(program)
 }
 
 // parseProgram内の1宣言の結果。TS版はfns/typesなど複数の配列へ直接pushしていたが、
@@ -264,7 +268,7 @@ impl Parser {
             }
             self.skip_semis();
         }
-        Program { imports, fns, consts, types }
+        Program { imports, fns, consts, types, comments: Vec::new() }
     }
 
     // import "math" — v1制限: パスは単一セグメントのみ(examples/mathutil相当のパッケージ名を
@@ -397,7 +401,10 @@ impl Parser {
             return Ok(TypeDecl { name, node: first, exported, is_error, is_json: false, pos: start.pos });
         }
         let pos = members[0].pos();
-        Ok(TypeDecl { name, node: TypeNode::Union { members, pos }, exported, is_error, is_json: false, pos: start.pos })
+        // multiline: 最後のメンバーが最初と別の行にあれば「元ソースで複数行だった」
+        // (`mesh fmt`がユーザーの改行選択をそのまま尊重するため。TS版と同じ判定)
+        let multiline = members[members.len() - 1].pos().line != members[0].pos().line;
+        Ok(TypeDecl { name, node: TypeNode::Union { members, pos, multiline }, exported, is_error, is_json: false, pos: start.pos })
     }
 
     // unionの継続`|`を読む。行頭`|`スタイルでは直前の改行がASIで';'になっているので、
@@ -547,7 +554,8 @@ impl Parser {
         while self.eat(TokenType::Pipe) {
             members.push(self.parse_single_type()?);
         }
-        Ok(TypeNode::Union { members, pos })
+        let multiline = members[members.len() - 1].pos().line != members[0].pos().line;
+        Ok(TypeNode::Union { members, pos, multiline })
     }
 
     fn parse_single_type(&mut self) -> Result<TypeNode, Box<CompileError>> {
@@ -648,7 +656,7 @@ impl Parser {
     // ---- 文 ----
 
     fn parse_block(&mut self) -> Result<Block, Box<CompileError>> {
-        self.expect(TokenType::LBrace, "at start of block")?;
+        let open = self.expect(TokenType::LBrace, "at start of block")?;
         let mut stmts = Vec::new();
         self.skip_semis();
         while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
@@ -659,8 +667,9 @@ impl Parser {
             }
             self.skip_semis();
         }
-        self.expect(TokenType::RBrace, "at end of block")?;
-        Ok(Block { stmts })
+        let close = self.expect(TokenType::RBrace, "at end of block")?;
+        // multiline: 閉じ括弧が開き括弧と別の行にあるか(無名関数式の印字だけが見る)
+        Ok(Block { stmts, multiline: close.pos.line != open.pos.line })
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, Box<CompileError>> {
@@ -974,6 +983,7 @@ impl Parser {
     // structリテラルの中身`{ field: value, ... }`を読む(名前の直後の`{`から)。
     // pkgはパッケージ修飾(math.Point{...})のときだけSome
     fn parse_struct_lit_body(&mut self, pkg: Option<String>, name: String, pos: Pos) -> Result<Expr, Box<CompileError>> {
+        let open = self.peek().pos;
         self.next(); // {
         self.skip_semis();
         // フィールド値の中では再びstruct literalを許可する(ネストしたliteral用)
@@ -989,8 +999,8 @@ impl Parser {
             }
             Ok(fields)
         })?;
-        self.expect(TokenType::RBrace, "at end of struct literal")?;
-        Ok(Expr::StructLit { name, pkg, fields, pos })
+        let close = self.expect(TokenType::RBrace, "at end of struct literal")?;
+        Ok(Expr::StructLit { name, pkg, fields, pos, multiline: close.pos.line != open.line })
     }
 
     // 型付き配列リテラルの本体: Todo[]{}(空) / int[]{1, 2} / int[][]{...}(多次元)。
@@ -1027,7 +1037,7 @@ impl Parser {
             self.eat(TokenType::Comma);
             self.skip_semis();
         }
-        self.expect(TokenType::RBrace, "at end of array literal")?;
+        let close = self.expect(TokenType::RBrace, "at end of array literal")?;
         if elems.is_empty() {
             // F-9a: 空の型付き配列は`xs: T[] = []`に一本化(素の[]が文脈から型を得られるため重複だった)
             return Err(self.error_at(
@@ -1036,7 +1046,7 @@ impl Parser {
                 "empty-typed-array-literal-removed",
             ));
         }
-        Ok(Some(Expr::ArrayLit { elems, elem_type: Some(elem_type), pos }))
+        Ok(Some(Expr::ArrayLit { elems, elem_type: Some(elem_type), pos, multiline: close.pos.line != pos.line }))
     }
 
     // 呼び出し・メンバアクセス・structリテラル・添字は後置で連鎖する: f(x)[0].name。
@@ -1088,6 +1098,7 @@ impl Parser {
                 continue;
             }
             if self.check(TokenType::LParen) {
+                let open = self.peek().pos;
                 self.next();
                 let mut args = Vec::new();
                 while !self.check(TokenType::RParen) {
@@ -1096,9 +1107,9 @@ impl Parser {
                         self.expect(TokenType::Comma, "between arguments")?;
                     }
                 }
-                self.expect(TokenType::RParen, "after arguments")?;
+                let close = self.expect(TokenType::RParen, "after arguments")?;
                 let call_pos = expr.pos();
-                expr = Expr::Call { callee: Box::new(expr), args, pos: call_pos };
+                expr = Expr::Call { callee: Box::new(expr), args, pos: call_pos, multiline: close.pos.line != open.line };
             } else if self.eat(TokenType::LBracket) {
                 let index = self.parse_expr()?;
                 self.expect(TokenType::RBracket, "after index")?;
@@ -1267,7 +1278,7 @@ impl Parser {
     // スタックオーバーフローの安全マージンに直結する——詳細はtry_parse_typed_array_literalの
     // コメント参照)
     fn parse_array_literal(&mut self, pos: Pos) -> Result<Expr, Box<CompileError>> {
-        self.next();
+        self.next(); // [
         self.skip_semis(); // 複数行の配列リテラルで、要素末尾のASI挿入セミコロンを読み飛ばす
         let mut elems = Vec::new();
         while !self.check(TokenType::RBracket) && !self.check(TokenType::Eof) {
@@ -1275,8 +1286,8 @@ impl Parser {
             self.eat(TokenType::Comma);
             self.skip_semis();
         }
-        self.expect(TokenType::RBracket, "after array elements")?;
-        Ok(Expr::ArrayLit { elems, elem_type: None, pos })
+        let close = self.expect(TokenType::RBracket, "after array elements")?;
+        Ok(Expr::ArrayLit { elems, elem_type: None, pos, multiline: close.pos.line != pos.line })
     }
 
     // F-8: 'map'は文脈依存キーワード。型位置と同じ'<'が続けばmapリテラル/型構築として読む。
@@ -1297,7 +1308,7 @@ impl Parser {
         self.expect(TokenType::Comma, "between map key and value types")?;
         let value = self.parse_type()?;
         self.expect(TokenType::Gt, "after map value type")?;
-        self.expect(TokenType::LBrace, "to create a map: map<K, V>{ ... }")?;
+        let open = self.expect(TokenType::LBrace, "to create a map: map<K, V>{ ... }")?;
         self.skip_semis();
         let mut entries = Vec::new();
         while !self.check(TokenType::RBrace) && !self.check(TokenType::Eof) {
@@ -1309,8 +1320,8 @@ impl Parser {
             self.eat(TokenType::Comma);
             self.skip_semis();
         }
-        self.expect(TokenType::RBrace, "at end of map literal")?;
-        Ok(Expr::MapLit { key, value, entries, pos })
+        let close = self.expect(TokenType::RBrace, "at end of map literal")?;
+        Ok(Expr::MapLit { key, value, entries, pos, multiline: close.pos.line != open.pos.line })
     }
 
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, Box<CompileError>> {

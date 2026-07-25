@@ -2,6 +2,7 @@
 //   mesh run   <file.mesh> [args...]  コンパイルして即実行
 //   mesh build <file.mesh> [-o out]   JavaScriptを書き出す
 //   mesh check <file.mesh> [--json]   型検査のみ
+//   mesh fmt   <file.mesh> [-w]        正規形へ整形して標準出力へ(-w で書き戻す)
 //   mesh ast   <file.mesh>            パース結果のASTを表示(移植用のデバッグ支援)
 //
 // **full_checkerのゲート統合**(milestone 35): `run`/`build`/`check`のいずれも、codegenの前に
@@ -18,6 +19,7 @@
 // 持つのでPATHから探す。
 use mesh::codegen::{self, ModuleUnit};
 use mesh::diagnostic_codes::Diagnostic;
+use mesh::formatter;
 use mesh::full_checker;
 use mesh::json_decode::synthesize_json_decoders;
 use mesh::modules::load_modules;
@@ -34,6 +36,7 @@ Usage:
   mesh run   <file.mesh> [args...]   compile and run
   mesh build <file.mesh> [-o out]    compile to JavaScript
   mesh check <file.mesh> [--json]    type-check only
+  mesh fmt   <file.mesh> [-w]        format to the canonical form (-w rewrites the file)
   mesh ast   <file.mesh>             print the parsed AST (debug aid for the port)
 ";
 
@@ -46,7 +49,7 @@ fn main() -> ExitCode {
     let rest: Vec<String> = args.iter().skip(3).cloned().collect();
 
     match command {
-        "run" | "build" | "check" | "ast" => match args.get(2) {
+        "run" | "build" | "check" | "fmt" | "ast" => match args.get(2) {
             Some(file) => dispatch(command, file, &rest),
             None => {
                 eprintln!("{USAGE}");
@@ -70,6 +73,7 @@ fn dispatch(command: &str, file: &str, rest: &[String]) -> ExitCode {
     match command {
         "ast" => run_ast(file),
         "check" => run_check(file, rest.iter().any(|a| a == "--json")),
+        "fmt" => run_fmt(file, rest.iter().any(|a| a == "-w")),
         "build" | "build-stdout" | "run" => {
             let js = match compile_file(file) {
                 Ok(js) => js,
@@ -243,6 +247,35 @@ fn run_check(file: &str, json: bool) -> ExitCode {
     }
     report(&parsed, &per_file);
     ExitCode::FAILURE
+}
+
+// `mesh fmt`(TS版`cli.ts`のfmtケース)。**モジュールを辿らず対象ファイル1本だけを読む**
+// ——整形はファイル単位の操作で、importの解決は要らない(TS版も`readFileSync`+`format`)。
+// 構文エラーはソース行つきでstderrへ報告して終了コード1
+fn run_fmt(file: &str, write: bool) -> ExitCode {
+    let source = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("error: cannot read file '{file}'");
+            return ExitCode::FAILURE;
+        }
+    };
+    let formatted = match formatter::format(&source) {
+        Ok(f) => f,
+        Err(errors) => {
+            eprint!("{}", format_compile_errors(file, &errors, &source));
+            return ExitCode::FAILURE;
+        }
+    };
+    if write {
+        if let Err(e) = std::fs::write(file, &formatted) {
+            eprintln!("error: cannot write {file}: {e}");
+            return ExitCode::FAILURE;
+        }
+    } else {
+        print!("{formatted}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn write_output(file: &str, js: &str, rest: &[String]) -> ExitCode {

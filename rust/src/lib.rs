@@ -2,6 +2,7 @@ pub mod ast;
 pub mod checker;
 pub mod codegen;
 pub mod diagnostic_codes;
+pub mod formatter;
 pub mod full_checker;
 pub mod json_decode;
 pub mod lexer;
