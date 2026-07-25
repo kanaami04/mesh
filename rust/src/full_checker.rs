@@ -24,7 +24,9 @@
 // 引数個数・型照合(下記`check_args_against`)+**メソッド本体の検査**(milestone 30まで
 // `check_program`の最終ループがレシーバ付き関数を丸ごとスキップしていた穴。`check_fn`が
 // レシーバをスコープへ宣言するのとセット)+宣言時の4診断(下記`declare_method`)。
-// 判別可能union構築・pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・
+// milestone 32で判別可能unionの構築検証(union名で書いたstructリテラルのメンバー特定+
+// フィールド検証。下記`resolve_union_lit_member`)。
+// pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・
 // 配列/map/channel等コレクションの要素型検査・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
@@ -332,10 +334,11 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
     ANY
 }
 
-// 名前付きstructリテラル(`User{...}`)のフィールド検証(milestone 29)。TS版
-// `expressions.ts`のstructLitケース(名前付きstruct部分)の移植——診断を積んで継続する。
-// フィールド値の型・重複・未知・欠落を検査し、struct型を返す。判別可能union構築
-// (union名でのリテラル・タグdisambiguation)・pkg修飾structは次段階のためANYを返す。
+// structリテラル(`User{...}`・`Resp{kind: "ok", ...}`)のフィールド検証。TS版
+// `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
+// 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
+// (判別可能unionのタグdisambiguation・名前付きstruct同士のunionのフィールド集合解決。
+// 下記`resolve_union_lit_member`)に対応した。pkg修飾structは次段階のためANYを返す。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
     let field_types: Vec<Type> = fields.iter().map(|f| infer_expr(ctx, &f.value)).collect();
@@ -343,12 +346,23 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     if pkg.is_some() {
         return ANY;
     }
-    // 名前がregistryのstructでなければ対象外(union/未宣言/ジェネリック型パラメータ等)——ANY
-    let struct_ty = match ctx.type_ctx.lookup_struct(name) {
-        Some(t) if matches!(t, Type::Struct { .. }) => t.clone(),
-        _ => return ANY,
+    // 名前がregistryのstructなら従来どおり(milestone 29)。structでなければunion
+    // (判別可能union構築、milestone 32)を試し、どちらでもなければ対象外——ANY
+    // `member_ty`はフィールド検証に使う具体的なstruct、`result_ty`は式全体の型
+    // (union構築なら**絞り込んだメンバーではなくunion自身**——TS版と同じ。match/isで
+    // 絞り込むまで常にunionとして扱うことで、mut再代入やwideningを新規に考えずに済む)、
+    // `display_name`は診断に出す名前(union構築なら書かれたunion名。メンバーは無名なので)
+    let (member_ty, result_ty, display_name) = match ctx.type_ctx.lookup_struct(name) {
+        Some(t @ Type::Struct { name: sname, .. }) => (t.clone(), t.clone(), sname.clone()),
+        _ => match ctx.type_ctx.lookup_union(name).cloned() {
+            Some(union_ty) => match resolve_union_lit_member(ctx, &union_ty, name, fields, &field_types, pos) {
+                Some(member) => (member, union_ty, name.to_string()),
+                None => return ANY, // 絞り込み失敗(診断は出し済み)or struct memberが無いunion
+            },
+            None => return ANY,
+        },
     };
-    let Type::Struct { fields: decl_cell, name: display_name, .. } = &struct_ty else {
+    let Type::Struct { fields: decl_cell, .. } = &member_ty else {
         return ANY;
     };
     let Some(decl_fields) = decl_cell.get() else {
@@ -387,7 +401,129 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     if !missing.is_empty() {
         ctx.error(pos, DiagnosticCode::MissingFields, format!("missing field(s) in {display_name}: {}", missing.join(", ")));
     }
-    struct_ty
+    result_ty
+}
+
+// union名で書かれたstructリテラル(`GetUserResponse{kind: "ok", user: u}`)から、実際に
+// 構築されるメンバーstructを特定する(milestone 32)。TS版`expressions.ts`のstructLitケースの
+// union分岐の移植。codegen側の`checker::resolve_struct_lit_member`(milestone 12)と同じ
+// 3分岐だが、あちらは`Result`で即失敗する最小リゾルバなのに対し、こちらは診断コード付きで
+// 積んで継続する(milestone 29で決めたサブフォーク: 型「解決」はchecker.rsを再利用、
+// 診断「発行」だけfull_checkerで再実装)。
+// 特定できなければ`None`(診断は必要に応じて出し済み。呼び出し元はANYへフォールバックする)。
+fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &str, fields: &[StructLitField], field_types: &[Type], pos: Pos) -> Option<Type> {
+    let Type::Union { body } = union_ty else { return None };
+    let ub = body.get()?;
+    let struct_members: Vec<&Type> = ub.members.iter().filter(|m| matches!(m, Type::Struct { .. })).collect();
+    let anonymous_members: Vec<&Type> = struct_members.iter().filter(|m| matches!(m, Type::Struct { name, .. } if name == types::ANONYMOUS_STRUCT_NAME)).copied().collect();
+
+    // (1) 無名`{...}`メンバーが2個以上 = F-7の判別可能union。**書かれたタグフィールドの
+    // 値だけ**でメンバーを特定する(フィールド集合は一切見ない)
+    if anonymous_members.len() >= 2 {
+        // タグ不足のunion宣言自体はresolve_type_declsが既にErrにしている(こちらはその
+        // Errを握り潰してレジストリ未登録=ここに来ない)。TS版も宣言時に報告済みとして
+        // 二重報告を避けるため黙って諦める
+        let tag_name = ub.discriminant_tag.as_ref()?;
+        let tag_value = fields
+            .iter()
+            .zip(field_types)
+            .find(|(f, _)| &f.name == tag_name)
+            .and_then(|(_, ty)| if let Type::Literal(v) = ty { Some(v.clone()) } else { None });
+        let Some(tag_value) = tag_value else {
+            ctx.error(
+                pos,
+                DiagnosticCode::DiscriminatedUnionTagMissing,
+                format!("'{name}{{...}}' needs its tag field '{tag_name}' set to select a member (e.g. {name}{{ {tag_name}: \"...\", ... }})"),
+            );
+            return None;
+        };
+        let matched = anonymous_members.iter().find(|m| member_tag_value(m, tag_name).as_deref() == Some(tag_value.as_str()));
+        return match matched {
+            Some(m) => Some((*m).clone()),
+            None => {
+                let valid: Vec<String> = anonymous_members.iter().filter_map(|m| member_tag_value(m, tag_name).map(|v| format!("{v:?}"))).collect();
+                ctx.error(
+                    pos,
+                    DiagnosticCode::DiscriminatedUnionNoMatch,
+                    format!("no member of '{name}' has {tag_name}: {tag_value:?} (valid {tag_name} values: {})", valid.join(" | ")),
+                );
+                None
+            }
+        };
+    }
+
+    // (2) structメンバーが1個以下: そのメンバー(無ければANY相当=None。`type Status =
+    // "active" | "banned"`のような非structのunionはTS版も無診断で素通りする)
+    if struct_members.len() <= 1 {
+        return struct_members.first().map(|m| (*m).clone());
+    }
+
+    // (3) 名前付きstruct同士のunion(`type Shape = Circle | Square`): フィールド集合で
+    // 解決し、複数残ればフィールド値の型で絞る(TS版と同じ2段階)
+    let mut written: Vec<&str> = Vec::new();
+    for f in fields {
+        if !written.contains(&f.name.as_str()) {
+            written.push(&f.name);
+        }
+    }
+    let mut candidates: Vec<&Type> = struct_members
+        .iter()
+        .filter(|m| {
+            let Some(mf) = struct_fields_of(m) else { return false };
+            let mut member_names: Vec<&str> = Vec::new();
+            for f in mf {
+                if !member_names.contains(&f.name.as_str()) {
+                    member_names.push(&f.name);
+                }
+            }
+            member_names.len() == written.len() && written.iter().all(|n| member_names.contains(n))
+        })
+        .copied()
+        .collect();
+    if candidates.len() > 1 {
+        candidates.retain(|m| {
+            let Some(mf) = struct_fields_of(m) else { return false };
+            fields.iter().zip(field_types).all(|(f, ty)| mf.iter().find(|d| d.name == f.name).map(|d| types::assignable(ty, &d.type_)).unwrap_or(false))
+        });
+    }
+    match candidates.len() {
+        1 => Some(candidates[0].clone()),
+        0 => {
+            let shapes: Vec<String> = struct_members
+                .iter()
+                .map(|m| format!("{{ {} }}", struct_fields_of(m).map(|mf| mf.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default()))
+                .collect();
+            ctx.error(
+                pos,
+                DiagnosticCode::DiscriminatedUnionNoMatch,
+                format!("no member of '{name}' matches the field(s) {{{}}} (union members: {})", written.join(", "), shapes.join(" | ")),
+            );
+            None
+        }
+        _ => {
+            ctx.error(
+                pos,
+                DiagnosticCode::DiscriminatedUnionAmbiguous,
+                format!("ambiguous — multiple members of '{name}' match the field(s) {{{}}}", written.join(", ")),
+            );
+            None
+        }
+    }
+}
+
+// union メンバー(struct)の解決済みフィールド列。未解決(knot-tying中)ならNone
+fn struct_fields_of(m: &Type) -> Option<&[types::StructField]> {
+    let Type::Struct { fields, .. } = m else { return None };
+    fields.get().map(|v| v.as_slice())
+}
+
+// union メンバーが持つタグフィールドのリテラル値(`{kind: "ok", ...}`なら"ok")
+fn member_tag_value(m: &Type, tag_name: &str) -> Option<String> {
+    let fields = struct_fields_of(m)?;
+    fields.iter().find(|f| f.name == tag_name).and_then(|f| match &f.type_ {
+        Type::Literal(v) => Some(v.clone()),
+        _ => None,
+    })
 }
 
 // 二項演算の妥当性検査+結果型の推論(milestone 25)。TS版`inferBinary`+`checkArithOp`
@@ -1936,5 +2072,96 @@ mod tests {
         assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
         assert_eq!(diags[0].message, "cannot return \"no\" as int");
         assert_eq!(diags[0].pos.col, 12);
+    }
+
+    // ---- milestone 32: 判別可能unionの構築検証 ----
+
+    // User + 無名メンバー3個の判別可能union(タグは`kind`)
+    const RESP: &str = "struct User {\n    name: string\n}\ntype Resp =\n    { kind: \"ok\", user: User }\n    | { kind: \"notFound\" }\n    | { kind: \"error\", message: string }\n";
+    // 名前付きstruct同士のunion(無名メンバー無し)。AとBはフィールド集合が同一で曖昧
+    const SHAPES: &str = "struct A {\n    x: int\n}\nstruct B {\n    x: int\n}\nstruct C {\n    y: string\n}\ntype AB = A | B\ntype AC = A | C\n";
+
+    #[test]
+    fn 判別可能unionのタグ未指定はtag_missingを報告する() {
+        let diags = check(&format!("{RESP}fn main() {{\n    u := User{{name: \"a\"}}\n    r := Resp{{user: u}}\n    print(r)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DiscriminatedUnionTagMissing);
+        assert_eq!(diags[0].message, "'Resp{...}' needs its tag field 'kind' set to select a member (e.g. Resp{ kind: \"...\", ... })");
+    }
+
+    #[test]
+    fn 判別可能unionの未知のタグ値はno_matchを報告する() {
+        let diags = check(&format!("{RESP}fn main() {{\n    r := Resp{{kind: \"bogus\"}}\n    print(r)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::DiscriminatedUnionNoMatch);
+        assert_eq!(diags[0].message, "no member of 'Resp' has kind: \"bogus\" (valid kind values: \"ok\" | \"notFound\" | \"error\")");
+    }
+
+    #[test]
+    fn 判別可能unionの絞り込み後にフィールドを検証する() {
+        // 絞り込んだメンバー({kind:"ok", user: User})に対して未知/欠落/型不一致を検査し、
+        // 診断に出す名前は(無名メンバーではなく)書かれたunion名になる
+        let missing = check(&format!("{RESP}fn main() {{\n    r := Resp{{kind: \"ok\"}}\n    print(r)\n}}\n"));
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].code, DiagnosticCode::MissingFields);
+        assert_eq!(missing[0].message, "missing field(s) in Resp: user");
+
+        let unknown = check(&format!("{RESP}fn main() {{\n    u := User{{name: \"a\"}}\n    r := Resp{{kind: \"ok\", user: u, extra: 1}}\n    print(r)\n}}\n"));
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].code, DiagnosticCode::UnknownField);
+        assert_eq!(unknown[0].message, "Resp has no field 'extra' (fields: kind, user)");
+
+        let mismatch = check(&format!("{RESP}fn main() {{\n    r := Resp{{kind: \"error\", message: 42}}\n    print(r)\n}}\n"));
+        assert_eq!(mismatch.len(), 1);
+        assert_eq!(mismatch[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(mismatch[0].message, "field 'message': cannot use int as string");
+    }
+
+    #[test]
+    fn 名前付きstruct同士のunionはフィールド集合で解決する() {
+        // ACはフィールド集合が重ならないので一意に決まる(無診断)
+        assert_eq!(check(&format!("{SHAPES}fn main() {{\n    v := AC{{y: \"s\"}}\n    print(v)\n}}\n")), vec![]);
+
+        // ABは同じ形の2メンバーなので曖昧
+        let ambiguous = check(&format!("{SHAPES}fn main() {{\n    v := AB{{x: 1}}\n    print(v)\n}}\n"));
+        assert_eq!(ambiguous.len(), 1);
+        assert_eq!(ambiguous[0].code, DiagnosticCode::DiscriminatedUnionAmbiguous);
+        assert_eq!(ambiguous[0].message, "ambiguous — multiple members of 'AB' match the field(s) {x}");
+
+        // どのメンバーの形とも一致しない
+        let no_match = check(&format!("{SHAPES}fn main() {{\n    v := AC{{z: 1}}\n    print(v)\n}}\n"));
+        assert_eq!(no_match.len(), 1);
+        assert_eq!(no_match[0].code, DiagnosticCode::DiscriminatedUnionNoMatch);
+        assert_eq!(no_match[0].message, "no member of 'AC' matches the field(s) {z} (union members: { x } | { y })");
+    }
+
+    #[test]
+    fn 正しいunion構築は診断を出さない() {
+        let diags = check(&format!("{RESP}fn main() {{\n    u := User{{name: \"a\"}}\n    print(Resp{{kind: \"ok\", user: u}})\n    print(Resp{{kind: \"notFound\"}})\n    print(Resp{{kind: \"error\", message: \"boom\"}})\n}}\n"));
+        assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn unionメンバーのコレクション_関数型フィールドは誤検知しない() {
+        // milestone 29と同じ配慮: 縮退する型(配列/map/chan/fn/union)のフィールドは
+        // 値側の型がANYへ潰れるため型検査をスキップする(unionメンバー側でも同じ)
+        let src = "struct Item {\n    id: int\n}\ntype Page =\n    { kind: \"list\", items: Item[], render: fn(int) string }\n    | { kind: \"empty\" }\nfn label(n: int) string {\n    return \"item\"\n}\nfn main() {\n    print(Page{kind: \"list\", items: [Item{id: 1}], render: label})\n    print(Page{kind: \"empty\"})\n}\n";
+        assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn union構築の式全体の型はunion自身になる() {
+        // TS版と同じく、絞り込んだメンバーではなくunion自身を返す——union値への算術は
+        // invalid-operation(milestone 25の演算子検査)になる
+        let diags = check(&format!("{RESP}fn main() {{\n    x := Resp{{kind: \"notFound\"}} + 1\n    print(x)\n}}\n"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+    }
+
+    #[test]
+    fn structメンバーを持たないunionは素通りする() {
+        // `type Status = "active" | "banned"`のようなリテラルunionはTS版も無診断で
+        // ANYへフォールバックする(cannot-infer-typeは未移植の別診断)
+        assert_eq!(check("type Status = \"active\" | \"banned\"\nfn main() {\n    s := Status{foo: 1}\n    print(s)\n}\n"), vec![]);
     }
 }

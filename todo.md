@@ -2789,6 +2789,45 @@
               - **次段階**: 判別可能union構築・pkg修飾struct/pkg修飾呼び出しの中身・
                 not-a-struct/narrow-required・配列/map型のモデル化(collection builtinの要素型検査
                 とセット)・`mesh run`/`build`へのゲート統合。
+        - [x] **milestone 32: 判別可能unionの構築検証**
+              ✅ 2026-07-25実装。milestone 29(名前付きstructリテラル)/31(メソッド)に続く
+              struct卒業の続き。**union名で書いたstructリテラル**(`Resp{kind: "ok", user: u}`)を
+              full_checkerが一切検証していなかった(`infer_struct_lit`がstructレジストリに無い名前を
+              全てANYで素通り)ため、TS版が7件出す入力にRust版は0件しか出さない状態だった。
+              - 新設`resolve_union_lit_member`(TS版`expressions.ts` structLitケースのunion分岐の
+                移植)。codegen側の`checker::resolve_struct_lit_member`(milestone 12)と**同じ3分岐**
+                だが、あちらは`Result`で即失敗する最小リゾルバなのに対しこちらは診断コード付きで
+                積んで継続する(milestone 29で決めたサブフォーク方針どおり、型「解決」の
+                レジストリ〈タグ計算込み〉は再利用し、診断「発行」だけ再実装):
+                (1) 無名`{...}`メンバーが2個以上 = F-7の判別可能union → **書かれたタグ値だけ**で
+                メンバーを特定(フィールド集合は見ない)。タグ欠落/非リテラル→
+                `discriminated-union-tag-missing`、一致するメンバー無し→
+                `discriminated-union-no-match`(有効なタグ値の一覧つき)。
+                (2) structメンバーが1個以下 → そのメンバー(非structのリテラルunionはTS版と
+                同じく無診断で素通り)。
+                (3) 名前付きstruct同士のunion → フィールド集合で候補を絞り、複数残ればフィールド値の
+                型で再度絞る(TS版と同じ2段階)。0個→`discriminated-union-no-match`(メンバーの形の
+                一覧つき)、2個以上→`discriminated-union-ambiguous`。
+              - 特定できたメンバーに対しては、milestone 29の既存のフィールド検証
+                (unknown-field/missing-fields/duplicate-field/type-mismatch)をそのまま流用。
+                ただし**診断に出す名前は絞り込んだメンバー(無名)ではなく書かれたunion名**にする
+                (TS版`displayName`と同じ)。
+              - **式全体の型はunion自身**(絞り込んだメンバーではない)——TS版と同じ設計で、
+                match/isで絞り込むまで常にunionとして扱う(mut再代入・wideningを新規に考えずに済む)。
+                これによりfull_checkerで初めてunion型が式の型として現れるようになったが、
+                union値への算術がTS版と同じく`invalid-operation`になることを確認済み
+                (milestone 25の演算子検査がそのまま正しく効く)。narrowingが未実装でも
+                誤検知しないのは、`match`/`is`式が引き続きANYで中へ踏み込まないため。
+              - 診断コード3種追加(discriminated-union-tag-missing / -no-match / -ambiguous)。
+              - 新規テスト8件。461→469件、全件パス。`cargo clippy --all-targets -- -D warnings`
+                クリーン。TS版と`mesh check`を突き合わせ、5パターン(タグ欠落・未知のタグ値・
+                絞り込み後のunknown/missing/type-mismatch)+名前付きstruct union 3パターン
+                (一意・曖昧・不一致)+error type union+コレクション/関数型フィールドを持つ
+                unionメンバーで、コード・メッセージ・位置まで完全一致を確認
+                (差分は未移植の`cannot-infer-type`のみ)。全single-file exampleで
+                full_checkerが無診断のまま回帰なし(discriminated_union/db_error/json系を含む)。
+              - **次段階**: pkg修飾struct/pkg修飾呼び出しの中身・not-a-struct/narrow-required・
+                cannot-infer-type・配列/map型のモデル化・`mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

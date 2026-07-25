@@ -914,10 +914,20 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      structになる)を本物のstructと見なして登録し、存在しないstructに同名メソッドを2つ書くと
      TS版には無い`duplicate-method`の誤検知が出ていた(milestone 30のガードが失われていた)。
      詳細はtodo.md参照
-   - 残る候補: **milestone 32以降でstruct卒業を継続**——判別可能union構築・pkg修飾struct/
+   - ✅ **milestone 32(2026-07-25)で判別可能unionの構築検証**。union名で書いたstructリテラル
+     (`Resp{kind: "ok", user: u}`)をfull_checkerが一切検証していなかった(structレジストリに
+     無い名前は全てANYで素通り)ため、新設`resolve_union_lit_member`でTS版structLitケースの
+     union分岐を移植——(1)無名メンバー2個以上の判別可能unionは**タグ値だけ**でメンバー特定
+     (`discriminated-union-tag-missing`/`-no-match`)、(2)structメンバー1個以下はそのメンバー、
+     (3)名前付きstruct同士のunionはフィールド集合→型の2段階で絞る(`-no-match`/`-ambiguous`)。
+     特定後のフィールド検証はmilestone 29の既存コードを流用し、**診断名はunion名**にする。
+     式全体の型はTS版と同じくunion自身(絞り込んだメンバーではない)——full_checkerで初めて
+     union型が式の型として現れるが、union値への算術がTS版と同じくinvalid-operationになる
+     ことを確認済み。診断コード3種追加、テスト461→469件。詳細はtodo.md参照
+   - 残る候補: **milestone 33以降でstruct卒業を継続**——pkg修飾struct/
      pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
-     `narrow-required`はunionがANYへ潰れる限り発火しない)・配列/map型のモデル化
-     (collection builtin要素型検査とセット)。
+     `narrow-required`はmatch/isが未実装でnarrowingが要らない間は発火しない)・
+     `cannot-infer-type`・配列/map型のモデル化(collection builtin要素型検査とセット)。
      その後: `mesh run`/`build`ゲート統合+RustCLI整備・generics推論(`generic-inference-failed`)・
      parser/lexerのDiagnosticCode統合。
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
@@ -925,8 +935,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        そのfn/constの引数照合が素通りする(milestone 30のcode review記録のうち唯一残った項目)、
        (2)型注釈の`unknown-type`が未移植のため、未知の型名のレシーバ(`fn (y: Bogus) f()`)は
        TS版の`unknown-type`+`invalid-receiver-type`のどちらも出ない、
-       (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)。
-       いずれも稀な入力で、struct卒業を進める中でまとめて対応する候補
+       (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)、
+       (4)`cannot-infer-type`(`s := Status{foo: 1}`のようにANYへ落ちた値の宣言。
+       milestone 32で確認)。いずれも稀な入力で、struct卒業を進める中でまとめて対応する候補
 
 **参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
 説明)・`src/checker/context.ts`(`CheckerCtx`の構造・診断のpush方式・スコープ管理・
