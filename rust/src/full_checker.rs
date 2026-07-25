@@ -36,7 +36,7 @@
 // フォールスルー。下記`check_if`)と`or`式の走査を追加した——これが無いと、unionを返すように
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
-// 残る縮退はunion型注釈・関数型のパラメータ・pkg修飾型・型パラメータ。
+// 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
 // pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・match式の中身・
 // `or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
@@ -430,10 +430,10 @@ fn is_fully_modeled(t: &Type) -> bool {
 }
 
 // structフィールドの型を読み取り側へ返す際、full_checkerが完全にはモデル化できない型
-// (map/chan/関数/union、および要素がそれらへ潰れる配列)はANYへ畳む——`u.rows`
-// (`map<..>[]`フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・literal・
-// **要素まで解決できる配列**(milestone 33)はそのまま返す(`u.cells[0]`のような
-// ネストしたアクセスに型が伝播する)
+// (関数型/union、およびそれらを内側に含むコレクション)はANYへ畳む——`u.cbs`
+// (`fn(..)[]`フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・literal・
+// **中身まで解決できるコレクション**(milestone 33で配列、milestone 34でmap/channel)は
+// そのまま返す(`u.cells[0]`や`u.counts["k"]`のようなネストしたアクセスに型が伝播する)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
 }
@@ -880,15 +880,11 @@ fn expect_arity(ctx: &mut FullCheckerCtx, name: &str, got: usize, want: usize, p
     true
 }
 
-// 「引数がANYでなければ builtin-arg-type を積む」——**まだモデル化していないコレクション**
-// (map/channel)を取る組み込み(delete/keys/values/close)の引数検査の縮退形。それらの型は
-// full_checkerではANYへ潰れるので、TS版の`m.kind === "map"`ガードは「ANYなら素通り」に
-// 縮退する。実際のmap/channelを渡す典型ケースは無診断、スカラーを誤って渡した場合だけ
-// 発火する(TS版と一致)。**配列はmilestone 33でモデル化したので`require_array`を使う**。
-// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——関数値を
-// コレクション組み込みへ渡すと`... requires a map, got fn(...)`が出る(TS版と一致)
 // milestone 34: mapを要求する組み込み(keys/values/delete)の共通処理。mapならキー/値の型を
-// 返し、ANYなら黙って`None`、それ以外は`builtin-arg-type`(配列の`require_array`と同じ形)
+// 返し(呼び出し側がキー型の検査や戻り値型に使う)、ANY(未対応の型・エラー回復)なら
+// 黙って`None`、それ以外はTS版と同じ`builtin-arg-type`——配列の`require_array`と同じ形。
+// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡されるので、関数値を
+// コレクション組み込みへ渡すと`... requires a map, got fn(...)`が出る(TS版と一致)
 fn require_map(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) -> Option<(Type, Type)> {
     match arg_ty {
         Type::Map { key, value } => Some(((**key).clone(), (**value).clone())),
