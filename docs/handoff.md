@@ -941,10 +941,18 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      テスト470→485件。**map/channelは引き続きANY**(次段階)。**code reviewで3件修正**
      (intのrangeで余分な名前を宣言→undefined-name見落とし/`cannot-infer-type`の抑止が
      名前単位で誤検知/配列要素代入の診断位置)。詳細はtodo.md参照
-   - 残る候補: **milestone 34以降**——map/channelのモデル化(`map key must be K`・
-     `compound-assign-on-map`・`not-a-channel`等。配列と同じ手順)・pkg修飾struct/
-     pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
-     `narrow-required`はmatch/isが未実装でnarrowingが要らない間は発火しない)。
+   - ✅ **milestone 34(2026-07-25)でmap/channelのモデル化+`is`によるnarrowing**
+     (コレクション卒業の完了)。mapリテラル/読み書き(`V | none`)/compound-assign-on-map/
+     keys/values/delete、channel生成/送受信(`T | closed`)/close/not-a-channel、range-forの
+     map対応を実装。**本題になったのはnarrowing**——unionを返す読みを入れた結果、
+     `if v is closed { break }`の後で誤検知が出るようになり、codegen側milestone 7と同じ設計で
+     `check_if`にthen/else/フォールスルーの絞り込みを実装した(型解決は`checker::narrow_for_is`を
+     再利用)。あわせて`or`式の走査も追加(mapの読みはほぼ必ず`or`と組で使われるため)。
+     診断コード2種追加、テスト485→493件。詳細はtodo.md参照
+   - 残る候補: **milestone 35以降**——pkg修飾struct/pkg修飾呼び出しの中身・
+     非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
+     値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・
+     `or`の4診断・match/selectの中身の走査。
      その後: `mesh run`/`build`ゲート統合+RustCLI整備・generics推論(`generic-inference-failed`)・
      parser/lexerのDiagnosticCode統合。
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→

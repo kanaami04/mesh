@@ -2902,6 +2902,48 @@
               - **次段階**: map/channelのモデル化(`map key must be K`・`compound-assign-on-map`・
                 `not-a-channel`等)・pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
                 `mesh run`/`build`へのゲート統合。
+        - [x] **milestone 34: map/channelのモデル化 + `is`によるnarrowing(コレクション卒業の完了)**
+              ✅ 2026-07-25実装。milestone 33(配列)の続きで、**残るコレクション(map/channel)も
+              ANY縮退から卒業**させた。TS版が出す診断はmapで10件・channelで5件あるのに対し、
+              着手前のRust版はそれぞれ0件・1件だった。
+              - `resolve_type_ann`に`MapType`/`Chan`アームを追加(再帰解決)、`is_fully_modeled`も
+                map(key/value)・chan(elem)へ再帰するよう拡張。**これでコレクションはひととおり
+                モデル化でき**、残る縮退はunion型注釈・関数型・pkg修飾型・型パラメータのみ。
+              - **map**: mapリテラルのキー/値検査、添字読み(`map key must be K`+`V | none`)、
+                添字への代入(**代入先は`V`**——読みの`V | none`ではない)、複合代入の禁止
+                (`compound-assign-on-map`)、range-forの(K, V)宣言+`range over a map`のarity、
+                `keys`/`values`の戻り値型(`K[]`/`V[]`)、`delete`のキー型、`len`のmap許可。
+              - **channel**: `chan<T>(n)`の容量検査(int or none)、送信の要素型
+                (`cannot send X to chan<Y>`)、受信の`T | closed`、`not-a-channel`(送信/受信)、
+                `close`のchannel検査、`len(chan)`と`range chan`の拒否。
+              - **`is`によるnarrowingを新規実装**(これがこのmilestoneの本題になった): map読みが
+                `V | none`、受信が`T | closed`を返すようになった結果、**narrowingが無いと
+                `if v is closed { break }` の後の `total + v` が誤って`invalid-operation`に
+                なる**という誤検知が既存example 2本(channel_spec/defer)で発生した。
+                codegen側milestone 7と同じ設計で`check_if`に導入——条件が`ident is T`のとき
+                then/else節で絞り込み、else節が無くthen節が必ず終端する場合は後続へ
+                「残り」の型を引き継ぐ(フォールスルー)。型「解決」層は既存の
+                `checker::narrow_for_is`を再利用し、`FullCheckerCtx::narrow`(declareの
+                予約語/重複/シャドーイング検査を通さない上書き)を追加した。
+              - **`or`式の走査も追加**: mapの読みはほぼ必ず`or`と組で使われるため、
+                中へ踏み込まないと添字のキー型検査がまるごと素通りしていた。両辺を推論し
+                (束縛形`or e => ...`のeも宣言)、式の型は失敗メンバーを除いた成功側を返す。
+                **TS版の`or`4診断**(or-never-fails/or-requires-binding/or-fallback-type-mismatch/
+                or-no-success-value)は別カテゴリとして次段階。
+              - 診断コード2種追加(not-a-channel / compound-assign-on-map)。
+              - 新規テスト8件。485→493件、全件パス。`cargo clippy --all-targets -- -D warnings`
+                クリーン。TS版と`mesh check`を突き合わせ、mapプローブ・channelプローブ・
+                エラー9件のプローブ(not-a-channel×2・容量・delete・narrow後の算術・range arity・
+                not-rangeable・keys・len)で完全一致、**誤検知プローブ**(structフィールドのmap/chan・
+                入れ子map・`map<K, V[]>`・or束縛・spawn/select・`is none`/`is closed`のelse付き)でも
+                両方無診断を確認。全single-file exampleでfull_checker無診断のまま回帰なし。
+              - **既知の限界**: 値位置の`void-used-as-value`(TS版`checkExprSingle`が全ての値位置で
+                行う検査。`print(delete(m, k))`等を見逃す)は未移植——milestone 22以来の一般的な
+                穴で、map/channel固有ではないため別途対応する。`match`式の中身・`select`アームの
+                中身も引き続き未走査(narrowingは`is`のみ)。
+              - **次段階**: pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
+                値位置のvoid-used-as-value・`or`の4診断・match/selectの中身・
+                `mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)

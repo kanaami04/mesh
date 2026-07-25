@@ -30,8 +30,15 @@
 // 配列リテラル・添字・要素代入・range-for・配列を取る組み込み(要素型/コールバック署名/
 // 戻り値型)を検査する(下記`resolve_type_ann`のArrayアーム・`is_fully_modeled`・
 // `require_array`参照)。
-// **map/channelは引き続きANY**(次段階)。pkg修飾struct・非structへのメンバーアクセス
-// (not-a-struct)・run/buildへのゲート統合も引き続き対象外
+// **milestone 34でmap/channelもモデル化**——mapリテラル/読み書き(`V | none`)/
+// compound-assign-on-map/keys/values/delete、channel生成/送受信(`T | closed`)/close/
+// not-a-channel、range-forのmap対応。あわせて**`is`によるnarrowing**(if文のthen/else/
+// フォールスルー。下記`check_if`)と`or`式の走査を追加した——これが無いと、unionを返すように
+// なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
+// **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
+// 残る縮退はunion型注釈・関数型のパラメータ・pkg修飾型・型パラメータ。
+// pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・match式の中身・
+// `or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は引き続き対象外
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -126,11 +133,21 @@ impl FullCheckerCtx {
         }
         self.scopes.last_mut().expect("scopes is never empty").insert(name.to_string(), Binding { ty, mutable });
     }
+
+    // milestone 34: 絞り込み(narrowing)用に、既存の束縛を**同じ可変性のまま**現在のスコープへ
+    // 上書き登録する。`declare`と違い予約語/重複/シャドーイングの検査は通さない——これは
+    // 新しい宣言ではなく「同じ変数について今わかっている型」を差し替える操作なので、
+    // 検査を通すと`shadowing`の誤検知になる(codegen側milestone 7のnarrowingと同じ考え方)
+    fn narrow(&mut self, name: &str, ty: Type) {
+        let mutable = self.lookup(name).map(|b| b.mutable).unwrap_or(false);
+        self.scopes.last_mut().expect("scopes is never empty").insert(name.to_string(), Binding { ty, mutable });
+    }
 }
 
 // 型注釈を解決する。スカラー(int/float/...)+ milestone 29から**名前付きstruct**
 // (type_ctxのレジストリ経由)を解決する。**配列/map/channel/union/関数型/pkg修飾型は
-// 引き続きANY**(milestone 33で**配列だけ**この縮退から卒業した——下記Arrayアーム)。
+// 引き続きANY**(milestone 33で配列、milestone 34でmap/channelがこの縮退から卒業した
+// ——下記Array/MapType/Chanアーム。残るのはunion/関数型/pkg修飾型/型パラメータ)。
 // 縮退させた型はレジストリ側の完全解決された型と突き合わせてはいけない(`is_fully_modeled`
 // 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
@@ -149,11 +166,13 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
                 _ => ANY,
             },
         },
-        // milestone 33: 配列だけコレクションのANY縮退から卒業させる(map/channelは次段階)。
-        // 要素型は再帰的に解決する——要素がmap等でANYへ潰れた場合は`Type::Array(ANY)`に
-        // なるが、その「中にANYを含む型」はレジストリ側の完全解決された型と突き合わせては
-        // いけない(下記`is_fully_modeled`が弾く)
+        // milestone 33で配列、**milestone 34でmap/channel**をANY縮退から卒業させた。
+        // 要素/キー/値の型は再帰的に解決する——中身がunion等でANYへ潰れた場合
+        // (`map<string, int|none>`等)は「中にANYを含む型」になるので、レジストリ側の
+        // 完全解決された型と突き合わせてはいけない(下記`is_fully_modeled`が弾く)
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_ann(tc, elem))),
+        TypeNode::MapType { key, value, .. } => Type::Map { key: Box::new(resolve_type_ann(tc, key)), value: Box::new(resolve_type_ann(tc, value)) },
+        TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_ann(tc, elem))),
         _ => ANY,
     }
 }
@@ -305,35 +324,85 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 33: 添字アクセス(`xs[0]` / `s[0]`)。TS版`expressions.ts`のindexケースの
         // 移植。mapはまだ未モデル化(型注釈もリテラルもANY)なのでmap分岐には到達せず、
         // ANYコンテナとして黙って素通りする(map対応は次段階)
-        Expr::Index { target, index, pos } => {
-            let tgt = infer_expr(ctx, target);
-            let idx = infer_expr(ctx, index);
-            // 添字の型検査は**コンテナが配列/文字列と分かっている場合だけ**行う。
-            // TS版はmapを先に分岐して`map key must be K`を出すが、full_checkerではmapが
-            // まだANYへ潰れるため、ANYコンテナで添字を検査するとmapの文字列キーを
-            // `invalid-index-type`と誤検知してしまう(実装中にexamplesで検出)
-            let container_known = matches!(tgt, Type::Array(_)) || types::is_stringy(&tgt);
-            if container_known && !matches!(idx, Type::Any) && (!types::is_numeric(&idx) || types::type_equals(&idx, &FLOAT)) {
-                ctx.error(index.pos(), DiagnosticCode::InvalidIndexType, format!("index must be int, got {}", types::type_to_string(&idx)));
+        Expr::Index { target, index, pos } => infer_index(ctx, target, index, *pos).read,
+        // milestone 34: mapリテラル(`map<string, int>{"a": 1}`)。キー/値の型は注釈から
+        // 解決し、各エントリを照合する(TS版`expressions.ts`のmapLitケース)
+        Expr::MapLit { key, value, entries, .. } => {
+            let key_ty = resolve_type_ann(&ctx.type_ctx, key);
+            let value_ty = resolve_type_ann(&ctx.type_ctx, value);
+            for e in entries {
+                let kt = infer_expr(ctx, &e.key);
+                let vt = infer_expr(ctx, &e.value);
+                if is_fully_modeled(&key_ty) && !types::assignable(&kt, &key_ty) {
+                    ctx.error(e.key.pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", types::type_to_string(&key_ty), types::type_to_string(&kt)));
+                }
+                if is_fully_modeled(&value_ty) && !types::assignable(&vt, &value_ty) {
+                    ctx.error(e.value.pos(), DiagnosticCode::TypeMismatch, format!("map value must be {}, got {}", types::type_to_string(&value_ty), types::type_to_string(&vt)));
+                }
             }
-            match &tgt {
-                Type::Array(elem) => (**elem).clone(),
-                t if types::is_stringy(t) => STRING,
+            Type::Map { key: Box::new(key_ty), value: Box::new(value_ty) }
+        }
+        // milestone 34: channel生成(`chan<int>(2)` / `chan<int>(none)`)。F-11: capacityは
+        // 常に必須で、`none`以外はintでなければならない
+        Expr::Chan { elem, capacity, .. } => {
+            if !matches!(**capacity, Expr::None { .. }) {
+                let cap = infer_expr(ctx, capacity);
+                if !types::type_equals(&cap, &INT) && !matches!(cap, Type::Any) {
+                    ctx.error(capacity.pos(), DiagnosticCode::TypeMismatch, format!("channel capacity must be int or none, got {}", types::type_to_string(&cap)));
+                }
+            }
+            Type::Chan(Box::new(resolve_type_ann(&ctx.type_ctx, elem)))
+        }
+        // milestone 34: 受信(`<-ch`)は常に`T | closed`(mapの`V | none`と同じ理由——
+        // closeされうることを型で強制する)
+        Expr::Recv { channel, pos } => {
+            let ch = infer_expr(ctx, channel);
+            match &ch {
+                Type::Chan(elem) => types::union_of(vec![(**elem).clone(), types::CLOSED]),
                 Type::Any => ANY,
                 other => {
-                    ctx.error(*pos, DiagnosticCode::NotIndexable, format!("cannot index into {}", types::type_to_string(other)));
+                    ctx.error(*pos, DiagnosticCode::NotAChannel, format!("cannot receive from non-channel type {}", types::type_to_string(other)));
                     ANY
                 }
             }
         }
-        // map/channel/match/is/spawn/select/prop/orElse/無名関数など:
+        // milestone 34: `x is T`はbool。値の型は変えないが、if文の条件に使われたときは
+        // `check_if`が絞り込みに使う(下記`narrow_binding_for_is`)
+        Expr::Is { operand, .. } => {
+            infer_expr(ctx, operand);
+            BOOL
+        }
+        // milestone 34: `or`式(`m["k"] or 0`)。map読みが`V | none`を返すようになり、
+        // mapは**ほぼ必ず`or`と組で使われる**ため、中へ踏み込まないと添字のキー型検査が
+        // まるごと素通りしてしまう(実装中にプローブで検出)。
+        // **診断はまだ出さない**——`or-never-fails`/`or-requires-binding`/
+        // `or-fallback-type-mismatch`/`or-no-success-value`のTS版4診断は別カテゴリの
+        // 移植として次段階に回し、ここでは「両辺を推論して型を伝播させる」ことだけ行う。
+        // 式の型は失敗メンバーを除いた「成功側」(TS版の`rest`)——`age := m["a"] or 0`が
+        // intになり、後続の検査が効くようになる
+        Expr::OrElse { left, right, binding, pos } => {
+            let left_ty = infer_expr(ctx, left);
+            // 束縛形(`or e => ...`)は失敗値をeに束縛して右辺を評価する。宣言しないと
+            // 右辺のeがundefined-nameの誤検知になる
+            ctx.push_scope();
+            if let Some(name) = binding
+                && name != "_"
+            {
+                ctx.declare(name, crate::checker::or_binding_type(&left_ty), *pos, false);
+            }
+            infer_expr(ctx, right);
+            ctx.pop_scope();
+            success_type_of(&left_ty)
+        }
+        // match/spawn/select/prop/無名関数など:
         // まだ対象外なので中へは踏み込まない
         _ => ANY,
     }
 }
 
 // struct-litのフィールド値の型検査を行ってよい宣言型か。full_checkerが縮退させる型
-// (配列/map/channel/関数型/union/型パラメータ——resolve_type_annがANY相当にする)は、
+// (union/関数型/pkg修飾型/型パラメータ、およびそれらを内側に含むコレクション
+// ——resolve_type_annがANY相当にする)は、
 // レジストリ側(checker.rsが完全解決)の型と突き合わせると誤検知するので検査しない。
 // スカラー・struct・literal・none/closed等はfull_checker側の値の型が信頼できるので検査する
 fn is_checkable_field_type(t: &Type) -> bool {
@@ -349,10 +418,13 @@ fn is_checkable_field_type(t: &Type) -> bool {
 fn is_fully_modeled(t: &Type) -> bool {
     match t {
         Type::Any => false,
-        // まだモデル化していない型(map/channel/関数/union/型パラメータ)。resolve_type_annは
+        // まだモデル化していない型(関数/union/型パラメータ)。resolve_type_annは
         // これらをANYへ縮退させるので、レジストリ側の型と突き合わせられない
-        Type::Chan(_) | Type::Map { .. } | Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_) => false,
-        Type::Array(elem) => is_fully_modeled(elem),
+        Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_) => false,
+        // コレクションは中身まで解決できていれば突き合わせてよい(milestone 33: 配列、
+        // milestone 34: map/channel)
+        Type::Array(elem) | Type::Chan(elem) => is_fully_modeled(elem),
+        Type::Map { key, value } => is_fully_modeled(key) && is_fully_modeled(value),
         _ => true,
     }
 }
@@ -364,6 +436,58 @@ fn is_fully_modeled(t: &Type) -> bool {
 // ネストしたアクセスに型が伝播する)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
+}
+
+// `or`式の結果型(TS版`expressions.ts`の`rest` = 失敗メンバーを除いたunion)。
+// unionでなければそのまま(TS版はその場合`or-never-fails`を報告するが、その診断は次段階)
+fn success_type_of(t: &Type) -> Type {
+    let Type::Union { body } = t else { return t.clone() };
+    let Some(ub) = body.get() else { return ANY };
+    let rest: Vec<Type> = ub.members.iter().filter(|m| !crate::checker::is_failure_type(m)).cloned().collect();
+    if rest.is_empty() { ANY } else { types::union_of(rest) }
+}
+
+// 添字アクセス(`xs[0]` / `m["k"]`)の解決結果。`read`は式としての型(mapは`V | none`)、
+// `write`は代入先としての型(mapは`V`——TS版`statements.ts`が
+// `container?.kind === "map"`のとき`expected`を`container.value`へ差し替えるのと同じ)。
+// `container`はコンテナ自体の型(代入側がmapかどうかの判定に使う)
+struct IndexInfo {
+    read: Type,
+    write: Type,
+    container: Type,
+}
+
+// 添字アクセスの型解決(milestone 33で配列、milestone 34でmap)。TS版`expressions.ts`の
+// indexケースの移植。**targetとindexはここで一度だけ評価する**——読み取りと代入で
+// 同じ経路を通し、二重評価(undefined-nameが2回出る等)を避けるため
+fn infer_index(ctx: &mut FullCheckerCtx, target: &Expr, index: &Expr, pos: Pos) -> IndexInfo {
+    let tgt = infer_expr(ctx, target);
+    let idx = infer_expr(ctx, index);
+    // mapを先に分岐する(TS版と同じ順序)。読み取りは常に`V | none`——無いキーを
+    // 無視できないというunion路線の帰結
+    if let Type::Map { key, value } = &tgt {
+        if is_fully_modeled(key) && !types::assignable(&idx, key) {
+            ctx.error(index.pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", types::type_to_string(key), types::type_to_string(&idx)));
+        }
+        let value = (**value).clone();
+        return IndexInfo { read: types::union_of(vec![value.clone(), NONE]), write: value, container: tgt };
+    }
+    // 添字の型検査は**コンテナが配列/文字列と分かっている場合だけ**行う
+    // (ANYコンテナ——未対応の型やエラー回復——では検査しない)
+    let container_known = matches!(tgt, Type::Array(_)) || types::is_stringy(&tgt);
+    if container_known && !matches!(idx, Type::Any) && (!types::is_numeric(&idx) || types::type_equals(&idx, &FLOAT)) {
+        ctx.error(index.pos(), DiagnosticCode::InvalidIndexType, format!("index must be int, got {}", types::type_to_string(&idx)));
+    }
+    let elem = match &tgt {
+        Type::Array(elem) => (**elem).clone(),
+        t if types::is_stringy(t) => STRING,
+        Type::Any => ANY,
+        other => {
+            ctx.error(pos, DiagnosticCode::NotIndexable, format!("cannot index into {}", types::type_to_string(other)));
+            ANY
+        }
+    };
+    IndexInfo { read: elem.clone(), write: elem, container: tgt }
 }
 
 // 推論済みの引数型をパラメータ型と照合する共通部分(TS版`calls.ts`の`checkArgsAgainst`)。
@@ -457,7 +581,7 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
             Some(decl) => {
                 // フィールド値の型検査は、full_checkerが値側の型を確実にモデル化できる型
                 // (スカラー・struct・literal等)のフィールドだけを対象にする。宣言側の型が
-                // 配列/map/channel/関数型/union(レジストリではchecker.rsが完全解決する)の
+                // 関数型/union等(レジストリではchecker.rsが完全解決する)の
                 // フィールドは、full_checker側の値の型がANYや縮退したType::Fn(fn_signatureは
                 // パラメータをANYにする)になり、完全解決された宣言型と突き合わせると誤検知する
                 // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
@@ -562,7 +686,8 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
         .copied()
         .collect();
     // 候補が複数ならフィールド値の型でさらに絞る(TS版の2段目)。ただし**縮退する型
-    // (配列/map/chan/fn/union)の宣言フィールドは絞り込みの材料にしない**——full_checker側の
+    // (fn/union、およびそれらを内側に含むコレクション)の宣言フィールドは絞り込みの材料に
+    // しない**——full_checker側の
     // 値の型はANY等へ潰れており、完全解決された宣言型と突き合わせると必ず不一致になるため、
     // そのまま使うと候補を誤って全滅させてしまう(code reviewで発覚・両CLIで再現確認:
     // `type AB = A | B`の両メンバーが`cb: fn(int[]) int`を持つとき、TS版の
@@ -762,9 +887,16 @@ fn expect_arity(ctx: &mut FullCheckerCtx, name: &str, got: usize, want: usize, p
 // 発火する(TS版と一致)。**配列はmilestone 33でモデル化したので`require_array`を使う**。
 // **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——関数値を
 // コレクション組み込みへ渡すと`... requires a map, got fn(...)`が出る(TS版と一致)
-fn require_kind(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) {
-    if !matches!(arg_ty, Type::Any) {
-        ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
+// milestone 34: mapを要求する組み込み(keys/values/delete)の共通処理。mapならキー/値の型を
+// 返し、ANYなら黙って`None`、それ以外は`builtin-arg-type`(配列の`require_array`と同じ形)
+fn require_map(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) -> Option<(Type, Type)> {
+    match arg_ty {
+        Type::Map { key, value } => Some(((**key).clone(), (**value).clone())),
+        Type::Any => None,
+        _ => {
+            ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
+            None
+        }
     }
 }
 
@@ -792,9 +924,9 @@ fn require_array(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: Str
 // `get`のinvalid-index-type、`sort`/`join`の要素型)と**高階組み込みのcallback署名検査**
 // (`filter`/`map`/`reduce`のcallback-signature-mismatch)——milestone 33で配列をモデル化する
 // までは「コレクションは常にANY」で到達しなかった経路(下記`require_array`参照)。
-// **まだ縮退している型**: map/channel。これらを引数に取る組み込み(delete/keys/values/close)は
-// 引き続き`require_kind`(ANYなら素通り)で、戻り値も要素型不明のまま
-// (`keys`/`values`は`any[]`)——map/channelのモデル化は次のmilestone。
+// milestone 34でmapを取る組み込み(keys/values/delete)も同じ形にした(`require_map`)。
+// milestone 34以降、map/channelもモデル化されているので`keys`/`values`は`K[]`/`V[]`を返し、
+// `delete`はキー型を、`close`はchannelであることを検査する。
 // **関数型はANYではなくType::Fnとして追跡される**ので、コレクション組み込みへ関数値を
 // 渡すと`push() requires an array, got fn(...)`が正しく出る(TS版と一致)。
 fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
@@ -812,7 +944,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             // milestone 33: 配列がモデル化されたので明示的に許す(map/channelは引き続きANY)
             if expect_arity(ctx, name, n, 1, pos)
                 && !types::is_stringy(&at[0])
-                && !matches!(at[0], Type::Any | Type::Array(_))
+                && !matches!(at[0], Type::Any | Type::Array(_) | Type::Map { .. })
             {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("len() requires string, array or map, got {}", ts(&at[0])));
             }
@@ -835,8 +967,12 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             ERROR
         }
         "delete" => {
-            if expect_arity(ctx, name, n, 2, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("delete() requires a map, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 2, pos)
+                && let Some((key, _)) = require_map(ctx, &at[0], args[0].pos(), format!("delete() requires a map, got {}", ts(&at[0])))
+                && is_fully_modeled(&key)
+                && !types::assignable(&at[1], &key)
+            {
+                ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", ts(&key), ts(&at[1])));
             }
             VOID
         }
@@ -879,16 +1015,20 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             ANY
         }
         "keys" => {
-            if expect_arity(ctx, name, n, 1, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("keys() requires a map, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 1, pos)
+                && let Some((key, _)) = require_map(ctx, &at[0], args[0].pos(), format!("keys() requires a map, got {}", ts(&at[0])))
+            {
+                return Type::Array(Box::new(key));
             }
-            Type::Array(Box::new(ANY)) // 本来 []K(mapのモデル化は次段階)
+            Type::Array(Box::new(ANY))
         }
         "values" => {
-            if expect_arity(ctx, name, n, 1, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("values() requires a map, got {}", ts(&at[0])));
+            if expect_arity(ctx, name, n, 1, pos)
+                && let Some((_, value)) = require_map(ctx, &at[0], args[0].pos(), format!("values() requires a map, got {}", ts(&at[0])))
+            {
+                return Type::Array(Box::new(value));
             }
-            Type::Array(Box::new(ANY)) // 本来 []V(mapのモデル化は次段階)
+            Type::Array(Box::new(ANY))
         }
         "sort" => {
             if expect_arity(ctx, name, n, 1, pos)
@@ -960,8 +1100,9 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             INT
         }
         "close" => {
-            if expect_arity(ctx, name, n, 1, pos) {
-                require_kind(ctx, &at[0], args[0].pos(), format!("close() requires a channel, got {}", ts(&at[0])));
+            // milestone 34: channelがモデル化されたので明示的に許す
+            if expect_arity(ctx, name, n, 1, pos) && !matches!(at[0], Type::Any | Type::Chan(_)) {
+                ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("close() requires a channel, got {}", ts(&at[0])));
             }
             VOID
         }
@@ -1108,10 +1249,10 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
             ctx.declare(name, declared, *pos, *mutable);
         }
-        Stmt::Assign { targets, values, pos, .. } => {
+        Stmt::Assign { targets, values, compound_op, pos } => {
             for (target, value) in targets.iter().zip(values.iter()) {
                 let value_ty = infer_expr(ctx, value);
-                check_assign_target(ctx, target, &value_ty, *pos);
+                check_assign_target(ctx, target, &value_ty, *pos, compound_op.is_some());
             }
         }
         Stmt::IncDec { target, op, pos } => {
@@ -1192,6 +1333,14 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                     ctx.declare(names.first().map(String::as_str).unwrap_or("_"), INT, *pos, false);
                     ctx.declare(names.get(1).map(String::as_str).unwrap_or("_"), elem, *pos, false);
                 }
+                Type::Map { key, value } => {
+                    if names.len() != 2 {
+                        ctx.error(*pos, DiagnosticCode::RangeArity, "range over a map needs two names: 'for a, b := range ...' (use _ to ignore one)");
+                    }
+                    let (k, v) = ((**key).clone(), (**value).clone());
+                    ctx.declare(names.first().map(String::as_str).unwrap_or("_"), k, *pos, false);
+                    ctx.declare(names.get(1).map(String::as_str).unwrap_or("_"), v, *pos, false);
+                }
                 t if types::type_equals(t, &INT) => {
                     if names.len() != 1 {
                         ctx.error(*pos, DiagnosticCode::RangeArity, "range over an int takes exactly one name: 'for i := range n'");
@@ -1221,9 +1370,19 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Wait { body, .. } => check_block(ctx, body),
-        Stmt::Send { channel, value, .. } => {
-            infer_expr(ctx, channel);
-            infer_expr(ctx, value);
+        Stmt::Send { channel, value, pos } => {
+            // milestone 34: `ch <- v`の要素型検査(TS版`statements.ts`のsendケース)
+            let ch = infer_expr(ctx, channel);
+            let v = infer_expr(ctx, value);
+            match &ch {
+                Type::Chan(elem) => {
+                    if is_fully_modeled(elem) && !types::assignable(&v, elem) {
+                        ctx.error(*pos, DiagnosticCode::TypeMismatch, format!("cannot send {} to {}", types::type_to_string(&v), types::type_to_string(&ch)));
+                    }
+                }
+                Type::Any => {}
+                other => ctx.error(channel.pos(), DiagnosticCode::NotAChannel, format!("cannot send to non-channel type {}", types::type_to_string(other))),
+            }
         }
         Stmt::DeferStmt { call, .. } => {
             infer_expr(ctx, call);
@@ -1231,16 +1390,27 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     }
 }
 
-fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos) {
-    // milestone 33: 配列要素への代入(`xs[0] = v`)は、添字読みと同じ経路で要素型を得て
-    // 値を照合する(TS版`statements.ts`のassignケース——targetの型をcheckExprで求め、
-    // それをexpectedとして使う)。mapはまだ未モデル化でANYになるため素通りする。
+fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos, compound: bool) {
+    // milestone 33/34: 配列要素・mapエントリへの代入(`xs[0] = v` / `m["k"] = v`)は、
+    // 添字読みと同じ経路(`infer_index`)で型を得て値を照合する(TS版`statements.ts`の
+    // assignケース)。**mapの代入先の型は読みの`V | none`ではなく`V`**。
     // **位置は代入文自身**(TS版は`stmt.pos`で報告する)——targetの位置を使うと
     // `a, xs[0] = 2, "no"`のような複数代入でTS版と列がずれる(code reviewで発覚)
-    if matches!(target, Expr::Index { .. }) {
-        let elem_ty = infer_expr(ctx, target);
-        if is_fully_modeled(&elem_ty) && !types::assignable(value_ty, &elem_ty) {
-            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&elem_ty)));
+    if let Expr::Index { target: container, index, pos } = target {
+        let info = infer_index(ctx, container, index, *pos);
+        // milestone 34: mapへの複合代入(`m[k] += 1`)は禁止——キーが存在しないかもしれず
+        // (読みは常に`V | none`)、「現在値 op 右辺」を無条件に計算すると欠損キーが
+        // 黙って壊れた値になるため(TS版`compound-assign-on-map`)
+        if compound && matches!(info.container, Type::Map { .. }) {
+            ctx.error(
+                stmt_pos,
+                DiagnosticCode::CompoundAssignOnMap,
+                "cannot use '+=' on a map entry — the key may not exist yet; write 'm[k] = (m[k] or fallback) + value' instead",
+            );
+            return;
+        }
+        if is_fully_modeled(&info.write) && !types::assignable(value_ty, &info.write) {
+            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&info.write)));
         }
         return;
     }
@@ -1283,14 +1453,68 @@ fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
     }
 }
 
+// milestone 34: `if v is closed { ... }`の絞り込み。条件が「裸の識別子 is T」の形のときだけ
+// 対応する(TS版のnarrowingは任意のstable pathを追うが、full_checkerでは実際のexampleが
+// 使う形——`<-ch`やmap読みをローカル変数へ束縛してからisで振り分ける——をカバーすれば足りる)。
+// 型「解決」層は既存の`checker::narrow_for_is`(codegen側milestone 7の資産)を再利用する。
+// **channel/mapのモデル化とセットで必要になった**——recvが`T | closed`、map読みが`V | none`を
+// 返すようになったため、絞り込みが無いと`if v is closed { break }`の後で`total + v`が
+// 誤って`invalid-operation`になる(実装中にexamplesで検出)
 fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
     infer_expr(ctx, &if_stmt.cond);
-    check_block(ctx, &if_stmt.then);
-    match if_stmt.else_.as_deref() {
-        Some(ElseClause::If(nested)) => check_if(ctx, nested),
-        Some(ElseClause::Block(b)) => check_block(ctx, b),
-        None => {}
+    // 条件が `ident is T` なら then/else 側の型を計算しておく
+    let narrowing = match &if_stmt.cond {
+        Expr::Is { operand, target, .. } => match &**operand {
+            Expr::Ident { name, .. } => ctx.lookup(name).map(|b| {
+                let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &b.ty, target);
+                (name.clone(), then_ty, else_ty)
+            }),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    ctx.push_scope();
+    if let Some((name, then_ty, _)) = &narrowing {
+        ctx.narrow(name, then_ty.clone());
     }
+    check_block(ctx, &if_stmt.then);
+    ctx.pop_scope();
+
+    match if_stmt.else_.as_deref() {
+        Some(ElseClause::If(nested)) => {
+            ctx.push_scope();
+            if let Some((name, _, else_ty)) = &narrowing {
+                ctx.narrow(name, else_ty.clone());
+            }
+            check_if(ctx, nested);
+            ctx.pop_scope();
+        }
+        Some(ElseClause::Block(b)) => {
+            ctx.push_scope();
+            if let Some((name, _, else_ty)) = &narrowing {
+                ctx.narrow(name, else_ty.clone());
+            }
+            check_block(ctx, b);
+            ctx.pop_scope();
+        }
+        // else節が無く、then節が必ず終端する(return/break/continue)なら、**後続の同じ
+        // ブロック**は絞り込んだ「残り」の型で読める(codegen側`gen_if`と同じフォールスルー
+        // 処理)。`if v is closed { break }` の直後に v を int として使う形がこれ
+        None => {
+            if let Some((name, _, else_ty)) = &narrowing
+                && block_always_terminates(&if_stmt.then)
+            {
+                ctx.narrow(&name.clone(), else_ty.clone());
+            }
+        }
+    }
+}
+
+// ブロックが必ず終端する(return/break/continueで終わる)かの単純判定。codegen.rsの
+// 同名関数と同じ単純化(最後の文だけを見る)——実際のexampleはこの形で足りる
+fn block_always_terminates(block: &Block) -> bool {
+    matches!(block.stmts.last(), Some(Stmt::Return { .. }) | Some(Stmt::Break { .. }) | Some(Stmt::Continue { .. }))
 }
 
 // 関数のシグネチャ型(Type::Fn)。milestone 26でcheck_programがトップレベル関数を
@@ -2581,6 +2805,125 @@ mod tests {
         // `map<string,int>[]`は要素がANYへ潰れるので、レジストリ側の完全解決された型と
         // 突き合わせると誤検知する——is_fully_modeledで再帰的に判定してスキップする
         let src = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
+        assert_eq!(check(src), vec![]);
+    }
+
+    // ---- milestone 34: map/channelのモデル化 + isによる絞り込み ----
+
+    #[test]
+    fn mapリテラルのキーと値の型を検査する() {
+        let diags = check("fn main() {\n    m := map<string, int>{\"a\": \"x\", 4: 5}\n    print(m)\n}\n");
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].message, "map value must be int, got \"x\"");
+        assert_eq!(diags[1].message, "map key must be string, got int");
+    }
+
+    #[test]
+    fn map読みはキー型を検査し成功側とnoneのunionを返す() {
+        let bad_key = check("fn main() {\n    m := map<string, int>{}\n    print(m[7] or 0)\n}\n");
+        assert_eq!(bad_key.len(), 1);
+        assert_eq!(bad_key[0].message, "map key must be string, got int");
+
+        // 読みは`V | none`——そのまま算術に使うとinvalid-operation(TS版と同じ)
+        let unnarrowed = check("fn main() {\n    m := map<string, int>{}\n    x := m[\"a\"]\n    print(x + 1)\n}\n");
+        assert_eq!(unnarrowed.len(), 1);
+        assert_eq!(unnarrowed[0].code, DiagnosticCode::InvalidOperation);
+
+        // `or`で成功側だけ取り出せば通る(orは両辺を推論しつつ成功側の型を返す)
+        assert_eq!(check("fn main() {\n    m := map<string, int>{}\n    x := m[\"a\"] or 0\n    print(x + 1)\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn mapへの代入と複合代入を検査する() {
+        // 代入先の型は読みの`V | none`ではなく`V`
+        let assign = check("fn main() {\n    mut m := map<string, int>{}\n    m[\"a\"] = \"no\"\n}\n");
+        assert_eq!(assign.len(), 1);
+        assert_eq!(assign[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(assign[0].message, "cannot assign \"no\" to int");
+
+        let compound = check("fn main() {\n    mut m := map<string, int>{}\n    m[\"a\"] += 1\n}\n");
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].code, DiagnosticCode::CompoundAssignOnMap);
+
+        // 正しい代入は無診断
+        assert_eq!(check("fn main() {\n    mut m := map<string, int>{}\n    m[\"a\"] = 1\n    print(len(m))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn map組み込みのキー型と戻り値型が効く() {
+        let del = check("fn main() {\n    mut m := map<string, int>{}\n    delete(m, 7)\n}\n");
+        assert_eq!(del.len(), 1);
+        assert_eq!(del[0].message, "map key must be string, got int");
+
+        // keys/valuesは`K[]`/`V[]`を返す——sort(keys(m))は string[] なのでOK、
+        // values(m)はint[]なのでjoinは弾かれる
+        assert_eq!(check("fn main() {\n    m := map<string, int>{}\n    print(join(sort(keys(m)), \",\"))\n}\n"), vec![]);
+        let joined = check("fn main() {\n    m := map<string, int>{}\n    print(join(values(m), \",\"))\n}\n");
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].message, "join() requires string[], got int[]");
+    }
+
+    #[test]
+    fn range_forはmapのキーと値を宣言する() {
+        // 値の型が伝播する(`v + 1`はstring + intでinvalid-operation)
+        let diags = check("fn main() {\n    m := map<string, string>{}\n    for k, v := range m {\n        print(k)\n        print(v + 1)\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+
+        let arity = check("fn main() {\n    m := map<string, int>{}\n    for k := range m {\n        print(k)\n    }\n}\n");
+        assert_eq!(arity.len(), 1);
+        assert_eq!(arity[0].code, DiagnosticCode::RangeArity);
+        assert_eq!(arity[0].message, "range over a map needs two names: 'for a, b := range ...' (use _ to ignore one)");
+    }
+
+    #[test]
+    fn channelの送受信と容量を検査する() {
+        let send = check("fn main() {\n    ch := chan<int>(1)\n    ch <- \"no\"\n}\n");
+        assert_eq!(send.len(), 1);
+        assert_eq!(send[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(send[0].message, "cannot send \"no\" to chan<int>");
+
+        let capacity = check("fn main() {\n    ch := chan<int>(\"two\")\n    close(ch)\n}\n");
+        assert_eq!(capacity.len(), 1);
+        assert_eq!(capacity[0].message, "channel capacity must be int or none, got \"two\"");
+
+        let not_chan = check("fn main() {\n    n := 5\n    n <- 1\n    v := <-n\n    print(v)\n}\n");
+        assert_eq!(not_chan.len(), 2);
+        assert_eq!(not_chan[0].code, DiagnosticCode::NotAChannel);
+        assert_eq!(not_chan[0].message, "cannot send to non-channel type int");
+        assert_eq!(not_chan[1].message, "cannot receive from non-channel type int");
+
+        // 受信は`T | closed`——絞り込まずに使うとinvalid-operation(TS版と同じ)
+        let unnarrowed = check("fn main() {\n    ch := chan<int>(1)\n    v := <-ch\n    print(v + 1)\n}\n");
+        assert_eq!(unnarrowed.len(), 1);
+        assert_eq!(unnarrowed[0].code, DiagnosticCode::InvalidOperation);
+    }
+
+    #[test]
+    fn isによる絞り込みが効く() {
+        // then節が必ず終端する場合、後続は「残り」の型で読める(フォールスルー)
+        assert_eq!(
+            check("fn main() {\n    ch := chan<int>(1)\n    mut total := 0\n    for {\n        v := <-ch\n        if v is closed {\n            break\n        }\n        total = total + v\n    }\n    print(total)\n}\n"),
+            vec![]
+        );
+        // else節でも絞り込む
+        assert_eq!(
+            check("fn main() {\n    m := map<string, int>{}\n    v := m[\"a\"]\n    if v is none {\n        print(\"none\")\n    } else {\n        print(v + 1)\n    }\n}\n"),
+            vec![]
+        );
+        // then節では絞り込んだ型になる(noneに算術→invalid-operation)
+        let then_narrowed = check("fn main() {\n    m := map<string, int>{}\n    v := m[\"a\"]\n    if v is none {\n        print(v + 1)\n    }\n}\n");
+        assert_eq!(then_narrowed.len(), 1);
+        assert_eq!(then_narrowed[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(then_narrowed[0].message, "invalid operation: none + int");
+    }
+
+    #[test]
+    fn map_channelを含む実用的なコードは誤検知しない() {
+        // struct フィールドのmap/chan・入れ子map・map<K, V[]>・or束縛・keys/sort・
+        // メソッド越しのrange——milestone 34で誤検知が出やすい組み合わせ
+        let src = "struct Store {\n    counts: map<string, int>\n    rows: map<string, int[]>\n    inbox: chan<string>\n}\nfn (s: Store) total() int {\n    mut sum := 0\n    for _, v := range s.counts {\n        sum = sum + v\n    }\n    return sum\n}\nfn main() {\n    mut m := map<string, int>{}\n    m[\"a\"] = (m[\"a\"] or 0) + 1\n    s := Store{counts: m, rows: map<string, int[]>{}, inbox: chan<string>(1)}\n    print(s.total())\n    print(join(sort(keys(s.counts)), \",\"))\n    s.inbox <- \"hi\"\n    close(s.inbox)\n}\n";
         assert_eq!(check(src), vec![]);
     }
 
