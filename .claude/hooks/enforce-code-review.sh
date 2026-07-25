@@ -83,11 +83,20 @@ for n in "${!seen[@]}"; do
   if ! comments=$(gh pr view "$n" --json comments -q '.comments[].body' 2>&1); then
     bail "PR #$n のレビューコメントを取得できませんでした（gh の実行に失敗）。認証やネットワークを確認してください: $comments"
   fi
-  # /code-review が投稿するコメントは "### Code review" 見出しで始まる（issues found / no issues 共通）
-  if ! printf '%s' "$comments" | grep -q '^### Code review'; then
-    hook_deny "PR #$n にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $n --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。"
-    exit 0
-  fi
+  # 通常のレビュー: /code-review が投稿するコメントは "### Code review" 見出し
+  # （issues found / no issues 共通）。**行全体が一致すること**を要求する——
+  # 下のスキップ形式(`### Code review skipped: 理由`)を前方一致で拾ってしまうと、
+  # 理由の記載を必須にしている意味が無くなるため。
+  printf '%s' "$comments" | grep -q '^### Code review[[:space:]]*$' && continue
+
+  # レビュー不要と判断した場合の明示的な記録（docsのみの変更など）。
+  # **理由の記載を必須**にする: 見出しだけの `### Code review skipped` は通さない。
+  # 「黙って飛ばす」のではなく「不要だと判断した事実と理由を残す」ためのものなので、
+  # 理由が無ければゲートとして意味を成さない。
+  printf '%s' "$comments" | grep -qE '^### Code review skipped:[[:space:]]*[^[:space:]]' && continue
+
+  hook_deny "PR #$n にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $n --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。レビューが不要だと判断した場合は、その旨と理由を \`### Code review skipped: <理由>\` という見出しのコメントで残してください。"
+  exit 0
 done
 
 exit 0

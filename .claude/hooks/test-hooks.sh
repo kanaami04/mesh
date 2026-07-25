@@ -92,6 +92,9 @@ echo "\$@" >> "$log"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
   case "\$3" in
     1) echo '### Code review'; echo '(no issues)' ;;
+    2) echo '### Code review skipped: docsのみの変更のため' ;;
+    3) echo '### Code review skipped' ;;
+    4) echo '### Code review skipped:   ' ;;
     999999) echo 'これはレビューコメントではない' ;;
     *) exit 1 ;;
   esac
@@ -138,6 +141,25 @@ fi
 result2=$(run_with_mock_gh 'gh pr merge 1 --squash')
 out2=$(printf '%s' "$result2" | sed -n '/^---OUT---$/,/^---LOG---$/p' | sed '1d;$d')
 [ -z "$out2" ] && ok || ng "$(printf 'レビュー済み単独PRはallowされるべき\n  出力: %s' "$out2")"
+
+# 「レビュー不要」を明示したコメント（理由つき）は allow する。
+# 黙って飛ばすのではなく、判断と理由をPRに残させるための形式。
+hook_out() { printf '%s' "$1" | sed -n '/^---OUT---$/,/^---LOG---$/p' | sed '1d;$d'; }
+
+skip_ok=$(hook_out "$(run_with_mock_gh 'gh pr merge 2 --squash')")
+[ -z "$skip_ok" ] && ok || ng "$(printf '理由つきの「レビュー不要」コメントはallowされるべき\n  出力: %s' "$skip_ok")"
+
+# 理由が無い（見出しだけ / 空白だけ）スキップは deny する。理由が無ければ
+# 「不要だと判断した記録」として意味を成さないため。前方一致で通ってしまう
+# 実装だとここが素通りする（回帰防止）
+for pr in 3 4; do
+  skip_ng=$(hook_out "$(run_with_mock_gh "gh pr merge $pr --squash")")
+  if [ -n "$skip_ng" ] && printf '%s' "$skip_ng" | grep -q 'skipped'; then
+    ok
+  else
+    ng "$(printf '理由の無いスキップ(PR #%s)はdenyされるべき\n  出力: %s' "$pr" "$skip_ng")"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 4. enforce-code-review.sh の fail-closed 挙動

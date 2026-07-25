@@ -1009,7 +1009,12 @@ todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+
   6. 次の2つを並行して進める(順不同): `gh pr checks <番号> --watch` でCI green確認、
      **`/code-review <番号> --comment` を実行**(PRにレビューコメントを投稿。指摘があれば
      対応してコミットを追加し、CIとレビューをやり直す)——`.claude/hooks/enforce-code-review.sh`が
-     このコメントの有無を`gh pr merge`実行時に機械チェックし、無ければ拒否する
+     このコメントの有無を`gh pr merge`実行時に機械チェックし、無ければ拒否する。
+     **レビュー不要と判断した場合**(docsのみの変更など)は、黙って飛ばさず
+     `### Code review skipped: <理由>`という見出しのコメントを残す(2026-07-25追加)——
+     `/code-review`スキルは「レビュー不要」と判断すると**何も投稿せずに終わる**ため、
+     そのままではフックに引っかかって手が止まる。フックはこの形式も通すが、
+     **理由の記載を必須**にしている(見出しだけのコメントは通さない)
   7. 両方(CI green・レビューコメント)が揃ったら `gh pr merge <番号> --squash --delete-branch`
      → ローカルは
      `git checkout main && git fetch --prune origin && git merge --ff-only origin/main` で同期
