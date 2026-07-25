@@ -19,8 +19,10 @@
 // `process.execPath`で自分自身(bun)を使うのと同じ役割で、Rust版はJSランタイムを外部に
 // 持つのでPATHから探す。
 use mesh::ast::Program;
+use mesh::card;
 use mesh::codegen::{self, ModuleUnit};
 use mesh::diagnostic_codes::Diagnostic;
+use mesh::explain;
 use mesh::formatter;
 use mesh::full_checker;
 use mesh::json_decode::synthesize_json_decoders;
@@ -42,6 +44,9 @@ Usage:
   mesh check <file.mesh> [--json]    type-check only
   mesh fmt   <file.mesh> [-w]        format to the canonical form (-w rewrites the file)
   mesh test  <file.mesh|dir> [--json]  run 'fn test...()' in *_test.mesh files
+  mesh explain <code>                explain a diagnostic code (no code: list them all)
+  mesh card                          print the language card (compressed spec for AI context)
+  mesh card --for <file.mesh>...     print only the sections the given sources use
   mesh ast   <file.mesh>             print the parsed AST (debug aid for the port)
 ";
 
@@ -52,6 +57,14 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let rest: Vec<String> = args.iter().skip(3).cloned().collect();
+
+    // `card`/`explain`はファイルを取らない(第2引数の意味が他と違う)ので、
+    // ファイル必須のディスパッチより手前で分岐する——TS版`cli.ts`と同じ構造
+    match command {
+        "card" => return run_card(args.get(2).map(String::as_str), &rest),
+        "explain" => return run_explain(args.get(2).map(String::as_str)),
+        _ => {}
+    }
 
     match command {
         "run" | "build" | "check" | "fmt" | "test" | "ast" => match args.get(2) {
@@ -69,6 +82,53 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!("{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// `mesh card` / `mesh card --for <file.mesh>...`(F-13後半)。カード本文と絞り込みは
+// card.rsが持つ(本文はTS版`src/card.ts`から取り出している)
+fn run_card(arg: Option<&str>, rest: &[String]) -> ExitCode {
+    if arg != Some("--for") {
+        // `--for`以外の引数は無視する(TS版も同じ——`mesh card`は引数を取らない)
+        println!("{}", card::language_card());
+        return ExitCode::SUCCESS;
+    }
+    if rest.is_empty() {
+        eprintln!("usage: mesh card --for <file.mesh> [<file2.mesh> ...]");
+        return ExitCode::FAILURE;
+    }
+    let mut sources = Vec::new();
+    for f in rest {
+        match std::fs::read_to_string(f) {
+            Ok(src) => sources.push(src),
+            Err(_) => {
+                eprintln!("error: cannot read file '{f}'");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    println!("{}", card::subset_card(&sources));
+    ExitCode::SUCCESS
+}
+
+// `mesh explain <code>`(F-13前半)。引数無しなら一覧。
+// **Rust版が出せる診断コードだけ**を扱う点でTS版と件数が違う(explain.rsの冒頭コメント)
+fn run_explain(code: Option<&str>) -> ExitCode {
+    let Some(code) = code else {
+        let codes = explain::all_codes();
+        println!("{} diagnostic codes. Run 'mesh explain <code>' for details.\n", codes.len());
+        println!("{}", codes.join("\n"));
+        return ExitCode::SUCCESS;
+    };
+    match explain::explanation(code) {
+        Some(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("error: unknown diagnostic code '{code}' (run 'mesh explain' with no code to list them all)");
             ExitCode::FAILURE
         }
     }

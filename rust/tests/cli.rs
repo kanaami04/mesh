@@ -298,3 +298,76 @@ fn 引数不足やサブコマンド無しはusageを出す() {
     assert_eq!(no_file.code, 1);
     assert!(no_file.stderr.contains("Usage:"), "stderr: {}", no_file.stderr);
 }
+
+// --- milestone 38: card / explain -------------------------------------------------
+
+#[test]
+fn cardは言語カードを出す() {
+    let out = mesh(&["card"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.starts_with("# Mesh Language Card"), "先頭: {:?}", out.stdout.lines().next());
+    // 完全版なので「COMPLETE reference」の主張が残っている
+    assert!(out.stdout.contains("COMPLETE reference"), "完全版の注記が無い");
+}
+
+#[test]
+fn card_forは使っている機能のセクションだけに絞る() {
+    let path = temp_mesh("card-for", "fn main() {\n    print(\"hi\")\n}\n");
+    let file = path.display().to_string();
+    let full = mesh(&["card"]);
+    let subset = mesh(&["card", "--for", &file]);
+    assert_eq!(subset.code, 0, "stderr: {}", subset.stderr);
+    assert!(subset.stdout.len() < full.stdout.len(), "絞り込まれていない");
+    // 使っていない機能のセクションは落ち、完全版の主張はサブセットの注記に置き換わる
+    assert!(!subset.stdout.contains("## Concurrency"), "並行処理のセクションが残っている");
+    assert!(subset.stdout.contains("PROJECT-SCOPED SUBSET"), "サブセットの注記が無い");
+    assert!(!subset.stdout.contains("COMPLETE reference"), "完全版の主張が残っている");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn card_forは引数不足と読めないファイルをエラーにする() {
+    let no_files = mesh(&["card", "--for"]);
+    assert_eq!(no_files.code, 1);
+    assert_eq!(no_files.stderr, "usage: mesh card --for <file.mesh> [<file2.mesh> ...]\n");
+    let missing = mesh(&["card", "--for", "/nonexistent/nope.mesh"]);
+    assert_eq!(missing.code, 1);
+    assert_eq!(missing.stderr, "error: cannot read file '/nonexistent/nope.mesh'\n");
+}
+
+#[test]
+fn explainは診断コードを説明する() {
+    let out = mesh(&["explain", "division-by-zero"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.starts_with("Integer division or modulo by the literal 0"), "stdout: {}", out.stdout);
+}
+
+#[test]
+fn explainは引数無しで一覧を出す() {
+    let out = mesh(&["explain"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let expected_count = mesh::diagnostic_codes::DiagnosticCode::ALL.len();
+    assert!(
+        out.stdout.starts_with(&format!("{expected_count} diagnostic codes. Run 'mesh explain <code>' for details.\n\n")),
+        "先頭: {:?}",
+        out.stdout.lines().next()
+    );
+    // 一覧は辞書順（TS版の Object.keys(...).sort() と同じ）
+    let codes: Vec<&str> = out.stdout.lines().skip(2).filter(|l| !l.is_empty()).collect();
+    assert_eq!(codes.len(), expected_count);
+    let mut sorted = codes.clone();
+    sorted.sort_unstable();
+    assert_eq!(codes, sorted);
+}
+
+#[test]
+fn explainは知らないコードをエラーにする() {
+    let out = mesh(&["explain", "no-such-code"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(
+        out.stderr,
+        "error: unknown diagnostic code 'no-such-code' (run 'mesh explain' with no code to list them all)\n"
+    );
+    // TS版には説明があるが Rust版がまだ出さない診断も同じ扱い（実装済みの範囲だけ説明する）
+    assert_eq!(mesh(&["explain", "narrow-required"]).code, 1);
+}
