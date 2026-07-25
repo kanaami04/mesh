@@ -49,6 +49,12 @@ pub enum DiagnosticCode {
     DiscriminatedUnionTagMissing,
     DiscriminatedUnionNoMatch,
     DiscriminatedUnionAmbiguous,
+    InvalidIndexType,
+    NotIndexable,
+    NotRangeable,
+    RangeArity,
+    CallbackSignatureMismatch,
+    CannotInferType,
 }
 
 impl DiagnosticCode {
@@ -82,6 +88,12 @@ impl DiagnosticCode {
             DiagnosticCode::DiscriminatedUnionTagMissing => "discriminated-union-tag-missing",
             DiagnosticCode::DiscriminatedUnionNoMatch => "discriminated-union-no-match",
             DiagnosticCode::DiscriminatedUnionAmbiguous => "discriminated-union-ambiguous",
+            DiagnosticCode::InvalidIndexType => "invalid-index-type",
+            DiagnosticCode::NotIndexable => "not-indexable",
+            DiagnosticCode::NotRangeable => "not-rangeable",
+            DiagnosticCode::RangeArity => "range-arity",
+            DiagnosticCode::CallbackSignatureMismatch => "callback-signature-mismatch",
+            DiagnosticCode::CannotInferType => "cannot-infer-type",
         }
     }
 }

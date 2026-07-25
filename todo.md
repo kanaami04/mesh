@@ -2843,6 +2843,50 @@
                 (同形2メンバー・型違い2メンバー・配列フィールド)追加、469→470件。
               - **次段階**: pkg修飾struct/pkg修飾呼び出しの中身・not-a-struct/narrow-required・
                 cannot-infer-type・配列/map型のモデル化・`mesh run`/`build`へのゲート統合。
+        - [x] **milestone 33: 配列型のモデル化(コレクション卒業の第一歩)**
+              ✅ 2026-07-25実装。milestone 27以来full_checkerが守ってきた
+              **「配列/map/channelは常にANY」というinvariantを、配列に限って外した**。ほぼ全ての
+              マイルストーンが「コレクションがANYなのでこの検査は到達しない」と先送りしてきた
+              根っこで、TS版が8件出す配列プログラムにRust版は0件しか出さない状態だった。
+              map/channelは引き続きANY(次段階)。
+              - `resolve_type_ann`が`TypeNode::Array`を**再帰的に**解決するようにした
+                (`int[][]`も可)。要素がmap等でANYへ潰れる場合は`Array(ANY)`になる。
+              - **`is_checkable_field_type`を再帰判定`is_fully_modeled`へ置き換え**——
+                「配列か否か」という粗い判定では足りなくなったため(`int[]`は突き合わせて
+                よいが、要素がANYへ潰れる`map<string,int>[]`は駄目)。milestone 29/32の
+                code reviewで2度踏んだ「縮退した型をレジストリの完全解決された型と
+                突き合わせてはいけない」という穴の一般化。
+              - `infer_expr`に配列リテラル(明示要素型/先頭要素をwiden)と添字アクセス
+                (配列→要素型・文字列→string・`invalid-index-type`・`not-indexable`)を追加。
+                **添字の型検査はコンテナが配列/文字列と分かっている場合だけ**行う——
+                mapがまだANYなので、ANYコンテナでも検査するとmapの文字列キーを
+                誤検知する(実装中にexamplesで検出)。
+              - 配列要素への代入(`xs[0] = v`)の型検査、range-forの
+                (int, 要素型)宣言+`range-arity`/`not-rangeable`を追加。
+              - **配列を取る組み込みをTS版の形に揃えた**: 新設`require_array`で
+                「配列なら要素型を返す/ANYなら素通り/それ以外はbuiltin-arg-type」を共通化し、
+                push/contains/indexOf/get/sort/join/lenの要素型検査、
+                filter/map/reduceの**コールバック署名検査**(`callback-signature-mismatch`)、
+                戻り値型の精密化(sort→同じ配列型・filter→同じ配列型・map→コールバックの
+                戻り値の配列・indexOf→`int | none`・get→`elem | none`・split→`string[]`)を実装。
+              - `cannot-infer-type`は**空配列リテラルに限定して**移植した——TS版の
+                `containsAny`をそのまま移植すると、map/channel/union/pkg修飾など多くをANYへ
+                縮退させるfull_checkerでは誤検知の山になるため(`m := map<..>{...}`まで
+                「推論できない」と報告してしまう)。この診断の本来の引き金だけを実装し、
+                他の形は対応する型をモデル化するmilestoneで広げる。
+              - 診断コード6種追加(invalid-index-type / not-indexable / not-rangeable /
+                range-arity / callback-signature-mismatch / cannot-infer-type)。
+              - 新規テスト12件。470→482件、全件パス。`cargo clippy --all-targets -- -D warnings`
+                クリーン。TS版と`mesh check`を突き合わせ、エラー系プローブ3本(添字・要素型・
+                高階組み込み・range・空配列)と**正当なコードの誤検知プローブ2本**(structの
+                配列フィールド/メソッド越しの配列・入れ子配列・クロージャ・ジェネリクス・
+                keys/split/join/get+or・型注釈つき空配列)で完全一致を確認。全single-file
+                exampleでfull_checker無診断のまま回帰なし。
+              - **既知の限界**: channelが未モデル化のため`len(<-ch)`(TS版は
+                `int[] | closed`をlenに渡せないと弾く)等は引き続き検出漏れ。
+              - **次段階**: map/channelのモデル化(`map key must be K`・`compound-assign-on-map`・
+                `not-a-channel`等)・pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
+                `mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
 
 ## 言語機能(中期)
