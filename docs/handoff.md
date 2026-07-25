@@ -923,7 +923,12 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      特定後のフィールド検証はmilestone 29の既存コードを流用し、**診断名はunion名**にする。
      式全体の型はTS版と同じくunion自身(絞り込んだメンバーではない)——full_checkerで初めて
      union型が式の型として現れるが、union値への算術がTS版と同じくinvalid-operationになる
-     ことを確認済み。診断コード3種追加、テスト461→469件。詳細はtodo.md参照
+     ことを確認済み。診断コード3種追加、テスト461→470件。**code reviewで実バグ1件を発見・
+     即修正**——分岐(3)の2段目の絞り込みが`assignable`を生で使っていたため、縮退する型
+     (配列/fn等)のフィールドで判別する名前付きstruct unionが、潰れ方によって「全候補脱落→
+     no-match(コード誤り)」または「全候補残存→ambiguousの誤検知」の2通りに壊れていた
+     (milestone 29の`is_checkable_field_type`ガードをこの絞り込みにも適用して解消)。
+     詳細はtodo.md参照
    - 残る候補: **milestone 33以降でstruct卒業を継続**——pkg修飾struct/
      pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
      `narrow-required`はmatch/isが未実装でnarrowingが要らない間は発火しない)・

@@ -480,11 +480,32 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
         })
         .copied()
         .collect();
+    // 候補が複数ならフィールド値の型でさらに絞る(TS版の2段目)。ただし**縮退する型
+    // (配列/map/chan/fn/union)の宣言フィールドは絞り込みの材料にしない**——full_checker側の
+    // 値の型はANY等へ潰れており、完全解決された宣言型と突き合わせると必ず不一致になるため、
+    // そのまま使うと候補を誤って全滅させてしまう(code reviewで発覚・両CLIで再現確認:
+    // `type AB = A | B`の両メンバーが`cb: fn(int[]) int`を持つとき、TS版の
+    // discriminated-union-ambiguousがRust版ではno-matchになっていた)。milestone 29の
+    // フィールド型検査と同じ`is_checkable_field_type`ガードを、この絞り込みにも適用する
+    let mut undecidable = false;
     if candidates.len() > 1 {
         candidates.retain(|m| {
             let Some(mf) = struct_fields_of(m) else { return false };
-            fields.iter().zip(field_types).all(|(f, ty)| mf.iter().find(|d| d.name == f.name).map(|d| types::assignable(ty, &d.type_)).unwrap_or(false))
+            fields.iter().zip(field_types).all(|(f, ty)| match mf.iter().find(|d| d.name == f.name) {
+                Some(d) if !is_checkable_field_type(&d.type_) => {
+                    undecidable = true;
+                    true
+                }
+                Some(d) => types::assignable(ty, &d.type_),
+                None => false,
+            })
         });
+    }
+    // 縮退フィールドを飛ばしたせいで絞り切れなかった場合は、TS版なら一意に決まる可能性が
+    // 残っている(型で絞れば1個になる)ので、ambiguousと決めつけずに黙って諦める
+    // ——full_checkerの既定方針どおり、誤検知ではなく検出漏れ側に倒す
+    if candidates.len() > 1 && undecidable {
+        return None;
     }
     match candidates.len() {
         1 => Some(candidates[0].clone()),
@@ -2147,6 +2168,25 @@ mod tests {
         // 値側の型がANYへ潰れるため型検査をスキップする(unionメンバー側でも同じ)
         let src = "struct Item {\n    id: int\n}\ntype Page =\n    { kind: \"list\", items: Item[], render: fn(int) string }\n    | { kind: \"empty\" }\nfn label(n: int) string {\n    return \"item\"\n}\nfn main() {\n    print(Page{kind: \"list\", items: [Item{id: 1}], render: label})\n    print(Page{kind: \"empty\"})\n}\n";
         assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn 名前付きstruct_unionの絞り込みは縮退フィールドで候補を落とさない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): 2段目の絞り込みが`assignable`を
+        // 生で使っていたため、縮退する型(fn/配列/map/union)のフィールドで**全候補が
+        // 脱落**していた。(1) 同じ形の2メンバー: TS版はambiguousだがRust版はno-matchという
+        // 誤ったコード・文言を出していた → 絞り切れないので黙って諦める(検出漏れ側)。
+        // (2) 型だけが違う2メンバー(TS版なら型で一意に決まる正当なコード): Rust版は
+        // no-matchの**誤検知**を出していた → 無診断になる(TS版と一致)
+        let same_shape = "struct A {\n    cb: fn(int[]) int\n}\nstruct B {\n    cb: fn(int[]) int\n}\ntype AB = A | B\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    print(AB{cb: sum})\n}\n";
+        assert_eq!(check(same_shape), vec![]);
+        let distinct_types = "struct A {\n    cb: fn(int[]) int\n}\nstruct B {\n    cb: fn(string) int\n}\ntype AB = A | B\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    print(AB{cb: sum})\n}\n";
+        assert_eq!(check(distinct_types), vec![]);
+        // (3) 値の型がトップレベルANYへ潰れる場合(配列リテラル)も同じ穴の別の現れ方——
+        // `assignable(ANY, _)`は常にtrueなので候補が**全て残り**、TS版が一意に解決する
+        // 正当なコードにambiguousの誤検知を出していた(別のレビューエージェントが指摘)
+        let array_fields = "struct A {\n    items: int[]\n}\nstruct B {\n    items: string[]\n}\ntype U = A | B\nfn main() {\n    print(U{items: [1, 2, 3]})\n}\n";
+        assert_eq!(check(array_fields), vec![]);
     }
 
     #[test]

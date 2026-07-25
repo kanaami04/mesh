@@ -2826,6 +2826,21 @@
                 unionメンバーで、コード・メッセージ・位置まで完全一致を確認
                 (差分は未移植の`cannot-infer-type`のみ)。全single-file exampleで
                 full_checkerが無診断のまま回帰なし(discriminated_union/db_error/json系を含む)。
+              - **code reviewで発見・即修正した実バグ1件**(2エージェントが**別々の再現コード**で
+                独立に同じ根本原因へ到達、両CLIで再現確認済み): 分岐(3)の2段目の絞り込みが
+                `types::assignable`を生で使っていたため、**縮退する型(配列/map/chan/fn/union)の
+                フィールドで判別する名前付きstruct union**が壊れていた。しかも潰れ方によって
+                2通りの逆向きの症状が出る——(a) 値が`Fn{[ANY], Int}`のようにトップレベルは
+                ANYでない場合、宣言型(完全解決済み)と必ず不一致になり**全候補が脱落**して、
+                TS版の`discriminated-union-ambiguous`がRust版では`no-match`という誤ったコード・
+                文言になっていた。(b) 値がトップレベルANY(配列リテラル等)の場合は逆に
+                `assignable(ANY, _)`が常にtrueで**全候補が残り**、TS版が型で一意に解決する
+                正当なコード(`{items: int[]} | {items: string[]}`に`[1,2,3]`)に
+                `ambiguous`の**誤検知**を出していた。milestone 29のフィールド型検査と同じ
+                `is_checkable_field_type`ガードをこの絞り込みにも適用し、縮退フィールドは
+                候補を落とす材料にしない+それで絞り切れなかった場合はambiguousと決めつけず
+                黙って諦める(既定方針どおり検出漏れ側に倒す)形にした。回帰テスト
+                (同形2メンバー・型違い2メンバー・配列フィールド)追加、469→470件。
               - **次段階**: pkg修飾struct/pkg修飾呼び出しの中身・not-a-struct/narrow-required・
                 cannot-infer-type・配列/map型のモデル化・`mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
