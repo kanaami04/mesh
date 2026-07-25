@@ -50,14 +50,17 @@ fn check_は無診断のファイルでno_errorsを出す() {
 }
 
 #[test]
-fn check_は診断をソース行とキャレット付きで出す() {
+fn check_は診断をソース行とキャレット付きでstderrへ出す() {
     let path = temp_mesh("diag", "fn main() {\n    xs := [1, \"a\"]\n    print(xs)\n}\n");
     let p = path.display().to_string();
     let out = mesh(&["check", &p]);
     assert_eq!(out.code, 1);
-    assert!(out.stdout.contains("error[type-mismatch]"), "stdout: {}", out.stdout);
+    // **診断はstderr**（TS版`cli.ts`が`console.error(formatDiagnostics(...))`を使うのと同じ。
+    // stdoutは"no errors"と`--json`の出力専用）。code reviewで発覚した逸脱の回帰テスト
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert!(out.stderr.contains("error[type-mismatch]"), "stderr: {}", out.stderr);
     // 見出しの次の行にソース行、その次にキャレット（TS版formatDiagnosticsと同じ3行構成）
-    let lines: Vec<&str> = out.stdout.lines().collect();
+    let lines: Vec<&str> = out.stderr.lines().collect();
     assert!(lines[1].contains("xs := [1, \"a\"]"), "lines: {lines:?}");
     assert!(lines[2].trim_start().starts_with('^'), "lines: {lines:?}");
 }
@@ -118,7 +121,7 @@ fn run_buildはfull_checkerのゲートで止まる() {
     for cmd in ["run", "build"] {
         let out = mesh(&[cmd, &p]);
         assert_eq!(out.code, 1, "{cmd}: stdout: {} stderr: {}", out.stdout, out.stderr);
-        assert!(out.stdout.contains("error[not-indexable]"), "{cmd}: stdout: {}", out.stdout);
+        assert!(out.stderr.contains("error[not-indexable]"), "{cmd}: stderr: {}", out.stderr);
     }
 }
 
@@ -139,7 +142,25 @@ fn 構文エラーはソース行付きで報告され型検査へ進まない()
     let p = path.display().to_string();
     let out = mesh(&["check", &p]);
     assert_eq!(out.code, 1);
-    assert!(out.stdout.contains("error[syntax-error]"), "stdout: {}", out.stdout);
+    assert!(out.stderr.contains("error[syntax-error]"), "stderr: {}", out.stderr);
+}
+
+#[test]
+fn importしたパッケージの中身も検査される() {
+    // 回帰(code reviewで発覚): ゲートがエントリファイルしか検査しておらず、
+    // importしたパッケージ内の型エラーを素通りさせていた(TS版は検出する)。
+    // 全モジュールを1本ずつ検査する形にして解消——`fn main`の要求はmainパッケージだけ
+    let dir = std::env::temp_dir().join("mesh-cli-test-multi");
+    let pkg = dir.join("badpkg");
+    std::fs::create_dir_all(&pkg).expect("一時パッケージを作れること");
+    std::fs::write(dir.join("main.mesh"), "import \"badpkg\"\n\nfn main() {\n    print(badpkg.broken())\n}\n").unwrap();
+    std::fs::write(pkg.join("ops.mesh"), "export fn broken() int {\n    n := 5\n    return n[0]\n}\n").unwrap();
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["check", &entry]);
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("error[not-indexable]"), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("ops.mesh"), "診断は該当ファイル名で出るべき: {}", out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

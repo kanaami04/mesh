@@ -2953,7 +2953,6 @@
               - **次段階**: pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
                 値位置のvoid-used-as-value・`or`の4診断・match/selectの中身・
                 `mesh run`/`build`へのゲート統合。
-  - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
         - [x] **milestone 35: Rust CLIの`run`/`build` + full_checkerのゲート統合**
               ✅ 2026-07-25実装。「TS実装の撤去条件」の(1)の前半。**Rust版が実際に使えるCLIになった**
               ——これまで`mesh check`(単一ファイル)とAST表示/`--emit-js`しか無く、
@@ -2962,24 +2961,40 @@
                 組み替え。旧来の`mesh <file> [--emit-js]`も互換で残す(docsの確認コマンドと
                 移植中の手癖を壊さないため)。
               - **full_checkerのゲート統合**: `run`/`build`/`check`のいずれもcodegenの前に
-                full_checkerを通し、診断があれば報告して終了コード1。**エントリファイル1本だけ**を
-                検査する(full_checkerが単一ファイル専用のため)——importしたパッケージの中身は
-                未検査だが、import aliasはANY扱いなので誤検知は出ない(検出漏れ側)。
+                full_checkerを通し、診断があれば**stderrへ**報告して終了コード1。full_checkerは
+                1ファイルずつしか検査できないが、**モジュールを1本ずつ順に検査する**ことで
+                importしたパッケージの中身も対象にしている(TS版と同じく依存パッケージ→エントリの順)。
+                `fn main`の要求はmainパッケージだけ(新設`check_program_opts`のrequire_main——
+                TS版`checkPackage`の同名オプション)。パッケージ間の参照は互いにANYへ潰れるので
+                誤検知は出ない(検出漏れ側)。
               - **診断表示**をTS版`formatDiagnostics`と同じ「見出し+ソース行+`^`」の3行構成に
                 (桁合わせの空白はタブをタブのまま残す)。パーサ/レクサのエラーも同じ見た目に揃えた。
-              - `mesh check --json`(TS版`diagnosticsToJson`の移植。2スペース整形まで一致。
-                `fix`はRust版に自動修正が無いため出さない——TS版もfixが無い診断ではキーごと省略)。
+              - `mesh check --json`(TS版`diagnosticsToJson`の移植。フィールド順・2スペース整形まで
+                一致。トップレベルの`file`はエントリ、各診断の`file`はそれが出たモジュール)。
+                **`fix`(機械適用可能な自動修正)はRust版がまだ持たないので出さない**——TS版は
+                一部の診断(`use-is-none`の`== none`等)でfixを付けるため、**その診断ではJSONの形が
+                TS版と揃わない**(fixの移植は将来のmilestone。code reviewで当初の
+                「TS版もfixが無い診断ではキーごと省略なので形は互換」という記述の誤りが判明)。
               - `mesh run`は生成JSを一時ファイルへ書き`bun`(無ければ`node`)で実行する。
                 TS版が`process.execPath`で自分自身を使うのと同じ役割。プログラム自身の引数
                 (`io.args()`)もそのまま渡す。panicの終了コードも伝える。
               - 新規: `rust/tests/cli.rs`(統合テスト10件。バイナリを実起動して入出力・終了コード・
                 ゲートを確認。JSランタイムが無い環境では`run`系をスキップ)。
               - **検証**: 全example 22本で`mesh run`の標準出力と終了コードがTS版と一致、
-                `mesh check --json`も22本すべてバイト一致。`cargo test` 495+10件、
+                `mesh check --json`も22本すべてバイト一致。複数ファイル(エントリと依存パッケージの
+                両方にエラー)でも診断の内容・順序・出力先がTS版と一致。`cargo test` 495+11件、
                 `cargo clippy --all-targets -- -D warnings`クリーン。
+              - **code reviewで発見・即修正した2件**(いずれもTS版と突き合わせて再現確認):
+                (1)**診断をstdoutへ出していた**——TS版は`console.error`でstderrへ出す
+                (stdoutは"no errors"と`--json`専用)。`mesh check f.mesh 2>/dev/null`のような
+                普通の使い方でパイプの中身が変わる実害があり、しかも**CLIテスト自身が
+                stdoutを前提に書かれていて誤りを固定していた**。(2)**ゲートがエントリファイル
+                しか検査しておらず**、importしたパッケージ内の型エラーを素通りさせていた
+                (TS版は検出する)——全モジュールを1本ずつ検査する形にして解消。回帰テスト
+                (multi-fileのゲート・stderrへの出力)を追加、10→11件。
               - **次段階**: `fmt`/`test`/`card`/`explain`の移植、full_checkerの複数ファイル対応
                 (ゲートを全モジュールへ広げる)。
-
+  - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/

@@ -1650,6 +1650,15 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
 // このProgram(単一ファイル。milestone 22はimport/パッケージ対象外)を検査し、
 // 見つかった診断を返す。空なら「(このスコープの範囲で)問題なし」の意味
 pub fn check_program(program: &Program) -> Vec<Diagnostic> {
+    check_program_opts(program, true)
+}
+
+// `require_main`はTS版`checkPackage`の同名オプションに対応する。mainパッケージ以外
+// (importされたパッケージ)は`fn main`を持たないのが普通なので、そこへ`missing-main`を
+// 出さないための切り替え(TS版は`pkg === "main" && !testMode`で渡す)。
+// milestone 35でCLIが**全モジュールを1ファイルずつ検査する**ようになったときに追加した
+// ——これが無いと、importされたパッケージ全部がmissing-mainの誤検知になる
+pub fn check_program_opts(program: &Program, require_main: bool) -> Vec<Diagnostic> {
     let mut ctx = FullCheckerCtx::new();
     // milestone 29: struct/union型のレジストリを既存の`checker.rs`のリゾルバで構築する
     // (再利用。knot-tying・自己参照・循環検出込み)。fn/const登録より前に済ませておく——
@@ -1714,6 +1723,8 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     // あれば引数ありor戻り値ありでinvalid-main-signature(エントリポイントは
     // 引数を取らず何も返さない)
     match program.fns.iter().find(|f| f.name == "main" && f.receiver.is_none()) {
+        // mainパッケージ以外は`fn main`を要求しない(TS版のrequireMain)
+        None if !require_main => {}
         None => ctx.error(
             Pos { line: 1, col: 1 },
             DiagnosticCode::MissingMain,

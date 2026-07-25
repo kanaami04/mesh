@@ -5,10 +5,13 @@
 //   mesh ast   <file.mesh>            パース結果のASTを表示(移植用のデバッグ支援)
 //
 // **full_checkerのゲート統合**(milestone 35): `run`/`build`/`check`のいずれも、codegenの前に
-// full_checker(診断を出すchecker)を通す。診断があればソース行+`^`つきで報告して終了する。
-// full_checkerはまだ**エントリファイル1本だけ**を検査する(複数ファイル対応は今後の
-// milestone)——importしたパッケージの中身は未検査だが、import aliasはANY扱いなので
-// 誤検知は出ない(検出漏れ側に倒れる)。
+// full_checker(診断を出すchecker)を通す。診断があればソース行+`^`つきで**stderrへ**報告して
+// 終了する(TS版`cli.ts`が`console.error(formatDiagnostics(...))`を使うのと同じ。stdoutは
+// `check`の"no errors"と`--json`の出力専用)。
+// full_checkerは1ファイルずつしか検査できないが、**モジュールを1本ずつ順に検査する**ことで
+// importしたパッケージの中身も検査対象にしている(TS版と同じく依存パッケージ→エントリの順)。
+// パッケージ間の参照は互いにANYへ潰れるので誤検知は出ない(検出漏れ側に倒れる)——
+// full_checker自身を複数ファイル対応にするのは今後のmilestone。
 //
 // `run`は生成JSを一時ファイルへ書き、`bun`(無ければ`node`)で実行する。TS版が
 // `process.execPath`で自分自身(bun)を使うのと同じ役割で、Rust版はJSランタイムを外部に
@@ -120,7 +123,7 @@ fn parse_all(file: &str) -> Result<ParsedModules, ExitCode> {
                 units.push(ModuleUnit { pkg: m.pkg.clone(), file: name, program });
             }
             Err(errors) => {
-                print!("{}", format_compile_errors(&name, &errors, &m.source));
+                eprint!("{}", format_compile_errors(&name, &errors, &m.source));
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -128,16 +131,34 @@ fn parse_all(file: &str) -> Result<ParsedModules, ExitCode> {
     Ok(ParsedModules { units, sources: source_map })
 }
 
-// full_checkerのゲート。診断があればソース行つきで報告し、`Err`を返す。
-// **エントリファイル(units[0])だけ**を検査する——full_checkerは単一ファイル専用のため
+// 全モジュールをfull_checkerに通し、(ファイル, 診断)を**TS版と同じ順序**で返す。
+// TS版`compileModules`は依存パッケージから順に検査するので、こちらも読み込み順
+// (エントリ→依存)を逆にして依存側を先に出す。`fn main`の要求はmainパッケージだけ
+// (importされたパッケージには普通mainが無い——`check_program_opts`のrequire_main)
+fn check_all(parsed: &ParsedModules) -> Vec<(String, Vec<Diagnostic>)> {
+    parsed
+        .units
+        .iter()
+        .rev()
+        .map(|u| (u.file.clone(), full_checker::check_program_opts(&u.program, u.pkg == "main")))
+        .filter(|(_, diags)| !diags.is_empty())
+        .collect()
+}
+
+// 診断をstderrへ(TS版`console.error(formatDiagnostics(...))`と同じ)
+fn report(parsed: &ParsedModules, per_file: &[(String, Vec<Diagnostic>)]) {
+    for (file, diags) in per_file {
+        eprint!("{}", format_diagnostics(file, diags, parsed.sources.get(file).map(String::as_str)));
+    }
+}
+
+// full_checkerのゲート。診断があれば報告して`Err`を返す
 fn gate(parsed: &ParsedModules) -> Result<(), ExitCode> {
-    let Some(entry) = parsed.units.first() else { return Ok(()) };
-    let diagnostics = full_checker::check_program(&entry.program);
-    if diagnostics.is_empty() {
+    let per_file = check_all(parsed);
+    if per_file.is_empty() {
         return Ok(());
     }
-    let source = parsed.sources.get(&entry.file).map(String::as_str);
-    print!("{}", format_diagnostics(&entry.file, &diagnostics, source));
+    report(parsed, &per_file);
     Err(ExitCode::FAILURE)
 }
 
@@ -172,23 +193,25 @@ fn run_check(file: &str, json: bool) -> ExitCode {
         // DiagnosticCodeへ統合されていないため。統合は将来のmilestone)
         Err(code) => return code,
     };
-    let Some(entry) = parsed.units.first() else {
+    if parsed.units.is_empty() {
         eprintln!("{file}: no modules");
         return ExitCode::FAILURE;
-    };
-    let diagnostics = full_checker::check_program(&entry.program);
-    if json {
-        // AIエージェント向けの構造化出力(TS版`diagnosticsToJson`と同じ形。
-        // `fix`はRust版がまだ自動修正を持たないため出さない)
-        println!("{}", diagnostics_to_json(&entry.file, &diagnostics));
-        return if diagnostics.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
-    if diagnostics.is_empty() {
+    let per_file = check_all(&parsed);
+    if json {
+        // AIエージェント向けの構造化出力(TS版`diagnosticsToJson`)。トップレベルの`file`は
+        // エントリ、各診断の`file`はそれが出たモジュール——TS版の`d.file ?? file`と同じ形。
+        // **`fix`(機械適用可能な自動修正)はRust版がまだ持たないので出さない**——TS版は
+        // 一部の診断(`use-is-none`の`== none`等)でfixを付けるので、その診断ではJSONの形が
+        // TS版と揃わない。fixの移植は将来のmilestone
+        println!("{}", diagnostics_to_json(file, &per_file));
+        return if per_file.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
+    if per_file.is_empty() {
         println!("{file}: no errors");
         return ExitCode::SUCCESS;
     }
-    let source = parsed.sources.get(&entry.file).map(String::as_str);
-    print!("{}", format_diagnostics(&entry.file, &diagnostics, source));
+    report(&parsed, &per_file);
     ExitCode::FAILURE
 }
 
@@ -287,10 +310,11 @@ fn caret_prefix(line: &str, col: usize) -> String {
 // 依存を増やさない方を選んだため(フィールドが増えたら見直す)。
 // `fix`(機械適用可能な自動修正)はRust版がまだ持たないので出さない——TS版でも
 // fixが無い診断ではキーごと省略されるため、形は互換
-fn diagnostics_to_json(file: &str, diagnostics: &[Diagnostic]) -> String {
+fn diagnostics_to_json(entry_file: &str, per_file: &[(String, Vec<Diagnostic>)]) -> String {
+    let diagnostics: Vec<(&str, &Diagnostic)> = per_file.iter().flat_map(|(f, ds)| ds.iter().map(move |d| (f.as_str(), d))).collect();
     let items: Vec<String> = diagnostics
         .iter()
-        .map(|d| {
+        .map(|(file, d)| {
             format!(
                 "    {{\n      \"file\": {},\n      \"line\": {},\n      \"col\": {},\n      \"severity\": \"error\",\n      \"code\": {},\n      \"message\": {}\n    }}",
                 json_string(file),
@@ -304,7 +328,7 @@ fn diagnostics_to_json(file: &str, diagnostics: &[Diagnostic]) -> String {
     let diags = if items.is_empty() { "[]".to_string() } else { format!("[\n{}\n  ]", items.join(",\n")) };
     format!(
         "{{\n  \"file\": {},\n  \"ok\": {},\n  \"diagnostics\": {}\n}}",
-        json_string(file),
+        json_string(entry_file),
         diagnostics.is_empty(),
         diags
     )
