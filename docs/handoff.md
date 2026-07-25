@@ -962,11 +962,20 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      **Rust側へ複製せず**、`include_str!`で`src/card.ts`・`src/diagnostic-codes.ts`から
      取り出している(複製するとTS側の`tests/card-completeness.test.ts`の検証から外れて
      静かに古くなるため)。`mesh explain`が説明するのは**Rust版が実際に出せる36種だけ**
-     (未実装の検査の説明を並べると誤解を招くため。一覧の件数行だけTS版の107と意図的に異なる)
+     (未実装の検査の説明を並べると誤解を招くため。一覧の件数行だけTS版の107と意図的に異なる。
+     `DiagnosticCode::ALL`から自動で追随するので、診断を足せばexplainの範囲も増える)
+   - ✅ **milestone 39(2026-07-26)でmatch/selectの中へ踏み込み、unionをモデル化した**
+     (撤去条件(2)=診断カバレッジの第一歩)。それまで`infer_expr`の`_ => ANY`で
+     **matchのアーム本体がまるごと未検査**だった——Meshはunion路線なので処理の大半が
+     matchの中に集まる、最大の検出漏れ領域。あわせて診断8種
+     (`empty-match`/`union-required`/`impossible-pattern`/`unreachable-pattern`/
+     `wildcard-not-alone`/`match-not-exhaustive`/`mixed-void-arms`/`empty-select`)を移植し、
+     診断コードは36→44種。**union注釈のANY縮退をやめた**のも同じmilestone(そうしないと
+     新診断がほとんど発火しないため。詳細と踏んだ落とし穴2件はtodo.md参照)
    - 残る候補: **診断の続き**——pkg修飾struct/pkg修飾呼び出しの中身・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
      値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・
-     `or`の4診断・match/selectの中身の走査。
+     `?`(prop)5診断と`or`の4診断・`type-alias-cycle`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
@@ -1078,7 +1087,7 @@ mise run rust-check     # = cd rust && cargo clippy --all-targets
 (cd rust && cargo run -- ast   ../examples/hello.mesh)         # ASTを表示(移植用のデバッグ支援)
 # `run`/`build`/`check`はいずれもcodegenの前にfull_checkerを通す(milestone 35のゲート統合。
 # 全モジュールを1本ずつ検査し、診断はTS版と同じくstderrへ出す)。
-# `explain`はRust版が出せる36種だけを説明する(TS版は107種。意図的な差)
+# `explain`はRust版が出せる診断コードだけを説明する(TS版は107種。意図的な差)
 ```
 
 ## 用語集(初見だと分かりにくい決定)

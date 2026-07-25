@@ -84,6 +84,14 @@ diagnostic_codes! {
     NotAChannel => "not-a-channel",
     CompoundAssignOnMap => "compound-assign-on-map",
     InvalidTestSignature => "invalid-test-signature",
+    EmptyMatch => "empty-match",
+    UnionRequired => "union-required",
+    ImpossiblePattern => "impossible-pattern",
+    UnreachablePattern => "unreachable-pattern",
+    WildcardNotAlone => "wildcard-not-alone",
+    MatchNotExhaustive => "match-not-exhaustive",
+    MixedVoidArms => "mixed-void-arms",
+    EmptySelect => "empty-select",
 }
 
 impl std::fmt::Display for DiagnosticCode {

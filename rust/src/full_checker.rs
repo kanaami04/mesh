@@ -42,11 +42,13 @@
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
-use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, Program, Stmt, StructLitField, TypeNode};
+use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchArm, MatchPattern, Program, SelectArm, Stmt, StructLitField, TypeNode};
 use crate::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use crate::token::{Pos, TokenType};
 use crate::types::{self, ANY, BOOL, ERROR, FLOAT, INT, NONE, STRING, VOID, Type};
+use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 // JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)
 const RESERVED: &[&str] = &[
@@ -160,10 +162,23 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
             "void" => VOID,
             "error" => ERROR,
             "none" => NONE,
-            // 名前付きstructだけレジストリから解決。union/未知/その他はANYのまま
+            // 名前付きstruct、**milestone 39からは名前付きunionも**レジストリから解決する。
+            // 未知/その他はANYのまま
             _ => match tc.lookup_struct(name) {
                 Some(t) if matches!(t, Type::Struct { .. }) => t.clone(),
-                _ => ANY,
+                // レジストリのunionはchecker.rsが完全解決したもの(knot-tying済み)。
+                // ただし`is_fully_modeled`はunionを引き続き「モデル化できていない」扱いに
+                // するので、レジストリ側の宣言型との突き合わせ(structリテラルのフィールド等)
+                // には使われない——matchのパターン照合・narrowingにだけ効く
+                // **中身が解決できていないunionはANYのまま**——`type_equals`/`union_of`/
+                // `assignable`はいずれも「union bodyは解決済み」前提で`.expect()`するので、
+                // 裸のunion循環などで空のまま残った登録を配るとパニックする
+                // (自分で書いた回帰テストで実際に踏んだ。milestone 37の`mesh test`
+                // クラッシュと同じ形)
+                _ => match tc.lookup_union(name) {
+                    Some(t) if safe_to_compare(t) => t.clone(),
+                    _ => ANY,
+                },
             },
         },
         // milestone 33で配列、**milestone 34でmap/channel**をANY縮退から卒業させた。
@@ -173,6 +188,17 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_ann(tc, elem))),
         TypeNode::MapType { key, value, .. } => Type::Map { key: Box::new(resolve_type_ann(tc, key)), value: Box::new(resolve_type_ann(tc, value)) },
         TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_ann(tc, elem))),
+        // milestone 39: 書き下しのunion注釈(`int | error`)。メンバーを1つずつ
+        // `resolve_type_ann`で解決してから組む——**メンバーが1つでもANYへ縮退したら
+        // `union_of`がANYを返す**(ANYの短絡)ので、「中身を完全に解決できたunionだけが
+        // unionとして残る」という安全な性質が自動的に得られる。
+        // matchのsubjectがunionになって初めて、パターン系の診断(impossible-pattern・
+        // unreachable-pattern・match-not-exhaustive)が実際に効くようになる
+        TypeNode::Union { members, .. } => {
+            let ms: Vec<Type> = members.iter().map(|m| resolve_type_ann(tc, m)).collect();
+            // 未解決のunionが紛れていたら`union_of`自身がパニックするので、その手前で降りる
+            if ms.iter().all(safe_to_compare) { types::union_of(ms) } else { ANY }
+        }
         _ => ANY,
     }
 }
@@ -394,8 +420,13 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             ctx.pop_scope();
             success_type_of(&left_ty)
         }
-        // match/spawn/select/prop/無名関数など:
-        // まだ対象外なので中へは踏み込まない
+        // milestone 39: match式・select式。TS版`checker/match-select.ts`の移植。
+        // **アーム本体を走査するようになった**のがこのmilestoneの本題——今まで
+        // `_ => ANY`で素通りしていたため、matchのアームの中にある未定義名も型不一致も
+        // まるごと検出漏れになっていた(Meshはunion路線なのでmatchの中に本文が集まる)
+        Expr::Match { subject, arms, pos } => infer_match(ctx, subject, arms, *pos),
+        Expr::Select { arms, default_arm, pos } => infer_select(ctx, arms, default_arm.as_deref(), *pos),
+        // spawn/prop(`?`)/無名関数など: まだ対象外なので中へは踏み込まない
         _ => ANY,
     }
 }
@@ -1461,6 +1492,239 @@ fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
 // **channel/mapのモデル化とセットで必要になった**——recvが`T | closed`、map読みが`V | none`を
 // 返すようになったため、絞り込みが無いと`if v is closed { break }`の後で`total + v`が
 // 誤って`invalid-operation`になる(実装中にexamplesで検出)
+// milestone 39: match式。TS版`checker/match-select.ts`の`inferMatch`の移植。
+//
+// この一歩の主眼は診断そのものより**アーム本体を走査すること**にある——それまで
+// `infer_expr`の`_ => ANY`に落ちていたため、`match`の中に書かれたコード(Meshでは
+// union路線なので処理の大半がここに集まる)が丸ごと未検査だった。
+//
+// **誤検知を避けるための方針**: パターン系の診断(impossible/unreachable/網羅性)は
+// subjectのunionメンバーが`safe_to_compare`(=中身が解決済みで`type_equals`に
+// かけても安全)なときだけ出す。full_checkerは未モデル化の型をANYへ縮退させるので、
+// 「unionのはずなのにANY」は日常的に起きる——そこで診断を出すと必ず誤検知になる。
+fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm], pos: Pos) -> Type {
+    let subject = infer_expr(ctx, subject_expr);
+    if arms.is_empty() {
+        ctx.error(pos, DiagnosticCode::EmptyMatch, "match must have at least one arm");
+        return ANY;
+    }
+    // `union-required`は**full_checkerが型を完全にモデル化できているときだけ**出す。
+    // ANY縮退した型(関数型・pkg修飾型・union注釈など)で出すと誤検知になる
+    if !matches!(subject, Type::Union { .. } | Type::Any) && is_fully_modeled(&subject) {
+        ctx.error(subject_expr.pos(), DiagnosticCode::UnionRequired, format!("match subject must be a union type, got {}", types::type_to_string(&subject)));
+    }
+    // パターン照合に使えるunionメンバー。未解決/比較すると危険なメンバーが1つでもあれば
+    // Noneにして、パターン系の診断も絞り込みもまるごと諦める(検出漏れ側)
+    let members: Option<Vec<Type>> = match &subject {
+        Type::Union { body } => body.get().map(|b| b.members.clone()).filter(|ms| ms.iter().all(safe_to_compare)),
+        _ => None,
+    };
+    // TS版`stablePath`相当。full_checkerが絞り込めるのは**裸の不変な識別子**だけ
+    // (`n.next`のようなフィールドパスは対象外——絞り込まないぶんには検出漏れ側に倒れる)。
+    // `mut`を除くのは`check_if`と同じ理由(milestone 34のcode review参照)
+    let narrow_name = match subject_expr {
+        Expr::Ident { name, .. } => ctx.lookup(name).filter(|b| !b.mutable).map(|_| name.clone()),
+        _ => None,
+    };
+
+    let mut covered: Vec<Type> = Vec::new();
+    let mut arm_types: Vec<Type> = Vec::new();
+    let mut saw_wildcard = false;
+
+    for arm in arms {
+        if saw_wildcard {
+            // TS版と同じく、到達しないアームは本体を検査しない(continue)
+            ctx.error(arm.pos, DiagnosticCode::UnreachablePattern, "unreachable arm — '_' already matches everything before this");
+            continue;
+        }
+        let mut pattern_types: Vec<Type> = Vec::new();
+        // このアームのパターンに「解決できなかった型」が混じっていたら、絞り込みは行わない
+        // (誤った型でアーム本体を検査すると、そこから誤検知が連鎖する)
+        let mut undecidable = false;
+        for p in &arm.patterns {
+            match p {
+                MatchPattern::Wildcard { pos: wpos } => {
+                    if arm.patterns.len() > 1 {
+                        ctx.error(*wpos, DiagnosticCode::WildcardNotAlone, "'_' must be the only pattern in its arm");
+                    }
+                    saw_wildcard = true;
+                }
+                MatchPattern::Type(node) => {
+                    let pt = crate::checker::resolve_type_node(&ctx.type_ctx, node);
+                    if !safe_to_compare(&pt) {
+                        undecidable = true;
+                        continue;
+                    }
+                    // 判別可能union: `{ kind: "ok" }`のような部分構造パターンは、書かれた
+                    // フィールドが一致するunionメンバー(具体的な形)へ解決してから通常の
+                    // 型パターンと同じに扱う(1個のパターンが複数メンバーに一致することもある)
+                    let resolved: Vec<Type> = match (&pt, &members) {
+                        (Type::Struct { .. }, Some(ms)) => ms.iter().filter(|m| struct_pattern_matches(m, &pt)).cloned().collect(),
+                        (_, Some(ms)) if !ms.iter().any(|m| types::type_equals(m, &pt)) => Vec::new(),
+                        _ => vec![pt.clone()],
+                    };
+                    if members.is_some() && resolved.is_empty() {
+                        ctx.error(arm.pos, DiagnosticCode::ImpossiblePattern, format!("{} can never be {}", types::type_to_string(&subject), types::type_to_string(&pt)));
+                    }
+                    for rp in resolved {
+                        if members.is_some() && covered.iter().any(|c| types::type_equals(c, &rp)) {
+                            ctx.error(arm.pos, DiagnosticCode::UnreachablePattern, format!("unreachable pattern — {} is already covered", types::type_to_string(&rp)));
+                        }
+                        covered.push(rp.clone());
+                        pattern_types.push(rp);
+                    }
+                }
+            }
+        }
+
+        // アーム内での対象の型: 型パターンならその union、`_`なら「まだカバーされていない残り」。
+        // **TS版との意図的な差**: 残りが空(=`_`より前で全メンバーを尽くしている)のとき、
+        // TS版は`unionOf([])`=voidへ絞り込むが、ここではsubjectのままにする。voidを配って
+        // アーム本体を検査すると、本来の型で書かれた正当なコードが軒並みtype-mismatchに
+        // なる(そのアームが到達不能なのは`unreachable-pattern`側の話)——誤検知を避ける
+        let narrowed = if saw_wildcard && pattern_types.is_empty() {
+            match &members {
+                Some(ms) => {
+                    let rest: Vec<Type> = ms.iter().filter(|m| !covered.iter().any(|c| types::type_equals(c, m))).cloned().collect();
+                    if rest.is_empty() { subject.clone() } else { types::union_of(rest) }
+                }
+                None => subject.clone(),
+            }
+        } else if pattern_types.is_empty() {
+            subject.clone()
+        } else {
+            types::union_of(pattern_types)
+        };
+
+        ctx.push_scope();
+        // **絞り込むのは`members`が取れたときだけ**。取れなかった(subjectがANYへ縮退して
+        // いる)ときのpattern_typesは「union実メンバー」ではなく**書かれたパターンそのもの**
+        // なので、それで絞り込むと部分構造パターンの`{ kind: "ok" }`が
+        // 「kindしか持たないstruct」として居座り、アーム本体の`res.user`が
+        // unknown-fieldの誤検知になる(実装中にexamplesとの突き合わせで発覚)。
+        // union注釈は`resolve_type_ann`がANYへ縮退させるので、**注釈付き引数を
+        // matchするコードでは絞り込みが効かない**——検出漏れ側の既知の限界
+        if let Some(name) = &narrow_name
+            && members.is_some()
+            && !undecidable
+        {
+            ctx.narrow(&name.clone(), narrowed);
+        }
+        arm_types.push(infer_expr(ctx, &arm.body));
+        ctx.pop_scope();
+    }
+
+    // 網羅性検査: unionの全メンバーがカバーされているか(`_`があれば常に網羅)
+    if let Some(ms) = &members
+        && !saw_wildcard
+    {
+        let missing: Vec<String> = ms.iter().filter(|m| !covered.iter().any(|c| types::type_equals(c, m))).map(types::type_to_string).collect();
+        if !missing.is_empty() {
+            ctx.error(pos, DiagnosticCode::MatchNotExhaustive, format!("match is not exhaustive — missing: {} (add arms for them, or a '_' arm)", missing.join(", ")));
+        }
+    }
+
+    arms_result_type(ctx, arm_types, pos, "match")
+}
+
+// milestone 39: select式。TS版`inferSelect`の移植。matchと違い、アームは型パターンでは
+// なく「どのチャネル操作が先に終わったか」で選ばれる——受信値は`T | closed`として
+// アームのスコープに束縛する
+fn infer_select(ctx: &mut FullCheckerCtx, arms: &[SelectArm], default_arm: Option<&Expr>, pos: Pos) -> Type {
+    if arms.is_empty() && default_arm.is_none() {
+        ctx.error(pos, DiagnosticCode::EmptySelect, "select must have at least one arm");
+        return ANY;
+    }
+    let mut arm_types: Vec<Type> = Vec::new();
+    for arm in arms {
+        let ch = infer_expr(ctx, &arm.channel);
+        let binding_ty = match &ch {
+            // 要素型が未解決なら`union_of`が内部で`.expect()`するので、安全な場合だけ組む
+            Type::Chan(elem) if safe_to_compare(elem) => types::union_of(vec![(**elem).clone(), types::CLOSED]),
+            Type::Chan(_) | Type::Any => ANY,
+            other => {
+                ctx.error(arm.channel.pos(), DiagnosticCode::NotAChannel, format!("select arm requires a channel, got {}", types::type_to_string(other)));
+                ANY
+            }
+        };
+        ctx.push_scope();
+        ctx.declare(&arm.name, binding_ty, arm.pos, false);
+        arm_types.push(infer_expr(ctx, &arm.body));
+        ctx.pop_scope();
+    }
+    if let Some(def) = default_arm {
+        arm_types.push(infer_expr(ctx, def));
+    }
+    arms_result_type(ctx, arm_types, pos, "select")
+}
+
+// match/selectの結果型(TS版の末尾3行が両方同じ形なので共通化): 全アームがvoidなら
+// void(文として使う)、混ざっていれば`mixed-void-arms`、それ以外はアームのunion
+fn arms_result_type(ctx: &mut FullCheckerCtx, arm_types: Vec<Type>, pos: Pos, kind: &str) -> Type {
+    if arm_types.is_empty() {
+        return ANY;
+    }
+    let voids = arm_types.iter().filter(|t| types::type_equals(t, &VOID)).count();
+    if voids == arm_types.len() {
+        return VOID;
+    }
+    if voids > 0 {
+        ctx.error(pos, DiagnosticCode::MixedVoidArms, format!("{kind} arms mix values and void — all arms must return a value, or none"));
+        return ANY;
+    }
+    // アームの型に未解決unionが混じっていると`union_of`が内部で`.expect()`する
+    if !arm_types.iter().all(safe_to_compare) {
+        return ANY;
+    }
+    types::union_of(arm_types)
+}
+
+// TS版`narrowing.ts`の`structPatternMatches`の移植。**codegen側の
+// `checker::pattern_matches_member`とは別物**——あちらはTypeNode(未解決のパターン)を
+// 受け取り、名前付きstructパターンを名前で照合する。TS版のmatchは解決済みの型どうしを
+// 構造的に照合するので、こちらを使わないとTS版と結果が食い違う
+fn struct_pattern_matches(member: &Type, pattern: &Type) -> bool {
+    let (Type::Struct { fields: mf, .. }, Type::Struct { fields: pf, .. }) = (member, pattern) else {
+        return types::type_equals(member, pattern);
+    };
+    let (Some(mfs), Some(pfs)) = (mf.get(), pf.get()) else { return false };
+    pfs.iter().all(|p| mfs.iter().find(|m| m.name == p.name).is_some_and(|m| types::type_equals(&m.type_, &p.type_)))
+}
+
+// `types::type_equals`/`types::union_of`へ渡しても**パニックしない**かの判定。
+// どちらも「unionのbody・structのfieldsは解決済み」を前提に`.expect()`するが、
+// `resolve_type_decls`は裸のunion循環などで解決に失敗すると中身が空のまま登録を残す
+// (milestone 37で`mesh test`がこれでクラッシュした)。判定できないときは診断を
+// 出さない=検出漏れ側に倒す、という既定方針のための門番。
+// 再帰structで無限に潜らないよう、訪問済みのfieldsセルを持ち回る(`type_equals`が
+// 同じ問題を`seen`で解いているのと同じ手)
+fn safe_to_compare(t: &Type) -> bool {
+    fn go(t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
+        match t {
+            Type::Union { body } => match body.get() {
+                Some(b) => b.members.iter().all(|m| go(m, seen)),
+                None => false,
+            },
+            Type::Struct { fields, .. } => {
+                let ptr = Rc::as_ptr(fields);
+                if seen.contains(&ptr) {
+                    return true; // 自己参照(既に検査中)——ここで打ち切ってよい
+                }
+                let Some(fs) = fields.get() else { return false };
+                seen.push(ptr);
+                let ok = fs.iter().all(|f| go(&f.type_, seen));
+                seen.pop();
+                ok
+            }
+            Type::Array(e) | Type::Chan(e) => go(e, seen),
+            Type::Map { key, value } => go(key, seen) && go(value, seen),
+            Type::Fn { params, ret } => params.iter().all(|p| go(p, seen)) && go(ret, seen),
+            _ => true,
+        }
+    }
+    go(t, &mut Vec::new())
+}
+
 fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
     infer_expr(ctx, &if_stmt.cond);
     // 条件が `ident is T` なら then/else 側の型を計算しておく
@@ -1471,7 +1735,11 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
             // 再代入で型が変わりうる変数を絞り込むと、絞り込んだ型が「宣言された型」として
             // 居座り、後続の正当な再代入をtype-mismatchで誤って弾く一方、本来出るべき
             // 診断を見落とす(code reviewで発覚・両CLIで再現確認)
-            Expr::Ident { name, .. } => ctx.lookup(name).filter(|b| !b.mutable).map(|b| {
+            // `safe_to_compare`は milestone 39 で追加した門番——`narrow_for_is`は
+            // union bodyが解決済み前提で`.expect()`するので、裸のunion循環などで
+            // 未解決のまま残った型を渡すとパニックする(milestone 37で`mesh test`が
+            // 同じ形でクラッシュした前例。絞り込まない=検出漏れ側に倒す)
+            Expr::Ident { name, .. } => ctx.lookup(name).filter(|b| !b.mutable && safe_to_compare(&b.ty)).map(|b| {
                 let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &b.ty, target);
                 (name.clone(), then_ty, else_ty)
             }),
@@ -1840,6 +2108,121 @@ mod tests {
              }\n",
         );
         assert_eq!(diags, vec![]);
+    }
+
+
+    // --- milestone 39: match / select -------------------------------------------------
+
+    #[test]
+    fn matchのアーム本体を走査する() {
+        // このmilestoneの本題。今までアーム本体は`_ => ANY`で素通りしていた
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"${bogus}\"\n        error => \"err\"\n    })\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn アーム内でsubjectが絞り込まれる() {
+        // `int`アームの中では r は int(unionのまま扱うと invalid-operation を見落とす)
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    n := match r {\n        int => r + \"x\"\n        error => 0\n    }\n    print(str(n))\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        // 正しく書けば無診断
+        assert_eq!(check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    n := match r {\n        int => r + 1\n        error => 0\n    }\n    print(str(n))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn matchの網羅性を検査する() {
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"int\"\n    })\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::MatchNotExhaustive);
+        assert_eq!(diags[0].message, "match is not exhaustive — missing: error (add arms for them, or a '_' arm)");
+        // `_`があれば網羅
+        assert_eq!(check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"int\"\n        _ => \"rest\"\n    })\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn 到達しないパターンを報告する() {
+        // unionに存在しない型
+        let impossible = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"int\"\n        string => \"s\"\n        error => \"e\"\n    })\n}\n");
+        assert_eq!(impossible.len(), 1);
+        assert_eq!(impossible[0].code, DiagnosticCode::ImpossiblePattern);
+        assert_eq!(impossible[0].message, "int | error can never be string");
+        // 同じパターンの重複
+        let dup = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"int\"\n        int => \"again\"\n        error => \"e\"\n    })\n}\n");
+        assert_eq!(dup.len(), 1);
+        assert_eq!(dup[0].code, DiagnosticCode::UnreachablePattern);
+        // `_`の後ろのアーム
+        let after = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        _ => \"any\"\n        int => \"int\"\n    })\n}\n");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].code, DiagnosticCode::UnreachablePattern);
+    }
+
+    #[test]
+    fn ワイルドカードは単独でなければならない() {
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int, _ => \"int\"\n    })\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::WildcardNotAlone);
+    }
+
+    #[test]
+    fn union以外をmatchするとunion_requiredになる() {
+        let diags = check("fn main() {\n    x := 1\n    print(match x {\n        int => \"int\"\n    })\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UnionRequired);
+        assert_eq!(diags[0].message, "match subject must be a union type, got int");
+    }
+
+    #[test]
+    fn 値のアームとvoidのアームは混ぜられない() {
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    x := match f() {\n        int => 1\n        error => print(\"boom\")\n    }\n    print(str(x))\n}\n");
+        assert!(diags.iter().any(|d| d.code == DiagnosticCode::MixedVoidArms), "{diags:?}");
+        // 全アームvoidなら文として使えて無診断
+        assert_eq!(check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    match r {\n        int => print(\"int\")\n        error => print(\"err\")\n    }\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn selectのアーム本体も走査する() {
+        // 受信値は`T | closed`として束縛され、本体の中の未定義名も見つかる
+        let diags = check("fn main() {\n    ch := chan<int>(1)\n    select {\n        v := <-ch => print(str(bogus))\n    }\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+        // チャネルでないものを待つ
+        let not_chan = check("fn main() {\n    n := 1\n    select {\n        v := <-n => print(\"got\")\n    }\n}\n");
+        assert_eq!(not_chan.len(), 1);
+        assert_eq!(not_chan[0].code, DiagnosticCode::NotAChannel);
+    }
+
+    #[test]
+    fn mutなsubjectは絞り込まない() {
+        // 回帰(milestone 34のcode reviewと同じ理由): 再代入されうる変数を絞り込むと、
+        // 絞り込んだ型が居座って後続の正当な再代入を誤って弾く
+        assert_eq!(
+            check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    mut r := f()\n    print(match r {\n        int => \"int\"\n        error => \"err\"\n    })\n    r = f()\n}\n"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn subjectがany縮退しているときはパターンで絞り込まない() {
+        // 回帰(実装中にexamples/discriminated_union.meshで発覚): pkg修飾型など
+        // full_checkerがANYへ縮退させる型をmatchすると、`{ kind: "ok" }`のような部分構造
+        // パターンで絞り込んでしまい、アーム本体の`r.user`がunknown-fieldの誤検知になっていた。
+        // ここでは「型注釈がANYになる」形(未知の型名)で同じ状況を作る
+        let diags = check("fn main() {\n    r := unknownThing()\n    print(match r {\n        { kind: \"ok\" } => \"${r.user}\"\n        _ => \"other\"\n    })\n}\n");
+        // undefined-name(unknownThing)だけが出る——r.userのunknown-fieldは出ない
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn 解決できないunionをmatchしてもパニックしない() {
+        // 回帰: 裸のunion循環があると`resolve_type_decls`が失敗し、レジストリには
+        // 中身が空のunionが残る。そこへ`type_equals`/`union_of`を通すと`.expect()`で
+        // パニックする(milestone 37で`mesh test`が同じ形でクラッシュした)。
+        // 判定できないので診断は出さない(検出漏れ側)
+        let diags = check("type A = B | int\ntype B = A | string\n\nfn f() A {\n    return 1\n}\n\nfn main() {\n    r := f()\n    print(match r {\n        int => \"int\"\n        _ => \"other\"\n    })\n    if r is int {\n        print(\"int\")\n    }\n}\n");
+        assert!(diags.iter().all(|d| d.code != DiagnosticCode::MatchNotExhaustive), "{diags:?}");
     }
 
     #[test]

@@ -3154,6 +3154,52 @@
                 効く小さなソース3種(空・structのみ・defer+配列)で一致、引数不足と読めない
                 ファイルのstderr・終了コードも一致。`mesh explain <code>`は36種すべて一致、
                 未知コードのstderr・終了コードも一致。一覧は件数行のみ意図的に異なる(36 vs 107)。
+        - [x] **milestone 39: match/selectの中へ踏み込む + unionのモデル化**
+              ✅ 2026-07-26実装。「TS実装の撤去条件」の(2)(診断カバレッジ)の第一歩。
+              - **本題は診断より「走査」**: `infer_expr`の末尾が`_ => ANY`で、match/selectの
+                アーム本体は**まるごと未検査**だった。Meshはunion路線なので処理の大半がmatchの
+                中に集まる——未定義名も型不一致も引数照合も、matchの中に書いた瞬間に全部
+                見逃していた。TS版`checker/match-select.ts`を移植してアーム本体を走査し、
+                アームごとの絞り込み(パターンでsubjectをnarrow)も入れた。
+              - 追加した診断8種: `empty-match` / `union-required` / `impossible-pattern` /
+                `unreachable-pattern` / `wildcard-not-alone` / `match-not-exhaustive` /
+                `mixed-void-arms` / `empty-select`(36→44種)。
+              - **unionのモデル化を同じmilestoneに含めた**: 最初は診断だけ入れたが、
+                プローブで測ると`match-not-exhaustive`等が**ほとんど発火しない**ことが判明。
+                原因は`resolve_type_ann`がunion注釈を一律ANYへ縮退させていたこと——
+                関数の戻り値`int | error`もANYになるので、subjectがunionにならない。
+                「入れたが効かない診断」は「コードがカバーされている」という誤解を招くので、
+                同じmilestoneで`resolve_type_ann`にunion(書き下し・名前付きalias)を
+                足した。**メンバーが1つでもANYへ縮退したら`union_of`がANYを返す**という
+                性質のおかげで、「中身を完全に解決できたunionだけがunionとして残る」形に
+                自動的になる(誤検知を増やさない)。
+              - **実装中に踏んだ2件**(どちらも「検証しなければ出荷していた」類):
+                (1)**subjectがANYへ縮退しているときにパターンで絞り込んでいた**——
+                `{ kind: "ok" }`という部分構造パターンが「kindしか持たないstruct」として
+                アーム本体に居座り、`res.user`が`unknown-field`の誤検知になった
+                (examples/discriminated_union.mesh・tree.meshとの突き合わせで発覚)。
+                union実メンバーへ解決できたときだけ絞り込む形に修正。
+                (2)**未解決unionを注釈経由で配るとパニック**——`assignable`も
+                「union bodyは解決済み」前提で`.expect()`する。裸のunion循環がある
+                プログラムでクラッシュした(**自分で書いた回帰テストが発見**)。
+                `safe_to_compare`という門番(unionのbody・structのfieldsが解決済みかを
+                再帰的に確認。自己参照はRcポインタで打ち切り)を作り、注釈解決・パターン照合・
+                アーム型のunion化・**既存の`check_if`のnarrowing**にも通した
+                (`check_if`は milestone 34 から同じパニック経路を持っていた既存の穴)。
+              - **TS版との意図的な差**: `_`アームで「残りのメンバー」が空(=`_`より前で
+                全メンバーを尽くしている)のとき、TS版は`unionOf([])`=voidへ絞り込むが、
+                Rust版はsubjectのままにする。voidを配ってアーム本体を検査すると正当な
+                コードが軒並みtype-mismatchになるため(到達不能であること自体は
+                `unreachable-pattern`側で報告される)。
+              - **既知の限界**(いずれも検出漏れ側): 絞り込めるのは**裸の不変な識別子**だけ
+                (TS版`stablePath`は`n.next`のようなフィールドパスも対象)。pkg修飾型など
+                ANYへ縮退する型をmatchしたときはパターン系の診断が出ない。
+              - 新規テスト11件(538→549件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): リポジトリ内の全`.mesh`27ファイル + 新規プローブ32本
+                (新診断8種を1つずつ発火させるもの・判別可能union/名前付きstruct union/
+                chan/map由来のunion/mutなsubject/入れ子match/メソッド内match/select既定アーム
+                など誤検知を狙うもの)の**計59ファイルで`mesh check`の出力・終了コードが完全一致**。
+                examples全22件の`mesh run`の標準出力・終了コードも一致。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3161,9 +3207,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-25時点、milestone 38まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 39まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 36種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 44種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。
