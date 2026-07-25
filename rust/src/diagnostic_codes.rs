@@ -46,6 +46,9 @@ pub enum DiagnosticCode {
     MethodFieldConflict,
     DuplicateMethod,
     VoidUsedAsValue,
+    DiscriminatedUnionTagMissing,
+    DiscriminatedUnionNoMatch,
+    DiscriminatedUnionAmbiguous,
 }
 
 impl DiagnosticCode {
@@ -76,6 +79,9 @@ impl DiagnosticCode {
             DiagnosticCode::MethodFieldConflict => "method-field-conflict",
             DiagnosticCode::DuplicateMethod => "duplicate-method",
             DiagnosticCode::VoidUsedAsValue => "void-used-as-value",
+            DiagnosticCode::DiscriminatedUnionTagMissing => "discriminated-union-tag-missing",
+            DiagnosticCode::DiscriminatedUnionNoMatch => "discriminated-union-no-match",
+            DiagnosticCode::DiscriminatedUnionAmbiguous => "discriminated-union-ambiguous",
         }
     }
 }
