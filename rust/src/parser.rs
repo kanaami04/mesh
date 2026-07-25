@@ -1029,6 +1029,7 @@ impl Parser {
             self.next();
             self.next();
         }
+        let open = self.peek().pos;
         self.next(); // {
         self.skip_semis();
         let mut elems = Vec::new();
@@ -1046,7 +1047,10 @@ impl Parser {
                 "empty-typed-array-literal-removed",
             ));
         }
-        Ok(Some(Expr::ArrayLit { elems, elem_type: Some(elem_type), pos, multiline: close.pos.line != pos.line }))
+        // multilineの基準は**開き括弧**(TS版`parser.ts`も`closeBrace.pos.line !== openBrace.pos.line`)。
+        // 型名の位置と比較しても実際には同じ結果になる(`]`と識別子はASI対象なので、型名と`{`の
+        // 間に改行があるとそもそも構文エラーになる)が、他の構文と判定式を揃えておく
+        Ok(Some(Expr::ArrayLit { elems, elem_type: Some(elem_type), pos, multiline: close.pos.line != open.line }))
     }
 
     // 呼び出し・メンバアクセス・structリテラル・添字は後置で連鎖する: f(x)[0].name。
