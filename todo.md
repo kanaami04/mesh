@@ -3194,7 +3194,19 @@
               - **既知の限界**(いずれも検出漏れ側): 絞り込めるのは**裸の不変な識別子**だけ
                 (TS版`stablePath`は`n.next`のようなフィールドパスも対象)。pkg修飾型など
                 ANYへ縮退する型をmatchしたときはパターン系の診断が出ない。
-              - 新規テスト11件(538→549件)。clippy(`-D warnings`)クリーン。
+              - **code reviewで発見・即修正した2件**(どちらも両CLIで再現確認):
+                (1)**不可能なパターンのアーム本体で誤検知**——パターンが1つもunion実メンバーへ
+                解決できなかった(=`impossible-pattern`を出した)アームに、subjectをunionのまま
+                配っていた。TS版は`unionOf([ANY])`=ANYへ絞る(死んだアームの中身は追加で
+                咎めない)ため、`string => print(str(r + 1))`のような本体でTS版に無い
+                `invalid-operation`が出ていた。ANYへ揃えて解消。
+                (2)**関数値をmatchしたときに`union-required`を見逃していた**——門番に
+                `is_fully_modeled`を使っていたため、`f := add`の`Type::Fn`のように
+                **正確に分かっている**型まで除外していた。full_checkerが型を諦めるときの
+                行き先は必ずANYなので、「unionでもANYでもない」だけで判定すれば十分だった
+                (`is_fully_modeled`は「レジストリ側の宣言型と突き合わせてよいか」を答える
+                述語で、ここで訊きたい問いとは別物)。
+              - 新規テスト13件(538→551件)。clippy(`-D warnings`)クリーン。
               - **検証**(TS版と突き合わせ): リポジトリ内の全`.mesh`27ファイル + 新規プローブ32本
                 (新診断8種を1つずつ発火させるもの・判別可能union/名前付きstruct union/
                 chan/map由来のunion/mutなsubject/入れ子match/メソッド内match/select既定アーム

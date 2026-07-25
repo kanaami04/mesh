@@ -1508,9 +1508,13 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
         ctx.error(pos, DiagnosticCode::EmptyMatch, "match must have at least one arm");
         return ANY;
     }
-    // `union-required`は**full_checkerが型を完全にモデル化できているときだけ**出す。
-    // ANY縮退した型(関数型・pkg修飾型・union注釈など)で出すと誤検知になる
-    if !matches!(subject, Type::Union { .. } | Type::Any) && is_fully_modeled(&subject) {
+    // `union-required`は「unionでもANYでもない」なら出す。**full_checkerが型を諦めるときの
+    // 行き先は必ずANY**(resolve_type_annもwiden_field_typeもANYへ畳む)なので、ANY以外の
+    // 具体的な型が来たならそれは本当にunionではない——`is_fully_modeled`で更に絞ると、
+    // 関数値(`f := add`のType::Fn)のような**正確に分かっている型**まで見逃す
+    // (code reviewで発覚・両CLIで再現確認。`is_fully_modeled`は「レジストリ側の宣言型と
+    // 突き合わせてよいか」を答える述語で、ここで訊きたい問いとは別物だった)
+    if !matches!(subject, Type::Union { .. } | Type::Any) {
         ctx.error(subject_expr.pos(), DiagnosticCode::UnionRequired, format!("match subject must be a union type, got {}", types::type_to_string(&subject)));
     }
     // パターン照合に使えるunionメンバー。未解決/比較すると危険なメンバーが1つでもあれば
@@ -1591,7 +1595,12 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
                 None => subject.clone(),
             }
         } else if pattern_types.is_empty() {
-            subject.clone()
+            // このアームのパターンが**全て不可能**(union実メンバーへ1つも解決できなかった)。
+            // TS版は`unionOf([ANY])`=ANYへ絞り込む——既に`impossible-pattern`で報告済みの
+            // 死んだアームなので、その中身は追加で咎めない。ここでsubject(unionのまま)を
+            // 配ると`r + 1`のような本体がunion相手の`invalid-operation`という**TS版に無い
+            // 誤検知**になる(code reviewで発覚・両CLIで再現確認)
+            ANY
         } else {
             types::union_of(pattern_types)
         };
@@ -2191,6 +2200,27 @@ mod tests {
         let not_chan = check("fn main() {\n    n := 1\n    select {\n        v := <-n => print(\"got\")\n    }\n}\n");
         assert_eq!(not_chan.len(), 1);
         assert_eq!(not_chan[0].code, DiagnosticCode::NotAChannel);
+    }
+
+
+    #[test]
+    fn 不可能なパターンのアーム本体では追加の診断を出さない() {
+        // 回帰(code reviewで発覚): 死んだアームにsubject(unionのまま)を配っていたため、
+        // 本体の`r + 1`がTS版に無い`invalid-operation`の誤検知になっていた。
+        // TS版と同じくANYへ絞り、impossible-patternだけを報告する
+        let diags = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    match r {\n        string => print(str(r + 1))\n        int => print(\"int\")\n        error => print(\"err\")\n    }\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::ImpossiblePattern);
+    }
+
+    #[test]
+    fn 関数値をmatchしてもunion_requiredを出す() {
+        // 回帰(code reviewで発覚): `is_fully_modeled`で門番していたため、関数型のように
+        // **正確に分かっている**型まで見逃していた
+        let diags = check("fn add(a: int, b: int) int {\n    return a + b\n}\n\nfn main() {\n    f := add\n    match f {\n        int => print(\"int\")\n    }\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::UnionRequired);
+        assert_eq!(diags[0].message, "match subject must be a union type, got fn(int, int) int");
     }
 
     #[test]
