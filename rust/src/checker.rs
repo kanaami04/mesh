@@ -1821,7 +1821,7 @@ mod tests {
         Expr::FnExpr {
             params: params.iter().map(|(n, t)| Param { name: n.to_string(), type_node: t.clone(), pos: pos() }).collect(),
             ret,
-            body: crate::ast::Block { stmts: vec![] },
+            body: crate::ast::Block { stmts: vec![], multiline: false },
             pos: pos(),
         }
     }
@@ -1844,7 +1844,7 @@ mod tests {
     #[test]
     fn infer_callはfilter_map_reduceの戻り値型をコールバックから引く() {
         let ctx = CheckerCtx::new();
-        let arr = Expr::ArrayLit { elems: vec![int_lit("1")], elem_type: None, pos: pos() };
+        let arr = Expr::ArrayLit { elems: vec![int_lit("1")], elem_type: None, pos: pos(), multiline: false };
 
         let filter_pred = fn_expr(&[("n", name_type("int"))], Some(name_type("bool")));
         let filter_ty = infer_call(&ctx, &Expr::Ident { name: "filter".into(), pos: pos() }, &[arr.clone(), filter_pred]);
@@ -1927,7 +1927,7 @@ mod tests {
         let types = vec![struct_decl("User", &[("name", name_type("string")), ("age", name_type("int"))])];
         let mut ctx = CheckerCtx::new();
         resolve_type_decls(&mut ctx, &types).unwrap();
-        let lit = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
+        let lit = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos(), multiline: false };
         let lit_ty = infer_expr(&ctx, &lit);
         assert!(matches!(&lit_ty, Type::Struct { name, .. } if name == "User"));
         let member = Expr::Member { target: Box::new(lit), name: "age".into(), pos: pos() };
@@ -1941,7 +1941,7 @@ mod tests {
         resolve_type_decls(&mut ctx, &types).unwrap();
         let user_ty = ctx.lookup_struct("User").unwrap().clone();
         ctx.declare_method("User", "describe", Type::Fn { params: vec![user_ty], ret: Box::new(STRING) });
-        let recv = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos() };
+        let recv = Expr::StructLit { name: "User".into(), pkg: None, fields: vec![], pos: pos(), multiline: false };
         let call = Expr::Member { target: Box::new(recv), name: "describe".into(), pos: pos() };
         assert!(types::type_equals(&infer_call(&ctx, &call, &[]), &STRING));
     }
@@ -2114,16 +2114,17 @@ mod tests {
     fn infer_exprは配列リテラルの型を推論する() {
         let ctx = CheckerCtx::new();
         // 型注釈あり
-        let typed = Expr::ArrayLit { elems: vec![], elem_type: Some(name_type("int")), pos: pos() };
+        let typed = Expr::ArrayLit { elems: vec![], elem_type: Some(name_type("int")), pos: pos(), multiline: false };
         assert!(types::type_equals(&infer_expr(&ctx, &typed), &Type::Array(Box::new(INT))));
         // 型注釈なし・空 → Array(ANY)
-        let empty = Expr::ArrayLit { elems: vec![], elem_type: None, pos: pos() };
+        let empty = Expr::ArrayLit { elems: vec![], elem_type: None, pos: pos(), multiline: false };
         assert!(matches!(infer_expr(&ctx, &empty), Type::Array(e) if matches!(*e, Type::Any)));
         // 型注釈なし・非空 → 最初の要素の型(文字列リテラルはwiden_literalでstringになる)
         let strs = Expr::ArrayLit {
             elems: vec![Expr::String { value: "a".into(), pos: pos() }, Expr::String { value: "b".into(), pos: pos() }],
             elem_type: None,
             pos: pos(),
+            multiline: false,
         };
         assert!(types::type_equals(&infer_expr(&ctx, &strs), &Type::Array(Box::new(STRING))));
     }
@@ -2131,7 +2132,7 @@ mod tests {
     #[test]
     fn infer_exprはmapリテラルの型を推論する() {
         let ctx = CheckerCtx::new();
-        let lit = Expr::MapLit { key: name_type("string"), value: name_type("int"), entries: vec![], pos: pos() };
+        let lit = Expr::MapLit { key: name_type("string"), value: name_type("int"), entries: vec![], pos: pos(), multiline: false };
         assert!(types::type_equals(&infer_expr(&ctx, &lit), &Type::Map { key: Box::new(STRING), value: Box::new(INT) }));
     }
 
@@ -2156,7 +2157,7 @@ mod tests {
         ctx.declare("arr", Type::Array(Box::new(INT)));
         ctx.declare("m", Type::Map { key: Box::new(STRING), value: Box::new(INT) });
         let ident = |name: &str| Expr::Ident { name: name.into(), pos: pos() };
-        let call = |name: &str, arg: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![ident(arg)], pos: pos() };
+        let call = |name: &str, arg: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![ident(arg)], pos: pos(), multiline: false };
 
         assert!(types::type_equals(&infer_expr(&ctx, &call("get", "arr")), &types::union_of(vec![INT, NONE])));
         assert!(types::type_equals(&infer_expr(&ctx, &call("sort", "arr")), &Type::Array(Box::new(INT))));
@@ -2236,7 +2237,7 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
         ctx.declare_fn("compute", Type::Fn { params: vec![], ret: Box::new(INT) });
-        let call = |name: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![], pos: pos() };
+        let call = |name: &str| Expr::Call { callee: Box::new(ident(name)), args: vec![], pos: pos(), multiline: false };
         let spawn_void = Expr::Spawn { call: Box::new(call("log")), detached: false, pos: pos() };
         let detach_void = Expr::Spawn { call: Box::new(call("log")), detached: true, pos: pos() };
         let spawn_int = Expr::Spawn { call: Box::new(call("compute")), detached: false, pos: pos() };
@@ -2251,7 +2252,7 @@ mod tests {
     fn infer_exprのselectはアームとdefaultのunionになり全void_混在も扱う() {
         let mut ctx = CheckerCtx::new();
         ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
-        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos() };
+        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos(), multiline: false };
         let arm = |body: Expr| SelectArm { name: "v".into(), channel: ident("ch"), body, pos: pos() };
 
         let all_int = Expr::Select {
@@ -2329,7 +2330,7 @@ mod tests {
         assert_eq!(name, "mathutil.Point");
         assert_eq!(fields.get().expect("resolved").len(), 1, "importが宣言済みなのでレジストリの実体(フィールド込み)が引けるべき");
 
-        let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
+        let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos(), multiline: false };
         let Type::Struct { name, fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
         assert_eq!(name, "mathutil.Point");
         assert_eq!(fields.get().expect("resolved").len(), 1);
@@ -2356,7 +2357,7 @@ mod tests {
         let Type::Struct { fields, .. } = resolve_type_node(&ctx, &qualified) else { panic!("expected struct") };
         assert!(fields.get().expect("resolved").is_empty(), "importしていないので殻(空フィールド)にフォールバックすべき");
 
-        let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos() };
+        let lit = Expr::StructLit { name: "Point".into(), pkg: Some("mathutil".into()), fields: vec![], pos: pos(), multiline: false };
         let Type::Struct { fields, .. } = infer_expr(&ctx, &lit) else { panic!("expected struct") };
         assert!(fields.get().expect("resolved").is_empty());
     }
@@ -2392,7 +2393,7 @@ mod tests {
     }
 
     fn union_decl(name: &str, members: Vec<TypeNode>) -> TypeDecl {
-        TypeDecl { name: name.to_string(), node: TypeNode::Union { members, pos: pos() }, exported: false, is_error: false, is_json: false, pos: pos() }
+        TypeDecl { name: name.to_string(), node: TypeNode::Union { members, pos: pos(), multiline: false }, exported: false, is_error: false, is_json: false, pos: pos() }
     }
 
     #[test]
@@ -2515,7 +2516,7 @@ mod tests {
         let ctx = CheckerCtx::new();
         let ok_shape = struct_type_node(&[("kind", literal_type("ok"))]);
         let err_shape = struct_type_node(&[("kind", literal_type("notFound"))]);
-        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos(), multiline: false });
 
         let narrowed = narrow_for_match_patterns(&ctx, &subject_ty, &[MatchPattern::Type(ok_shape.clone())]);
         let Type::Struct { fields, .. } = &narrowed else { panic!("expected single struct member, got {}", types::type_to_string(&narrowed)) };
@@ -2532,7 +2533,7 @@ mod tests {
         let ctx = CheckerCtx::new();
         let ok_shape = struct_type_node(&[("kind", literal_type("ok"))]);
         let err_shape = struct_type_node(&[("kind", literal_type("notFound"))]);
-        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+        let subject_ty = resolve_type_node(&ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos(), multiline: false });
 
         let arm = |pattern: TypeNode| MatchArm { patterns: vec![MatchPattern::Type(pattern)], body: int_lit("1"), pos: pos() };
         assert!(match_is_exhaustive(&ctx, &subject_ty, &[arm(ok_shape.clone()), arm(err_shape.clone())]));
@@ -2563,7 +2564,7 @@ mod tests {
         let base_ctx = CheckerCtx::new();
         let ok_shape = struct_type_node(&[("kind", literal_type("ok")), ("value", name_type("int"))]);
         let err_shape = struct_type_node(&[("kind", literal_type("err"))]);
-        let union_ty = resolve_type_node(&base_ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos() });
+        let union_ty = resolve_type_node(&base_ctx, &TypeNode::Union { members: vec![ok_shape.clone(), err_shape.clone()], pos: pos(), multiline: false });
 
         let mut ctx = CheckerCtx::new();
         ctx.declare("res", union_ty);
@@ -2587,7 +2588,7 @@ mod tests {
         let mut ctx = CheckerCtx::new();
         ctx.declare_fn("log", Type::Fn { params: vec![], ret: Box::new(types::VOID) });
         ctx.declare("x", INT);
-        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos() };
+        let void_call = || Expr::Call { callee: Box::new(ident("log")), args: vec![], pos: pos(), multiline: false };
         let arm = |body: Expr| MatchArm { patterns: vec![MatchPattern::Wildcard { pos: pos() }], body, pos: pos() };
 
         let all_void = Expr::Match { subject: Box::new(ident("x")), arms: vec![arm(void_call()), arm(void_call())], pos: pos() };

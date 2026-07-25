@@ -951,11 +951,15 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      診断コード2種追加、テスト485→495件。**code reviewで2件修正**——`mut`な束縛まで
      絞り込んでいた(TS版は不変な束縛のみ。誤検知と検出漏れの両方が出ていた)/
      `compound-assign-on-map`の文言が`+=`固定だった。詳細はtodo.md参照
-   - 残る候補: **milestone 35以降**——pkg修飾struct/pkg修飾呼び出しの中身・
+   - ✅ **milestone 35(2026-07-25)でCLIの`run`/`build` + full_checkerのゲート統合**、
+     **milestone 36で`mesh fmt`**(TS版`formatter.ts`の移植。AST/parserへ`comments`と
+     `multiline`フラグを足すのが前提だった)。これで`run`/`build`/`check`/`fmt`が揃い、
+     移植した診断が実際にコンパイルを止めるようになった。詳細はtodo.md参照
+   - 残る候補: **診断の続き**——pkg修飾struct/pkg修飾呼び出しの中身・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
      値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・
-     `or`の4診断・match/selectの中身の走査。
-     その後: `mesh run`/`build`ゲート統合+RustCLI整備・generics推論(`generic-inference-failed`)・
+     `or`の4診断・match/selectの中身の走査。**CLIの残り**: `mesh test`/`card`/`explain`。
+     その後: full_checkerの複数ファイル対応・generics推論(`generic-inference-failed`)・
      parser/lexerのDiagnosticCode統合。
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出し
@@ -1058,10 +1062,11 @@ mise run rust-check     # = cd rust && cargo clippy --all-targets
 (cd rust && cargo run -- run   ../examples/hello.mesh)         # コンパイルして即実行(milestone 35)
 (cd rust && cargo run -- build ../examples/hello.mesh -o out.mjs)
 (cd rust && cargo run -- check ../examples/hello.mesh [--json]) # 型検査のみ(ソース行+^つき)
+(cd rust && cargo run -- fmt   ../examples/hello.mesh [-w])    # 正規形へ整形(milestone 36)
 (cd rust && cargo run -- ast   ../examples/hello.mesh)         # ASTを表示(移植用のデバッグ支援)
 # `run`/`build`/`check`はいずれもcodegenの前にfull_checkerを通す(milestone 35のゲート統合。
 # 全モジュールを1本ずつ検査し、診断はTS版と同じくstderrへ出す)。
-# `fmt`/`test`/`card`/`explain`はまだTS版のみ
+# `test`/`card`/`explain`はまだTS版のみ
 ```
 
 ## 用語集(初見だと分かりにくい決定)

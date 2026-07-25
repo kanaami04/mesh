@@ -13,7 +13,7 @@
 // そのまま使っている。Plus/Minus/EqEq等は既にlexer側で列挙済みなので、
 // 意味の重複するenumを増やさない判断
 
-use crate::token::Pos;
+use crate::token::{CommentInfo, Pos};
 
 // ---- 型の構文ノード(ソースに書かれた型注釈) ----
 // TS版の8種すべてを移植済み。inline structType(判別可能unionのメンバー)もこの一種として表す。
@@ -23,7 +23,8 @@ use crate::token::Pos;
 pub enum TypeNode {
     Name { name: String, pkg: Option<String>, pos: Pos }, // int, string, Status, math.User など
     Literal { value: String, pos: Pos },                  // "active" — 文字列リテラル型
-    Union { members: Vec<TypeNode>, pos: Pos },           // int | error
+    // multiline: `mesh fmt`(gofmt方式)がユーザーの改行選択をそのまま尊重するための印
+    Union { members: Vec<TypeNode>, pos: Pos, multiline: bool }, // int | error
     StructType { fields: Vec<StructFieldNode>, pos: Pos }, // struct宣言の中身 / union内の無名{...}
     Chan { elem: Box<TypeNode>, pos: Pos },               // chan<int>
     Array { elem: Box<TypeNode>, pos: Pos },              // int[]
@@ -69,6 +70,10 @@ pub struct Program {
     pub fns: Vec<FnDecl>,
     pub consts: Vec<ConstDecl>,
     pub types: Vec<TypeDecl>,
+    // milestone 36(`mesh fmt`)用: lexerが退避したコメント。印字時に位置ベースで
+    // leading/trailingへ再割り当てする(TS版`Program.comments`と同じ)。
+    // checker/codegenは一切参照しない
+    pub comments: Vec<CommentInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +129,10 @@ pub struct Receiver {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    // milestone 36(`mesh fmt`)用: 元ソースで複数行だったか。**無名関数式の印字だけが
+    // これを見る**——fn宣言/if/for/waitの本体は常に複数行に印字する既存の慣習なので参照しない
+    // (TS版`Block.multiline`と同じ)
+    pub multiline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,9 +205,9 @@ pub enum Expr {
     Ident { name: String, pos: Pos },
     Binary { op: crate::token::TokenType, left: Box<Expr>, right: Box<Expr>, pos: Pos },
     Unary { op: crate::token::TokenType, operand: Box<Expr>, pos: Pos }, // ! または -
-    Call { callee: Box<Expr>, args: Vec<Expr>, pos: Pos },
+    Call { callee: Box<Expr>, args: Vec<Expr>, pos: Pos, multiline: bool },
     Member { target: Box<Expr>, name: String, pos: Pos }, // obj.name
-    StructLit { name: String, pkg: Option<String>, fields: Vec<StructLitField>, pos: Pos }, // User{name: "a"} / math.Point{x: 1, y: 2}(パッケージ修飾)
+    StructLit { name: String, pkg: Option<String>, fields: Vec<StructLitField>, pos: Pos, multiline: bool }, // User{name: "a"} / math.Point{x: 1, y: 2}(パッケージ修飾)
     Is { operand: Box<Expr>, target: TypeNode, pos: Pos }, // x is none / x is { kind: "ok" }
     Match { subject: Box<Expr>, arms: Vec<MatchArm>, pos: Pos },
     Recv { channel: Box<Expr>, pos: Pos }, // <-ch
@@ -215,9 +224,9 @@ pub enum Expr {
     OrElse { left: Box<Expr>, right: Box<Expr>, binding: Option<String>, pos: Pos },
     // [1, 2, 3](elem_type: None) / Todo[]{}(空) / int[]{1, 2}(elem_type: Some。
     // 空の型付き配列はF-9aで廃止済み — `xs: T[] = []`に一本化)
-    ArrayLit { elems: Vec<Expr>, elem_type: Option<TypeNode>, pos: Pos },
+    ArrayLit { elems: Vec<Expr>, elem_type: Option<TypeNode>, pos: Pos, multiline: bool },
     Index { target: Box<Expr>, index: Box<Expr>, pos: Pos }, // a[i]
-    MapLit { key: TypeNode, value: TypeNode, entries: Vec<MapLitEntry>, pos: Pos }, // map<string, int>{"a": 1}
+    MapLit { key: TypeNode, value: TypeNode, entries: Vec<MapLitEntry>, pos: Pos, multiline: bool }, // map<string, int>{"a": 1}
     // 無名関数: fn(x: int) int { return x * 2 }
     FnExpr { params: Vec<Param>, ret: Option<TypeNode>, body: Block, pos: Pos },
 }
