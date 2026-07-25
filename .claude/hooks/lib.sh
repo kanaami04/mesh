@@ -117,6 +117,16 @@ hook_json_escape() {
 }
 
 # PreToolUse フックの deny 応答を出力する。$1 = 理由（ユーザーに表示される）。
+# レビューコメント判定に使う jq フィルタ。**各コメントの先頭行だけ**を1行ずつ出す。
+# 全文を見ると、マーカーを**説明・引用**しただけのコメント(コードフェンスの中に
+# `### Code review skipped: ...` と書いた等)でもゲートを通ってしまう——「確認できない
+# ときは deny」という原則に反する(code reviewで発覚・モックghで再現確認)。
+# 見出しはコメントの先頭行に書く運用なので、先頭行に限定しても正当なコメントは落ちない。
+# フックとテストで同じ文字列を使うためにここへ切り出している(片方だけ直る事故を防ぐ)。
+hook_comment_first_lines_filter() {
+  printf '%s' '.comments[].body | split("\n")[0] | sub("\r$"; "")'
+}
+
 hook_deny() {
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$(hook_json_escape "$1")"
 }
