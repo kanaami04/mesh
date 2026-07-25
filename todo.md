@@ -2775,6 +2775,17 @@
                 完全一致を確認(唯一の差分は上記(b)の`not-a-struct`未実装による検出漏れのみ)。
                 **全single-file exampleでfull_checkerが無診断のまま回帰なし**(メソッドを使う
                 struct_methods/users/defer系を含む)。
+              - **code reviewで発見・即修正した実バグ1件**(git履歴レビューのエージェントが指摘、
+                Rust版・TS版の両CLIで再現確認済み): `declare_method`が`resolve_type_node`の
+                **殻structフォールバック**(未知の型名・pkg修飾型は「空フィールドのstruct」になる)を
+                本物のstructと見なして登録していたため、**存在しないstructに同名メソッドを2つ書くと
+                TS版には無い`duplicate-method`の誤検知**が出ていた(TS版はunknown-type+
+                invalid-receiver-type)。milestone 30の「レシーバが未宣言/非struct/pkg修飾なら
+                登録しない(誤った名前で登録しないため)」というガードが、resolve_type_node化に伴い
+                失われていたのが原因——`lookup_struct(sname).is_none()`なら登録も残りの診断もせず
+                素通りする形で復活させた(型aliasは解決後の実名で引くので通る)。この誤検知は
+                「誤検知ではなく検出漏れ側に倒す」というfull_checkerの既定方針にも反していた。
+                回帰テスト追加、460→461件。
               - **次段階**: 判別可能union構築・pkg修飾struct/pkg修飾呼び出しの中身・
                 not-a-struct/narrow-required・配列/map型のモデル化(collection builtinの要素型検査
                 とセット)・`mesh run`/`build`へのゲート統合。

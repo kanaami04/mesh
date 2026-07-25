@@ -909,7 +909,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      専用文言〉/ method-field-conflict / duplicate-method)を`declare_method`へ移植。
      **副産物**: メソッド本体を検査するようになって顕在化したmilestone 22以来のTS非互換
      メッセージ2件も修正(undefined-nameの文言・return文の位置/文言/`void-used-as-value`)。
-     診断コード4種追加、テスト448→460件。詳細はtodo.md参照
+     診断コード4種追加、テスト448→461件。**code reviewで実バグ1件を発見・即修正**——
+     `declare_method`が`resolve_type_node`の殻structフォールバック(未知の型名は空フィールドの
+     structになる)を本物のstructと見なして登録し、存在しないstructに同名メソッドを2つ書くと
+     TS版には無い`duplicate-method`の誤検知が出ていた(milestone 30のガードが失われていた)。
+     詳細はtodo.md参照
    - 残る候補: **milestone 32以降でstruct卒業を継続**——判別可能union構築・pkg修飾struct/
      pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの
      `narrow-required`はunionがANYへ潰れる限り発火しない)・配列/map型のモデル化

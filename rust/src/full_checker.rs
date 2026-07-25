@@ -905,7 +905,7 @@ fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
 // **既知の限界**: 未知の型名のレシーバ(`fn (y: Bogus) f()`)は`resolve_type_node`が
 // 「空フィールドの殻struct」へフォールバックするため、TS版が出す`unknown-type`+
 // `invalid-receiver-type`のどちらも出ない(full_checkerは型注釈のunknown-type検査自体が
-// 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり)
+// 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり。下記のlookup_structガード参照)
 fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     let Some(recv) = &f.receiver else { return };
     let recv_full = crate::checker::resolve_type_node(&ctx.type_ctx, &recv.type_node);
@@ -918,6 +918,19 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
         return;
     };
     let sname = sname.clone();
+    // **殻structのフォールバックを弾く**(code reviewで発覚・再現確認済み): `resolve_type_node`は
+    // 未知の型名・pkg修飾型を「空フィールドの殻struct」へフォールバックさせる(checker.rs)ため、
+    // 上のstruct判定だけでは`fn (y: Bogus) f()`のような未宣言のレシーバも通ってしまう。
+    // レジストリに実在するstructでなければ、**登録も残りの診断もせず素通りさせる**——
+    // milestone 30の「レシーバが未宣言/非struct/pkg修飾なら登録しない(誤った名前で登録しない
+    // ため)」というガードを、resolve_type_node化の後も維持するもの。これが無いと、存在しない
+    // structに同名メソッドを2つ書いたときに`duplicate-method`という**TS版には無い誤検知**が出る
+    // (TS版はunknown-type+invalid-receiver-type。full_checkerはunknown-type未移植なので、
+    // 誤検知ではなく検出漏れ側に倒す既定方針どおり無診断にする)。
+    // 型aliasが名前付きstructを指す場合は解決後の実名で引くので通る
+    if ctx.type_ctx.lookup_struct(&sname).is_none() {
+        return;
+    }
     let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|fd| fd.name.clone()).collect()).unwrap_or_default();
     // 組み込み関数名はメソッド名にも使えない(TS版はここだけ「cannot be used as a method
     // name」という専用の文言。declare()の"cannot be redeclared"とは別)
@@ -1891,6 +1904,17 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::BuiltinRedeclared);
         assert_eq!(diags[0].message, "'len' is a builtin function and cannot be used as a method name");
+    }
+
+    #[test]
+    fn 未宣言のレシーバ型にはメソッドを登録せず誤検知も出さない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): `resolve_type_node`が未知の型名を
+        // 「空フィールドの殻struct」へフォールバックさせるため、殻を本物のstructと見なして
+        // メソッド表へ登録してしまい、同名メソッドを2つ書くと存在しないstructについて
+        // `duplicate-method`という**TS版には無い誤検知**が出ていた(TS版はunknown-type+
+        // invalid-receiver-type)。lookup_structガードで無診断(検出漏れ側)に戻した
+        let src = "fn (a: Bogus) f() int {\n    return 1\n}\nfn (b: Bogus) f() int {\n    return 2\n}\nfn main() {\n    print(\"x\")\n}\n";
+        assert_eq!(check(src), vec![]);
     }
 
     #[test]
