@@ -580,6 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn json_structのjsonキーワードを落とさない() {
+        // TS版が実際に踏んだバグの回帰テスト(`printTypeDecl`が`json`を印字しておらず、
+        // 再整形で`json struct`が普通のstructに化けてデコーダ生成の対象から外れていた)
+        let src = "json struct User {\n\tname: string\n}\n\nfn main() {\n}\n";
+        assert_eq!(fmt(src), src);
+        // error structも同様(接頭辞の印字漏れは同じ形のバグになる)
+        let err = "error struct DbError {\n\tmessage: string\n}\n\nfn main() {\n}\n";
+        assert_eq!(fmt(err), err);
+    }
+
+    #[test]
+    fn defer文を落とさない() {
+        // TS版が実際に踏んだバグの回帰テスト(`printStmt`のswitchに`deferStmt`のcaseが無く、
+        // default節も無かったため、再整形でdefer文が丸ごと消えていた)
+        let src = "fn main() {\n\tdefer cleanup()\n\tprint(1)\n}\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
     fn 複数行のunion宣言は改行を保つ() {
         // 先頭メンバーは`=`の直後(行頭`|`は先頭には付かない文法)
         let src = "type Resp =\n\t{ kind: \"ok\" }\n\t| { kind: \"err\" }\n\nfn main() {\n}\n";
