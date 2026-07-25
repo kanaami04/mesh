@@ -977,10 +977,12 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      無名関数の本体)。あわせて`?`の5診断と`or`の4診断を移植し、診断コードは44→53種。
      **catch-allは復活させないこと**——新しい式を足すとコンパイルエラーになり、
      「検査するか、しないなら理由を書く」判断を強制できる
-   - 残る候補: **診断の続き**——型名そのものの検査(`unknown-type`/`type-alias-cycle`。
+   - 残る候補: **診断の続き**——**値位置の`void-used-as-value`**(TS版`checkExprSingle`相当。
+     milestone 40のcode reviewで「これが無いとprop/or/matchがTS版と違うコードを出す」と
+     判明したため優先度が上がった)・型名そのものの検査(`unknown-type`/`type-alias-cycle`。
      milestone 39でこれが無いために「未知の型名は判定不能として飛ばす」対処が要った)・
      pkg修飾struct/pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`)・
-     union targetの`narrow-required`・値位置の`void-used-as-value`。
+     union targetの`narrow-required`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)

@@ -1512,7 +1512,13 @@ fn infer_prop(ctx: &mut FullCheckerCtx, operand: &Expr, context: Option<&Expr>, 
             ctx.error(cx.pos(), DiagnosticCode::PropContextNotString, format!("'?' context must be a string, got {}", types::type_to_string(&ct)));
         }
     }
-    if matches!(t, Type::Any) || !safe_to_compare(&t) {
+    // **voidも免除する**(ANYと同じ扱い)。TS版は`checkExprSingle`が値位置のvoidを
+    // `void-used-as-value`で報告してANYへ差し替えるため、prop/or/matchの検査には
+    // voidが届かない。その診断がまだ未移植のRust版でvoidをそのまま流すと、
+    // TS版と**違うコード**(`prop-requires-failure-union`等)を出してしまう
+    // ——コードが違うのは検出漏れより悪いので、`void-used-as-value`を移植するまでは黙る
+    // (code reviewで発覚・両CLIで再現確認)
+    if matches!(t, Type::Any) || types::type_equals(&t, &VOID) || !safe_to_compare(&t) {
         return ANY;
     }
     let Type::Union { body } = &t else {
@@ -1582,7 +1588,8 @@ fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: O
             _ => infer_expr(ctx, right),
         }
     }
-    if matches!(t, Type::Any) || !safe_to_compare(&t) {
+    // voidの免除理由は`infer_prop`のコメント参照(TS版は`void-used-as-value`で先に弾く)
+    if matches!(t, Type::Any) || types::type_equals(&t, &VOID) || !safe_to_compare(&t) {
         check_right(ctx, &t, right, binding, pos);
         return ANY;
     }
@@ -1640,7 +1647,8 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
     // 関数値(`f := add`のType::Fn)のような**正確に分かっている型**まで見逃す
     // (code reviewで発覚・両CLIで再現確認。`is_fully_modeled`は「レジストリ側の宣言型と
     // 突き合わせてよいか」を答える述語で、ここで訊きたい問いとは別物だった)
-    if !matches!(subject, Type::Union { .. } | Type::Any) {
+    // voidの免除理由は`infer_prop`のコメント参照(milestone 39から同じ穴があった)
+    if !matches!(subject, Type::Union { .. } | Type::Any) && !types::type_equals(&subject, &VOID) {
         ctx.error(subject_expr.pos(), DiagnosticCode::UnionRequired, format!("match subject must be a union type, got {}", types::type_to_string(&subject)));
     }
     // パターン照合に使えるunionメンバー。未解決/比較すると危険なメンバーが1つでもあれば
@@ -2291,6 +2299,22 @@ mod tests {
 
 
     // --- milestone 40: ? / or / spawn / 無名関数 ---------------------------------------
+
+
+    #[test]
+    fn 値位置のvoidには別のコードを出さない() {
+        // 回帰(code reviewで発覚): TS版は`checkExprSingle`が値位置のvoidを
+        // `void-used-as-value`で弾いてANYへ差し替えるので、prop/or/matchにはvoidが届かない。
+        // その診断が未移植のRust版でvoidをそのまま流すと**違うコード**を出してしまう
+        // (or-never-fails / prop-requires-failure-union / union-required)。
+        // 移植するまでは黙る(コードが違うのは検出漏れより悪い)
+        let void_or = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    n := work(1) or 0\n    print(str(n))\n}\n");
+        assert!(void_or.iter().all(|d| d.code != DiagnosticCode::OrNeverFails), "{void_or:?}");
+        let void_prop = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn run() int | error {\n    work(1)?\n    return 1\n}\n\nfn main() {\n    print(str(run() or e => 0))\n}\n");
+        assert!(void_prop.iter().all(|d| d.code != DiagnosticCode::PropRequiresFailureUnion), "{void_prop:?}");
+        let void_match = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    print(match work(1) {\n        int => \"int\"\n    })\n}\n");
+        assert!(void_match.iter().all(|d| d.code != DiagnosticCode::UnionRequired), "{void_match:?}");
+    }
 
     #[test]
     fn propは失敗を伝播し戻り値型と突き合わせる() {

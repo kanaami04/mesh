@@ -3249,10 +3249,20 @@
                 文字列リテラル/補間に限っているため、この診断はTS版でも実質到達不能)。
               - `union_without`/`assignable`/`or_binding_type`はいずれも「union bodyは解決済み」
                 前提なので、milestone 39の`safe_to_compare`門番をここにも通した。
-              - 新規テスト5件(552→557件)。clippy(`-D warnings`)クリーン。
-              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計84ファイルで`mesh check`の
+              - **code reviewで発見・即修正した1件**(両CLIで再現確認): **値位置のvoidに
+                別のコードを出していた**。TS版は`checkExprSingle`が値位置のvoidを
+                `void-used-as-value`で報告して**ANYへ差し替える**ので、prop/or/matchの検査には
+                voidが届かない。その診断が未移植のRust版はvoidをそのまま流していたため、
+                `work(1) or 0`で`or-never-fails`、`work(1)?`で`prop-requires-failure-union`、
+                `match work(1)`で`union-required`という**TS版と違うコード**を出していた
+                (最後の1つはmilestone 39から入っていた既存の穴)。**コードが違うのは検出漏れ
+                より悪い**ので、`void-used-as-value`を移植するまでは3箇所ともvoidを免除して
+                黙る。→ `void-used-as-value`の移植が次の有力候補になった。
+              - 新規テスト6件(552→558件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計87ファイルで`mesh check`の
                 出力・終了コードを比較。差が出るのは未移植の診断(`unknown-type`・
-                `type-alias-cycle`)が絡む3ファイルのみで、**Rust側だけに出る診断は0件**
+                `type-alias-cycle`・`void-used-as-value`)が絡む6ファイルのみで、
+                **Rust側だけに出る診断は0件**
                 (=検出漏れ側)。examples全22件の`mesh run`も一致。プローブは9診断を
                 1つずつ発火させるものに加え、メソッド内の`?`・無名関数の中の`?`
                 (ret_stackの入れ子)・mapの読みに対する`or`・`detach`・引数位置の`or`など
