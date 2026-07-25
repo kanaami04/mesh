@@ -98,7 +98,7 @@ for n in "${!seen[@]}"; do
   # 理由が無ければゲートとして意味を成さない。
   printf '%s' "$comments" | grep -qE '^### Code review skipped:[[:space:]]*[^[:space:]]' && continue
 
-  hook_deny "PR #$n にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $n --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。レビューが不要だと判断した場合は、その旨と理由を \`### Code review skipped: <理由>\` という見出しのコメントで残してください。"
+  hook_deny "PR #$n にはまだ /code-review のレビューコメントが投稿されていません。マージ前に \`/code-review $n --comment\` を実行してレビューを記録してください（指摘が見つかった場合は対応してから再度レビューを通してください）。レビューが不要だと判断した場合は、その旨と理由を \`### Code review skipped: <理由>\` という見出しのコメントで残してください（見出しは**コメントの先頭行**に置いてください。前置きの文章を挟むと認識されません）。"
   exit 0
 done
 
