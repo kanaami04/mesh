@@ -214,6 +214,12 @@ fn print_stmt(p: &mut Printer, stmt: &Stmt, indent: usize) {
         return;
     }
     match stmt {
+        // `defer`は1行の文だが、`try_print_stmt_inline`には載せない(上記の理由)ので
+        // ここで直接印字する(TS版`printStmt`の`case "deferStmt"`に対応)
+        Stmt::DeferStmt { call, pos } => {
+            let trailing = p.take_trailing_comment(pos.line);
+            p.emit(with_trailing(format!("{ind}defer {}", print_expr(call, indent)), trailing));
+        }
         Stmt::If(if_stmt) => print_if(p, if_stmt, indent),
         Stmt::For { init, cond, post, body, pos } => {
             let init_s = init.as_deref().and_then(|s| try_print_stmt_inline(s, indent)).unwrap_or_default();
@@ -243,8 +249,8 @@ fn print_stmt(p: &mut Printer, stmt: &Stmt, indent: usize) {
             print_block_stmts(p, body, indent + 1);
             p.emit(format!("{ind}}}"));
         }
-        // try_print_stmt_inlineがNoneを返すのは上の3種+ifだけ
-        _ => unreachable!("inline印字できない文はif/for/rangeFor/waitのみ"),
+        // try_print_stmt_inlineがNoneを返すのはif/for/rangeFor/wait/deferだけ
+        _ => unreachable!("inline印字できない文はif/for/rangeFor/wait/deferのみ"),
     }
 }
 
@@ -277,8 +283,12 @@ fn try_print_stmt_inline(stmt: &Stmt, indent: usize) -> Option<String> {
         Stmt::Send { channel, value, .. } => format!("{} <- {}", print_expr(channel, indent), print_expr(value, indent)),
         Stmt::Break { .. } => "break".to_string(),
         Stmt::Continue { .. } => "continue".to_string(),
-        Stmt::DeferStmt { call, .. } => format!("defer {}", print_expr(call, indent)),
-        // if/for/wait/rangeFor: ブロックを持つので1行化しない
+        // **`defer`はここに入れない**(TS版`tryPrintStmtInline`にも`deferStmt`のcaseは無い)。
+        // この関数は「無名関数の本体を1行に保てるか」の判定にも使われるため、deferを
+        // 1行化可能と答えると`fn() { defer f() }`がTS版(複数行へ展開する)と食い違う
+        // ——実際にRust版だけ1行のままになる差分をcode reviewで検出した。
+        // 通常の文としての`defer`の印字は`print_stmt`が直接行う
+        // if/for/wait/rangeFor/defer: 1行化しない
         _ => return None,
     };
     Some(text)
@@ -596,6 +606,16 @@ mod tests {
         // default節も無かったため、再整形でdefer文が丸ごと消えていた)
         let src = "fn main() {\n\tdefer cleanup()\n\tprint(1)\n}\n";
         assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn deferを含む無名関数は1行にまとめない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): TS版`tryPrintStmtInline`には
+        // `deferStmt`のcaseが無く、deferを含むクロージャ本体は常に複数行へ展開される。
+        // Rust版が`try_print_stmt_inline`にdeferを入れていたため1行のままになっていた
+        let src = "fn cleanup() {\n}\n\nfn main() {\n\tf := fn() { defer cleanup() }\n\tf()\n}\n";
+        let expected = "fn cleanup() {\n}\n\nfn main() {\n\tf := fn() {\n\t\tdefer cleanup()\n\t}\n\tf()\n}\n";
+        assert_eq!(fmt(src), expected);
     }
 
     #[test]
