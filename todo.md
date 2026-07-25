@@ -3044,6 +3044,77 @@
                 回帰テストと、`escape_string`が単一パスでもTS版の多段パスと等価である理由の
                 説明コメントも追加した(いずれもcode reviewの指摘)。単体テスト10→13件。
               - **次段階**: `mesh test`/`card`/`explain`の移植。
+        - [x] **milestone 37: `mesh test`(F-15のテストランナー)+ full_checkerのパッケージ単位検査**
+              ✅ 2026-07-25実装。「TS実装の撤去条件」の(1)の続き。
+              - **本題になったのはfull_checkerのパッケージ単位検査**: 着手直後、
+                `main_test.mesh`から`main.mesh`の関数を呼ぶだけで`undefined-name`の誤検知に
+                なることが判明。原因はfull_checkerが**1ファイルずつ独立に検査していた**こと
+                (TS版`checkPackage`は同じパッケージの全ファイルを1つの名前空間で検査する)。
+                さらに調べると、これは`mesh test`固有ではなく**milestone 35のゲート統合以降
+                `mesh check`/`run`/`build`が、複数ファイルのパッケージが内部で相互参照する
+                正当なプログラムを弾いていた**という既存の誤検知だった(examplesのパッケージが
+                たまたま相互参照していなかったため気づけていなかった)。
+                新設`check_package(files, require_main)`でTS版と同じ順序
+                (全ファイルの型宣言→メソッド表→import alias→全ファイルの関数シグネチャ→
+                定数→mainの形→本体)にし、診断は**それが出たファイル**へ振り分ける
+                (ctx.diagnosticsが追記のみなので各段階の前後の長さで区間を切る)。
+                `check_program`は1ファイルのcheck_packageとして残したので既存テストは無変更。
+              - **`mesh test`本体**: `modules.rs`に`load_modules_for_test`(ディレクトリ指定なら
+                そのパッケージ自身をテストファイル込みで、ファイル指定ならそのファイル+同じ
+                ディレクトリの`_test.mesh`)。**依存先パッケージからは`_test.mesh`を除外**する
+                (TS版`readMeshFiles(dir, {includeTests:false})`——これも今まで抜けていた)。
+                新設`test_discovery.rs`(`_test.mesh`内の`test`で始まる関数を集め、
+                `() none | error`でなければ`invalid-test-signature`)。codegenは
+                `generate_modules_for_test`で末尾を`main()`ではなく`__runTests([...])`にする
+                (ランタイム側のハーネスはruntime.ts丸ごと埋め込みで既に存在)。
+              - **結果JSONの読み取りは手書き**(kanayamaと相談して依存ゼロを維持する判断)。
+                新設`test_report.rs`は「自分たちのランタイムが出す固定の形」だけを読む最小実装で、
+                文字列のエスケープ解釈(失敗メッセージに改行・引用符が入る)とサロゲートペアは
+                テストで固めた。想定外の形はNoneを返し、呼び出し元が生の出力を見せて失敗にする。
+                TS版と同じ防衛的二重チェック(`ok`なのに終了コードが0でなければ失敗扱い)も移植。
+              - 新規テスト: test_discovery 6件・test_report 7件・full_checker 3件
+                (パッケージ単位検査)・CLI 4件(合否表示・テスト無し・シグネチャ違反・
+                パッケージ内相互参照の回帰)。508→524件 + CLI 15→19件。clippyクリーン。
+              - **検証**: `mesh test`をTS版と突き合わせ、7シナリオ(成功+失敗混在・`--json`・
+                テスト無し・panicするテスト・シグネチャ違反・型エラー・ディレクトリ指定・
+                存在しないターゲット)で出力と終了コードが完全一致。全exampleの
+                `check`/`run`/`fmt`も回帰なし。
+              - **code reviewで発見・即修正した3件**(いずれも両CLIで再現確認):
+                (1)**`mesh test --json`が構文エラーのときだけ素のテキストを返していた**——
+                `run_test`が`parse_all`を再利用せず自前のパースループを持っていたため、
+                milestone 35で`mesh check --json`に入れた「構文エラーもJSONで返す」契約が
+                抜けていた。共通の`parse_modules`へ切り出して解消(milestone 28の
+                「checkだけ合成を忘れる」ドリフトを構造的に防ぐ意味もある)。
+                (2)**`require_main`が偽でも`invalid-main-signature`を出していた**(誤検知)——
+                依存パッケージが`export fn main(n: int) int`を持ち`util.main(3)`と呼ぶのは
+                正当なのに弾いていた。TS版は`if (opts.requireMain)`でブロック全体を包むので、
+                同じく検査ごと飛ばす形にした。**milestone 35から入っていた既存の誤検知**で、
+                このPRのcheck_package化で表面化しやすくなっていた。
+                (3)**`test_discovery`が未解決のunionで`type_equals`を呼びパニックしていた**——
+                裸のunion循環があると解決が失敗し、knot-tyingで登録済みのunionは中身が
+                空のまま残る。そこへ`.expect()`する`type_equals`を通すとクラッシュし、
+                `mesh test`が診断もJSONも出さずに落ちていた。判定不能を`None`で返す
+                専用の述語に置き換え、判定できないときは診断を出さない(検出漏れ側)。
+                あわせて、宣言時診断の順序(メソッドと自由関数を2周に分けていたためソース順と
+                食い違っていた)と、`invalid-main-signature`のファイル帰属(一律に先頭ファイルへ
+                紐づけていた——TS版は`main`を宣言したファイル)もTS版に揃えた。
+                (4)**テストの戻り値エイリアスが同じパッケージの別ファイルにあると
+                `invalid-test-signature`の誤検知**になっていた——発見側が自ファイルの型宣言
+                だけで解決していたため(`type R = none | error`を本体側で宣言してテストで使う
+                のは自然な書き方)。パッケージ全体の型宣言を渡す形に修正。
+                (5)パッケージの検査順が「読み込み順の逆」だったため、ダイヤモンド依存
+                (mainがa/cをimportし、cもaをimportする)で診断の出る順序がTS版と食い違って
+                いた——TS版と同じDFS後順(依存されている側が先)に修正。
+                あわせて、宣言時診断の順序(メソッドと自由関数を2周に分けていたためソース順と
+                食い違っていた)と、`invalid-main-signature`のファイル帰属(一律に先頭ファイルへ
+                紐づけていた——TS版は`main`を宣言したファイル)もTS版に揃えた。
+                回帰テスト5件追加、524→529件。
+              - **既知の限界**: 裸のunion循環があるファイルでは、TS版が
+                `type-alias-cycle`+`invalid-test-signature`を位置付きで報告するのに対し、
+                Rust版はcodegen側リゾルバのエラー文(`checker: type alias cycle involving 'B'`、
+                位置なし)を出す。`type-alias-cycle`はfull_checkerに未移植の診断で、
+                終了コードは両方1で一致する。
+              - **次段階**: `mesh card`/`explain`の移植(CLIの残り)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では

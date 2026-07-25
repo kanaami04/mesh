@@ -211,6 +211,84 @@ fn fmtは構文エラーをstderrへ出して書き戻さない() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "壊れたソースを書き潰してはいけない");
 }
 
+// `mesh test`用: 対象ディレクトリを作ってファイルを書く
+fn temp_test_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mesh-cli-test-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
+    for (f, src) in files {
+        std::fs::write(dir.join(f), src).expect("一時ファイルを書けること");
+    }
+    dir
+}
+
+#[test]
+fn testは合否を並べて終了コードで返す() {
+    if !js_runtime_available() {
+        eprintln!("skip: bun/node が見つからないため test のテストをスキップ");
+        return;
+    }
+    let dir = temp_test_dir(
+        "test-run",
+        &[
+            ("main.mesh", "fn add(a: int, b: int) int {\n\treturn a + b\n}\n\nfn main() {\n\tprint(add(1, 2))\n}\n"),
+            ("main_test.mesh", "fn testOk() none | error {\n\tif add(1, 2) != 3 {\n\t\treturn error(\"bad\")\n\t}\n\treturn none\n}\n\nfn testNg() none | error {\n\treturn error(\"boom\")\n}\n"),
+        ],
+    );
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["test", &entry]);
+    assert_eq!(out.code, 1, "失敗テストがあるので1: {} {}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("ok   testOk"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("FAIL testNg"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("boom"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("1/2 passed"), "stdout: {}", out.stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn testはテストが無ければその旨を出して成功で終わる() {
+    if !js_runtime_available() {
+        eprintln!("skip: bun/node が見つからないため test のテストをスキップ");
+        return;
+    }
+    let dir = temp_test_dir("test-none", &[("main.mesh", "fn main() {\n\tprint(1)\n}\n")]);
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["test", &entry]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("no tests found"), "stdout: {}", out.stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn testはシグネチャ違反を報告して実行しない() {
+    // `fn test...`は`() none | error`固定(F-15)
+    let dir = temp_test_dir(
+        "test-sig",
+        &[("main.mesh", "fn main() {\n\tprint(1)\n}\n"), ("main_test.mesh", "fn testBad(n: int) none | error {\n\treturn none\n}\n")],
+    );
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["test", &entry]);
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("error[invalid-test-signature]"), "stderr: {}", out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn 同じパッケージの複数ファイルは相互参照できる() {
+    // 回帰(milestone 35のゲート統合以降の誤検知): パッケージ内の別ファイルの関数を
+    // 呼ぶだけで`undefined-name`になり、`check`/`run`/`build`が正当なプログラムを弾いていた
+    let dir = temp_test_dir("pkg-crossref", &[]);
+    let pkg = dir.join("util");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(dir.join("main.mesh"), "import \"util\"\n\nfn main() {\n\tprint(util.twice(3))\n}\n").unwrap();
+    std::fs::write(pkg.join("a.mesh"), "export fn twice(n: int) int {\n\treturn double(n)\n}\n").unwrap();
+    std::fs::write(pkg.join("b.mesh"), "fn double(n: int) int {\n\treturn n * 2\n}\n").unwrap();
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["check", &entry]);
+    assert_eq!(out.code, 0, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn 引数不足やサブコマンド無しはusageを出す() {
     let no_args = mesh(&[]);

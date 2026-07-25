@@ -70,12 +70,9 @@ fn load_dependencies(root: &Path, initial_queue: Vec<String>) -> Result<Vec<Modu
         if !dir.is_dir() {
             return Err(format!("error: cannot find package '{path}' (expected directory '{}' with .mesh files)", dir.display()));
         }
-        let mut files: Vec<PathBuf> = fs::read_dir(&dir)
-            .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mesh"))
-            .collect();
-        files.sort();
+        // **依存先には`_test.mesh`を含めない**(TS版`readMeshFiles(dir, {includeTests:false})`)。
+        // テストファイルを読むのは`mesh test`が直接指定した対象パッケージだけ
+        let files = read_mesh_files(&dir, false)?;
         if files.is_empty() {
             return Err(format!("error: package '{path}' has no .mesh files (in '{}')", dir.display()));
         }
@@ -85,6 +82,68 @@ fn load_dependencies(root: &Path, initial_queue: Vec<String>) -> Result<Vec<Modu
             modules.push(ModuleSource { pkg: path.clone(), file, source });
         }
     }
+    Ok(modules)
+}
+
+// ディレクトリ直下の`.mesh`をソート順で返す(TS版`readMeshFiles`)。
+// `include_tests`がfalseなら`_test.mesh`を除く
+fn read_mesh_files(dir: &Path, include_tests: bool) -> Result<Vec<PathBuf>, String> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mesh"))
+        .filter(|p| include_tests || !is_test_file(p))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+fn is_test_file(p: &Path) -> bool {
+    p.file_name().and_then(|n| n.to_str()).map(|n| n.ends_with("_test.mesh")).unwrap_or(false)
+}
+
+// `mesh test`用のモジュール収集(TS版`cli.ts`の`loadModulesForTest`)。
+// - ディレクトリを渡された場合: そのディレクトリ自身が1パッケージ(名前=ディレクトリ名)で、
+//   **`_test.mesh`も含めて**全ファイルを読む。依存解決の基準(プロジェクトルート)は親ディレクトリ
+// - ファイルを渡された場合: そのファイルが`main`パッケージ。**同じディレクトリの`_test.mesh`だけ**
+//   を同じパッケージへ足す(通常の`.mesh`は足さない——`load_modules`と同じ「エントリは1ファイル」
+//   の原則を保つ)
+//
+// どちらの場合も、そこからimportされたパッケージは`load_dependencies`が集める
+// (依存先はテストファイルを含まない本体コードのみ)
+pub fn load_modules_for_test(target: &Path) -> Result<Vec<ModuleSource>, String> {
+    if !target.exists() {
+        return Err(format!("error: cannot find '{}'", target.display()));
+    }
+    let is_dir = target.is_dir();
+    let dir = if is_dir { target.to_path_buf() } else { target.parent().unwrap_or_else(|| Path::new(".")).to_path_buf() };
+    // 依存先解決の基準: ディレクトリ指定ならその親、ファイル指定ならそのファイルのディレクトリ
+    let root = if is_dir { target.parent().unwrap_or_else(|| Path::new(".")).to_path_buf() } else { dir.clone() };
+
+    let mut modules: Vec<ModuleSource> = Vec::new();
+    if is_dir {
+        let pkg = target.file_name().and_then(|n| n.to_str()).unwrap_or("main").to_string();
+        let files = read_mesh_files(&dir, true)?;
+        if files.is_empty() {
+            return Err(format!("error: '{}' has no .mesh files", dir.display()));
+        }
+        for file in files {
+            let source = fs::read_to_string(&file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+            modules.push(ModuleSource { pkg: pkg.clone(), file, source });
+        }
+    } else {
+        let source = fs::read_to_string(target).map_err(|e| format!("failed to read {}: {e}", target.display()))?;
+        modules.push(ModuleSource { pkg: "main".to_string(), file: target.to_path_buf(), source });
+        for file in read_mesh_files(&dir, true)? {
+            if file == target || !is_test_file(&file) {
+                continue;
+            }
+            let source = fs::read_to_string(&file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+            modules.push(ModuleSource { pkg: "main".to_string(), file, source });
+        }
+    }
+    let queue: Vec<String> = modules.iter().flat_map(|m| imports_of(&m.source)).collect();
+    modules.extend(load_dependencies(&root, queue)?);
     Ok(modules)
 }
 

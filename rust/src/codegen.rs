@@ -16,6 +16,7 @@
 
 use crate::ast::{Block, ConstDecl, ElseClause, Expr, FnDecl, IfStmt, MatchPattern, Program, Receiver, SelectArm, Stmt, TypeDecl, TypeNode};
 use crate::checker::{self, CheckerCtx};
+use crate::test_discovery::TestInfo;
 use crate::token::{Pos, TokenType};
 use crate::types::{self, INT, Type};
 use std::collections::{HashMap, HashSet};
@@ -55,7 +56,13 @@ pub fn generate(program: &Program, file: &str) -> CodegenResult<String> {
 // 複数ファイル/複数パッケージのコンパイル(milestone 6)。TS版`compileModules`に相当するが、
 // このリゾルバはcheck/generateが融合しているので2パスではなく1パスで済む
 pub fn generate_modules(modules: &[ModuleUnit]) -> CodegenResult<String> {
-    Codegen::new().generate_all_modules(modules)
+    Codegen::new().generate_all_modules(modules, None)
+}
+
+// F-15(`mesh test`): 末尾を`main()`呼び出しではなくテストハーネスにする。
+// panicも1件の失敗として隔離される(ランタイムの`__runTests`参照——他のテストは続行する)
+pub fn generate_modules_for_test(modules: &[ModuleUnit], tests: &[TestInfo]) -> CodegenResult<String> {
+    Codegen::new().generate_all_modules(modules, Some(tests))
 }
 
 // 1ファイルぶんのソース+それが属するパッケージ名。TS版`ModuleSource`/`ParsedModule`に相当
@@ -125,7 +132,7 @@ impl Codegen {
     // パッケージごとにファイルをまとめ(同一パッケージ内はimport不要のフラット名前空間、
     // TS版compileModulesと同じ)、import依存グラフの依存順(importされる側が先)にソート
     // してから1パッケージずつ処理する
-    fn generate_all_modules(&mut self, modules: &[ModuleUnit]) -> CodegenResult<String> {
+    fn generate_all_modules(&mut self, modules: &[ModuleUnit], tests: Option<&[TestInfo]>) -> CodegenResult<String> {
         // 組み込みパッケージ(milestone 9・`mesh/json`、milestone 20・`mesh/io`、
         // milestone 21・`mesh/http`)を、ユーザーパッケージの処理が始まる前に登録しておく
         // (依存グラフのソート対象には現れない——topo_sort_packagesはpackagesに無い名前への
@@ -169,7 +176,19 @@ impl Codegen {
             self.generate_package(pkg, files)?;
         }
 
-        self.out.push("main().catch(__panic);".to_string());
+        match tests {
+            // F-15: mesh test — main()を呼ぶ代わりにテストハーネスを起動する
+            Some(tests) => {
+                let entries: Vec<String> = tests
+                    .iter()
+                    // JS文字列リテラル化はこのファイル既存の慣習(`{:?}`)に合わせる——
+                    // Rustのstr Debugは`"`と`\`と制御文字だけをエスケープし、日本語等はそのまま残す
+                    .map(|t| format!("  {{ name: {:?}, file: {:?}, fn: {} }}", t.name, t.file, t.js_name))
+                    .collect();
+                self.out.push(format!("await __runTests([\n{}\n]);", entries.join(",\n")));
+            }
+            None => self.out.push("main().catch(__panic);".to_string()),
+        }
         Ok(self.out.join("\n") + "\n")
     }
 
@@ -1685,7 +1704,7 @@ fn method_js_name(struct_name: &str, method_name: &str) -> String {
 // トップレベルconstにはこの接頭辞を付けていない(パッケージ修飾された「呼び出しを
 // 伴わない」値参照が対象外のため——gen_const_decl参照。複数パッケージで同名の
 // トップレベルconstが衝突する場合はgen_const_declが明確なErrで検出する)
-fn fn_js_name(pkg: &str, name: &str) -> String {
+pub fn fn_js_name(pkg: &str, name: &str) -> String {
     if pkg == "main" { name.to_string() } else { format!("{pkg}${name}") }
 }
 

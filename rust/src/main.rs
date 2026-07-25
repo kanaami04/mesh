@@ -3,6 +3,7 @@
 //   mesh build <file.mesh> [-o out]   JavaScriptを書き出す
 //   mesh check <file.mesh> [--json]   型検査のみ
 //   mesh fmt   <file.mesh> [-w]        正規形へ整形して標準出力へ(-w で書き戻す)
+//   mesh test  <file.mesh|dir> [--json] `_test.mesh`の`fn test...()`を実行する(F-15)
 //   mesh ast   <file.mesh>            パース結果のASTを表示(移植用のデバッグ支援)
 //
 // **full_checkerのゲート統合**(milestone 35): `run`/`build`/`check`のいずれも、codegenの前に
@@ -17,13 +18,16 @@
 // `run`は生成JSを一時ファイルへ書き、`bun`(無ければ`node`)で実行する。TS版が
 // `process.execPath`で自分自身(bun)を使うのと同じ役割で、Rust版はJSランタイムを外部に
 // 持つのでPATHから探す。
+use mesh::ast::Program;
 use mesh::codegen::{self, ModuleUnit};
 use mesh::diagnostic_codes::Diagnostic;
 use mesh::formatter;
 use mesh::full_checker;
 use mesh::json_decode::synthesize_json_decoders;
-use mesh::modules::load_modules;
+use mesh::modules::{load_modules, load_modules_for_test};
 use mesh::parser::parse;
+use mesh::test_discovery;
+use mesh::test_report::{self, TestReport};
 use mesh::token::CompileError;
 use std::collections::HashMap;
 use std::env;
@@ -37,6 +41,7 @@ Usage:
   mesh build <file.mesh> [-o out]    compile to JavaScript
   mesh check <file.mesh> [--json]    type-check only
   mesh fmt   <file.mesh> [-w]        format to the canonical form (-w rewrites the file)
+  mesh test  <file.mesh|dir> [--json]  run 'fn test...()' in *_test.mesh files
   mesh ast   <file.mesh>             print the parsed AST (debug aid for the port)
 ";
 
@@ -49,7 +54,7 @@ fn main() -> ExitCode {
     let rest: Vec<String> = args.iter().skip(3).cloned().collect();
 
     match command {
-        "run" | "build" | "check" | "fmt" | "ast" => match args.get(2) {
+        "run" | "build" | "check" | "fmt" | "test" | "ast" => match args.get(2) {
             Some(file) => dispatch(command, file, &rest),
             None => {
                 eprintln!("{USAGE}");
@@ -74,6 +79,7 @@ fn dispatch(command: &str, file: &str, rest: &[String]) -> ExitCode {
         "ast" => run_ast(file),
         "check" => run_check(file, rest.iter().any(|a| a == "--json")),
         "fmt" => run_fmt(file, rest.iter().any(|a| a == "-w")),
+        "test" => run_test(file, rest.iter().any(|a| a == "--json")),
         "build" | "build-stdout" | "run" => {
             let js = match compile_file(file) {
                 Ok(js) => js,
@@ -124,7 +130,13 @@ impl LoadFailure {
 // エントリファイルと、そこからimportで辿れるパッケージを全部読んでパースする。
 // 構文エラーはこの時点で報告して`Err`を返す(型検査まで進めない)
 fn parse_all(file: &str) -> Result<ParsedModules, LoadFailure> {
-    let sources = load_modules(Path::new(file)).map_err(LoadFailure::Discover)?;
+    parse_modules(load_modules(Path::new(file)).map_err(LoadFailure::Discover)?)
+}
+
+// 読み込み済みのソース列をパースし、json structのデコーダを合成する。
+// `mesh test`も含め**全サブコマンドがここを通る**(milestone 28で踏んだ
+// 「`mesh check`だけ合成を忘れていた」というドリフトを構造的に防ぐ)
+fn parse_modules(sources: Vec<mesh::modules::ModuleSource>) -> Result<ParsedModules, LoadFailure> {
     let mut units = Vec::with_capacity(sources.len());
     let mut source_map = HashMap::new();
     for m in &sources {
@@ -156,13 +168,63 @@ fn parse_all_reported(file: &str) -> Result<ParsedModules, ExitCode> {
 // (エントリ→依存)を逆にして依存側を先に出す。`fn main`の要求はmainパッケージだけ
 // (importされたパッケージには普通mainが無い——`check_program_opts`のrequire_main)
 fn check_all(parsed: &ParsedModules) -> Vec<(String, Vec<Diagnostic>)> {
-    parsed
-        .units
-        .iter()
-        .rev()
-        .map(|u| (u.file.clone(), full_checker::check_program_opts(&u.program, u.pkg == "main")))
-        .filter(|(_, diags)| !diags.is_empty())
-        .collect()
+    check_all_opts(parsed, false)
+}
+
+// **パッケージ単位**で検査する(milestone 37)。同じパッケージの複数ファイルは1つの名前空間を
+// 共有するので、まとめて`check_package`へ渡さないと「別ファイルの関数が未定義」という誤検知に
+// なる(実際にmilestone 35のゲート統合以降、複数ファイルのパッケージで発生していた)。
+// パッケージの並びはTS版と同じ「依存パッケージ→エントリ」(= 読み込み順の逆)。
+// `test_mode`のときはmainパッケージにも`fn main`を要求しない(TS版のtestMode)
+fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<Diagnostic>)> {
+    // パッケージごとにファイルをまとめる(パッケージの初出順を保つ)
+    let mut discovered: Vec<String> = Vec::new();
+    let mut by_pkg: HashMap<String, Vec<(String, &Program)>> = HashMap::new();
+    for u in &parsed.units {
+        if !discovered.contains(&u.pkg) {
+            discovered.push(u.pkg.clone());
+        }
+        by_pkg.entry(u.pkg.clone()).or_default().push((u.file.clone(), &u.program));
+    }
+    let mut out = Vec::new();
+    for pkg in dependency_order(&discovered, &parsed.units) {
+        let files = &by_pkg[&pkg];
+        let require_main = pkg == "main" && !test_mode;
+        out.extend(full_checker::check_package(files, require_main));
+    }
+    out
+}
+
+// 依存されている側が先に来る順(TS版`checkModules`のDFS後順)。
+// **単純な「読み込み順の逆」では足りない**——`main`が`a`と`c`をimportし`c`も`a`をimportする
+// ような形(ダイヤモンド)では、読み込み順の逆が依存順にならず、診断の出る順序がTS版と
+// 食い違う(code reviewで発覚)。循環があっても後順で確定した分から積むので停止する
+fn dependency_order(discovered: &[String], units: &[ModuleUnit]) -> Vec<String> {
+    let mut deps: HashMap<&str, Vec<String>> = HashMap::new();
+    for u in units {
+        deps.entry(u.pkg.as_str()).or_default().extend(u.program.imports.iter().map(|i| i.alias.clone()));
+    }
+    let known: Vec<&str> = discovered.iter().map(String::as_str).collect();
+    let mut order: Vec<String> = Vec::new();
+    let mut visiting: Vec<String> = Vec::new();
+    fn visit(pkg: &str, deps: &HashMap<&str, Vec<String>>, known: &[&str], order: &mut Vec<String>, visiting: &mut Vec<String>) {
+        if order.iter().any(|p| p == pkg) || visiting.iter().any(|p| p == pkg) {
+            return; // 訪問済み or 循環(循環の報告はcodegen側の仕事)
+        }
+        visiting.push(pkg.to_string());
+        for d in deps.get(pkg).into_iter().flatten() {
+            // 組み込みパッケージ(mesh/json等)や未知の名前は飛ばす
+            if known.contains(&d.as_str()) {
+                visit(d, deps, known, order, visiting);
+            }
+        }
+        visiting.retain(|p| p != pkg);
+        order.push(pkg.to_string());
+    }
+    for pkg in &known {
+        visit(pkg, &deps, &known, &mut order, &mut visiting);
+    }
+    order
 }
 
 // 診断をstderrへ(TS版`console.error(formatDiagnostics(...))`と同じ)
@@ -276,6 +338,137 @@ fn run_fmt(file: &str, write: bool) -> ExitCode {
         print!("{formatted}");
     }
     ExitCode::SUCCESS
+}
+
+// `mesh test`(F-15。TS版`cli.ts`のtestケース)。`_test.mesh`の中の`fn test...() none | error`を
+// 集めて実行する。ファイルを渡せばそのファイル+同ディレクトリの`_test.mesh`、ディレクトリを
+// 渡せばそのパッケージ自身(テストファイル込み)が対象(`modules::load_modules_for_test`)。
+//
+// 生成JSの末尾は`main()`ではなくテストハーネス(`__runTests`)になり、**最終行に結果のJSONを
+// 1行**書く。テスト自身の`print()`出力がその前に混ざっていてもよい(最後の行だけ見る)
+fn run_test(target: &str, json: bool) -> ExitCode {
+    let sources = match load_modules_for_test(Path::new(target)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // パース + json structのデコーダ合成(他のサブコマンドと同じ前処理を`parse_modules`で共有——
+    // milestone 28で踏んだ「checkだけ合成を忘れる」ドリフトを構造的に防ぐため)
+    let parsed = match parse_modules(sources) {
+        Ok(p) => p,
+        // **`--json`のときは構文エラーもJSONで返す**(milestone 35の`mesh check --json`と同じ
+        // 契約。エージェントが機械的にパースするので、構文エラーのときだけ素のテキストに
+        // なると自己修正ループが壊れる。code reviewで発覚)
+        Err(LoadFailure::Parse { file: f, errors, .. }) if json => {
+            let diags: Vec<JsonDiag> = errors
+                .iter()
+                .map(|e| JsonDiag { file: &f, line: e.pos.line, col: e.pos.col, code: e.code.to_string(), message: &e.message })
+                .collect();
+            println!("{}", json_report(target, &diags));
+            return ExitCode::FAILURE;
+        }
+        Err(f) => {
+            f.report();
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // テストの発見と、型検査(**mainを要求しない**——テストだけのパッケージにmainは無い。
+    // TS版の`testMode`と同じ)。診断はどちらもゲートとして扱う
+    let mut tests = Vec::new();
+    let mut per_file = check_all_opts(&parsed, true);
+    // 発見にはそのファイルが属する**パッケージ全体の型宣言**を渡す(テストの戻り値
+    // エイリアスは本体側のファイルで宣言されるのが普通なため)
+    let mut types_by_pkg: HashMap<String, Vec<mesh::ast::TypeDecl>> = HashMap::new();
+    for u in &parsed.units {
+        types_by_pkg.entry(u.pkg.clone()).or_default().extend(u.program.types.iter().cloned());
+    }
+    for u in &parsed.units {
+        let pkg_types = types_by_pkg.get(&u.pkg).map(Vec::as_slice).unwrap_or(&[]);
+        let found = test_discovery::discover_in(&u.pkg, &u.file, &u.program, pkg_types);
+        tests.extend(found.tests);
+        if !found.diagnostics.is_empty() {
+            match per_file.iter_mut().find(|(f, _)| f == &u.file) {
+                Some((_, diags)) => diags.extend(found.diagnostics),
+                None => per_file.push((u.file.clone(), found.diagnostics)),
+            }
+        }
+    }
+    if !per_file.is_empty() {
+        if json {
+            println!("{}", diagnostics_to_json(target, &per_file));
+        } else {
+            report(&parsed, &per_file);
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let js = match codegen::generate_modules_for_test(&parsed.units, &tests) {
+        Ok(js) => js,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run_test_harness(target, &js) {
+        Ok(report) => print_test_report(target, &report, json),
+        Err(msg) => {
+            eprintln!("{msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// 生成したハーネスを実行し、最終行のJSONを読んで結果を返す
+fn run_test_harness(target: &str, js: &str) -> Result<TestReport, String> {
+    let Some(runtime) = ["bun", "node"].into_iter().find(|r| which(r)) else {
+        return Err("error: テストを実行するには 'bun' か 'node' が必要です（PATHに見つかりません）".to_string());
+    };
+    let dir = env::temp_dir().join(format!("mesh-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("error: cannot create temp dir {}: {e}", dir.display()))?;
+    let out_path = dir.join("test.mjs");
+    std::fs::write(&out_path, js).map_err(|e| format!("error: cannot write {}: {e}", out_path.display()))?;
+    let output = Command::new(runtime).arg(&out_path).output();
+    let _ = std::fs::remove_dir_all(&dir);
+    let output = output.map_err(|e| format!("error: cannot run {runtime}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let last_line = stdout.trim_end().lines().next_back().unwrap_or("");
+    let mut report = test_report::parse(last_line)
+        .ok_or_else(|| format!("mesh test: internal error — could not read test results\n{stdout}{stderr}"))?;
+    // 防衛的な二重チェック(TS版と同じ): ハーネス側の隔離ロジックに将来また穴があっても、
+    // JSONの`ok`を盲信してプロセスの実際の終了コードと食い違うまま緑判定にはしない
+    if report.ok && output.status.code() != Some(0) {
+        report.ok = false;
+        let code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+        let mut message = format!("test process exited with code {code} despite reporting success");
+        if !stderr.trim().is_empty() {
+            message.push_str(&format!(" — stderr: {}", stderr.trim()));
+        }
+        report.tests.push(test_report::TestResult { name: "(process)".into(), file: target.to_string(), pass: false, message: Some(message) });
+    }
+    Ok(report)
+}
+
+fn print_test_report(target: &str, report: &TestReport, json: bool) -> ExitCode {
+    if json {
+        println!("{}", test_report::to_json(report));
+    } else if report.tests.is_empty() {
+        println!("no tests found (looked for 'fn test...() none | error' in *_test.mesh files)");
+    } else {
+        for t in &report.tests {
+            println!("{} {} ({})", if t.pass { "ok  " } else { "FAIL" }, t.name, t.file);
+            if !t.pass && let Some(m) = &t.message {
+                println!("     {m}");
+            }
+        }
+        let passed = report.tests.iter().filter(|t| t.pass).count();
+        println!("\n{passed}/{} passed", report.tests.len());
+    }
+    let _ = target;
+    if report.ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 fn write_output(file: &str, js: &str, rest: &[String]) -> ExitCode {
