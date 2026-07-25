@@ -968,6 +968,12 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ。いずれもモデル化を
        進める中でまとめて対応する候補
 
+**TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置
+(オラクル)**で、各milestoneは「TS版と`mesh check`/生成JSを突き合わせて完全一致」で検証している。
+撤去条件の一覧(Rust CLIのサブコマンド・full_checkerのゲート統合と複数ファイル対応・テスト資産の
+移植・playground/VS Code拡張の移行・CIでの並走確認)はtodo.md「TS実装(`src/`)の撤去条件」が
+一次情報源。
+
 **参考にすべきTS側の一次資料**: `src/checker/index.ts`(全体の入口・ファイル分割の
 説明)・`src/checker/context.ts`(`CheckerCtx`の構造・診断のpush方式・スコープ管理・
 `declareBinding`等の基盤関数)・`src/diagnostic-codes.ts`(コード一覧+説明文)。

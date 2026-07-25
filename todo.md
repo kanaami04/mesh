@@ -2954,6 +2954,28 @@
                 値位置のvoid-used-as-value・`or`の4診断・match/selectの中身・
                 `mesh run`/`build`へのゲート統合。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
+  - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
+        判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
+        なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
+        生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
+        見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
+        答え合わせの手段として必要。
+        現状の差(2026-07-25時点): CLIはTS版が`run`/`build`/`check`/`fmt`/`test`、Rust版は
+        `check`+AST表示/`--emit-js`のみ(`fmt`/`test`は未実装)。診断コードは107種 vs 41種。
+        full_checkerは単一ファイル専用で`run`/`build`のゲートに未統合。
+        - [ ] (1) Rust CLIが`run`/`build`/`fmt`/`test`/`card`を持ち、full_checkerが
+              `run`/`build`のゲートに入る
+        - [ ] (2) full_checkerが複数ファイル/パッケージ対応になり、診断が実用上必要な範囲を
+              カバーする(107種すべてが必要かは別途判断)
+        - [ ] (3) TSのテスト資産をRust側へ移植する——特に`tests/e2e.test.ts`と
+              `tests/card-completeness.test.ts`(後者は`src/card.ts`の主張と実装の乖離を
+              CIで検出している唯一の仕組み)
+        - [ ] (4) `playground/`(ブラウザで`main.ts`をその場でバンドル)と`editors/vscode`の移行。
+              **ここが一番重い**——playgroundはwasmビルドが要る。`bench/`・`demo/todo-api`も対象
+        - [ ] (5) 一定期間CIで**両実装を並走**させ、examples/テスト全体で差分ゼロを確認してから撤去
+        - 現実的な進め方: (4)の直前まで進めて、TS版はしばらくCI上のオラクルとして残す。
+          撤去は「Rust版が本番として十分」+「オラクルとしての役目も終わった」の両方が
+          揃ってから
 
 ## 言語機能(中期)
 
