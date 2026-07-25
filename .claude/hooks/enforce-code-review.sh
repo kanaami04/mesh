@@ -80,12 +80,15 @@ for n in "${pr_nums[@]}"; do seen[$n]=1; done
 
 for n in "${!seen[@]}"; do
   # gh の失敗（認証切れ・ネットワーク断など）を「コメント0件」と区別する
-  if ! comments=$(gh pr view "$n" --json comments -q '.comments[].body' 2>&1); then
+  # 各コメントの**先頭行だけ**を取る(マーカーを引用・説明しただけのコメントで
+  # 通ってしまわないように。hook_comment_first_lines_filter のコメント参照)
+  if ! comments=$(gh pr view "$n" --json comments -q "$(hook_comment_first_lines_filter)" 2>&1); then
     bail "PR #$n のレビューコメントを取得できませんでした（gh の実行に失敗）。認証やネットワークを確認してください: $comments"
   fi
   # 通常のレビュー: /code-review が投稿するコメントは "### Code review" 見出し
-  # （issues found / no issues 共通）。**行全体が一致すること**を要求する——
-  # 下のスキップ形式(`### Code review skipped: 理由`)を前方一致で拾ってしまうと、
+  # （issues found / no issues 共通）で、それがコメントの先頭行になる。
+  # **行全体が一致すること**を要求する——下のスキップ形式
+  # (`### Code review skipped: 理由`)を前方一致で拾ってしまうと、
   # 理由の記載を必須にしている意味が無くなるため。
   printf '%s' "$comments" | grep -q '^### Code review[[:space:]]*$' && continue
 

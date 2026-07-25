@@ -95,6 +95,7 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
     2) echo '### Code review skipped: docsのみの変更のため' ;;
     3) echo '### Code review skipped' ;;
     4) echo '### Code review skipped:   ' ;;
+    5) echo '### Code review skipped:' ;;
     999999) echo 'これはレビューコメントではない' ;;
     *) exit 1 ;;
   esac
@@ -152,7 +153,7 @@ skip_ok=$(hook_out "$(run_with_mock_gh 'gh pr merge 2 --squash')")
 # 理由が無い（見出しだけ / 空白だけ）スキップは deny する。理由が無ければ
 # 「不要だと判断した記録」として意味を成さないため。前方一致で通ってしまう
 # 実装だとここが素通りする（回帰防止）
-for pr in 3 4; do
+for pr in 3 4 5; do
   skip_ng=$(hook_out "$(run_with_mock_gh "gh pr merge $pr --squash")")
   if [ -n "$skip_ng" ] && printf '%s' "$skip_ng" | grep -q 'skipped'; then
     ok
@@ -160,6 +161,35 @@ for pr in 3 4; do
     ng "$(printf '理由の無いスキップ(PR #%s)はdenyされるべき\n  出力: %s' "$pr" "$skip_ng")"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# 3-b. コメント抽出フィルタ（hook_comment_first_lines_filter）
+#      **各コメントの先頭行だけ**を出すこと。全文を見ると、マーカーを説明・引用した
+#      だけのコメント（コードフェンスの中に書いた等）でゲートを通ってしまう
+#      （code reviewで発覚・モックghで再現確認した実際のすり抜け）。
+# ---------------------------------------------------------------------------
+
+filter=$(hook_comment_first_lines_filter)
+
+# コードフェンスの中にマーカーを書いた「説明コメント」は、先頭行だけ見れば素通りしない
+fenced='{"comments":[{"body":"この形式はこう書きます:\n\n```\n### Code review skipped: 理由\n```\n\nまだスキップしていません。"}]}'
+got=$(printf '%s' "$fenced" | jq -r "$filter")
+if printf '%s' "$got" | grep -qE '^### Code review'; then
+  ng "$(printf 'コードフェンス内のマーカーは抽出されるべきでない\n  抽出結果: %s' "$got")"
+else
+  ok
+fi
+
+# 正当なコメント（見出しが先頭行）は当然拾う。複数コメントなら1行ずつ出る
+legit='{"comments":[{"body":"雑談\nです"},{"body":"### Code review\n\nNo issues found."}]}'
+got2=$(printf '%s' "$legit" | jq -r "$filter")
+[ "$(printf '%s\n' "$got2" | grep -c '')" -eq 2 ] && ok || ng "$(printf 'コメント数ぶんの行が出るべき\n  抽出結果: %s' "$got2")"
+printf '%s' "$got2" | grep -qE '^### Code review[[:space:]]*$' && ok || ng "$(printf '先頭行の見出しは拾うべき\n  抽出結果: %s' "$got2")"
+
+# CRLF（\r 終端）が混ざっても見出し判定を邪魔しない
+crlf='{"comments":[{"body":"### Code review\r\n\r\nNo issues found."}]}'
+got3=$(printf '%s' "$crlf" | jq -r "$filter")
+printf '%s' "$got3" | grep -qE '^### Code review[[:space:]]*$' && ok || ng "$(printf 'CRLFでも見出しを拾うべき\n  抽出結果: %s' "$got3")"
 
 # ---------------------------------------------------------------------------
 # 4. enforce-code-review.sh の fail-closed 挙動
