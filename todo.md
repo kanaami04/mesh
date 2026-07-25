@@ -2884,6 +2884,21 @@
                 exampleでfull_checker無診断のまま回帰なし。
               - **既知の限界**: channelが未モデル化のため`len(<-ch)`(TS版は
                 `int[] | closed`をlenに渡せないと弾く)等は引き続き検出漏れ。
+                `5["x"]`はTS版が`invalid-index-type`+`not-indexable`の2件を出すのに対し
+                Rust版は`not-indexable`のみ(コンテナがANYのときに添字を検査すると
+                mapの文字列キーを誤検知するため意図的に狭めた——検出漏れ側)。
+              - **code reviewで発見・即修正した3件**(いずれも両CLIで再現確認): (1)intの
+                rangeで**2つ目以降の名前まで宣言**していたため、`for i, x := range 5`の
+                `x`参照でTS版が出す`undefined-name`を見落としていた(TS版は`names[0]`のみ宣言)。
+                (2)`cannot-infer-type`の抑止(TS版の`alreadyErrored`)を**名前ごと**に判定して
+                いたため、`a, b := undefinedThing, []`でundefined-nameに加えて
+                cannot-infer-typeまで出す**誤検知**になっていた——TS版と同じく文全体の値を
+                先に検査してから宣言する順序に直し、抑止も文単位にした(この修正で
+                `a, b := 1, a`のような右辺の未定義名も正しく検出できるようになった)。
+                (3)配列要素代入の診断位置がtargetの位置だったため、`a, xs[0] = 2, "no"`の
+                ような複数代入でTS版(`stmt.pos`)と列がずれていた。回帰テスト3件追加、
+                482→485件。あわせてmilestone 27時代の古いコメント3箇所
+                (「配列/map/channelは常にANY」)も現状に合わせて訂正。
               - **次段階**: map/channelのモデル化(`map key must be K`・`compound-assign-on-map`・
                 `not-a-channel`等)・pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
                 `mesh run`/`build`へのゲート統合。

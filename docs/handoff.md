@@ -938,7 +938,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `is_checkable_field_type`を**再帰判定`is_fully_modeled`**へ置き換え(`int[]`は突き合わせて
      よいが要素がANYへ潰れる`map<..>[]`は駄目、というmilestone 29/32の穴の一般化)。
      `cannot-infer-type`は誤検知を避けるため**空配列リテラル限定**で移植。診断コード6種追加、
-     テスト470→482件。**map/channelは引き続きANY**(次段階)。詳細はtodo.md参照
+     テスト470→485件。**map/channelは引き続きANY**(次段階)。**code reviewで3件修正**
+     (intのrangeで余分な名前を宣言→undefined-name見落とし/`cannot-infer-type`の抑止が
+     名前単位で誤検知/配列要素代入の診断位置)。詳細はtodo.md参照
    - 残る候補: **milestone 34以降**——map/channelのモデル化(`map key must be K`・
      `compound-assign-on-map`・`not-a-channel`等。配列と同じ手順)・pkg修飾struct/
      pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`。unionの

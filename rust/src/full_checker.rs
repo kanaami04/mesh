@@ -285,7 +285,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             let elem = match &declared {
                 Some(t) => t.clone(),
                 None => match elems.first() {
-                    // 空配列は要素型不明(TS版と同じくANY要素の配列。`cannot-infer-type`は未移植)
+                    // 空配列は要素型不明(TS版と同じくANY要素の配列)。宣言に使われた場合の
+                    // `cannot-infer-type`は`Stmt::ShortVarDecl`側で報告する
                     None => return Type::Array(Box::new(ANY)),
                     Some(first) => types::widen_literal(infer_expr(ctx, first)),
                 },
@@ -754,13 +755,13 @@ fn expect_arity(ctx: &mut FullCheckerCtx, name: &str, got: usize, want: usize, p
     true
 }
 
-// 「引数がANYでなければ builtin-arg-type を積む」——コレクション系組み込みの引数検査の
-// 縮退形。full_checkerのスカラースコープでは配列/map/channelはANYへ潰れるので、TS版の
-// `arr.kind === "array"` ガードは「ANYなら素通り」に縮退する。実際のコレクションを渡す
-// 典型ケース(型がANY)は無診断、スカラーを誤って渡した場合だけ発火(TS版と一致)。
-// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——`push(add, 4)`の
-// ように関数値をコレクション組み込みへ渡すと`push() requires an array, got fn(...)`が出る
-// (これもTS版と一致——TS版も`arr.kind !== "any"`なら同じエラーを出す)
+// 「引数がANYでなければ builtin-arg-type を積む」——**まだモデル化していないコレクション**
+// (map/channel)を取る組み込み(delete/keys/values/close)の引数検査の縮退形。それらの型は
+// full_checkerではANYへ潰れるので、TS版の`m.kind === "map"`ガードは「ANYなら素通り」に
+// 縮退する。実際のmap/channelを渡す典型ケースは無診断、スカラーを誤って渡した場合だけ
+// 発火する(TS版と一致)。**配列はmilestone 33でモデル化したので`require_array`を使う**。
+// **注**: 関数型はmilestone 26以降ANYではなくType::Fnとして追跡される——関数値を
+// コレクション組み込みへ渡すと`... requires a map, got fn(...)`が出る(TS版と一致)
 fn require_kind(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: String) {
     if !matches!(arg_ty, Type::Any) {
         ctx.error(arg_pos, DiagnosticCode::BuiltinArgType, msg);
@@ -782,19 +783,20 @@ fn require_array(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: Str
     }
 }
 
-// 組み込み関数呼び出しの検査(milestone 27)。TS版`inferBuiltinCall`
-// (src/checker/builtins.ts)の移植。
-// **スカラースコープでの縮退**: 配列/map/channelはfull_checkerでは常にANYなので、
-// TS版がコレクション種別(`arr.kind === "array"`等)でガードする「要素型・添字型・callback署名」の
-// 検査(type-mismatch/invalid-index-type/callback-signature-mismatch)は実際には到達せず、
-// コレクションをモデル化する将来のmilestoneで拾う。この一歩で実際に効くのは
-// (1)全組み込みのarity(argument-count)、(2)スカラー引数の型検査(builtin-arg-type)——
-// `len(5)`・`contains(5, x)`・`round(3)`のようにスカラーを渡した場合のエラー、
-// (3)スカラー戻り値型(str→string, len→int, round→int 等)。配列を返す組み込み
-// (keys/values/sort/split/filter/map/indexOf/get/toInt 等)はANYを返す(配列型は未モデル化)。
-// ただしreduceの戻り値だけはaccumulator型でスカラーになりうるためcallbackから計算する
-// (下記reduceアーム参照)。**関数型はANYではなくType::Fnとして追跡される**ので、
-// コレクション組み込みへ関数値を渡すとrequire_kindが正しく発火する(TS版と一致)。
+// 組み込み関数呼び出しの検査(milestone 27で導入、milestone 33で配列対応)。
+// TS版`inferBuiltinCall`(src/checker/builtins.ts)の移植。
+// **効く検査**: (1)全組み込みのarity(argument-count)、(2)引数の型検査(builtin-arg-type)——
+// `len(5)`・`contains(5, x)`・`round(3)`のようにスカラーを誤って渡した場合、
+// (3)戻り値型(str→string, len→int, sort→同じ配列型, map→callback戻り値の配列 等)、
+// (4)**配列を取る組み込みの要素型検査**(`push`/`contains`/`indexOf`のtype-mismatch、
+// `get`のinvalid-index-type、`sort`/`join`の要素型)と**高階組み込みのcallback署名検査**
+// (`filter`/`map`/`reduce`のcallback-signature-mismatch)——milestone 33で配列をモデル化する
+// までは「コレクションは常にANY」で到達しなかった経路(下記`require_array`参照)。
+// **まだ縮退している型**: map/channel。これらを引数に取る組み込み(delete/keys/values/close)は
+// 引き続き`require_kind`(ANYなら素通り)で、戻り値も要素型不明のまま
+// (`keys`/`values`は`any[]`)——map/channelのモデル化は次のmilestone。
+// **関数型はANYではなくType::Fnとして追跡される**ので、コレクション組み込みへ関数値を
+// 渡すと`push() requires an array, got fn(...)`が正しく出る(TS版と一致)。
 fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
     // 引数はarityに関わらず全て推論する(未定義名検査のため)
     let at: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
@@ -1059,9 +1061,16 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     match stmt {
         // names/valuesは1:1対応が前提(Go風多重代入はF-9で廃止済み。パーサが数を揃える)
         Stmt::ShortVarDecl { names, values, mutable, pos } => {
-            for (name, value) in names.iter().zip(values.iter()) {
-                let diags_before = ctx.diagnostics.len();
-                let ty = infer_expr(ctx, value);
+            // TS版`statements.ts`と同じ順序: **文全体の値を先に全部検査してから**名前を宣言する
+            // (宣言を挟むと`a, b := 1, a`のような右辺の未定義名を見落とす)。
+            // `already_errored`も**文単位**で判定する——名前ごとに取り直すと、先の値で
+            // undefined-nameが出ていても後の名前にcannot-infer-typeを重ねて出してしまう
+            // (`a, b := undefinedThing, []`。code reviewで発覚・両CLIで再現確認)
+            let diags_before = ctx.diagnostics.len();
+            let value_tys: Vec<Type> = values.iter().map(|v| infer_expr(ctx, v)).collect();
+            let already_errored = ctx.diagnostics.len() > diags_before;
+            for (i, name) in names.iter().enumerate() {
+                let ty = value_tys.get(i).cloned().unwrap_or(ANY);
                 // mut宣言はリテラル型を広げる(`mut s := "a"`のsはstring型——後で
                 // `s = "b"`と別リテラルを代入できるように)。TS版statements.tsの
                 // `stmt.mutable ? widenLiteral(t) : t`と同じ
@@ -1075,8 +1084,8 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 // (他の形は、対応する型をモデル化するmilestoneで広げていく)。
                 // 値の検査で既に診断が出ている場合は二重に出さない(TS版の`alreadyErrored`)
                 if name != "_"
-                    && ctx.diagnostics.len() == diags_before
-                    && matches!(value, Expr::ArrayLit { elems, elem_type: None, .. } if elems.is_empty())
+                    && !already_errored
+                    && matches!(values.get(i), Some(Expr::ArrayLit { elems, elem_type: None, .. }) if elems.is_empty())
                 {
                     ctx.error(
                         *pos,
@@ -1099,10 +1108,10 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
             ctx.declare(name, declared, *pos, *mutable);
         }
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign { targets, values, pos, .. } => {
             for (target, value) in targets.iter().zip(values.iter()) {
                 let value_ty = infer_expr(ctx, value);
-                check_assign_target(ctx, target, &value_ty);
+                check_assign_target(ctx, target, &value_ty, *pos);
             }
         }
         Stmt::IncDec { target, op, pos } => {
@@ -1187,8 +1196,12 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                     if names.len() != 1 {
                         ctx.error(*pos, DiagnosticCode::RangeArity, "range over an int takes exactly one name: 'for i := range n'");
                     }
-                    for n in names {
-                        ctx.declare(n, INT, *pos, false);
+                    // **宣言するのは1つ目の名前だけ**(TS版`statements.ts`のintブランチは
+                    // `stmt.names[0]`しか宣言しない)。余分な名前を宣言してしまうと、
+                    // `for i, x := range 5 { print(x) }`でTS版が出す`undefined-name`を
+                    // 見落とす(code reviewで発覚・両CLIで再現確認)
+                    if let Some(first) = names.first() {
+                        ctx.declare(first, INT, *pos, false);
                     }
                 }
                 Type::Any => {
@@ -1218,14 +1231,16 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     }
 }
 
-fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type) {
+fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos) {
     // milestone 33: 配列要素への代入(`xs[0] = v`)は、添字読みと同じ経路で要素型を得て
     // 値を照合する(TS版`statements.ts`のassignケース——targetの型をcheckExprで求め、
-    // それをexpectedとして使う)。mapはまだ未モデル化でANYになるため素通りする
-    if let Expr::Index { pos, .. } = target {
+    // それをexpectedとして使う)。mapはまだ未モデル化でANYになるため素通りする。
+    // **位置は代入文自身**(TS版は`stmt.pos`で報告する)——targetの位置を使うと
+    // `a, xs[0] = 2, "no"`のような複数代入でTS版と列がずれる(code reviewで発覚)
+    if matches!(target, Expr::Index { .. }) {
         let elem_ty = infer_expr(ctx, target);
         if is_fully_modeled(&elem_ty) && !types::assignable(value_ty, &elem_ty) {
-            ctx.error(*pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&elem_ty)));
+            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&elem_ty)));
         }
         return;
     }
@@ -2024,8 +2039,8 @@ mod tests {
 
     #[test]
     fn 配列map引数の組み込みは誤検知しない() {
-        // 配列/mapはスカラースコープでANYに潰れるため、push/contains/lenは無診断
-        // (要素型検査はコレクションをモデル化する将来のmilestone)
+        // milestone 33で配列をモデル化した後は「ANYに潰れるから無診断」ではなく、
+        // `xs: int[]`に対して要素型まで合っているから無診断(mapは引き続きANY)
         let diags = check("fn main() {\n    mut xs: int[] = [1, 2, 3]\n    push(xs, 4)\n    b := contains(xs, 2)\n    n := len(xs)\n    print(\"${b} ${n}\")\n}\n");
         assert_eq!(diags, vec![]);
     }
@@ -2567,6 +2582,38 @@ mod tests {
         // 突き合わせると誤検知する——is_fully_modeledで再帰的に判定してスキップする
         let src = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
         assert_eq!(check(src), vec![]);
+    }
+
+    #[test]
+    fn int_rangeは1つ目の名前しか宣言しない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): 余分な名前まで宣言していたため、
+        // TS版が出す`undefined-name`を見落としていた(TS版statements.tsのintブランチは
+        // `stmt.names[0]`しか宣言しない)
+        let diags = check("fn main() {\n    for i, x := range 5 {\n        print(x)\n        print(i)\n    }\n}\n");
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].code, DiagnosticCode::RangeArity);
+        assert_eq!(diags[1].code, DiagnosticCode::UndefinedName);
+        assert_eq!(diags[1].message, "undefined: 'x'");
+    }
+
+    #[test]
+    fn cannot_infer_typeの抑止は文単位で判定する() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): `already_errored`を名前ごとに
+        // 取り直していたため、先の値のundefined-nameがあっても後の名前に
+        // cannot-infer-typeを重ねて出していた(TS版は文単位の`alreadyErrored`で抑止)
+        let diags = check("fn main() {\n    a, b := undefinedThing, []\n    print(a)\n    print(b)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UndefinedName);
+    }
+
+    #[test]
+    fn 配列要素代入の診断位置は代入文自身() {
+        // 回帰(code reviewで発覚): targetの位置で報告していたため、複数代入で
+        // TS版(stmt.pos)と列がずれていた
+        let diags = check("fn main() {\n    mut a := 1\n    mut xs := [1, 2]\n    a, xs[0] = 2, \"no\"\n    print(a)\n    print(xs)\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(diags[0].pos.col, 5); // `a, xs[0] = ...`の先頭(TS版と一致)
     }
 
     #[test]
