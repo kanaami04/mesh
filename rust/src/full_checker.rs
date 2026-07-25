@@ -321,9 +321,9 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             }
             Type::Array(Box::new(elem))
         }
-        // milestone 33: 添字アクセス(`xs[0]` / `s[0]`)。TS版`expressions.ts`のindexケースの
-        // 移植。mapはまだ未モデル化(型注釈もリテラルもANY)なのでmap分岐には到達せず、
-        // ANYコンテナとして黙って素通りする(map対応は次段階)
+        // 添字アクセス(`xs[0]` / `m["k"]` / `s[0]`)。TS版`expressions.ts`のindexケースの
+        // 移植(milestone 33で配列・文字列、milestone 34でmap)。読み書きで共通の
+        // `infer_index`へ委譲する
         Expr::Index { target, index, pos } => infer_index(ctx, target, index, *pos).read,
         // milestone 34: mapリテラル(`map<string, int>{"a": 1}`)。キー/値の型は注釈から
         // 解決し、各エントリを照合する(TS版`expressions.ts`のmapLitケース)
@@ -367,7 +367,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             }
         }
         // milestone 34: `x is T`はbool。値の型は変えないが、if文の条件に使われたときは
-        // `check_if`が絞り込みに使う(下記`narrow_binding_for_is`)
+        // `check_if`が絞り込みに使う(下記`check_if`+`FullCheckerCtx::narrow`)
         Expr::Is { operand, .. } => {
             infer_expr(ctx, operand);
             BOOL
@@ -941,7 +941,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             STRING
         }
         "len" => {
-            // milestone 33: 配列がモデル化されたので明示的に許す(map/channelは引き続きANY)
+            // 配列(milestone 33)とmap(milestone 34)を明示的に許す。channelは弾く(TS版と同じ)
             if expect_arity(ctx, name, n, 1, pos)
                 && !types::is_stringy(&at[0])
                 && !matches!(at[0], Type::Any | Type::Array(_) | Type::Map { .. })
@@ -1252,7 +1252,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         Stmt::Assign { targets, values, compound_op, pos } => {
             for (target, value) in targets.iter().zip(values.iter()) {
                 let value_ty = infer_expr(ctx, value);
-                check_assign_target(ctx, target, &value_ty, *pos, compound_op.is_some());
+                check_assign_target(ctx, target, &value_ty, *pos, compound_op.as_ref());
             }
         }
         Stmt::IncDec { target, op, pos } => {
@@ -1321,9 +1321,9 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // for文と同じ理由でヘッダ(range変数)とbodyは別スコープにする
             let subject_ty = infer_expr(ctx, subject);
             ctx.push_scope();
-            // milestone 33: 配列とintのrangeは型と名前の個数まで検査する(TS版
-            // `statements.ts`のrangeForケース)。mapは未モデル化でANYのまま——
-            // ANYは従来どおり全ての名前をANYで宣言して素通りさせる
+            // 配列/map/intのrangeは型と名前の個数まで検査する(TS版`statements.ts`の
+            // rangeForケース。milestone 33で配列とint、milestone 34でmap)。ANY
+            // (未対応の型・エラー回復)は従来どおり全ての名前をANYで宣言して素通りさせる
             match &subject_ty {
                 Type::Array(elem) => {
                     if names.len() != 2 {
@@ -1390,7 +1390,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     }
 }
 
-fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos, compound: bool) {
+fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos, compound_op: Option<&TokenType>) {
     // milestone 33/34: 配列要素・mapエントリへの代入(`xs[0] = v` / `m["k"] = v`)は、
     // 添字読みと同じ経路(`infer_index`)で型を得て値を照合する(TS版`statements.ts`の
     // assignケース)。**mapの代入先の型は読みの`V | none`ではなく`V`**。
@@ -1401,11 +1401,16 @@ fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type,
         // milestone 34: mapへの複合代入(`m[k] += 1`)は禁止——キーが存在しないかもしれず
         // (読みは常に`V | none`)、「現在値 op 右辺」を無条件に計算すると欠損キーが
         // 黙って壊れた値になるため(TS版`compound-assign-on-map`)
-        if compound && matches!(info.container, Type::Map { .. }) {
+        if let Some(op) = compound_op
+            && matches!(info.container, Type::Map { .. })
+        {
+            // 文言は**実際に書かれた演算子**で組み立てる(TS版`statements.ts`も
+            // `stmt.compoundOp`を埋め込む)——`+=`固定にすると`-=`等でTS版と食い違う
+            // (code reviewで発覚・両CLIで再現確認)
             ctx.error(
                 stmt_pos,
                 DiagnosticCode::CompoundAssignOnMap,
-                "cannot use '+=' on a map entry — the key may not exist yet; write 'm[k] = (m[k] or fallback) + value' instead",
+                format!("cannot use '{op}=' on a map entry — the key may not exist yet; write 'm[k] = (m[k] or fallback) {op} value' instead"),
             );
             return;
         }
@@ -1465,7 +1470,12 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
     // 条件が `ident is T` なら then/else 側の型を計算しておく
     let narrowing = match &if_stmt.cond {
         Expr::Is { operand, target, .. } => match &**operand {
-            Expr::Ident { name, .. } => ctx.lookup(name).map(|b| {
+            // **`mut`な束縛は絞り込まない**(TS版`narrowing.ts`の`stablePath`が
+            // `binding && !binding.mutable ? name : null`で不変な束縛だけを対象にするのと同じ)。
+            // 再代入で型が変わりうる変数を絞り込むと、絞り込んだ型が「宣言された型」として
+            // 居座り、後続の正当な再代入をtype-mismatchで誤って弾く一方、本来出るべき
+            // 診断を見落とす(code reviewで発覚・両CLIで再現確認)
+            Expr::Ident { name, .. } => ctx.lookup(name).filter(|b| !b.mutable).map(|b| {
                 let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &b.ty, target);
                 (name.clone(), then_ty, else_ty)
             }),
@@ -2263,8 +2273,8 @@ mod tests {
 
     #[test]
     fn 配列map引数の組み込みは誤検知しない() {
-        // milestone 33で配列をモデル化した後は「ANYに潰れるから無診断」ではなく、
-        // `xs: int[]`に対して要素型まで合っているから無診断(mapは引き続きANY)
+        // milestone 33/34でコレクションをモデル化した後は「ANYに潰れるから無診断」ではなく、
+        // `xs: int[]`に対して要素型まで合っているから無診断
         let diags = check("fn main() {\n    mut xs: int[] = [1, 2, 3]\n    push(xs, 4)\n    b := contains(xs, 2)\n    n := len(xs)\n    print(\"${b} ${n}\")\n}\n");
         assert_eq!(diags, vec![]);
     }
@@ -2709,8 +2719,9 @@ mod tests {
 
     #[test]
     fn mapの添字は誤検知しない() {
-        // mapはまだ未モデル化(ANY)。ANYコンテナのときは添字の型検査自体を行わない——
-        // 行うと文字列キーが誤ってinvalid-index-typeになる(実装中にexamplesで検出)
+        // milestone 34でmapをモデル化した後は、mapの添字は`invalid-index-type`ではなく
+        // キー型(`map key must be K`)で検査される——文字列キーは当然通る。
+        // (milestone 33時点では「ANYコンテナでは添字の型検査をしない」ことで通していた)
         assert_eq!(check("fn main() {\n    m := map<string, int>{\"a\": 1}\n    print(m[\"a\"] or 0)\n}\n"), vec![]);
     }
 
@@ -2802,10 +2813,14 @@ mod tests {
 
     #[test]
     fn 要素が縮退する配列は突き合わせない() {
-        // `map<string,int>[]`は要素がANYへ潰れるので、レジストリ側の完全解決された型と
-        // 突き合わせると誤検知する——is_fully_modeledで再帰的に判定してスキップする
-        let src = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
-        assert_eq!(check(src), vec![]);
+        // 内側にANY縮退を含む型(ここでは関数型の配列——`fn`は引き続き縮退する)は、
+        // レジストリ側の完全解決された型と突き合わせると誤検知する——is_fully_modeledで
+        // 再帰的に判定してスキップする。**milestone 34でmapもモデル化されたので、
+        // `map<string,int>[]`はもう縮退しない**(この例は正しく検査される側に移った)
+        let degenerate = "struct Bag {\n    cbs: fn(int[]) int[]\n}\nfn pick(xs: int[]) int {\n    return 0\n}\nfn main() {\n    b := Bag{cbs: [pick]}\n    print(len(b.cbs))\n}\n";
+        assert_eq!(check(degenerate), vec![]);
+        let modeled = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
+        assert_eq!(check(modeled), vec![]);
     }
 
     // ---- milestone 34: map/channelのモデル化 + isによる絞り込み ----
@@ -2917,6 +2932,28 @@ mod tests {
         assert_eq!(then_narrowed.len(), 1);
         assert_eq!(then_narrowed[0].code, DiagnosticCode::InvalidOperation);
         assert_eq!(then_narrowed[0].message, "invalid operation: none + int");
+    }
+
+    #[test]
+    fn mutな束縛は絞り込まない() {
+        // 回帰(code reviewで発覚・両CLIで再現確認): TS版`narrowing.ts`の`stablePath`は
+        // **不変な束縛だけ**を絞り込み対象にする。mutを絞り込むと、絞り込んだ型が
+        // 「宣言された型」として居座り、後続の正当な再代入を誤って弾く一方(誤検知)、
+        // 本来出るべき`invalid-operation`を見落とす(検出漏れ)
+        let src = "fn drain(ch: chan<int>) int {\n    mut v := <-ch\n    if v is closed {\n        return 0\n    }\n    v = <-ch\n    return v + 1\n}\nfn main() {\n    ch := chan<int>(1)\n    print(drain(ch))\n}\n";
+        let diags = check(src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::InvalidOperation);
+        assert_eq!(diags[0].message, "invalid operation: int | closed + int");
+    }
+
+    #[test]
+    fn 複合代入の診断は実際の演算子を使う() {
+        // 回帰(code reviewで発覚): `+=`固定の文言だったため`-=`等でTS版と食い違っていた
+        let diags = check("fn main() {\n    mut m := map<string, int>{\"a\": 1}\n    m[\"a\"] -= 1\n    print(len(m))\n}\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::CompoundAssignOnMap);
+        assert_eq!(diags[0].message, "cannot use '-=' on a map entry — the key may not exist yet; write 'm[k] = (m[k] or fallback) - value' instead");
     }
 
     #[test]

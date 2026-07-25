@@ -948,7 +948,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `if v is closed { break }`の後で誤検知が出るようになり、codegen側milestone 7と同じ設計で
      `check_if`にthen/else/フォールスルーの絞り込みを実装した(型解決は`checker::narrow_for_is`を
      再利用)。あわせて`or`式の走査も追加(mapの読みはほぼ必ず`or`と組で使われるため)。
-     診断コード2種追加、テスト485→493件。詳細はtodo.md参照
+     診断コード2種追加、テスト485→495件。**code reviewで2件修正**——`mut`な束縛まで
+     絞り込んでいた(TS版は不変な束縛のみ。誤検知と検出漏れの両方が出ていた)/
+     `compound-assign-on-map`の文言が`+=`固定だった。詳細はtodo.md参照
    - 残る候補: **milestone 35以降**——pkg修飾struct/pkg修飾呼び出しの中身・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
      値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・

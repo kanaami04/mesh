@@ -2941,6 +2941,15 @@
                 行う検査。`print(delete(m, k))`等を見逃す)は未移植——milestone 22以来の一般的な
                 穴で、map/channel固有ではないため別途対応する。`match`式の中身・`select`アームの
                 中身も引き続き未走査(narrowingは`is`のみ)。
+              - **code reviewで発見・即修正した2件**(いずれも両CLIで再現確認): (1)**`mut`な束縛まで
+                絞り込んでいた**——TS版`narrowing.ts`の`stablePath`は`!binding.mutable`で
+                不変な束縛だけを対象にする。mutを絞り込むと絞り込んだ型が「宣言された型」として
+                居座り、`mut v := <-ch; if v is closed { return 0 }; v = <-ch`の再代入を
+                誤って弾く一方(誤検知)、本来出るべき`invalid-operation`を見落としていた
+                (検出漏れ)。`filter(|b| !b.mutable)`を足して解消。(2)`compound-assign-on-map`の
+                文言が`+=`固定で、`-=`等の演算子でTS版と食い違っていた(TS版は`stmt.compoundOp`を
+                埋め込む)——実際の演算子を引き回す形に修正。回帰テスト2件追加、493→495件。
+                あわせて古いコメント6箇所(「mapは引き続きANY」等)も訂正。
               - **次段階**: pkg修飾struct/呼び出しの中身・not-a-struct/narrow-required・
                 値位置のvoid-used-as-value・`or`の4診断・match/selectの中身・
                 `mesh run`/`build`へのゲート統合。
