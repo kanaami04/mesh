@@ -99,16 +99,28 @@ struct ParsedModules {
     sources: HashMap<String, String>,
 }
 
+// パースまで到達できなかった理由。**表示は呼び出し元に任せる**——`check --json`は
+// 構文エラーもJSONへ載せる必要があるため(TS版`compileModules`はパースエラーを型検査の
+// 診断と同じ配列へ畳み込む。一方モジュール発見の失敗はTS版も素のエラー文なので同じにする)
+enum LoadFailure {
+    Discover(String),
+    Parse { file: String, source: String, errors: Vec<CompileError> },
+}
+
+impl LoadFailure {
+    // 非JSONの経路での表示(全てstderr)
+    fn report(&self) {
+        match self {
+            LoadFailure::Discover(msg) => eprintln!("{msg}"),
+            LoadFailure::Parse { file, source, errors } => eprint!("{}", format_compile_errors(file, errors, source)),
+        }
+    }
+}
+
 // エントリファイルと、そこからimportで辿れるパッケージを全部読んでパースする。
 // 構文エラーはこの時点で報告して`Err`を返す(型検査まで進めない)
-fn parse_all(file: &str) -> Result<ParsedModules, ExitCode> {
-    let sources = match load_modules(Path::new(file)) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("{e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
+fn parse_all(file: &str) -> Result<ParsedModules, LoadFailure> {
+    let sources = load_modules(Path::new(file)).map_err(LoadFailure::Discover)?;
     let mut units = Vec::with_capacity(sources.len());
     let mut source_map = HashMap::new();
     for m in &sources {
@@ -117,18 +129,22 @@ fn parse_all(file: &str) -> Result<ParsedModules, ExitCode> {
         match parse(&m.source) {
             Ok(mut program) => {
                 if let Err(e) = synthesize_json_decoders(&mut program) {
-                    eprintln!("{name}: {e}");
-                    return Err(ExitCode::FAILURE);
+                    return Err(LoadFailure::Discover(format!("{name}: {e}")));
                 }
                 units.push(ModuleUnit { pkg: m.pkg.clone(), file: name, program });
             }
-            Err(errors) => {
-                eprint!("{}", format_compile_errors(&name, &errors, &m.source));
-                return Err(ExitCode::FAILURE);
-            }
+            Err(errors) => return Err(LoadFailure::Parse { file: name, source: m.source.clone(), errors }),
         }
     }
     Ok(ParsedModules { units, sources: source_map })
+}
+
+// 非JSON経路の共通処理: 失敗を表示して終了コードへ変換する
+fn parse_all_reported(file: &str) -> Result<ParsedModules, ExitCode> {
+    parse_all(file).map_err(|f| {
+        f.report();
+        ExitCode::FAILURE
+    })
 }
 
 // 全モジュールをfull_checkerに通し、(ファイル, 診断)を**TS版と同じ順序**で返す。
@@ -163,7 +179,7 @@ fn gate(parsed: &ParsedModules) -> Result<(), ExitCode> {
 }
 
 fn compile_file(file: &str) -> Result<String, ExitCode> {
-    let parsed = parse_all(file)?;
+    let parsed = parse_all_reported(file)?;
     gate(&parsed)?;
     codegen::generate_modules(&parsed.units).map_err(|e| {
         eprintln!("{e}");
@@ -174,7 +190,7 @@ fn compile_file(file: &str) -> Result<String, ExitCode> {
 // ---- 各サブコマンド ----
 
 fn run_ast(file: &str) -> ExitCode {
-    match parse_all(file) {
+    match parse_all_reported(file) {
         Ok(parsed) => {
             for u in &parsed.units {
                 println!("{:#?}", u.program);
@@ -188,10 +204,24 @@ fn run_ast(file: &str) -> ExitCode {
 fn run_check(file: &str, json: bool) -> ExitCode {
     let parsed = match parse_all(file) {
         Ok(p) => p,
-        // --json でも構文エラーはparse_all側の表示に任せる(TS版も構文エラーは
-        // compileEntry経由で同じ診断経路に乗るが、Rust版のパーサはまだ
-        // DiagnosticCodeへ統合されていないため。統合は将来のmilestone)
-        Err(code) => return code,
+        // **`--json`のときは構文エラーもJSONへ載せる**(TS版`compileModules`はパースエラーを
+        // 型検査の診断と同じ配列へ畳み込むので、`--json`の出力が常にJSONになる)。
+        // これを怠ると、`mesh check --json`をパースするエージェントが構文エラーの
+        // ときだけJSONパースに失敗する——`--json`は機械可読の契約なので実害がある
+        // (code reviewで発覚。README/requirements.mdが自己修正ループの前提として明記)。
+        // モジュール発見の失敗(存在しないパッケージ等)はTS版も素のエラー文なので揃える
+        Err(LoadFailure::Parse { file: f, errors, .. }) if json => {
+            let diags: Vec<JsonDiag> = errors
+                .iter()
+                .map(|e| JsonDiag { file: &f, line: e.pos.line, col: e.pos.col, code: e.code.to_string(), message: &e.message })
+                .collect();
+            println!("{}", json_report(file, &diags));
+            return ExitCode::FAILURE;
+        }
+        Err(f) => {
+            f.report();
+            return ExitCode::FAILURE;
+        }
     };
     if parsed.units.is_empty() {
         eprintln!("{file}: no modules");
@@ -310,27 +340,45 @@ fn caret_prefix(line: &str, col: usize) -> String {
 // 依存を増やさない方を選んだため(フィールドが増えたら見直す)。
 // `fix`(機械適用可能な自動修正)はRust版がまだ持たないので出さない——TS版でも
 // fixが無い診断ではキーごと省略されるため、形は互換
+// JSON出力用の1件ぶん(full_checkerの診断とパーサのCompileErrorを同じ形へ揃える)
+struct JsonDiag<'a> {
+    file: &'a str,
+    line: usize,
+    col: usize,
+    code: String,
+    message: &'a str,
+}
+
 fn diagnostics_to_json(entry_file: &str, per_file: &[(String, Vec<Diagnostic>)]) -> String {
-    let diagnostics: Vec<(&str, &Diagnostic)> = per_file.iter().flat_map(|(f, ds)| ds.iter().map(move |d| (f.as_str(), d))).collect();
-    let items: Vec<String> = diagnostics
+    let diags: Vec<JsonDiag> = per_file
         .iter()
-        .map(|(file, d)| {
+        .flat_map(|(f, ds)| {
+            ds.iter().map(move |d| JsonDiag { file: f, line: d.pos.line, col: d.pos.col, code: d.code.to_string(), message: &d.message })
+        })
+        .collect();
+    json_report(entry_file, &diags)
+}
+
+fn json_report(entry_file: &str, diags: &[JsonDiag]) -> String {
+    let items: Vec<String> = diags
+        .iter()
+        .map(|d| {
             format!(
                 "    {{\n      \"file\": {},\n      \"line\": {},\n      \"col\": {},\n      \"severity\": \"error\",\n      \"code\": {},\n      \"message\": {}\n    }}",
-                json_string(file),
-                d.pos.line,
-                d.pos.col,
-                json_string(&d.code.to_string()),
-                json_string(&d.message)
+                json_string(d.file),
+                d.line,
+                d.col,
+                json_string(&d.code),
+                json_string(d.message)
             )
         })
         .collect();
-    let diags = if items.is_empty() { "[]".to_string() } else { format!("[\n{}\n  ]", items.join(",\n")) };
+    let body = if items.is_empty() { "[]".to_string() } else { format!("[\n{}\n  ]", items.join(",\n")) };
     format!(
         "{{\n  \"file\": {},\n  \"ok\": {},\n  \"diagnostics\": {}\n}}",
         json_string(entry_file),
-        diagnostics.is_empty(),
-        diags
+        diags.is_empty(),
+        body
     )
 }
 

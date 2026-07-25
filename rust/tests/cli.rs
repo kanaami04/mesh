@@ -164,6 +164,21 @@ fn importしたパッケージの中身も検査される() {
 }
 
 #[test]
+fn json出力は構文エラーでもjsonのまま() {
+    // 回帰(code reviewで発覚): 構文エラーのときだけ素のテキストを出しており、
+    // `--json`をパースするエージェントがそこでJSONパースに失敗していた
+    // (TS版`compileModules`はパースエラーを型検査の診断と同じ配列へ畳み込む)。
+    // README/requirements.mdが自己修正ループの前提として明記している契約なので実害がある
+    let path = temp_mesh("json-syntax", "fn main() {\n    x := \n}\n");
+    let p = path.display().to_string();
+    let out = mesh(&["check", &p, "--json"]);
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.starts_with('{'), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("\"code\": \"syntax-error\""), "stdout: {}", out.stdout);
+    assert!(out.stdout.trim_end().ends_with('}'), "stdout: {}", out.stdout);
+}
+
+#[test]
 fn 引数不足やサブコマンド無しはusageを出す() {
     let no_args = mesh(&[]);
     assert_eq!(no_args.code, 1);
