@@ -3044,6 +3044,42 @@
                 回帰テストと、`escape_string`が単一パスでもTS版の多段パスと等価である理由の
                 説明コメントも追加した(いずれもcode reviewの指摘)。単体テスト10→13件。
               - **次段階**: `mesh test`/`card`/`explain`の移植。
+        - [x] **milestone 37: `mesh test`(F-15のテストランナー)+ full_checkerのパッケージ単位検査**
+              ✅ 2026-07-25実装。「TS実装の撤去条件」の(1)の続き。
+              - **本題になったのはfull_checkerのパッケージ単位検査**: 着手直後、
+                `main_test.mesh`から`main.mesh`の関数を呼ぶだけで`undefined-name`の誤検知に
+                なることが判明。原因はfull_checkerが**1ファイルずつ独立に検査していた**こと
+                (TS版`checkPackage`は同じパッケージの全ファイルを1つの名前空間で検査する)。
+                さらに調べると、これは`mesh test`固有ではなく**milestone 35のゲート統合以降
+                `mesh check`/`run`/`build`が、複数ファイルのパッケージが内部で相互参照する
+                正当なプログラムを弾いていた**という既存の誤検知だった(examplesのパッケージが
+                たまたま相互参照していなかったため気づけていなかった)。
+                新設`check_package(files, require_main)`でTS版と同じ順序
+                (全ファイルの型宣言→メソッド表→import alias→全ファイルの関数シグネチャ→
+                定数→mainの形→本体)にし、診断は**それが出たファイル**へ振り分ける
+                (ctx.diagnosticsが追記のみなので各段階の前後の長さで区間を切る)。
+                `check_program`は1ファイルのcheck_packageとして残したので既存テストは無変更。
+              - **`mesh test`本体**: `modules.rs`に`load_modules_for_test`(ディレクトリ指定なら
+                そのパッケージ自身をテストファイル込みで、ファイル指定ならそのファイル+同じ
+                ディレクトリの`_test.mesh`)。**依存先パッケージからは`_test.mesh`を除外**する
+                (TS版`readMeshFiles(dir, {includeTests:false})`——これも今まで抜けていた)。
+                新設`test_discovery.rs`(`_test.mesh`内の`test`で始まる関数を集め、
+                `() none | error`でなければ`invalid-test-signature`)。codegenは
+                `generate_modules_for_test`で末尾を`main()`ではなく`__runTests([...])`にする
+                (ランタイム側のハーネスはruntime.ts丸ごと埋め込みで既に存在)。
+              - **結果JSONの読み取りは手書き**(kanayamaと相談して依存ゼロを維持する判断)。
+                新設`test_report.rs`は「自分たちのランタイムが出す固定の形」だけを読む最小実装で、
+                文字列のエスケープ解釈(失敗メッセージに改行・引用符が入る)とサロゲートペアは
+                テストで固めた。想定外の形はNoneを返し、呼び出し元が生の出力を見せて失敗にする。
+                TS版と同じ防衛的二重チェック(`ok`なのに終了コードが0でなければ失敗扱い)も移植。
+              - 新規テスト: test_discovery 6件・test_report 7件・full_checker 3件
+                (パッケージ単位検査)・CLI 4件(合否表示・テスト無し・シグネチャ違反・
+                パッケージ内相互参照の回帰)。508→524件 + CLI 15→19件。clippyクリーン。
+              - **検証**: `mesh test`をTS版と突き合わせ、7シナリオ(成功+失敗混在・`--json`・
+                テスト無し・panicするテスト・シグネチャ違反・型エラー・ディレクトリ指定・
+                存在しないターゲット)で出力と終了コードが完全一致。全exampleの
+                `check`/`run`/`fmt`も回帰なし。
+              - **次段階**: `mesh card`/`explain`の移植(CLIの残り)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では

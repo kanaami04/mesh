@@ -57,6 +57,7 @@ pub enum DiagnosticCode {
     CannotInferType,
     NotAChannel,
     CompoundAssignOnMap,
+    InvalidTestSignature,
 }
 
 impl DiagnosticCode {
@@ -98,6 +99,7 @@ impl DiagnosticCode {
             DiagnosticCode::CannotInferType => "cannot-infer-type",
             DiagnosticCode::NotAChannel => "not-a-channel",
             DiagnosticCode::CompoundAssignOnMap => "compound-assign-on-map",
+            DiagnosticCode::InvalidTestSignature => "invalid-test-signature",
         }
     }
 }

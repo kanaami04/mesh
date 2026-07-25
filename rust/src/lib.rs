@@ -8,5 +8,7 @@ pub mod json_decode;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
+pub mod test_discovery;
+pub mod test_report;
 pub mod token;
 pub mod types;
