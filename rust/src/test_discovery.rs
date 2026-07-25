@@ -27,17 +27,22 @@ pub struct DiscoveredTests {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-// 1ファイルぶんの発見。`file`は`_test.mesh`かどうかの判定と、報告する位置情報に使う
-pub fn discover_in(pkg: &str, file: &str, program: &Program) -> DiscoveredTests {
+// 1ファイルぶんの発見。`file`は`_test.mesh`かどうかの判定と、報告する位置情報に使う。
+// `pkg_types`は**そのファイルが属するパッケージ全体の型宣言**——テストの戻り値に
+// `type R = none | error`のようなエイリアスを使うとき、その宣言は本体側のファイル
+// (`main.mesh`等)にあるのが普通なので、自ファイルの型だけで解決すると
+// `invalid-test-signature`の誤検知になる(code reviewで発覚・両CLIで再現確認。
+// TS版はパッケージ全体を1つのcheckerで見るので元から問題にならない)
+pub fn discover_in(pkg: &str, file: &str, program: &Program, pkg_types: &[crate::ast::TypeDecl]) -> DiscoveredTests {
     let mut tests = Vec::new();
     let mut diagnostics = Vec::new();
     if !file.ends_with("_test.mesh") {
         return DiscoveredTests { tests, diagnostics };
     }
-    // 戻り値型の解決にはchecker.rs側のリゾルバを使う(`type R = none | error`のような
-    // エイリアス越しでも判定できるように——TS版もresolveType後にtypeEqualsで比べている)
+    // 戻り値型の解決にはchecker.rs側のリゾルバを使う(エイリアス越しでも判定できるように
+    // ——TS版もresolveType後にtypeEqualsで比べている)
     let mut ctx = CheckerCtx::new();
-    let _ = crate::checker::resolve_type_decls(&mut ctx, &program.types);
+    let _ = crate::checker::resolve_type_decls(&mut ctx, pkg_types);
     for f in &program.fns {
         if f.receiver.is_some() || !f.name.starts_with("test") {
             continue;
@@ -93,7 +98,9 @@ mod tests {
     use crate::parser::parse;
 
     fn discover(file: &str, src: &str) -> DiscoveredTests {
-        discover_in("main", file, &parse(src).expect("テスト用ソースはパースできること"))
+        let program = parse(src).expect("テスト用ソースはパースできること");
+        let types = program.types.clone();
+        discover_in("main", file, &program, &types)
     }
 
     #[test]
@@ -142,7 +149,7 @@ mod tests {
     #[test]
     fn パッケージ側のtestはpkg修飾のjs名になる() {
         let program = parse("fn testAdds() none | error {\n    return none\n}\n").unwrap();
-        let d = discover_in("mathutil", "mathutil/ops_test.mesh", &program);
+        let d = discover_in("mathutil", "mathutil/ops_test.mesh", &program, &[]);
         assert_eq!(d.tests[0].js_name, "mathutil$testAdds");
     }
 
@@ -153,6 +160,17 @@ mod tests {
         // 通すと`.expect()`でpanicしていた(`mesh test`がクラッシュしてJSONも診断も出ない)。
         // 判定不能として扱い、診断は出さずにテストとして受け入れる(検出漏れ側)
         let d = discover("a_test.mesh", "type A = B | int\ntype B = A | string\n\nfn testX() A {\n    return none\n}\n");
+        assert_eq!(d.diagnostics, vec![]);
+        assert_eq!(d.tests.len(), 1);
+    }
+
+    #[test]
+    fn 同じパッケージの別ファイルにある型aliasも解決できる() {
+        // 回帰(code reviewで発覚): テストの戻り値エイリアスは本体側のファイルで宣言される
+        // のが普通なので、自ファイルの型だけで解決すると誤検知になる
+        let body = parse("type R = none | error\n\nfn add(a: int, b: int) int {\n    return a + b\n}\n").unwrap();
+        let test_file = parse("fn testAdd() R {\n    return none\n}\n").unwrap();
+        let d = discover_in("main", "main_test.mesh", &test_file, &body.types);
         assert_eq!(d.diagnostics, vec![]);
         assert_eq!(d.tests.len(), 1);
     }

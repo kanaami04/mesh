@@ -178,21 +178,53 @@ fn check_all(parsed: &ParsedModules) -> Vec<(String, Vec<Diagnostic>)> {
 // `test_mode`のときはmainパッケージにも`fn main`を要求しない(TS版のtestMode)
 fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<Diagnostic>)> {
     // パッケージごとにファイルをまとめる(パッケージの初出順を保つ)
-    let mut order: Vec<String> = Vec::new();
+    let mut discovered: Vec<String> = Vec::new();
     let mut by_pkg: HashMap<String, Vec<(String, &Program)>> = HashMap::new();
     for u in &parsed.units {
-        if !order.contains(&u.pkg) {
-            order.push(u.pkg.clone());
+        if !discovered.contains(&u.pkg) {
+            discovered.push(u.pkg.clone());
         }
         by_pkg.entry(u.pkg.clone()).or_default().push((u.file.clone(), &u.program));
     }
     let mut out = Vec::new();
-    for pkg in order.iter().rev() {
-        let files = &by_pkg[pkg];
+    for pkg in dependency_order(&discovered, &parsed.units) {
+        let files = &by_pkg[&pkg];
         let require_main = pkg == "main" && !test_mode;
         out.extend(full_checker::check_package(files, require_main));
     }
     out
+}
+
+// 依存されている側が先に来る順(TS版`checkModules`のDFS後順)。
+// **単純な「読み込み順の逆」では足りない**——`main`が`a`と`c`をimportし`c`も`a`をimportする
+// ような形(ダイヤモンド)では、読み込み順の逆が依存順にならず、診断の出る順序がTS版と
+// 食い違う(code reviewで発覚)。循環があっても後順で確定した分から積むので停止する
+fn dependency_order(discovered: &[String], units: &[ModuleUnit]) -> Vec<String> {
+    let mut deps: HashMap<&str, Vec<String>> = HashMap::new();
+    for u in units {
+        deps.entry(u.pkg.as_str()).or_default().extend(u.program.imports.iter().map(|i| i.alias.clone()));
+    }
+    let known: Vec<&str> = discovered.iter().map(String::as_str).collect();
+    let mut order: Vec<String> = Vec::new();
+    let mut visiting: Vec<String> = Vec::new();
+    fn visit(pkg: &str, deps: &HashMap<&str, Vec<String>>, known: &[&str], order: &mut Vec<String>, visiting: &mut Vec<String>) {
+        if order.iter().any(|p| p == pkg) || visiting.iter().any(|p| p == pkg) {
+            return; // 訪問済み or 循環(循環の報告はcodegen側の仕事)
+        }
+        visiting.push(pkg.to_string());
+        for d in deps.get(pkg).into_iter().flatten() {
+            // 組み込みパッケージ(mesh/json等)や未知の名前は飛ばす
+            if known.contains(&d.as_str()) {
+                visit(d, deps, known, order, visiting);
+            }
+        }
+        visiting.retain(|p| p != pkg);
+        order.push(pkg.to_string());
+    }
+    for pkg in &known {
+        visit(pkg, &deps, &known, &mut order, &mut visiting);
+    }
+    order
 }
 
 // 診断をstderrへ(TS版`console.error(formatDiagnostics(...))`と同じ)
@@ -347,8 +379,15 @@ fn run_test(target: &str, json: bool) -> ExitCode {
     // TS版の`testMode`と同じ)。診断はどちらもゲートとして扱う
     let mut tests = Vec::new();
     let mut per_file = check_all_opts(&parsed, true);
+    // 発見にはそのファイルが属する**パッケージ全体の型宣言**を渡す(テストの戻り値
+    // エイリアスは本体側のファイルで宣言されるのが普通なため)
+    let mut types_by_pkg: HashMap<String, Vec<mesh::ast::TypeDecl>> = HashMap::new();
     for u in &parsed.units {
-        let found = test_discovery::discover_in(&u.pkg, &u.file, &u.program);
+        types_by_pkg.entry(u.pkg.clone()).or_default().extend(u.program.types.iter().cloned());
+    }
+    for u in &parsed.units {
+        let pkg_types = types_by_pkg.get(&u.pkg).map(Vec::as_slice).unwrap_or(&[]);
+        let found = test_discovery::discover_in(&u.pkg, &u.file, &u.program, pkg_types);
         tests.extend(found.tests);
         if !found.diagnostics.is_empty() {
             match per_file.iter_mut().find(|(f, _)| f == &u.file) {
