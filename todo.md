@@ -3115,6 +3115,45 @@
                 位置なし)を出す。`type-alias-cycle`はfull_checkerに未移植の診断で、
                 終了コードは両方1で一致する。
               - **次段階**: `mesh card`/`explain`の移植(CLIの残り)。
+        - [x] **milestone 38: `mesh card` / `mesh explain`(CLIの完成)**
+              ✅ 2026-07-25実装。「TS実装の撤去条件」の(1)を満たした——Rust CLIのサブコマンドが
+              TS版と同じ顔ぶれ(`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)になった。
+              - **本文はRust側へ複製しない**という判断が中心。`card.rs`は`src/card.ts`を、
+                `explain.rs`は`src/diagnostic-codes.ts`の`DIAGNOSTIC_EXPLANATIONS`を
+                `include_str!`で埋め込み、必要な部分だけ取り出す(codegen.rsの`prelude()`が
+                runtime.tsに対してやっているのと同じ手法)。理由: カード本文の主張は
+                TS側の`tests/card-completeness.test.ts`が実装と突き合わせている唯一の仕組みで、
+                Rustへコピーするとそこから外れて静かに古くなる。説明文も「一般論」なので
+                実装の進捗とは独立していて複製する価値が無い。
+              - **`mesh card --for`(サブセットカード)** は`src/card-subset.ts`の移植。
+                依存ゼロを維持するため、TS版の正規表現(`/\bfn\s+\w+\s*</`等9本)を
+                手書きの走査に置き換えた(`contains_word`/`kw_ident_then`/`has_array_syntax`)。
+                `\w`はJSと同じ`[A-Za-z0-9_]`定義。カード本文は書き換えず`## 見出し`で分割して
+                振り分けるだけ・未知の見出しは常に含める、というTS版の設計もそのまま。
+              - **`mesh explain`が説明するのはRust版が出せる36種だけ**(kanayamaと相談して決定)。
+                TS版は107種すべてを説明できるが、未実装の検査の説明を並べると「Rust版でも
+                その診断が出る」という誤解を招く。したがって引数無しの件数行はTS版の107ではなく
+                36になる(意図的な差)。検査を足せば自動で追随するよう、
+                `DiagnosticCode`のenum・`ALL`・`as_str`を**1つの表から`macro_rules!`で生成**する形に
+                変えた(手で3箇所に書くと`ALL`への追加漏れ=`explain`から静かに欠ける、が起きる。
+                `as_str`の網羅性はコンパイラが見てくれるが定数配列は誰も見てくれない)。
+              - **実装中に踏んだ罠**: `language_card()`を`prelude()`と同じ「ファイル最初の
+                バッククォート」で切ったところ、card.ts冒頭の日本語コメントに含まれる
+                `` `mesh card` `` を拾ってカードではなくコメントを返していた。`LANGUAGE_CARD = `
+                の宣言位置を起点にして解消。
+              - 新規テスト: card 4件・explain 5件・CLI 6件。529→538件 + CLI 19→25件。
+                clippyクリーン(`-D warnings`)。
+              - **code reviewは指摘0件**(5観点すべて)。非ブロッキングの観察が1件あり、
+                資料としてコードに残した(kanayamaの指示): `has_array_syntax`の第2分岐
+                (`\w+\[\]`)は第1分岐(`\[\s*\]`、`\s*`は0文字にマッチ)に包含されて
+                実質デッド。**TS版の正規表現が同じ理由で第2の選択肢を持っている**ので、
+                忠実移植として残す判断(消しても挙動は変わらないが、TS版と1対1で読み比べ
+                られなくなる方が移植中のコストは高い)。
+              - **検証**(TS版と突き合わせ): `mesh card`は48,306バイトがbyte-for-byte一致。
+                `mesh card --for`はexamples全22ファイル+全部まとめて渡す形+絞り込みが実際に
+                効く小さなソース3種(空・structのみ・defer+配列)で一致、引数不足と読めない
+                ファイルのstderr・終了コードも一致。`mesh explain <code>`は36種すべて一致、
+                未知コードのstderr・終了コードも一致。一覧は件数行のみ意図的に異なる(36 vs 107)。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3122,11 +3161,14 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-25時点): CLIはTS版が`run`/`build`/`check`/`fmt`/`test`、Rust版は
-        `check`+AST表示/`--emit-js`のみ(`fmt`/`test`は未実装)。診断コードは107種 vs 41種。
-        full_checkerは単一ファイル専用で`run`/`build`のゲートに未統合。
-        - [ ] (1) Rust CLIが`run`/`build`/`fmt`/`test`/`card`を持ち、full_checkerが
-              `run`/`build`のゲートに入る
+        現状の差(2026-07-25時点、milestone 38まで): CLIのサブコマンドは揃った
+        (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
+        107種 vs 36種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
+        `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
+        (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。
+        - [x] (1) Rust CLIが`run`/`build`/`fmt`/`test`/`card`を持ち、full_checkerが
+              `run`/`build`のゲートに入る(milestone 35〜38で完了)
         - [ ] (2) full_checkerが複数ファイル/パッケージ対応になり、診断が実用上必要な範囲を
               カバーする(107種すべてが必要かは別途判断)
         - [ ] (3) TSのテスト資産をRust側へ移植する——特に`tests/e2e.test.ts`と

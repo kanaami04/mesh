@@ -14,94 +14,76 @@
 // この列挙型へはまだ統合していない——統合は、そちら側のコードを実際にこの型へ
 // 移行するタイミングで行う。
 //
-// `DIAGNOSTIC_EXPLANATIONS`(`mesh explain`用の説明文マップ、TS版後半)はまだ
-// `mesh explain`自体が無いため今回は移植しない(そのCLIサブコマンドを生やす
-// milestoneで一緒に持ってくる)。
+// `DIAGNOSTIC_EXPLANATIONS`(`mesh explain`用の説明文マップ、TS版後半)はmilestone 38で
+// `explain.rs`が扱うようになった——本文はRust側へ複製せず、TS版の定義から取り出している
+// (理由はexplain.rsの冒頭コメント)。説明を出す範囲は`ALL`(=このenum)に絞る。
 
 use crate::token::Pos;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DiagnosticCode {
-    ReservedWord,
-    BuiltinRedeclared,
-    AlreadyDeclared,
-    Shadowing,
-    UndefinedName,
-    TypeMismatch,
-    ImmutableAssignment,
-    MissingMain,
-    InvalidMainSignature,
-    InvalidOperation,
-    IncomparableTypes,
-    NotBool,
-    UseIsNone,
-    DivisionByZero,
-    ArgumentCount,
-    BuiltinArgType,
-    UnknownField,
-    MissingFields,
-    DuplicateField,
-    MethodNotCalled,
-    InvalidReceiverType,
-    MethodFieldConflict,
-    DuplicateMethod,
-    VoidUsedAsValue,
-    DiscriminatedUnionTagMissing,
-    DiscriminatedUnionNoMatch,
-    DiscriminatedUnionAmbiguous,
-    InvalidIndexType,
-    NotIndexable,
-    NotRangeable,
-    RangeArity,
-    CallbackSignatureMismatch,
-    CannotInferType,
-    NotAChannel,
-    CompoundAssignOnMap,
-    InvalidTestSignature,
+// enum・`ALL`・`as_str`は**1つの表から生成する**。手で3箇所に書き分けると、変体を足したときの
+// `ALL`への追加漏れ(=その診断が`mesh explain`から静かに欠ける)が起きる——`as_str`の網羅性は
+// コンパイラが検査してくれるが、定数配列の網羅性は誰も検査してくれないため。
+// `macro_rules!`は「コンパイル前にコードを展開する型付きテンプレート」で、ここでは
+// `変体名 => "文字列",`の並びを受け取ってenum定義・`ALL`・`as_str`の3つへ同時に展開している。
+macro_rules! diagnostic_codes {
+    ($($variant:ident => $text:literal,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum DiagnosticCode {
+            $($variant,)*
+        }
+
+        impl DiagnosticCode {
+            // 実装済みの診断コード全部(宣言順)。`mesh explain`(explain.rs)が
+            // 「Rust版が出せる範囲」を知るために使う
+            pub const ALL: &'static [DiagnosticCode] = &[$(DiagnosticCode::$variant,)*];
+
+            // TS版DiagnosticCodeの文字列リテラルと同じ表記(`mesh check --json`の code フィールド用)
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(DiagnosticCode::$variant => $text,)*
+                }
+            }
+        }
+    };
 }
 
-impl DiagnosticCode {
-    // TS版DiagnosticCodeの文字列リテラルと同じ表記(`mesh check --json`の code フィールド用)
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DiagnosticCode::ReservedWord => "reserved-word",
-            DiagnosticCode::BuiltinRedeclared => "builtin-redeclared",
-            DiagnosticCode::AlreadyDeclared => "already-declared",
-            DiagnosticCode::Shadowing => "shadowing",
-            DiagnosticCode::UndefinedName => "undefined-name",
-            DiagnosticCode::TypeMismatch => "type-mismatch",
-            DiagnosticCode::ImmutableAssignment => "immutable-assignment",
-            DiagnosticCode::MissingMain => "missing-main",
-            DiagnosticCode::InvalidMainSignature => "invalid-main-signature",
-            DiagnosticCode::InvalidOperation => "invalid-operation",
-            DiagnosticCode::IncomparableTypes => "incomparable-types",
-            DiagnosticCode::NotBool => "not-bool",
-            DiagnosticCode::UseIsNone => "use-is-none",
-            DiagnosticCode::DivisionByZero => "division-by-zero",
-            DiagnosticCode::ArgumentCount => "argument-count",
-            DiagnosticCode::BuiltinArgType => "builtin-arg-type",
-            DiagnosticCode::UnknownField => "unknown-field",
-            DiagnosticCode::MissingFields => "missing-fields",
-            DiagnosticCode::DuplicateField => "duplicate-field",
-            DiagnosticCode::MethodNotCalled => "method-not-called",
-            DiagnosticCode::InvalidReceiverType => "invalid-receiver-type",
-            DiagnosticCode::MethodFieldConflict => "method-field-conflict",
-            DiagnosticCode::DuplicateMethod => "duplicate-method",
-            DiagnosticCode::VoidUsedAsValue => "void-used-as-value",
-            DiagnosticCode::DiscriminatedUnionTagMissing => "discriminated-union-tag-missing",
-            DiagnosticCode::DiscriminatedUnionNoMatch => "discriminated-union-no-match",
-            DiagnosticCode::DiscriminatedUnionAmbiguous => "discriminated-union-ambiguous",
-            DiagnosticCode::InvalidIndexType => "invalid-index-type",
-            DiagnosticCode::NotIndexable => "not-indexable",
-            DiagnosticCode::NotRangeable => "not-rangeable",
-            DiagnosticCode::RangeArity => "range-arity",
-            DiagnosticCode::CallbackSignatureMismatch => "callback-signature-mismatch",
-            DiagnosticCode::CannotInferType => "cannot-infer-type",
-            DiagnosticCode::NotAChannel => "not-a-channel",
-            DiagnosticCode::CompoundAssignOnMap => "compound-assign-on-map",
-            DiagnosticCode::InvalidTestSignature => "invalid-test-signature",
-        }
-    }
+diagnostic_codes! {
+    ReservedWord => "reserved-word",
+    BuiltinRedeclared => "builtin-redeclared",
+    AlreadyDeclared => "already-declared",
+    Shadowing => "shadowing",
+    UndefinedName => "undefined-name",
+    TypeMismatch => "type-mismatch",
+    ImmutableAssignment => "immutable-assignment",
+    MissingMain => "missing-main",
+    InvalidMainSignature => "invalid-main-signature",
+    InvalidOperation => "invalid-operation",
+    IncomparableTypes => "incomparable-types",
+    NotBool => "not-bool",
+    UseIsNone => "use-is-none",
+    DivisionByZero => "division-by-zero",
+    ArgumentCount => "argument-count",
+    BuiltinArgType => "builtin-arg-type",
+    UnknownField => "unknown-field",
+    MissingFields => "missing-fields",
+    DuplicateField => "duplicate-field",
+    MethodNotCalled => "method-not-called",
+    InvalidReceiverType => "invalid-receiver-type",
+    MethodFieldConflict => "method-field-conflict",
+    DuplicateMethod => "duplicate-method",
+    VoidUsedAsValue => "void-used-as-value",
+    DiscriminatedUnionTagMissing => "discriminated-union-tag-missing",
+    DiscriminatedUnionNoMatch => "discriminated-union-no-match",
+    DiscriminatedUnionAmbiguous => "discriminated-union-ambiguous",
+    InvalidIndexType => "invalid-index-type",
+    NotIndexable => "not-indexable",
+    NotRangeable => "not-rangeable",
+    RangeArity => "range-arity",
+    CallbackSignatureMismatch => "callback-signature-mismatch",
+    CannotInferType => "cannot-infer-type",
+    NotAChannel => "not-a-channel",
+    CompoundAssignOnMap => "compound-assign-on-map",
+    InvalidTestSignature => "invalid-test-signature",
 }
 
 impl std::fmt::Display for DiagnosticCode {

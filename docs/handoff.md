@@ -100,8 +100,9 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
 
 - **アーキテクチャ**: `rust/src/token.rs`(Pos/TokenType/Token/CompileError)・
   `lexer.rs`・`ast.rs`・`parser.rs`・`types.rs`・`checker.rs`・`codegen.rs`。
-  lib+binハイブリッドのCargoプロジェクト。CLIは milestone 35 でTS版と同じサブコマンド構成
-  (`run`/`build`/`check`/`ast`)になった(旧来の`cargo run -- file.mesh [--emit-js]`も互換で残す)
+  lib+binハイブリッドのCargoプロジェクト。CLIは milestone 35〜38 でTS版と同じサブコマンド構成
+  (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`/`ast`)になった
+  (旧来の`cargo run -- file.mesh [--emit-js]`も互換で残す)
 - **`parser.ts`(1217行)を全面移植完了(2026-07-22)**。詳細は todo.md の各マイルストーン
   項目が一次情報源(ここは要約のみ): lexer全体(`fffd0d9`)→ parser核サブセット→
   struct/type宣言+判別可能union+match/is式・文字列補間(+スタックオーバーフロー対策の
@@ -955,10 +956,17 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      **milestone 36で`mesh fmt`**(TS版`formatter.ts`の移植。AST/parserへ`comments`と
      `multiline`フラグを足すのが前提だった)。これで`run`/`build`/`check`/`fmt`が揃い、
      移植した診断が実際にコンパイルを止めるようになった。詳細はtodo.md参照
+   - ✅ **milestone 37で`mesh test`、milestone 38(2026-07-25)で`mesh card`/`mesh explain`。
+     これでRust CLIのサブコマンドはTS版と同じ顔ぶれになった**
+     (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。card本文と診断コードの説明文は
+     **Rust側へ複製せず**、`include_str!`で`src/card.ts`・`src/diagnostic-codes.ts`から
+     取り出している(複製するとTS側の`tests/card-completeness.test.ts`の検証から外れて
+     静かに古くなるため)。`mesh explain`が説明するのは**Rust版が実際に出せる36種だけ**
+     (未実装の検査の説明を並べると誤解を招くため。一覧の件数行だけTS版の107と意図的に異なる)
    - 残る候補: **診断の続き**——pkg修飾struct/pkg修飾呼び出しの中身・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`・
      値位置の`void-used-as-value`(TS版`checkExprSingle`相当。milestone 22以来の一般的な穴)・
-     `or`の4診断・match/selectの中身の走査。**CLIの残り**: `mesh card`/`explain`。
+     `or`の4診断・match/selectの中身の走査。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
@@ -1065,10 +1073,12 @@ mise run rust-check     # = cd rust && cargo clippy --all-targets
 (cd rust && cargo run -- check ../examples/hello.mesh [--json]) # 型検査のみ(ソース行+^つき)
 (cd rust && cargo run -- fmt   ../examples/hello.mesh [-w])    # 正規形へ整形(milestone 36)
 (cd rust && cargo run -- test  ../path/to/file.mesh [--json])  # _test.meshのテストを実行(milestone 37)
+(cd rust && cargo run -- explain [<code>])                     # 診断コードの説明(milestone 38)
+(cd rust && cargo run -- card [--for <file.mesh>...])          # 言語カード/その絞り込み(milestone 38)
 (cd rust && cargo run -- ast   ../examples/hello.mesh)         # ASTを表示(移植用のデバッグ支援)
 # `run`/`build`/`check`はいずれもcodegenの前にfull_checkerを通す(milestone 35のゲート統合。
 # 全モジュールを1本ずつ検査し、診断はTS版と同じくstderrへ出す)。
-# `card`/`explain`はまだTS版のみ
+# `explain`はRust版が出せる36種だけを説明する(TS版は107種。意図的な差)
 ```
 
 ## 用語集(初見だと分かりにくい決定)

@@ -1,7 +1,9 @@
 pub mod ast;
+pub mod card;
 pub mod checker;
 pub mod codegen;
 pub mod diagnostic_codes;
+pub mod explain;
 pub mod formatter;
 pub mod full_checker;
 pub mod json_decode;
