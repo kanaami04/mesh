@@ -105,6 +105,7 @@ diagnostic_codes! {
     AnyTypeRemoved => "any-type-removed",
     TypeAliasCycle => "type-alias-cycle",
     DeferRequiresCall => "defer-requires-call",
+    NotCallable => "not-callable",
 }
 
 impl std::fmt::Display for DiagnosticCode {
