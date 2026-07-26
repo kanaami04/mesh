@@ -5,10 +5,16 @@
   "version": "0.1.0",
   "publisher": "kanayama-mesh",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kanaami04/mesh.git",
+    "directory": "editors/vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": ["Programming Languages"],
+  "extensionKind": ["workspace"],
   "contributes": {
     "languages": [
       {
