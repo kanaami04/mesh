@@ -1,0 +1,6 @@
+main.mesh:2:1: error[already-declared]: type 'A' is already declared
+  type A = int
+  ^
+main.mesh:1:10: error[unknown-type]: unknown type 'Bogus'
+  type A = Bogus
+           ^

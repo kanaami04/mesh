@@ -1,0 +1,3 @@
+main.mesh:4:19: error[type-mismatch]: argument 2: cannot use "s" as int
+  	print(lib.add(1, "s"))
+  	                 ^

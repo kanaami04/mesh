@@ -1,0 +1,3 @@
+main.mesh:1:10: error[type-alias-cycle]: type alias cycle involving 'A'
+  type A = A
+           ^

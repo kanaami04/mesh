@@ -1,0 +1,3 @@
+main.mesh:1:1: error[builtin-type-redeclared]: 'int' is a builtin type and cannot be redeclared
+  type int = Bogus
+  ^

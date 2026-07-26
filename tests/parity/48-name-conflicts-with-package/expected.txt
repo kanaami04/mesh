@@ -1,0 +1,3 @@
+main.mesh:2:1: error[name-conflicts-with-package]: 'lib' conflicts with an imported package name
+  type lib = int
+  ^

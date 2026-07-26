@@ -1,0 +1,3 @@
+main.mesh:4:8: error[package-symbol-is-a-type]: 'Point' is a type — use lib.Point in a type position, or lib.Point{...} to construct it
+  	print(lib.Point(1))
+  	      ^

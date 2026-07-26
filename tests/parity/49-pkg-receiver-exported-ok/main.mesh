@@ -1,0 +1,9 @@
+import "lib"
+
+fn (p: lib.Point) show() int {
+	return p.x
+}
+
+fn main() {
+	print(1)
+}

@@ -1,0 +1,9 @@
+main.mesh:3:1: error[name-conflicts-with-package]: 'io' conflicts with an imported package name
+  struct io {
+  ^
+main.mesh:7:11: error[unknown-type]: unknown type 'io'
+  fn use(v: io) int {
+            ^
+main.mesh:7:11: error[unknown-type]: unknown type 'io'
+  fn use(v: io) int {
+            ^

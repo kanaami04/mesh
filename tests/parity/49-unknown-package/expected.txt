@@ -1,0 +1,3 @@
+main.mesh:4:5: error[unknown-package]: unknown package 'nosuch' — add: import "nosuch"
+  	p: nosuch.Point = lib.Point{x: 1}
+  	   ^

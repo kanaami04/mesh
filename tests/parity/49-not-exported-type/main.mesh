@@ -1,0 +1,6 @@
+import "lib"
+
+fn main() {
+	h: lib.Hidden = lib.Point{x: 1}
+	print(h)
+}

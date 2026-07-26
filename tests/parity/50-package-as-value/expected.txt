@@ -1,0 +1,3 @@
+main.mesh:4:8: error[package-as-value]: 'lib' is a package — use it as a qualifier like lib.something
+  	print(lib)
+  	      ^

@@ -1,0 +1,9 @@
+main.mesh:3:8: error[not-exported]: 'Hidden' is not exported by package 'lib' — add 'export' to its declaration
+  fn (h: lib.Hidden) show() int {
+         ^
+main.mesh:3:5: error[invalid-receiver-type]: method receiver must be a struct type, got any
+  fn (h: lib.Hidden) show() int {
+      ^
+main.mesh:3:8: error[not-exported]: 'Hidden' is not exported by package 'lib' — add 'export' to its declaration
+  fn (h: lib.Hidden) show() int {
+         ^

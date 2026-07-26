@@ -1,0 +1,2 @@
+type int = string
+fn main() { print(1) }

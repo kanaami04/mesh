@@ -1,0 +1,3 @@
+struct P { x: int }
+fn (p: P) show() int { return p.x }
+fn main() { p := P{x: 1} print(p.show) }

@@ -1,0 +1,8 @@
+import "lib"
+
+fn main() {
+	print(lib.add(1, 2))
+	print(lib.LIMIT)
+	p := lib.Point{x: 1}
+	print(p)
+}

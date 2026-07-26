@@ -1,0 +1,3 @@
+main.mesh:3:28: error[narrow-required]: cannot access field or method on int | none — narrow it first (with 'is' or 'match')
+  fn main() { v := f() print(v.x) }
+                             ^

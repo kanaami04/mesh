@@ -1,0 +1,3 @@
+main.mesh:4:8: error[argument-count]: expected 2 argument(s), got 1
+  	print(lib.add(1))
+  	      ^

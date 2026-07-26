@@ -1,0 +1,15 @@
+export struct Point {
+	x: int
+}
+
+struct Hidden {
+	y: int
+}
+
+export fn add(a: int, b: int) int {
+	return a + b
+}
+
+fn secret() int {
+	return 1
+}

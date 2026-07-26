@@ -1,0 +1,6 @@
+type A = Bogus
+type A = int
+
+fn main() {
+    print("hi")
+}

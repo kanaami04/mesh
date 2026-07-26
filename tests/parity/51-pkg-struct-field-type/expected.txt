@@ -1,0 +1,3 @@
+main.mesh:4:21: error[type-mismatch]: field 'x': cannot use "oops" as int
+  	print(lib.Point{x: "oops", y: 1})
+  	                   ^

@@ -1,0 +1,6 @@
+main.mesh:2:1: error[already-declared]: type 'P' is already declared
+  struct P { x: int }
+  ^
+main.mesh:3:1: error[already-declared]: type 'P' is already declared
+  struct P { x: int }
+  ^

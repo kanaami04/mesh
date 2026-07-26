@@ -1,0 +1,3 @@
+fn f() int | none { return 1 }
+struct P { x: int }
+fn main() { v := f() print(v.x) }

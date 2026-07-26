@@ -1,0 +1,9 @@
+import "lib"
+
+struct Box {
+	p: lib.Hidden
+}
+
+fn main() {
+	print(1)
+}

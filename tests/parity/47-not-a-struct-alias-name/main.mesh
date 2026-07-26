@@ -1,0 +1,2 @@
+type S = string
+fn main() { print(S{n: 1}) }

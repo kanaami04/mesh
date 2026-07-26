@@ -1,0 +1,12 @@
+export struct Point {
+	x: int
+	y: int
+}
+
+export fn add(a: int, b: int) int {
+	return a + b
+}
+
+export type Status = "on" | "off"
+
+export LIMIT := 10

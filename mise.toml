@@ -34,3 +34,15 @@ run = "cd rust && cargo test"
 [tasks."rust-check"]
 description = "Rust移植版のlint(clippy)"
 run = "cd rust && cargo clippy --all-targets"
+
+[tasks.parity]
+description = "TS版(オラクル)とRust版のcheck出力を突き合わせる(誤検知があれば失敗)"
+run = "scripts/parity.sh"
+
+[tasks."parity-update"]
+description = "parityコーパスのRust側期待出力を更新する(TS版と突き合わせたうえで書き換わる)"
+run = "scripts/parity.sh --update"
+
+[tasks.drift]
+description = "自分の変更が偽にしたコメントの候補を出す(判定はしない)"
+run = "scripts/drift.sh"
