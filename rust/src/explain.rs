@@ -155,7 +155,10 @@ mod tests {
     #[test]
     fn 未実装のコードは説明しない() {
         // TS版には説明文があるが、Rust版のfull_checkerがまだ出さない診断
-        assert_eq!(explanation("narrow-required"), None);
+        // (milestone 47で`narrow-required`を移植したので、未移植の`generic-inference-failed`へ
+        // 差し替えた。**モデル化が進むとこの例は毎回古くなる**——ここが落ちたら
+        // 「その診断を移植したから」であって退行ではない)
+        assert_eq!(explanation("generic-inference-failed"), None);
         assert_eq!(explanation("no-such-code"), None);
     }
 

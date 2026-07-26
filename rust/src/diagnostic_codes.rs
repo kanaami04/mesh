@@ -65,6 +65,8 @@ diagnostic_codes! {
     ArgumentCount => "argument-count",
     BuiltinArgType => "builtin-arg-type",
     UnknownField => "unknown-field",
+    NotAStruct => "not-a-struct",
+    NarrowRequired => "narrow-required",
     MissingFields => "missing-fields",
     DuplicateField => "duplicate-field",
     MethodNotCalled => "method-not-called",
