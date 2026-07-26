@@ -3321,9 +3321,24 @@
                 「メモ化+placeholder検出」の歩き方を移植しないと位置・件数が合わないので分けた。
                 pkg修飾型の`unknown-package`/`unknown-package-type`/`not-exported`は
                 パッケージ跨ぎの検査とセット(いずれも検出漏れ側)。
-              - 新規テスト6件・既存3件を新しい挙動へ更新(559→565件)。clippy(`-D warnings`)クリーン。
-              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計115ファイル。差が出るのは
-                `type-alias-cycle`が絡む2ファイルのみで、**Rust側だけに出る診断は0件**。
+              - **code reviewで発見・即修正した1件**(2人が別々の再現手順で見つけた誤検知):
+                **`unknown-type`の判定にレジストリを使っていた**。レジストリ
+                (`type_ctx.lookup_struct`/`lookup_union`)に載るのはstruct宣言とunion宣言だけで、
+                **宣言されているのに載らない型が2通りある**——(1)`type UserId = int`のような
+                素のalias、(2)`resolve_type_decls`は最初のErrで走査全体を打ち切るため、
+                壊れた宣言(裸のunion循環など)より**後ろ**に書かれた型が丸ごと未登録になる。
+                どちらも`unknown-type`の誤検知になっていた(TS版は`resolveAlias`が名前ごとに
+                独立してメモ化するので、循環1つが無関係な型を巻き添えにしない)。
+                **宣言された型名の集合を別に持つ**(`ctx.declared_types`)形に直した。
+                回帰テスト1件追加。
+              - **既知の限界(この一歩で残したもの)**: struct形パターンの**中**に書かれた未知の
+                型名(`{ kind: Bogus }`)はANY差し替えの対象外なので、殻structのまま
+                「判定不能」として飛ばす——TS版が出す`impossible-pattern`と
+                `match-not-exhaustive`が出ない(検出漏れ側。code reviewで指摘)。
+              - 新規テスト7件・既存3件を新しい挙動へ更新(559→566件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計120ファイル(修正後に再測定)。
+                差が出るのは未移植の診断(`type-alias-cycle`・ジェネリック呼び出しの引数照合)が
+                絡む4ファイルのみで、**Rust側だけに出る診断は0件**。
                 examples全22件の`mesh run`も一致。プローブは型名の誤りをあらゆる位置
                 (関数の引数・戻り値・structフィールド・type alias本体・ローカル注釈・
                 レシーバ・matchのパターン・`is`のターゲット・`any`)へ置いたものを用意した。

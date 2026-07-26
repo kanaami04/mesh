@@ -83,6 +83,14 @@ pub struct FullCheckerCtx {
     // Result即失敗で形が違うため、TS版`expressions.ts`/`calls.ts`を手本に診断蓄積形で
     // 書き直す)。詳細はtodo.md/handoff.md milestone 29参照
     type_ctx: crate::checker::CheckerCtx,
+    // milestone 42: このパッケージで**宣言されている型名**(struct/type宣言の名前)。
+    // `check_type_ann`が「未知の型名か」を判定するのに使う。**レジストリ
+    // (`type_ctx.lookup_struct/lookup_union`)で判定してはいけない**——レジストリに載るのは
+    // struct宣言とunion宣言だけで、(a)`type UserId = int`のような素のaliasは元々載らず、
+    // (b)`resolve_type_decls`は最初のErrで走査全体を打ち切るため、壊れた宣言より後ろの
+    // 型も丸ごと未登録になる。どちらも「宣言はされている」ので`unknown-type`は誤検知になる
+    // (code reviewで2人が別々の再現手順で発見)
+    declared_types: std::collections::HashSet<String>,
     // milestone 42: 今検査しているジェネリック関数の型パラメータ(`fn first<T>(...)`のT)。
     // `check_type_ann`が`unknown-type`の誤検知を出さないために要る——TS版の
     // `isTypeParam(ctx, name)`に対応する
@@ -96,6 +104,7 @@ impl FullCheckerCtx {
             ret_stack: Vec::new(),
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
+            declared_types: std::collections::HashSet::new(),
             type_params: Vec::new(),
         }
     }
@@ -259,7 +268,7 @@ fn unknown_type_name(ctx: &FullCheckerCtx, node: &TypeNode) -> bool {
     if ctx.type_params.iter().any(|t| t == name) {
         return false;
     }
-    ctx.type_ctx.lookup_struct(name).is_none() && ctx.type_ctx.lookup_union(name).is_none()
+    !ctx.declared_types.contains(name)
 }
 
 // 型宣言(`struct X { ... }` / `type X = ...`)の中に書かれた型注釈を検査する。
@@ -296,7 +305,7 @@ fn check_type_ann(ctx: &mut FullCheckerCtx, node: &TypeNode) {
                 if ctx.type_params.iter().any(|t| t == name) {
                     return;
                 }
-                if ctx.type_ctx.lookup_struct(name).is_none() && ctx.type_ctx.lookup_union(name).is_none() {
+                if !ctx.declared_types.contains(name) {
                     ctx.error(*pos, DiagnosticCode::UnknownType, format!("unknown type '{name}'"));
                 }
             }
@@ -2327,6 +2336,9 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // リテラル検証が無診断で素通りする(code reviewで波及範囲を明確化)。診断機構
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let all_types: Vec<crate::ast::TypeDecl> = files.iter().flat_map(|(_, p)| p.types.iter().cloned()).collect();
+    // **宣言されている型名を先に集める**(レジストリの中身とは独立に。上記
+    // `declared_types`のコメント参照)
+    ctx.declared_types = all_types.iter().map(|t| t.name.clone()).collect();
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
     // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
     // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
@@ -2711,6 +2723,21 @@ mod tests {
         let local = check("fn main() {\n    x: Bogus = 1\n    print(str(x))\n}\n");
         assert_eq!(local.len(), 1, "{local:?}");
         assert_eq!(local[0].code, DiagnosticCode::UnknownType);
+    }
+
+
+    #[test]
+    fn 宣言されている型名はレジストリに無くてもunknown_typeにしない() {
+        // 回帰(code reviewで2人が別々の再現手順で発見した誤検知): `unknown-type`の判定に
+        // `type_ctx`のレジストリを使うと、**宣言されているのに載っていない型**を未知と
+        // 誤判定する。載らないのは2通り——
+        // (1)`type UserId = int`のような素のalias(レジストリはstruct/union宣言だけを持つ)
+        assert_eq!(check("type UserId = int\n\nstruct User {\n    id: UserId\n}\n\nfn main() {\n    u := User{id: 1}\n    print(str(u.id))\n}\n"), vec![]);
+        // (2)`resolve_type_decls`が最初のErrで走査を打ち切るため、壊れた宣言より**後ろ**の
+        //    型が丸ごと未登録になる(裸のunion循環のあとに書いたstructが巻き添えになる)。
+        //    TS版は循環そのものだけを報告し、無関係な`C`については何も言わない
+        let cascade = check("type A = B | none\ntype B = A | error\n\nstruct C {\n    n: int\n}\n\nstruct D {\n    c: C\n}\n\nfn main() {\n    d := D{c: C{n: 1}}\n    print(str(d.c.n))\n}\n");
+        assert!(cascade.iter().all(|d| d.code != DiagnosticCode::UnknownType), "{cascade:?}");
     }
 
     #[test]
