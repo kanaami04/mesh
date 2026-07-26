@@ -987,7 +987,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      TS版と同じく**未知の型名はANYへ解決する**のが要——checker.rsは未知の名前を殻structへ
      落とすので、そのまま使うとmatchのパターンが何にでも一致したりstructリテラルが
      誤検知になったりする。milestone 39の「未知の型名は飛ばす」応急処置と、
-     「未知のレシーバ型に何も出ない」既知の限界がこれで解消した
+     「未知のレシーバ型に何も出ない」既知の限界がこれで解消した。
+     **注意**: 「宣言されている型名か」の判定にレジストリ(`lookup_struct`/`lookup_union`)を
+     使ってはいけない——素のalias(`type UserId = int`)は載らず、`resolve_type_decls`が
+     最初のErrで走査全体を打ち切るため壊れた宣言より後ろの型も載らない。宣言名の集合
+     (`ctx.declared_types`)で判定する(どちらもcode reviewで誤検知として発覚)
    - 残る候補: **診断の続き**——`type-alias-cycle`(TS版`resolveAlias`のメモ化+placeholder検出を
      移植しないと位置・件数が合わないのでmilestone 42から分けた)・`defer-requires-call`・
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
