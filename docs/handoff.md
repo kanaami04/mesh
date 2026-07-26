@@ -1026,7 +1026,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
        (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
-       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。いずれもモデル化を
+       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
+       (7)**関数値の型照合が効かない場面がある**(milestone 44のcode reviewで発見・スコープ外):
+       `chan<fn() void>`へ`fn(int) void`を送る/`(<-fch)()`のように受信した関数値を呼ぶ、で
+       TS版は`type-mismatch`と`not-callable`を出すがRust版は無診断。`not-callable`自体が
+       未移植で、関数型の代入互換性(`resolve_type_ann`が関数型をANYへ畳む)とセットの課題。いずれもモデル化を
        進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置
