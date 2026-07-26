@@ -213,6 +213,26 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
 // **catch-allを復活させないこと**: 新しい式をASTへ足したらここがコンパイルエラーになり、
 // 「検査するか、しないなら理由を書いてANYを返す」という判断を必ず強制できる
 // (黙って未検査のまま出荷される事故が、この移植で最も繰り返した失敗だった)
+// milestone 41: **値が要る場所**で使う入口。TS版`checkExprSingle`の移植——voidが来たら
+// `void-used-as-value`を出してANYへ差し替える。
+//
+// TS版はこの2段(`checkExpr`=voidを許す / `checkExprSingle`=許さない)で書かれており、
+// voidを許すのは**6種類の位置だけ**: 式文・defer・代入先・spawnする呼び出し・
+// match/selectのアーム本体(+select既定アーム)。それ以外は全部こちらを通る。
+//
+// **ANYへ差し替えるのが要**——voidをそのまま下流へ流すと、prop/or/matchが
+// 「unionではない」と判断してTS版と違うコードを出す(milestone 40のcode reviewで発覚し、
+// あのときは各所でvoidを免除する応急処置を入れていた。この二層化でその借りを返し、
+// 応急処置は不要になったので外した)
+fn infer_expr_single(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
+    let t = infer_expr(ctx, expr);
+    if types::type_equals(&t, &VOID) {
+        ctx.error(expr.pos(), DiagnosticCode::VoidUsedAsValue, "this function has no return value");
+        return ANY;
+    }
+    t
+}
+
 fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
     match expr {
         Expr::Int { .. } => INT,
@@ -227,7 +247,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         Expr::Interp { segments, .. } => {
             for seg in segments {
                 if let InterpSegment::Expr { expr } = seg {
-                    infer_expr(ctx, expr);
+                    infer_expr_single(ctx, expr);
                 }
             }
             STRING
@@ -270,14 +290,14 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // undefined-nameが2回出る。TS版`calls.ts:78-80`が「targetは一度だけ評価する」と
             // 明記している不変条件。code reviewで発覚し再現確認済み)
             if let Expr::Member { target, name, pos: mpos } = &**callee {
-                let tgt = infer_expr(ctx, target);
+                let tgt = infer_expr_single(ctx, target);
                 if let Type::Struct { name: sname, fields: fcell, .. } = &tgt {
                     let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
                     if !field_names.iter().any(|n| n == name) {
                         // フィールドではない——メソッドとして解決を試みる(所有型へcloneして
                         // type_ctxのborrowを閉じてから引数を推論する)
                         let method_ty = ctx.type_ctx.lookup_method(sname, name).cloned();
-                        let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+                        let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
                         return match method_ty {
                             // milestone 31: 引数の個数・型照合。メソッド型の`params[0]`は
                             // レシーバなので落として照合する(TS版`inferCall`の
@@ -300,12 +320,12 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 // struct以外/フィールド呼び出し: 引数だけ推論してANY(targetは上で評価済み——
                 // 二重評価を避けるためここで完結させ、generic経路へは落とさない)
                 for a in args {
-                    infer_expr(ctx, a);
+                    infer_expr_single(ctx, a);
                 }
                 return ANY;
             }
-            let callee_ty = infer_expr(ctx, callee);
-            let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+            let callee_ty = infer_expr_single(ctx, callee);
+            let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
             // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
             // 非ジェネリック自由関数をシグネチャ付きで登録)なら個数・各引数の型を照合する
             // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
@@ -339,13 +359,13 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                     // 空配列は要素型不明(TS版と同じくANY要素の配列)。宣言に使われた場合の
                     // `cannot-infer-type`は`Stmt::ShortVarDecl`側で報告する
                     None => return Type::Array(Box::new(ANY)),
-                    Some(first) => types::widen_literal(infer_expr(ctx, first)),
+                    Some(first) => types::widen_literal(infer_expr_single(ctx, first)),
                 },
             };
             // 明示型があれば先頭要素も照合対象(推論経由なら先頭は基準なのでスキップ)
             let rest = if declared.is_some() { &elems[..] } else { &elems[1..] };
             for e in rest {
-                let t = infer_expr(ctx, e);
+                let t = infer_expr_single(ctx, e);
                 // 要素型がANY縮退を含むなら突き合わせない(milestone 29/32と同じ配慮)
                 if is_fully_modeled(&elem) && !types::assignable(&t, &elem) {
                     ctx.error(e.pos(), DiagnosticCode::TypeMismatch, format!("array element must be {}, got {}", types::type_to_string(&elem), types::type_to_string(&t)));
@@ -363,8 +383,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             let key_ty = resolve_type_ann(&ctx.type_ctx, key);
             let value_ty = resolve_type_ann(&ctx.type_ctx, value);
             for e in entries {
-                let kt = infer_expr(ctx, &e.key);
-                let vt = infer_expr(ctx, &e.value);
+                let kt = infer_expr_single(ctx, &e.key);
+                let vt = infer_expr_single(ctx, &e.value);
                 if is_fully_modeled(&key_ty) && !types::assignable(&kt, &key_ty) {
                     ctx.error(e.key.pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", types::type_to_string(&key_ty), types::type_to_string(&kt)));
                 }
@@ -378,7 +398,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // 常に必須で、`none`以外はintでなければならない
         Expr::Chan { elem, capacity, .. } => {
             if !matches!(**capacity, Expr::None { .. }) {
-                let cap = infer_expr(ctx, capacity);
+                let cap = infer_expr_single(ctx, capacity);
                 if !types::type_equals(&cap, &INT) && !matches!(cap, Type::Any) {
                     ctx.error(capacity.pos(), DiagnosticCode::TypeMismatch, format!("channel capacity must be int or none, got {}", types::type_to_string(&cap)));
                 }
@@ -388,7 +408,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 34: 受信(`<-ch`)は常に`T | closed`(mapの`V | none`と同じ理由——
         // closeされうることを型で強制する)
         Expr::Recv { channel, pos } => {
-            let ch = infer_expr(ctx, channel);
+            let ch = infer_expr_single(ctx, channel);
             match &ch {
                 Type::Chan(elem) => types::union_of(vec![(**elem).clone(), types::CLOSED]),
                 Type::Any => ANY,
@@ -401,7 +421,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 34: `x is T`はbool。値の型は変えないが、if文の条件に使われたときは
         // `check_if`が絞り込みに使う(下記`check_if`+`FullCheckerCtx::narrow`)
         Expr::Is { operand, .. } => {
-            infer_expr(ctx, operand);
+            infer_expr_single(ctx, operand);
             BOOL
         }
         // milestone 34: `or`式(`m["k"] or 0`)。map読みが`V | none`を返すようになり、
@@ -425,6 +445,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // spawnした関数の引数がまるごと未検査だった)。式の型はTS版と同じで、
         // 戻り値なしならvoid、そうでなければ`chan<T>`(受取口)
         Expr::Spawn { call, .. } => {
+            // spawnする呼び出しは戻り値なしでもよい(TS版が`checkExpr`を使う位置)
             let ret = infer_expr(ctx, call);
             if types::type_equals(&ret, &VOID) { VOID } else { Type::Chan(Box::new(ret)) }
         }
@@ -501,8 +522,8 @@ struct IndexInfo {
 // indexケースの移植。**targetとindexはここで一度だけ評価する**——読み取りと代入で
 // 同じ経路を通し、二重評価(undefined-nameが2回出る等)を避けるため
 fn infer_index(ctx: &mut FullCheckerCtx, target: &Expr, index: &Expr, pos: Pos) -> IndexInfo {
-    let tgt = infer_expr(ctx, target);
-    let idx = infer_expr(ctx, index);
+    let tgt = infer_expr_single(ctx, target);
+    let idx = infer_expr_single(ctx, index);
     // mapを先に分岐する(TS版と同じ順序)。読み取りは常に`V | none`——無いキーを
     // 無視できないというunion路線の帰結
     if let Type::Map { key, value } = &tgt {
@@ -551,7 +572,7 @@ fn check_args_against(ctx: &mut FullCheckerCtx, call_pos: Pos, args: &[Expr], ar
 // 宣言済みメソッド名→method-not-called・それ以外→unknown-field。target が struct 以外
 // (union/scalar/any)はこの一歩ではANY(union の narrow-required・not-a-struct は次段階)
 fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
-    let tgt = infer_expr(ctx, target);
+    let tgt = infer_expr_single(ctx, target);
     let Type::Struct { name: sname, fields: fcell, .. } = &tgt else {
         return ANY;
     };
@@ -578,7 +599,7 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
 // 下記`resolve_union_lit_member`)に対応した。pkg修飾structは次段階のためANYを返す。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
-    let field_types: Vec<Type> = fields.iter().map(|f| infer_expr(ctx, &f.value)).collect();
+    let field_types: Vec<Type> = fields.iter().map(|f| infer_expr_single(ctx, &f.value)).collect();
     // pkg修飾はmilestone 29対象外
     if pkg.is_some() {
         return ANY;
@@ -808,19 +829,19 @@ fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Ex
     use TokenType::{AndAnd, EqEq, Ge, Gt, Le, Lt, NotEq, OrOr};
     // &&/||: 左右それぞれがbool(またはANY)であること。位置は全体ではなく各オペランド自身
     if op == AndAnd || op == OrOr {
-        let lt = infer_expr(ctx, left);
+        let lt = infer_expr_single(ctx, left);
         if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
             ctx.error(left.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&lt)));
         }
-        let rt = infer_expr(ctx, right);
+        let rt = infer_expr_single(ctx, right);
         if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {
             ctx.error(right.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&rt)));
         }
         return BOOL;
     }
 
-    let lt = infer_expr(ctx, left);
-    let rt = infer_expr(ctx, right);
+    let lt = infer_expr_single(ctx, left);
+    let rt = infer_expr_single(ctx, right);
 
     // ==/!=: noneとの比較は narrowing の効く`is none`へ一本化する(P1)。それ以外は双方向assignable
     if op == EqEq || op == NotEq {
@@ -897,7 +918,7 @@ fn check_arith(ctx: &mut FullCheckerCtx, op: TokenType, left: &Type, right_expr:
 // 単項演算子(! / -)の妥当性検査(milestone 25)。TS版`case "unary"`の移植——
 // `!`はnot-bool・単項`-`はinvalid-operationで、算術二項演算子と同じ`invalid-operation`を共有する
 fn infer_unary(ctx: &mut FullCheckerCtx, op: TokenType, operand: &Expr, pos: Pos) -> Type {
-    let t = infer_expr(ctx, operand);
+    let t = infer_expr_single(ctx, operand);
     if op == TokenType::Bang {
         if !types::type_equals(&t, &BOOL) && !matches!(t, Type::Any) {
             ctx.error(pos, DiagnosticCode::NotBool, format!("'!' requires bool, got {}", types::type_to_string(&t)));
@@ -967,7 +988,7 @@ fn require_array(ctx: &mut FullCheckerCtx, arg_ty: &Type, arg_pos: Pos, msg: Str
 // 渡すと`push() requires an array, got fn(...)`が正しく出る(TS版と一致)。
 fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
     // 引数はarityに関わらず全て推論する(未定義名検査のため)
-    let at: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+    let at: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
     let n = at.len();
     let ts = |t: &Type| types::type_to_string(t);
     match name {
@@ -1244,7 +1265,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // undefined-nameが出ていても後の名前にcannot-infer-typeを重ねて出してしまう
             // (`a, b := undefinedThing, []`。code reviewで発覚・両CLIで再現確認)
             let diags_before = ctx.diagnostics.len();
-            let value_tys: Vec<Type> = values.iter().map(|v| infer_expr(ctx, v)).collect();
+            let value_tys: Vec<Type> = values.iter().map(|v| infer_expr_single(ctx, v)).collect();
             let already_errored = ctx.diagnostics.len() > diags_before;
             for (i, name) in names.iter().enumerate() {
                 let ty = value_tys.get(i).cloned().unwrap_or(ANY);
@@ -1275,7 +1296,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::TypedVarDecl { name, type_node, value, mutable, pos } => {
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
-            let value_ty = infer_expr(ctx, value);
+            let value_ty = infer_expr_single(ctx, value);
             if !types::assignable(&value_ty, &declared) {
                 ctx.error(
                     *pos,
@@ -1287,7 +1308,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::Assign { targets, values, compound_op, pos } => {
             for (target, value) in targets.iter().zip(values.iter()) {
-                let value_ty = infer_expr(ctx, value);
+                let value_ty = infer_expr_single(ctx, value);
                 check_assign_target(ctx, target, &value_ty, *pos, compound_op.as_ref());
             }
         }
@@ -1295,7 +1316,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // TS版`case "incDec"`と同じ順序: まず対象の型を推論(identなら未定義名も検査)し、
             // int/floatでなければinvalid-operation(算術二項演算子と共有する診断)、
             // そのあとidentなら可変性を検査する
-            let t = infer_expr(ctx, target);
+            let t = infer_expr_single(ctx, target);
             if !types::is_numeric(&t) {
                 ctx.error(*pos, DiagnosticCode::InvalidOperation, format!("'{op}' requires int or float, got {}", types::type_to_string(&t)));
             }
@@ -1308,6 +1329,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
         }
         Stmt::ExprStmt { expr, .. } => {
+            // 式文はvoid呼び出しそのもの(`print(x)`)が主用途——voidを許す位置
             infer_expr(ctx, expr);
         }
         Stmt::Return { value, .. } => {
@@ -1317,7 +1339,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // milestone 31でTS版`statements.ts:178-187`と細部まで揃えた(位置は`return`
             // ではなく**値の式**・文言・戻り値なし関数でのreturn値はvoid-used-as-value)
             if let Some(v) = value {
-                let value_ty = infer_expr(ctx, v);
+                let value_ty = infer_expr_single(ctx, v);
                 let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
                 if types::type_equals(&expected, &VOID) {
                     ctx.error(v.pos(), DiagnosticCode::VoidUsedAsValue, "this function has no return value");
@@ -1345,7 +1367,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 check_for_init(ctx, init);
             }
             if let Some(cond) = cond {
-                infer_expr(ctx, cond);
+                infer_expr_single(ctx, cond);
             }
             if let Some(post) = post {
                 check_stmt(ctx, post);
@@ -1355,7 +1377,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::RangeFor { names, subject, body, pos } => {
             // for文と同じ理由でヘッダ(range変数)とbodyは別スコープにする
-            let subject_ty = infer_expr(ctx, subject);
+            let subject_ty = infer_expr_single(ctx, subject);
             ctx.push_scope();
             // 配列/map/intのrangeは型と名前の個数まで検査する(TS版`statements.ts`の
             // rangeForケース。milestone 33で配列とint、milestone 34でmap)。ANY
@@ -1408,8 +1430,8 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         Stmt::Wait { body, .. } => check_block(ctx, body),
         Stmt::Send { channel, value, pos } => {
             // milestone 34: `ch <- v`の要素型検査(TS版`statements.ts`のsendケース)
-            let ch = infer_expr(ctx, channel);
-            let v = infer_expr(ctx, value);
+            let ch = infer_expr_single(ctx, channel);
+            let v = infer_expr_single(ctx, value);
             match &ch {
                 Type::Chan(elem) => {
                     if is_fully_modeled(elem) && !types::assignable(&v, elem) {
@@ -1421,6 +1443,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
         }
         Stmt::DeferStmt { call, .. } => {
+            // deferする呼び出しも戻り値なしでよい
             infer_expr(ctx, call);
         }
     }
@@ -1486,7 +1509,7 @@ fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
             // `for s := "a"; s != "z"; s = "b"` のsがLiteral("a")のままになり、
             // 比較(incomparable-types)・再代入(type-mismatch)が誤検知になる
             // (code reviewで発見した回帰)
-            let ty = types::widen_literal(infer_expr(ctx, value));
+            let ty = types::widen_literal(infer_expr_single(ctx, value));
             ctx.declare(name, ty, *pos, true);
         }
     } else {
@@ -1508,20 +1531,15 @@ fn check_for_init(ctx: &mut FullCheckerCtx, init: &Stmt) {
 // **ANYは常に免除する**(TS版はANYでも文脈の文字列性を咎めるが、full_checkerは
 // 未モデル化の型をANYへ縮退させるので、そこで診断を出すと誤検知になる)。
 fn infer_prop(ctx: &mut FullCheckerCtx, operand: &Expr, context: Option<&Expr>, pos: Pos) -> Type {
-    let t = infer_expr(ctx, operand);
+    let t = infer_expr_single(ctx, operand);
     if let Some(cx) = context {
-        let ct = infer_expr(ctx, cx);
+        let ct = infer_expr_single(ctx, cx);
         if !types::is_stringy(&ct) && !matches!(ct, Type::Any) {
             ctx.error(cx.pos(), DiagnosticCode::PropContextNotString, format!("'?' context must be a string, got {}", types::type_to_string(&ct)));
         }
     }
-    // **voidも免除する**(ANYと同じ扱い)。TS版は`checkExprSingle`が値位置のvoidを
-    // `void-used-as-value`で報告してANYへ差し替えるため、prop/or/matchの検査には
-    // voidが届かない。その診断がまだ未移植のRust版でvoidをそのまま流すと、
-    // TS版と**違うコード**(`prop-requires-failure-union`等)を出してしまう
-    // ——コードが違うのは検出漏れより悪いので、`void-used-as-value`を移植するまでは黙る
-    // (code reviewで発覚・両CLIで再現確認)
-    if matches!(t, Type::Any) || types::type_equals(&t, &VOID) || !safe_to_compare(&t) {
+    // voidはここへ届かない(`infer_expr_single`がANYへ差し替える。milestone 41)
+    if matches!(t, Type::Any) || !safe_to_compare(&t) {
         return ANY;
     }
     let Type::Union { body } = &t else {
@@ -1575,7 +1593,7 @@ fn infer_prop(ctx: &mut FullCheckerCtx, operand: &Expr, context: Option<&Expr>, 
 // milestone 40: `or`(失敗時のフォールバック)。TS版`expressions.ts`のorElseケースの移植。
 // milestone 34では「両辺を推論して型を伝播させる」だけだった4診断をここで足す
 fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: Option<&str>, pos: Pos) -> Type {
-    let t = infer_expr(ctx, left);
+    let t = infer_expr_single(ctx, left);
     // 右辺の評価(束縛形なら失敗値を束縛してから)。TS版の`checkRight`と同じで、
     // どの分岐に入っても**必ず一度だけ**評価する——右辺の中の未定義名等を見落とさないため
     fn check_right(ctx: &mut FullCheckerCtx, left_ty: &Type, right: &Expr, binding: Option<&str>, pos: Pos) -> Type {
@@ -1584,15 +1602,14 @@ fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: O
                 ctx.push_scope();
                 let bt = if safe_to_compare(left_ty) { crate::checker::or_binding_type(left_ty) } else { ANY };
                 ctx.declare(name, bt, pos, false);
-                let r = infer_expr(ctx, right);
+                let r = infer_expr_single(ctx, right);
                 ctx.pop_scope();
                 r
             }
-            _ => infer_expr(ctx, right),
+            _ => infer_expr_single(ctx, right),
         }
     }
-    // voidの免除理由は`infer_prop`のコメント参照(TS版は`void-used-as-value`で先に弾く)
-    if matches!(t, Type::Any) || types::type_equals(&t, &VOID) || !safe_to_compare(&t) {
+    if matches!(t, Type::Any) || !safe_to_compare(&t) {
         check_right(ctx, &t, right, binding, pos);
         return ANY;
     }
@@ -1639,7 +1656,7 @@ fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: O
 // かけても安全)なときだけ出す。full_checkerは未モデル化の型をANYへ縮退させるので、
 // 「unionのはずなのにANY」は日常的に起きる——そこで診断を出すと必ず誤検知になる。
 fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm], pos: Pos) -> Type {
-    let subject = infer_expr(ctx, subject_expr);
+    let subject = infer_expr_single(ctx, subject_expr);
     if arms.is_empty() {
         ctx.error(pos, DiagnosticCode::EmptyMatch, "match must have at least one arm");
         return ANY;
@@ -1650,8 +1667,7 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
     // 関数値(`f := add`のType::Fn)のような**正確に分かっている型**まで見逃す
     // (code reviewで発覚・両CLIで再現確認。`is_fully_modeled`は「レジストリ側の宣言型と
     // 突き合わせてよいか」を答える述語で、ここで訊きたい問いとは別物だった)
-    // voidの免除理由は`infer_prop`のコメント参照(milestone 39から同じ穴があった)
-    if !matches!(subject, Type::Union { .. } | Type::Any) && !types::type_equals(&subject, &VOID) {
+    if !matches!(subject, Type::Union { .. } | Type::Any) {
         ctx.error(subject_expr.pos(), DiagnosticCode::UnionRequired, format!("match subject must be a union type, got {}", types::type_to_string(&subject)));
     }
     // パターン照合に使えるunionメンバー。未解決/比較すると危険なメンバーが1つでもあれば
@@ -1774,6 +1790,7 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
         {
             ctx.narrow(&name.clone(), narrowed);
         }
+        // アーム本体はvoidでよい(全アームvoidなら文としてのmatch)——TS版も`checkExpr`
         arm_types.push(infer_expr(ctx, &arm.body));
         ctx.pop_scope();
     }
@@ -1802,7 +1819,7 @@ fn infer_select(ctx: &mut FullCheckerCtx, arms: &[SelectArm], default_arm: Optio
     }
     let mut arm_types: Vec<Type> = Vec::new();
     for arm in arms {
-        let ch = infer_expr(ctx, &arm.channel);
+        let ch = infer_expr_single(ctx, &arm.channel);
         let binding_ty = match &ch {
             // 要素型が未解決なら`union_of`が内部で`.expect()`するので、安全な場合だけ組む
             Type::Chan(elem) if safe_to_compare(elem) => types::union_of(vec![(**elem).clone(), types::CLOSED]),
@@ -1913,7 +1930,7 @@ fn safe_to_compare(t: &Type) -> bool {
 }
 
 fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
-    infer_expr(ctx, &if_stmt.cond);
+    infer_expr_single(ctx, &if_stmt.cond);
     // 条件が `ident is T` なら then/else 側の型を計算しておく
     let narrowing = match &if_stmt.cond {
         Expr::Is { operand, target, .. } => match &**operand {
@@ -2084,7 +2101,7 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
 // これによりmilestone 23で追加した名前衝突検査(reserved-word/builtin-redeclared/
 // already-declared/shadowing)がローカル変数と同じdeclare()経由で自動的に効く
 fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
-    let value_ty = infer_expr(ctx, &c.value);
+    let value_ty = infer_expr_single(ctx, &c.value);
     let final_ty = match &c.type_node {
         Some(type_node) => {
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
@@ -2305,18 +2322,31 @@ mod tests {
 
 
     #[test]
-    fn 値位置のvoidには別のコードを出さない() {
-        // 回帰(code reviewで発覚): TS版は`checkExprSingle`が値位置のvoidを
-        // `void-used-as-value`で弾いてANYへ差し替えるので、prop/or/matchにはvoidが届かない。
-        // その診断が未移植のRust版でvoidをそのまま流すと**違うコード**を出してしまう
-        // (or-never-fails / prop-requires-failure-union / union-required)。
-        // 移植するまでは黙る(コードが違うのは検出漏れより悪い)
+    fn 値位置のvoidはvoid_used_as_valueになる() {
+        // milestone 40では「TS版と違うコードを出さない」ことだけを確認していた(void-used-as-value
+        // が未移植だったため黙らせる応急処置)。milestone 41で`infer_expr_single`を入れたので、
+        // TS版と同じ診断が同じ位置に出るところまで確認する
         let void_or = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    n := work(1) or 0\n    print(str(n))\n}\n");
-        assert!(void_or.iter().all(|d| d.code != DiagnosticCode::OrNeverFails), "{void_or:?}");
+        assert_eq!(void_or.len(), 1, "{void_or:?}");
+        assert_eq!(void_or[0].code, DiagnosticCode::VoidUsedAsValue);
         let void_prop = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn run() int | error {\n    work(1)?\n    return 1\n}\n\nfn main() {\n    print(str(run() or e => 0))\n}\n");
+        assert!(void_prop.iter().any(|d| d.code == DiagnosticCode::VoidUsedAsValue), "{void_prop:?}");
         assert!(void_prop.iter().all(|d| d.code != DiagnosticCode::PropRequiresFailureUnion), "{void_prop:?}");
         let void_match = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    print(match work(1) {\n        int => \"int\"\n    })\n}\n");
+        assert!(void_match.iter().any(|d| d.code == DiagnosticCode::VoidUsedAsValue), "{void_match:?}");
         assert!(void_match.iter().all(|d| d.code != DiagnosticCode::UnionRequired), "{void_match:?}");
+    }
+
+    #[test]
+    fn voidを許す位置では診断しない() {
+        // TS版が`checkExpr`(void可)を使う6種の位置: 式文・defer・spawnする呼び出し・
+        // 代入先・match/selectのアーム本体。ここで診断するとvoid関数が一切呼べなくなる
+        assert_eq!(check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    work(1)\n    defer work(2)\n    spawn work(3)\n}\n"), vec![]);
+        // 全アームvoidのmatchは「文としてのmatch」——mixed-void-armsにもならない
+        assert_eq!(
+            check("fn work(n: int) {\n    print(str(n))\n}\n\nfn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    match r {\n        int => work(1)\n        error => work(2)\n    }\n}\n"),
+            vec![]
+        );
     }
 
     #[test]
