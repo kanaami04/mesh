@@ -3641,6 +3641,39 @@
                 2件が解消)、**Rust側だけに出る診断は0件**。examples全23本の実行も回帰なし。
                 手順2''(移植した診断名でgrepし「未移植/対象外/次段階」を潰す)も回して
                 4件のコメントdriftを自力で修正した。テスト603→604件(+1)、clippyクリーン。
+        - [x] **milestone 51: pkg修飾シンボルの型のモデル化**
+              ✅ 2026-07-26実装。**新しい診断コードは足していない**(65→68種のまま)——
+              milestone 49・50で移植済みの診断が、型が渡っていないせいで効いていなかったのを
+              効くようにした回。
+              - **構造**: TS版`compileModules`と同じく、レジストリを依存順に持ち回り
+                **各パッケージが検査の最後に自分の解決済みシンボル表を書き戻す**形にした
+                (`check_package_shared`の返り値2つ目)。`PackageExports`に
+                `type_of_type`/`type_of_value`を追加。可視性(宣言を見るだけで作れる)と
+                型(検査しないと作れない)を**別々に持つ**のが要点で、型が空でも
+                従来どおりANY=検出漏れ側に倒れるだけなので単体テスト経路も壊れない。
+              - **メソッド表を全パッケージで共有**するようにした(TS版`sharedMethods`)。
+                共有しないと`mathutil.Point`のメソッドを`main`から呼んだときに
+                「そんなメソッドは無い」という**誤検知**になる(実際に
+                `examples/modules_demo.mesh`が落ちた)。
+              - **`safe_to_compare`のunion再帰ガード漏れを修正**。structには`seen`ガードが
+                あったがunionには無く、`type A = B | int` / `type B = A[] | string`のような
+                「配列越しに自分へ戻るunion」で**スタックオーバーフローして落ちた**
+                (レジストリの全型をここへ通すようになって顕在化した既存バグ)。
+                `type_to_string`が同じ理由で持っているガードと揃えた。
+              - **踏んだ誤検知2件**(どちらも実測で発見・修正済み): (1)未exportの型で本物の
+                型を返すと`not-exported`に**重ねて**`type-mismatch`が出る——TS版は診断後ANYを
+                返すので、`type_of_type`にはexport済みだけを載せる形にした。
+                (2)`json.field`が返す`json.Value | none`(自己参照union)を突き合わせると
+                `examples/json_decode.mesh`が落ちる——`try_package_member`が返す型にも
+                `is_fully_modeled`を掛けて、完全にモデル化できている型だけ通す。
+              - **効くようになった検査**(milestone 50のcode reviewで実測して記録していた
+                ものが全部埋まった): `lib.add(1)`のargument-count / `lib.add(1,"s")`の
+                引数型 / `lib.Point{x:"oops"}`のフィールド型 / missing-fields /
+                unknown-field / pkg修飾structのフィールドアクセス / `lib.add(1,2) is int`の
+                union-required。診断の表示名も`lib.Point`とpkg修飾されTS版と一致する。
+              - **検証**: 上記8ケース + 全`.mesh`計171ファイルで差は7件のみ(いずれも
+                未移植診断による検出漏れ)、**偽陽性0件**。examples全23本の実行も回帰なし。
+                テスト604→606件(+2)、clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3648,7 +3681,7 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 50まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 51まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
         107種 vs 68種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
