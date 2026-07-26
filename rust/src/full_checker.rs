@@ -204,6 +204,23 @@ impl FullCheckerCtx {
 // 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     match node {
+        // milestone 51: pkg修飾型(`lib.Point`)。レジストリに解決済みの型があればそれを使う
+        // ——`is_package_alias`でimport宣言を経由した参照かどうかも確認する(milestone 6の
+        // 不変条件)。**完全にモデル化できている型だけ**通す(それ以外はANY=検出漏れ側)
+        TypeNode::Name { name, pkg: Some(pkg), .. } => {
+            if !tc.is_package_alias(pkg) {
+                return ANY;
+            }
+            // **未exportの型は解決しない**——TS版`resolvePackageType`は`not-exported`を出した後
+            // ANYを返す。ここで本物の型を返すと、`h: lib.Hidden = lib.Point{...}`に
+            // `not-exported`と**重ねて**`type-mismatch`が出る誤検知になった(実測で発覚)。
+            // 可視性はレジストリ側(`pkg_registry`)にしか無いのでここでは判定できないため、
+            // **`type_of_type`にはexport済みの型だけを載せる**ことで担保している
+            match tc.lookup_package_type(pkg, name) {
+                Some(t) if safe_to_compare(t) && is_fully_modeled(t) => t.clone(),
+                _ => ANY,
+            }
+        }
         TypeNode::Name { name, pkg: None, .. } => match name.as_str() {
             "int" => INT,
             "float" => FLOAT,
@@ -447,6 +464,14 @@ pub struct PackageExports {
     types: HashMap<String, bool>,
     fns: HashMap<String, bool>,
     consts: HashMap<String, bool>,
+    // milestone 51: **解決済みの型**。可視性(上の3つ)と違って宣言を見るだけでは作れず、
+    // そのパッケージを実際に検査してからでないと埋まらない——`check_package_with_registry`が
+    // 最後に自分のぶんを書き戻す(TS版`checkPackage`末尾の`ctx.registry.set(ctx.pkg, ...)`と
+    // 同じ)。依存順に検査するので、あるパッケージを検査する時点で依存先は埋まっている。
+    // **空のままでも正しく動く**(型が引けなければ従来どおりANY=検出漏れ側)——単体テストの
+    // ように依存を検査しない経路があるため、この分離が要る
+    type_of_type: HashMap<String, Type>,
+    type_of_value: HashMap<String, Type>, // fn・constを1つの表にまとめる(参照側の探索順と同じ)
 }
 
 // パッケージ名→そのパッケージのシンボル表。`check_package`の呼び出し元(main.rsの
@@ -492,6 +517,9 @@ pub fn builtin_package_exports() -> PackageRegistry {
                 types: syms.types.keys().map(|k| (k.clone(), true)).collect(),
                 fns: syms.fns.keys().map(|k| (k.clone(), true)).collect(),
                 consts: syms.consts.keys().map(|k| (k.clone(), true)).collect(),
+                // milestone 51: 組み込みは型もそのまま載せる(codegen側の定義が既に解決済み)
+                type_of_type: syms.types.clone(),
+                type_of_value: syms.fns.iter().chain(syms.consts.iter()).map(|(k, v)| (k.clone(), v.clone())).collect(),
             },
         );
     }
@@ -574,8 +602,8 @@ fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
 //
 // pkg修飾の型(`math.Point`)は**milestone 49から検査する**——`unknown-package` /
 // `unknown-package-type` / `not-exported`(下記`check_package_type_ref`)。
-// ただし**型そのものは引き続きANY**(pkg修飾型のモデル化は別マイルストーン)なので、
-// その型のフィールド検証などは効かない
+// **milestone 51から型も渡る**(レジストリに解決済みの型を載せた)ので、フィールド検証や
+// 引数照合も効く。ただし完全にモデル化できていない型(自己参照union等)はANYのまま
 // `pkg.symbol`(パッケージ修飾メンバー参照)の解決を試みる。TS版`calls.ts`の
 // `tryPackageMember`の移植(milestone 50)。呼び出し形(`lib.add(1)`)とメンバー参照形
 // (`f := lib.add`)の両方から呼ぶ——TS版も`inferCall`と`expressions.ts`のmemberケースで共有する。
@@ -619,9 +647,15 @@ fn try_package_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: 
             DiagnosticCode::NotExported,
             format!("'{name}' is not exported by package '{alias}' — add 'export' to its declaration"),
         ),
-        // **型は返さない**(pkg修飾シンボルのモデル化は別マイルストーン)。ANYを返すので
-        // 引数照合等は効かない——検出漏れ側に倒す既定方針
-        Some(true) => {}
+        // milestone 51: **解決済みの型があればそれを返す**(TS版は`fn.type`を返す)。
+        // ただし**完全にモデル化できている型だけ**——`json.field`のように
+        // `json.Value | none`(自己参照union)を返す組み込みは、full_checker側の値の型と
+        // 突き合わせると誤検知になる(`examples/json_decode.mesh`が実際に落ちた)。
+        // 表に型が無い(依存を検査していない経路)場合と同じくANYへ倒す=検出漏れ側
+        Some(true) => {
+            let t = syms.type_of_value.get(name).cloned().unwrap_or(ANY);
+            return Some(if safe_to_compare(&t) && is_fully_modeled(&t) { t } else { ANY });
+        }
     }
     Some(ANY)
 }
@@ -642,8 +676,8 @@ fn package_type_resolves(ctx: &FullCheckerCtx, pkg: &str, name: &str) -> bool {
 }
 
 // pkg修飾された型参照(`math.Point`)の検査。TS版`types-resolve.ts`の`resolvePackageType`の
-// 移植(milestone 49)。**型は返さない**——pkg修飾型のモデル化は別マイルストーンで、
-// ここは診断だけを担う(呼び出し側は従来どおりANYのまま)。
+// 移植(milestone 49)。診断を出すのが仕事で、型は返さない——**型の解決は`resolve_type_ann`が
+// レジストリ経由で行う**(milestone 51)。
 // unknown-package → unknown-package-type → not-exported の順はTS版と同じ
 fn check_package_type_ref(ctx: &mut FullCheckerCtx, pkg: &str, name: &str, pos: Pos) {
     if !ctx.import_aliases.contains(pkg) {
@@ -668,7 +702,7 @@ fn check_package_type_ref(ctx: &mut FullCheckerCtx, pkg: &str, name: &str, pos: 
 
 fn check_type_ann(ctx: &mut FullCheckerCtx, node: &TypeNode) {
     match node {
-        // milestone 49: pkg修飾された型参照の3診断(型自体は引き続きANY——モデル化は別回)
+        // milestone 49: pkg修飾された型参照の3診断(型の解決自体は`resolve_type_ann`、milestone 51)
         TypeNode::Name { pkg: Some(pkg), name, pos } => check_package_type_ref(ctx, pkg, name, *pos),
         TypeNode::Name { name, pkg: None, pos } => match name.as_str() {
             "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" => {}
@@ -1114,7 +1148,8 @@ fn check_call_of_value(ctx: &mut FullCheckerCtx, callee_ty: Type, args: &[Expr],
     // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
     // (`f := add; f(1,2)`)もcalleeがType::Fnとして伝播するので同じく照合される。
     // pkg修飾呼び出し(milestone 50で`try_package_member`が解決する)・ジェネリック関数は
-    // calleeがANYになるため引数照合の対象外——pkg修飾シンボルの型のモデル化は別回
+    // ジェネリック関数はcalleeがANYになるため引数照合の対象外(pkg修飾呼び出しは
+    // milestone 51から型が渡るので照合される)
     if let Type::Fn { params, ret } = &callee_ty {
         let (params, ret) = (params.clone(), (**ret).clone());
         check_args_against(ctx, pos, args, &arg_tys, &params);
@@ -1189,6 +1224,62 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
     member_field_type(ctx, &tgt, name, pos)
 }
 
+// structリテラルのフィールド検証本体(重複/未知/型不一致/欠落)。**milestone 51で切り出した**
+// ——pkg修飾structリテラル(`lib.Point{...}`)も同じ検証を通すため。TS版も同じ本体を共有する
+fn validate_struct_lit_fields(
+    ctx: &mut FullCheckerCtx,
+    member_ty: &Type,
+    display_name: &str,
+    fields: &[StructLitField],
+    field_types: &[Type],
+    pos: Pos,
+) {
+    let Type::Struct { fields: decl_cell, .. } = member_ty else {
+        return;
+    };
+    let Some(decl_fields) = decl_cell.get() else {
+        return; // 未解決(循環等でセットされていない)——素通り
+    };
+    // TS版structLitのforEach(重複→duplicate-field・未知→unknown-field・型不一致→
+    // type-mismatch)。いずれも診断を積んで次のフィールドへ継続する
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (f, ty) in fields.iter().zip(field_types) {
+        if !seen.insert(f.name.as_str()) {
+            ctx.error(f.pos, DiagnosticCode::DuplicateField, format!("duplicate field '{}'", f.name));
+            continue;
+        }
+        match decl_fields.iter().find(|d| d.name == f.name) {
+            None => {
+                let field_names = decl_fields.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", ");
+                ctx.error(f.pos, DiagnosticCode::UnknownField, format!("{display_name} has no field '{}' (fields: {field_names})", f.name));
+            }
+            Some(decl) => {
+                // フィールド値の型検査は、full_checkerが値側の型を確実にモデル化できる型
+                // (スカラー・struct・literal等)のフィールドだけを対象にする。宣言側の型が
+                // 関数型/union等(レジストリではchecker.rsが完全解決する)の
+                // フィールドは、full_checker側の値の型がANYや縮退したType::Fn(fn_signatureは
+                // パラメータをANYにする)になり、完全解決された宣言型と突き合わせると誤検知する
+                // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
+                // レジストリのparam=int[]で不一致になる。code reviewで発覚)。それらの型の
+                // フィールドはコレクション/関数型をモデル化する次段階まで検査をスキップ
+                // **未登録のstruct名を含む宣言型は突き合わせない**(milestone 42)。
+                // checker.rsのレジストリは未知の型名・pkg修飾型を「空フィールドの殻struct」へ
+                // フォールバックさせるので、そのまま照合すると`struct Box { n: Bogus }`に対する
+                // `Box{n: 1}`が`cannot use int as Bogus`という**TS版に無い誤検知**になる
+                // (TS版は未知の型をANYへ解決するので照合自体が起きない。実装中に発覚)
+                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(&ctx.type_ctx, &decl.type_) && !assignable_checked(ty, &decl.type_) {
+                    ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
+                }
+            }
+        }
+    }
+    // 全フィールド必須(v1。ゼロ値・デフォルト無し)
+    let missing: Vec<String> = decl_fields.iter().filter(|d| !seen.contains(d.name.as_str())).map(|d| d.name.clone()).collect();
+    if !missing.is_empty() {
+        ctx.error(pos, DiagnosticCode::MissingFields, format!("missing field(s) in {display_name}: {}", missing.join(", ")));
+    }
+}
+
 // structリテラル(`User{...}`・`Resp{kind: "ok", ...}`)のフィールド検証。TS版
 // `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
 // 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
@@ -1198,11 +1289,22 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
     let field_types: Vec<Type> = fields.iter().map(|f| infer_expr_single(ctx, &f.value)).collect();
-    // pkg修飾structリテラル(`lib.Point{...}`)。**milestone 49で名前の3診断だけ**を出す
-    // ——フィールド検証は他パッケージの型をモデル化してからなので引き続きANY(検出漏れ側)
+    // pkg修飾structリテラル(`lib.Point{...}`)。milestone 49で名前の3診断、
+    // **milestone 51でフィールド検証**(他パッケージの型がレジストリに載るようになった)。
+    // 解決できなければ従来どおりANY——検出漏れ側に倒す
     if let Some(pkg) = pkg {
         check_package_type_ref(ctx, pkg, name, pos);
-        return ANY;
+        let resolved = if ctx.type_ctx.is_package_alias(pkg) { ctx.type_ctx.lookup_package_type(pkg, name).cloned() } else { None };
+        let Some(member_ty @ Type::Struct { .. }) = resolved else {
+            return ANY;
+        };
+        if !safe_to_compare(&member_ty) {
+            return ANY;
+        }
+        // 診断に出す名前はTS版と同じ「解決済みの型自身の名前」(pkg修飾済み)
+        let display_name = types::type_to_string(&member_ty);
+        validate_struct_lit_fields(ctx, &member_ty, &display_name, fields, &field_types, pos);
+        return member_ty;
     }
     // 名前がregistryのstructなら従来どおり(milestone 29)。structでなければunion
     // (判別可能union構築、milestone 32)を試し、どちらでもなければ対象外——ANY
@@ -1239,50 +1341,7 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
             }
         },
     };
-    let Type::Struct { fields: decl_cell, .. } = &member_ty else {
-        return ANY;
-    };
-    let Some(decl_fields) = decl_cell.get() else {
-        return ANY; // 未解決(循環等でセットされていない)——素通り
-    };
-    // TS版structLitのforEach(重複→duplicate-field・未知→unknown-field・型不一致→
-    // type-mismatch)。いずれも診断を積んで次のフィールドへ継続する
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (f, ty) in fields.iter().zip(&field_types) {
-        if !seen.insert(f.name.as_str()) {
-            ctx.error(f.pos, DiagnosticCode::DuplicateField, format!("duplicate field '{}'", f.name));
-            continue;
-        }
-        match decl_fields.iter().find(|d| d.name == f.name) {
-            None => {
-                let field_names = decl_fields.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", ");
-                ctx.error(f.pos, DiagnosticCode::UnknownField, format!("{display_name} has no field '{}' (fields: {field_names})", f.name));
-            }
-            Some(decl) => {
-                // フィールド値の型検査は、full_checkerが値側の型を確実にモデル化できる型
-                // (スカラー・struct・literal等)のフィールドだけを対象にする。宣言側の型が
-                // 関数型/union等(レジストリではchecker.rsが完全解決する)の
-                // フィールドは、full_checker側の値の型がANYや縮退したType::Fn(fn_signatureは
-                // パラメータをANYにする)になり、完全解決された宣言型と突き合わせると誤検知する
-                // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
-                // レジストリのparam=int[]で不一致になる。code reviewで発覚)。それらの型の
-                // フィールドはコレクション/関数型をモデル化する次段階まで検査をスキップ
-                // **未登録のstruct名を含む宣言型は突き合わせない**(milestone 42)。
-                // checker.rsのレジストリは未知の型名・pkg修飾型を「空フィールドの殻struct」へ
-                // フォールバックさせるので、そのまま照合すると`struct Box { n: Bogus }`に対する
-                // `Box{n: 1}`が`cannot use int as Bogus`という**TS版に無い誤検知**になる
-                // (TS版は未知の型をANYへ解決するので照合自体が起きない。実装中に発覚)
-                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(&ctx.type_ctx, &decl.type_) && !assignable_checked(ty, &decl.type_) {
-                    ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
-                }
-            }
-        }
-    }
-    // 全フィールド必須(v1。ゼロ値・デフォルト無し)
-    let missing: Vec<String> = decl_fields.iter().filter(|d| !seen.contains(d.name.as_str())).map(|d| d.name.clone()).collect();
-    if !missing.is_empty() {
-        ctx.error(pos, DiagnosticCode::MissingFields, format!("missing field(s) in {display_name}: {}", missing.join(", ")));
-    }
+    validate_struct_lit_fields(ctx, &member_ty, &display_name, fields, &field_types, pos);
     result_ty
 }
 
@@ -2540,30 +2599,42 @@ fn struct_pattern_matches(member: &Type, pattern: &Type) -> bool {
 // 再帰structで無限に潜らないよう、訪問済みのfieldsセルを持ち回る(`type_equals`が
 // 同じ問題を`seen`で解いているのと同じ手)
 fn safe_to_compare(t: &Type) -> bool {
-    fn go(t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
+    // 再帰ガードは**structとunionの両方**に要る。structだけだった頃は
+    // `type A = B | int` / `type B = A[] | string`のような「配列越しに自分へ戻るunion」で
+    // 無限再帰し、**スタックオーバーフローで落ちた**(milestone 51でレジストリの全型を
+    // ここへ通すようになって顕在化。それまでは自己参照型を渡す呼び出し元が無かった)。
+    // `type_to_string`が同じ理由で同じ形のガードを持っているのを揃えた
+    fn go(t: &Type, structs: &mut Vec<*const ()>, unions: &mut Vec<*const ()>) -> bool {
         match t {
-            Type::Union { body } => match body.get() {
-                Some(b) => b.members.iter().all(|m| go(m, seen)),
-                None => false,
-            },
+            Type::Union { body } => {
+                let ptr = Rc::as_ptr(body) as *const ();
+                if unions.contains(&ptr) {
+                    return true; // 自己参照(既に検査中)
+                }
+                let Some(b) = body.get() else { return false };
+                unions.push(ptr);
+                let ok = b.members.iter().all(|m| go(m, structs, unions));
+                unions.pop();
+                ok
+            }
             Type::Struct { fields, .. } => {
-                let ptr = Rc::as_ptr(fields);
-                if seen.contains(&ptr) {
+                let ptr = Rc::as_ptr(fields) as *const ();
+                if structs.contains(&ptr) {
                     return true; // 自己参照(既に検査中)——ここで打ち切ってよい
                 }
                 let Some(fs) = fields.get() else { return false };
-                seen.push(ptr);
-                let ok = fs.iter().all(|f| go(&f.type_, seen));
-                seen.pop();
+                structs.push(ptr);
+                let ok = fs.iter().all(|f| go(&f.type_, structs, unions));
+                structs.pop();
                 ok
             }
-            Type::Array(e) | Type::Chan(e) => go(e, seen),
-            Type::Map { key, value } => go(key, seen) && go(value, seen),
-            Type::Fn { params, ret } => params.iter().all(|p| go(p, seen)) && go(ret, seen),
+            Type::Array(e) | Type::Chan(e) => go(e, structs, unions),
+            Type::Map { key, value } => go(key, structs, unions) && go(value, structs, unions),
+            Type::Fn { params, ret } => params.iter().all(|p| go(p, structs, unions)) && go(ret, structs, unions),
             _ => true,
         }
     }
-    go(t, &mut Vec::new())
+    go(t, &mut Vec::new(), &mut Vec::new())
 }
 
 fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
@@ -2693,8 +2764,11 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // `unknown-type`を移植したので上のANY差し替え経由で`invalid-receiver-type`まで
     // TS版と同じに出るようになった。今ここに残るのはpkg修飾のケース(パッケージ跨ぎの
     // 検査を移植するまでは検出漏れ側)。
-    // 型aliasが名前付きstructを指す場合は解決後の実名で引くので通る
-    if ctx.type_ctx.lookup_struct(&sname).is_none() {
+    // 型aliasが名前付きstructを指す場合は解決後の実名で引くので通る。
+    // **milestone 51**: `sname`はpkg修飾済み(`mathutil.Point`)になりうるので、
+    // レジストリのキー(パッケージ内の素の名前)へ戻してから引く
+    let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+    if ctx.type_ctx.lookup_struct(&bare).is_none() {
         ctx.type_params.clear();
         return;
     }
@@ -2726,8 +2800,10 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     let mut params = vec![resolve_type_ann(&ctx.type_ctx, &recv.type_node)];
     params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
     let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
-    // mainパッケージ単一ファイルなので struct 名は無修飾のまま(declare_methodの
-    // qualify_struct_nameはmain時に無修飾——lookup側も無修飾のstruct.nameで引く)
+    // `sname`は**解決済みstructの名前**なので既にpkg修飾済み(`mathutil.Point`)。
+    // 参照側(`member_field_type`)も同じ名前で引くのでキーが揃う。ここで更に
+    // `qualify_struct_name`を掛けると二重修飾になり、他パッケージからのメソッド呼び出しが
+    // 「そんなメソッドは無い」という**誤検知**になる(milestone 51で実際に踏んだ)
     ctx.type_ctx.declare_method(&sname, &f.name, Type::Fn { params, ret: Box::new(ret) });
 }
 
@@ -2829,16 +2905,64 @@ pub fn check_program_opts(program: &Program, require_main: bool) -> Vec<Diagnost
 // **組み込みパッケージだけは常に載せる**——`import "mesh/json"`は`.mesh`ソースを持たず
 // どの経路でも解決できる必要があるため
 pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(String, Vec<Diagnostic>)> {
-    check_package_with_registry(files, require_main, &builtin_package_exports())
+    check_package_with_registry(files, require_main, &builtin_package_exports()).0
 }
 
+// 返り値の2つ目は**このパッケージの解決済みシンボル表**(milestone 51)。呼び出し元が
+// 依存順にレジストリへ書き戻すことで、後続のパッケージが`lib.Point`の本物の型を引ける
 pub fn check_package_with_registry(
     files: &[(String, &Program)],
     require_main: bool,
     pkg_registry: &PackageRegistry,
-) -> Vec<(String, Vec<Diagnostic>)> {
+) -> (Vec<(String, Vec<Diagnostic>)>, PackageExports) {
+    check_package_in(files, require_main, pkg_registry, "main")
+}
+
+// `pkg`はこのパッケージ自身の名前。**struct名のpkg修飾に効く**(`qualify_struct_name`)
+// ——`main`以外では`lib.Point`という表示名になり、他パッケージからの診断文言がTS版と揃う
+// (milestone 51。`main`固定にしていて`Point`と表示され食い違った)
+pub fn check_package_in(
+    files: &[(String, &Program)],
+    require_main: bool,
+    pkg_registry: &PackageRegistry,
+    pkg: &str,
+) -> (Vec<(String, Vec<Diagnostic>)>, PackageExports) {
+    check_package_shared(files, require_main, pkg_registry, pkg, &mut crate::checker::CheckerCtx::new())
+}
+
+// `shared`は**全パッケージで共有するメソッド表の持ち主**(TS版`compileModules`の
+// `sharedMethods`と同じ)。struct名はpkg修飾済みなので衝突しない。共有しないと
+// `mathutil.Point`のメソッドを`main`から呼んだときに「そんなメソッドは無い」という
+// **誤検知**になる(milestone 51で実際に踏んだ——`examples/modules_demo.mesh`が落ちた)
+pub fn check_package_shared(
+    files: &[(String, &Program)],
+    require_main: bool,
+    pkg_registry: &PackageRegistry,
+    pkg: &str,
+    shared: &mut crate::checker::CheckerCtx,
+) -> (Vec<(String, Vec<Diagnostic>)>, PackageExports) {
     let mut ctx = FullCheckerCtx::new();
+    ctx.type_ctx = shared.clone();
     ctx.pkg_registry = pkg_registry.clone();
+    // milestone 51: **解決済みの型を`checker::CheckerCtx`のパッケージレジストリにも載せる**。
+    // そちらは元々codegenがpkg修飾型の解決に使っている仕組み(`lookup_package_type`)で、
+    // `resolve_type_node`/`resolve_type_ann`がそのまま引ける——診断用の可視性の表
+    // (`pkg_registry`)とは目的が違うので、両方に載せるのが正しい。
+    // importエイリアス集合も渡す(`is_package_alias`がimport宣言を経由しない参照を弾くため
+    // ——この不変条件はmilestone 6のcode reviewで入った)
+    let all_import_aliases: std::collections::HashSet<String> =
+        files.iter().flat_map(|(_, p)| p.imports.iter().map(|i| i.alias.clone())).collect();
+    ctx.type_ctx.begin_package(pkg, all_import_aliases);
+    for (alias, exp) in pkg_registry {
+        ctx.type_ctx.register_package(
+            alias,
+            crate::checker::PackageSymbols {
+                types: exp.type_of_type.clone(),
+                fns: exp.type_of_value.clone(),
+                consts: HashMap::new(),
+            },
+        );
+    }
     // どの区間の診断がどのファイルのものかを記録する(start, end, file index)
     let mut spans: Vec<(usize, usize, usize)> = Vec::new();
     // milestone 29: struct/union型のレジストリを既存の`checker.rs`のリゾルバで構築する
@@ -3043,6 +3167,38 @@ pub fn check_package_with_registry(
         spans.push((start, ctx.diagnostics.len(), i));
     }
 
+    // milestone 51: **このパッケージの解決済みシンボル表を作る**(TS版`checkPackage`末尾の
+    // `ctx.registry.set(ctx.pkg, ...)`と同じ)。呼び出し元が依存順にレジストリへ書き戻すので、
+    // 後続のパッケージから`lib.Point`の**本物の型**が引けるようになる。
+    // 可視性は`collect_package_exports`が既に入れてあるものをそのまま使い、型だけ足す
+    let mut exports = collect_package_exports(files);
+    for (name, exported) in exports.types.clone() {
+        if !exported {
+            continue; // 未exportの型は他パッケージから見えない(TS版もANYへ倒す)
+        }
+        if let Some(t) = ctx.type_ctx.lookup_named_type(&name) {
+            // **中身が解決できていない型は載せない**——`type_to_string`/`type_equals`は
+            // 解決済みを前提に`.expect()`するので、裸のunion循環等で空のまま残った型を
+            // 他パッケージへ配るとパニックする(milestone 37の`mesh test`クラッシュと同じ形)
+            if safe_to_compare(t) {
+                exports.type_of_type.insert(name, t.clone());
+            }
+        }
+    }
+    for (name, exported) in exports.fns.iter().chain(exports.consts.iter()) {
+        if !*exported {
+            continue;
+        }
+        if let Some(b) = ctx.scopes[0].get(name)
+            && safe_to_compare(&b.ty)
+        {
+            exports.type_of_value.insert(name.clone(), b.ty.clone());
+        }
+    }
+
+    // メソッド表を共有側へ返す(次のパッケージが`mathutil.Point`のメソッドを引けるように)
+    *shared = ctx.type_ctx.clone();
+
     // 区間をファイルごとに畳み直す(ファイルの並び順を保つ)
     let mut per_file: Vec<(String, Vec<Diagnostic>)> = files.iter().map(|(f, _)| (f.clone(), Vec::new())).collect();
     for (start, end, i) in spans {
@@ -3051,7 +3207,7 @@ pub fn check_package_with_registry(
         }
     }
     per_file.retain(|(_, d)| !d.is_empty());
-    per_file
+    (per_file, exports)
 }
 
 #[cfg(test)]
@@ -4867,7 +5023,7 @@ mod tests {
         for (src, code) in cases {
             let program = parse(src).expect("test source must parse");
             let diags: Vec<Diagnostic> =
-                check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+                check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
             assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
             assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
         }
@@ -4875,8 +5031,53 @@ mod tests {
         // `invalid-receiver-type`の誤検知になる(TS版はこの形を通す。実測で確認)
         let ok = parse("import \"lib\"\n\nfn (p: lib.Point) show() int {\n    return 1\n}\n\nfn main() {\n    print(1)\n}\n").unwrap();
         let diags: Vec<Diagnostic> =
-            check_package_with_registry(&[("main.mesh".to_string(), &ok)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+            check_package_with_registry(&[("main.mesh".to_string(), &ok)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn pkg修飾シンボルの型が渡ると引数照合とフィールド検証が効く() {
+        // milestone 51: レジストリに**解決済みの型**を載せたことで効くようになった検査。
+        // libを実際に検査してexportsを得る(`main`から見ると依存順で先に処理される形)
+        let lib = parse("export struct Point {\n    x: int\n    y: int\n}\n\nexport fn add(a: int, b: int) int {\n    return a + b\n}\n").unwrap();
+        let (_, lib_exports) = check_package_in(&[("l.mesh".to_string(), &lib)], false, &builtin_package_exports(), "lib");
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), lib_exports);
+        let run = |src: &str| -> Vec<Diagnostic> {
+            let program = parse(src).expect("test source must parse");
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect()
+        };
+        for (src, code) in [
+            ("import \"lib\"\n\nfn main() {\n    print(lib.add(1))\n}\n", DiagnosticCode::ArgumentCount),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.add(1, \"s\"))\n}\n", DiagnosticCode::TypeMismatch),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Point{x: \"oops\", y: 1})\n}\n", DiagnosticCode::TypeMismatch),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Point{x: 1})\n}\n", DiagnosticCode::MissingFields),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Point{x: 1, y: 2, z: 3})\n}\n", DiagnosticCode::UnknownField),
+        ] {
+            let diags = run(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // 診断の表示名はpkg修飾(TS版と同じ`lib.Point`)
+        let d = run("import \"lib\"\n\nfn main() {\n    print(lib.Point{x: 1})\n}\n");
+        assert_eq!(d[0].message, "missing field(s) in lib.Point: y");
+        // 正常な形は素通り
+        assert!(run("import \"lib\"\n\nfn main() {\n    p := lib.Point{x: 1, y: 2}\n    print(lib.add(p.x, p.y))\n}\n").is_empty());
+    }
+
+    #[test]
+    fn 未exportの型はレジストリに載せない() {
+        // 未exportの型で本物の型を返すと、`not-exported`に**重ねて**`type-mismatch`が出る
+        // 誤検知になった(TS版は診断後ANYを返す。実測で発覚)
+        let lib = parse("export struct Point {\n    x: int\n}\n\nstruct Hidden {\n    y: int\n}\n").unwrap();
+        let (_, lib_exports) = check_package_in(&[("l.mesh".to_string(), &lib)], false, &builtin_package_exports(), "lib");
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), lib_exports);
+        let program = parse("import \"lib\"\n\nfn main() {\n    h: lib.Hidden = lib.Point{x: 1}\n    print(h)\n}\n").unwrap();
+        let diags: Vec<Diagnostic> =
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
+        let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
     }
 
     #[test]
@@ -4886,7 +5087,7 @@ mod tests {
         registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
         let run = |src: &str| -> Vec<Diagnostic> {
             let program = parse(src).expect("test source must parse");
-            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect()
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect()
         };
         for (src, code) in [
             ("import \"lib\"\n\nfn main() {\n    print(lib.nope(1, 2))\n}\n", DiagnosticCode::UnknownPackageFunction),
@@ -4917,7 +5118,7 @@ mod tests {
         registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
         let program = parse("import \"lib\"\n\nc: lib.Hidden = lib.Hidden{y: 1}\n\nfn main() {\n    print(1)\n}\n").unwrap();
         let diags: Vec<Diagnostic> =
-            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         assert_eq!(diags.len(), 2, "{diags:?}");
         // 注釈(3:4)が値(3:17)より先
         assert!(diags[0].pos.col < diags[1].pos.col, "{diags:?}");

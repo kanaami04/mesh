@@ -6,7 +6,7 @@
 ## 次のセッションでやること(2026-07-26時点)
 
 **現在地**: Rust移植の診断は**68種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜50を消化した
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜51を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,19 +20,12 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **pkg修飾シンボルの「型」のモデル化** — milestone 49・50で**パッケージ跨ぎの診断は
-   ひととおり移植済み**だが、`try_package_member`も`resolve_type_ann`もANYを返すので
-   **型は渡っていない**。レジストリに`Type`を載せる必要があり、codegen側の
-   `checker::PackageSymbols`と統合するか併存させるかの設計判断が要る。
-   **milestone 50のcode reviewで実測した、これで塞がる検出漏れ**:
-   `lib.add(1)`の`argument-count` / `lib.Point{x: "oops"}`のフィールド型不一致・
-   missing-field・unknown-field / `lib.add(1,2) is int`の`union-required` /
-   `lib.add(1,2).nofield`の`not-a-struct`
-   (別件で`print(print)`の`builtin-as-value`も未移植だと分かった——こちらは
-   `is_builtin`分岐に1行足すだけなので、上記とは独立にいつでも入れられる)
-2. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
+1. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
    (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
    式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
+2. **`builtin-as-value`**(`print(print)`のように組み込み関数を値として参照する形)——
+   milestone 50のcode reviewで未移植と判明。`is_builtin`の分岐に1行足すだけなので、
+   軽い回に単独で入れられる
 3. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
    `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
    `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
@@ -1133,7 +1126,7 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      出せなかった。full_checker専用の可視性の表を新設し、`check_all_opts`が全パッケージぶんを
      先に組み立てて渡す形にした。**組み込みパッケージ(`mesh/json`等)を忘れると即誤検知**に
      なるので、codegen側の`*_stdlib_symbols`をそのまま流用している。診断コードは62→65種。
-     **pkg修飾型のモデル化は対象外**(診断だけで、型は引き続きANY)。詳細はtodo.mdの当該項目
+     **pkg修飾型のモデル化はmilestone 51で対応**(この回は診断だけ)。詳細はtodo.mdの当該項目
    - ✅ **milestone 50(2026-07-26)でパッケージ跨ぎ(呼び出し側)+ `package-as-value`**。
      **構造変更**: milestone 30以来import aliasをANYとして`scopes[0]`へ登録していたのを撤去した。
      新設`try_package_member`(TS版`tryPackageMember`)が**targetを評価する前に**pkg修飾参照を
@@ -1141,7 +1134,15 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      (登録したままだと束縛が見つかってしまい**原理的に出せない**診断だった)。
      返り値の`None`は「そもそもpkg修飾参照ではない」だけで、pkg修飾だと分かったら診断を
      出したうえで必ず`Some`を返す——呼び出し元はそれ以上targetを評価してはいけない。
-     診断コードは65→68種。**pkg修飾シンボルの型のモデル化は引き続き対象外**。
+     診断コードは65→68種。**pkg修飾シンボルの型のモデル化はmilestone 51で対応**。
+     詳細はtodo.mdの当該項目
+   - ✅ **milestone 51(2026-07-26)でpkg修飾シンボルの型のモデル化**。**新しい診断コードは
+     足していない**——49・50で移植済みの診断が、型が渡っていないせいで効いていなかったのを
+     効くようにした回。TS版`compileModules`と同じくレジストリを依存順に持ち回り、
+     **各パッケージが検査の最後に自分の解決済みシンボル表を書き戻す**。可視性(宣言を見れば
+     作れる)と型(検査しないと作れない)を別々に持つのが要点。**メソッド表も全パッケージ
+     共有**にした(TS版`sharedMethods`——共有しないと他パッケージのメソッド呼び出しが誤検知)。
+     副産物として`safe_to_compare`のunion再帰ガード漏れ(スタックオーバーフロー)も修正。
      詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化・

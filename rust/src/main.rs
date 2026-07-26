@@ -255,10 +255,17 @@ fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<D
         pkg_registry.insert(pkg.clone(), full_checker::collect_package_exports(files));
     }
     let mut out = Vec::new();
+    // メソッド表は全パッケージ共有(TS版`sharedMethods`)。struct名がpkg修飾済みなので衝突しない
+    let mut shared = mesh::checker::CheckerCtx::new();
     for pkg in dependency_order(&discovered, &parsed.units) {
         let files = &by_pkg[&pkg];
         let require_main = pkg == "main" && !test_mode;
-        out.extend(full_checker::check_package_with_registry(files, require_main, &pkg_registry));
+        let (diags, exports) = full_checker::check_package_shared(files, require_main, &pkg_registry, &pkg, &mut shared);
+        // milestone 51: **検査し終えたパッケージの解決済みシンボル表をレジストリへ書き戻す**
+        // (TS版`compileModules`が`registry`を持ち回るのと同じ)。依存順に回しているので、
+        // あるパッケージを検査する時点で依存先の型は埋まっている
+        pkg_registry.insert(pkg.clone(), exports);
+        out.extend(diags);
     }
     out
 }
