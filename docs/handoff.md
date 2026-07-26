@@ -1094,8 +1094,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      ——発行順は位置順ではない。診断コードは58→60種。詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
-     非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
+     型宣言の名前衝突(`already-declared`系)・structリテラルの未宣言名(`unknown-type`)。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
+     (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→

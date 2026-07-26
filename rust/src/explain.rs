@@ -12,7 +12,9 @@
 // 「Rust版でもその診断が出る」という誤解を招くので、`DiagnosticCode::ALL`
 // (=実装済みの検査)に絞る。したがって:
 //   - `mesh explain`(引数無し)の件数行はTS版の107にならない(意図的な差)
-//   - Rust版が未実装のコード(例: `narrow-required`)は`unknown diagnostic code`になる
+//   - Rust版が未実装のコード(例: `generic-inference-failed`)は`unknown diagnostic code`になる
+//     (**この例は診断を移植するたび古くなる**——milestone 47で`narrow-required`を
+//     移植したときに差し替えた。下のテストも同じ理由で毎回更新が要る)
 // 検査を足すたびにDiagnosticCodeへ変体が増え、ここも自動的に追随する。
 //
 // 抽出が壊れていないことは`すべての診断コードに説明文がある`テストが担保する——TS側の

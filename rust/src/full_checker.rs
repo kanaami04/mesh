@@ -37,8 +37,9 @@
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
 // 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
-// pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・match式の中身・
-// `or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は引き続き対象外
+// pkg修飾struct・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
+// run/buildへのゲート統合は引き続き対象外(**非structへのメンバーアクセス〈not-a-struct〉と
+// union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -995,8 +996,8 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     // `display_name`は診断に出す名前(union構築なら書かれたunion名。メンバーは無名なので)
     // milestone 46: `lookup_constructible_type`は素のaliasも(**struct/unionを指すときだけ**)
     // 引く——`type Q = P`と書いて`Q{x: 1}`で構築する形はTS版が通す。`type Count = int`に
-    // 対する`Count{...}`はTS版が`not-a-struct`で弾く形だが、その診断自体が未移植なので
-    // 従来どおりANY(検出漏れ側)のままにする
+    // 対する`Count{...}`はstruct/unionのどちらでもないので引かず、**milestone 47から**
+    // 下のNoneアームで`not-a-struct`を出す
     let (member_ty, result_ty, display_name) = match ctx.type_ctx.lookup_constructible_type(name) {
         Some(t @ Type::Struct { name: sname, .. }) => (t.clone(), t.clone(), sname.clone()),
         _ => match ctx.type_ctx.lookup_constructible_type(name).cloned().filter(|t| matches!(t, Type::Union { .. })) {
@@ -1009,7 +1010,13 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
             // 名前だけ**を対象にする——未宣言の名前(`Bogus{...}`)はTS版では`unknown-type`
             // という別の診断になり(実測で確認)、そちらは未移植なので黙って諦める
             None => {
-                if ctx.type_ctx.lookup_alias(name).is_some() {
+                // **ANYへ解決したaliasは免除する**——TS版`expressions.ts`も
+                // `if (t.kind === "any") return ANY;`で同じ免除を先に置いている
+                // (「解決自体が失敗——エラーは報告済み」)。milestone 46で循環alias
+                // (`type A = A`)をANYとして登録するようにしたので、`.is_some()`だけ見ると
+                // `type-alias-cycle`に**not-a-structを重ねて出す誤検知**になる
+                // (code reviewで発覚・両CLIで再現確認済み)
+                if ctx.type_ctx.lookup_alias(name).is_some_and(|t| !matches!(t, Type::Any)) {
                     ctx.error(pos, DiagnosticCode::NotAStruct, format!("'{name}' is not a struct"));
                 }
                 return ANY;
@@ -3094,6 +3101,12 @@ mod tests {
         assert_eq!(diags[0].message, "'S' is not a struct");
         // **未宣言の名前はTS版では`unknown-type`**(別診断・未移植)なので黙る
         assert!(check("fn main() {\n    print(Bogus{n: 1})\n}\n").is_empty());
+        // **循環aliasはANYへ解決されるので免除する**——`type-alias-cycle`に重ねて
+        // not-a-structを出すとTS版に無い誤検知になる(code reviewで発覚)
+        for src in ["type A = A\n\nfn main() {\n    print(A{n: 1})\n}\n", "type A = B\n\ntype B = A\n\nfn main() {\n    print(A{n: 1})\n}\n"] {
+            let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+            assert_eq!(codes, vec![DiagnosticCode::TypeAliasCycle], "{src} -> {codes:?}");
+        }
     }
 
     #[test]
