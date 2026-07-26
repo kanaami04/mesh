@@ -37,8 +37,10 @@
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
 // 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
-// pkg修飾struct・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
-// run/buildへのゲート統合は引き続き対象外(**非structへのメンバーアクセス〈not-a-struct〉と
+// pkg修飾**呼び出し**の中身・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
+// run/buildへのゲート統合は引き続き対象外(**milestone 49でpkg修飾の「型参照」側は移植済み**
+// ——`lib.Point{...}`の名前解決も含む。残るのは呼び出しの中身とフィールド検証。
+// **非structへのメンバーアクセス〈not-a-struct〉と
 // union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
@@ -92,6 +94,10 @@ pub struct FullCheckerCtx {
     // 型も丸ごと未登録になる。どちらも「宣言はされている」ので`unknown-type`は誤検知になる
     // (code reviewで2人が別々の再現手順で発見)
     declared_types: std::collections::HashSet<String>,
+    // milestone 49: 全パッケージのシンボル表(呼び出し元が組み立てて渡す)。
+    // **ここに載っていないパッケージについては診断を出さない**——単体テストのように
+    // 依存を読み込まずに検査する経路があるため、「知らない」と「無い」を混同すると誤検知になる
+    pkg_registry: PackageRegistry,
     // milestone 48: このパッケージのimportエイリアス集合(TS版`CheckerCtx.importAliases`)。
     // 型宣言側(`check_package`冒頭)と値側(`declare`)の両方が`name-conflicts-with-package`の
     // 判定に使う——TS版もこの2箇所で同じ集合を引いている
@@ -117,6 +123,7 @@ impl FullCheckerCtx {
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
             declared_types: std::collections::HashSet::new(),
+            pkg_registry: PackageRegistry::new(),
             import_aliases: std::collections::HashSet::new(),
             alias_decls: HashMap::new(),
             alias_state: HashMap::new(),
@@ -333,9 +340,17 @@ fn assignable_checked(from: &Type, to: &Type) -> bool {
     types::assignable(from, to)
 }
 
-// その型注釈が「未知の裸の型名」か(レシーバのANY差し替え判定用)。
-// pkg修飾・組み込み・型パラメータ・レジストリにある名前はfalse
+// その型注釈が「未知の型名」か(レシーバのANY差し替え判定用)。組み込み・型パラメータ・
+// レジストリにある名前はfalse。**milestone 49からpkg修飾名も見る**——解決できなければ
+// (未import/未定義/未export)true(下記`package_type_resolves`)
 fn unknown_type_name(ctx: &FullCheckerCtx, node: &TypeNode) -> bool {
+    // milestone 49: pkg修飾された型名も「解決できなければ未知」として扱う——TS版
+    // `resolvePackageType`が未import/未定義/未exportのどれでもANYを返すため。
+    // **exportされている型は未知にしない**(`fn (p: lib.Point) show()`はTS版が通す形で、
+    // 一律ANYにすると`invalid-receiver-type`の誤検知になる。実測で確認)
+    if let TypeNode::Name { name, pkg: Some(pkg), .. } = node {
+        return !package_type_resolves(ctx, pkg, name);
+    }
     let TypeNode::Name { name, pkg: None, .. } = node else { return false };
     if matches!(name.as_str(), "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" | "any") {
         return false;
@@ -421,6 +436,67 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
 // struct/array/map/chan/関数型に包まれた参照は循環にならない、というTS版の区別そのもの。
 // あわせて`unknown-type`/`any-type-removed`もここで出す(TS版も`resolveType`が
 // 解決しながら報告する。型宣言の中の診断はこの経路だけから出る)
+// パッケージが持つシンボルとその可視性(milestone 49)。TS版`CheckerCtx.registry`の
+// `PackageSymbolEntry`に相当する——**未exportのシンボルも載せる**のが要点で、そうしないと
+// 「無い」と「あるがexportされていない」を区別できず`not-exported`が出せない
+// (codegen側の`checker::PackageSymbols`はexport済みだけを持つ。あちらは生成に必要な型情報の
+// 表で、こちらは診断用の可視性の表——目的が違うので別々に持つ)。値は`exported`
+#[derive(Default, Clone)]
+pub struct PackageExports {
+    types: HashMap<String, bool>,
+    fns: HashMap<String, bool>,
+    consts: HashMap<String, bool>,
+}
+
+// パッケージ名→そのパッケージのシンボル表。`check_package`の呼び出し元(main.rsの
+// `check_all_opts`)が全パッケージぶんを先に組み立てて渡す——TS版も`compileModules`が
+// レジストリを持ち回り、依存パッケージから順に検査する
+pub type PackageRegistry = HashMap<String, PackageExports>;
+
+// ユーザーパッケージ1つぶんのシンボル表を、そのパッケージの全ファイルから組み立てる。
+// **検査を通さなくても作れる**(宣言を見るだけ)ので、依存順を気にせず先に全部作れる
+pub fn collect_package_exports(files: &[(String, &Program)]) -> PackageExports {
+    let mut out = PackageExports::default();
+    for (_, program) in files {
+        for t in &program.types {
+            // 先勝ち(同名宣言はmilestone 48の名前検査で報告済み。最初の宣言が生きる)
+            out.types.entry(t.name.clone()).or_insert(t.exported);
+        }
+        for f in &program.fns {
+            // メソッドはパッケージのシンボルではない(名前空間が別。TS版も登録しない)
+            if f.receiver.is_none() {
+                out.fns.entry(f.name.clone()).or_insert(f.exported);
+            }
+        }
+        for c in &program.consts {
+            out.consts.entry(c.name.clone()).or_insert(c.exported);
+        }
+    }
+    out
+}
+
+// 組み込みパッケージ(`mesh/json`→`json`、`mesh/io`→`io`、`mesh/http`→`http`)の
+// シンボル表。**codegen側の定義をそのまま流用する**——2箇所に書くと必ずずれるため
+// (この移植で何度も踏んだ形)。組み込みは当然すべてexport済み
+pub fn builtin_package_exports() -> PackageRegistry {
+    let mut out = PackageRegistry::new();
+    for (alias, syms) in [
+        ("json", crate::codegen::json_stdlib_symbols()),
+        ("io", crate::codegen::io_stdlib_symbols()),
+        ("http", crate::codegen::http_stdlib_symbols()),
+    ] {
+        out.insert(
+            alias.to_string(),
+            PackageExports {
+                types: syms.types.keys().map(|k| (k.clone(), true)).collect(),
+                fns: syms.fns.keys().map(|k| (k.clone(), true)).collect(),
+                consts: syms.consts.keys().map(|k| (k.clone(), true)).collect(),
+            },
+        );
+    }
+    out
+}
+
 // 組み込み型名(TS版`checker/context.ts`の`BUILTIN_TYPE_NAMES`)。`type`/`struct`宣言の名前に
 // 使えない。**`any`も含む**——H-1で型としては撤去されたが、名前としては予約されたまま
 // (TS版と同じ)。**`none`だけはレクサーのキーワード**なのでパーサーが先に構文エラーにし、
@@ -430,8 +506,13 @@ const BUILTIN_TYPE_NAMES: [&str; 9] = ["int", "float", "string", "bool", "void",
 
 fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
     match node {
-        // pkg修飾はスコープ外(check_type_annと同じ理由)
-        TypeNode::Name { pkg: Some(_), .. } => AliasState::Resolved,
+        // milestone 49: 型宣言の中のpkg修飾参照(`struct Box { p: lib.Hidden }` /
+        // `type Alias = lib.Nope`)。裸の名前と違って解決状態は返さない——pkg修飾参照は
+        // 他パッケージを指すので、このパッケージ内のalias循環には関与しない
+        TypeNode::Name { pkg: Some(pkg), name, pos } => {
+            check_package_type_ref(ctx, pkg, name, *pos);
+            AliasState::Resolved
+        }
         TypeNode::Name { name, pkg: None, pos } => match name.as_str() {
             "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" => AliasState::Resolved,
             "any" => {
@@ -490,13 +571,54 @@ fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
 // 登録時と本体検査時の2回`resolveType`を通るため——`fn f(x: Bogus)`で2件出る。
 // 実測して確認した)。順序も「型宣言 → シグネチャ登録 → 本体」で揃えている。
 //
-// pkg修飾の型(`math.Point`)はこの一歩では**検査しない**(TS版の`unknown-package`/
-// `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。
-// 検出漏れ側に倒す)
+// pkg修飾の型(`math.Point`)は**milestone 49から検査する**——`unknown-package` /
+// `unknown-package-type` / `not-exported`(下記`check_package_type_ref`)。
+// ただし**型そのものは引き続きANY**(pkg修飾型のモデル化は別マイルストーン)なので、
+// その型のフィールド検証などは効かない
+// pkg修飾型が解決できるか(診断は出さない版)。TS版`resolvePackageType`が本物の型を返すのは
+// 「importされている & その名前の型がある & exportされている」の3つが揃ったときだけで、
+// それ以外は全部ANY——`unknown_type_name`がその判定に使う。
+// **表に無いパッケージは「解決できる」側に倒す**(検査経路によっては依存を読み込まないため。
+// ここで未知扱いにすると`invalid-receiver-type`等の誤検知になる)
+fn package_type_resolves(ctx: &FullCheckerCtx, pkg: &str, name: &str) -> bool {
+    if !ctx.import_aliases.contains(pkg) {
+        return false;
+    }
+    let Some(syms) = ctx.pkg_registry.get(pkg) else {
+        return true;
+    };
+    matches!(syms.types.get(name), Some(true))
+}
+
+// pkg修飾された型参照(`math.Point`)の検査。TS版`types-resolve.ts`の`resolvePackageType`の
+// 移植(milestone 49)。**型は返さない**——pkg修飾型のモデル化は別マイルストーンで、
+// ここは診断だけを担う(呼び出し側は従来どおりANYのまま)。
+// unknown-package → unknown-package-type → not-exported の順はTS版と同じ
+fn check_package_type_ref(ctx: &mut FullCheckerCtx, pkg: &str, name: &str, pos: Pos) {
+    if !ctx.import_aliases.contains(pkg) {
+        ctx.error(pos, DiagnosticCode::UnknownPackage, format!("unknown package '{pkg}' — add: import \"{pkg}\""));
+        return;
+    }
+    // **表に無いパッケージは黙る**。単体テストのように依存を読み込まずに検査する経路があり、
+    // 「知らない」を「無い」と混同すると誤検知になる(誤検知ではなく検出漏れ側に倒す既定方針)
+    let Some(syms) = ctx.pkg_registry.get(pkg) else {
+        return;
+    };
+    match syms.types.get(name) {
+        None => ctx.error(pos, DiagnosticCode::UnknownPackageType, format!("package '{pkg}' has no type '{name}'")),
+        Some(false) => ctx.error(
+            pos,
+            DiagnosticCode::NotExported,
+            format!("'{name}' is not exported by package '{pkg}' — add 'export' to its declaration"),
+        ),
+        Some(true) => {}
+    }
+}
+
 fn check_type_ann(ctx: &mut FullCheckerCtx, node: &TypeNode) {
     match node {
-        // pkg修飾はスコープ外(上記)
-        TypeNode::Name { pkg: Some(_), .. } => {}
+        // milestone 49: pkg修飾された型参照の3診断(型自体は引き続きANY——モデル化は別回)
+        TypeNode::Name { pkg: Some(pkg), name, pos } => check_package_type_ref(ctx, pkg, name, *pos),
         TypeNode::Name { name, pkg: None, pos } => match name.as_str() {
             "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" => {}
             // H-1(2026-07-21決定): `any`は撤去済み——書かれたら常にエラー
@@ -1001,12 +1123,15 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
 // `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
 // 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
 // (判別可能unionのタグdisambiguation・名前付きstruct同士のunionのフィールド集合解決。
-// 下記`resolve_union_lit_member`)に対応した。pkg修飾structは次段階のためANYを返す。
+// 下記`resolve_union_lit_member`)に対応した。**milestone 49でpkg修飾structの名前解決**
+// (`lib.Point{...}`の3診断)を追加——ただしフィールド検証はまだで、型はANYを返す。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
     let field_types: Vec<Type> = fields.iter().map(|f| infer_expr_single(ctx, &f.value)).collect();
-    // pkg修飾はmilestone 29対象外
-    if pkg.is_some() {
+    // pkg修飾structリテラル(`lib.Point{...}`)。**milestone 49で名前の3診断だけ**を出す
+    // ——フィールド検証は他パッケージの型をモデル化してからなので引き続きANY(検出漏れ側)
+    if let Some(pkg) = pkg {
+        check_package_type_ref(ctx, pkg, name, pos);
         return ANY;
     }
     // 名前がregistryのstructなら従来どおり(milestone 29)。structでなければunion
@@ -2575,11 +2700,18 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
 // これによりmilestone 23で追加した名前衝突検査(reserved-word/builtin-redeclared/
 // already-declared/shadowing)がローカル変数と同じdeclare()経由で自動的に効く
 fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
+    // **型注釈を値より先に解決する**(TS版`checkPackage`の`const declared = c.typeNode ? ...`が
+    // `checkExprSingle(c.value)`より前にある)。逆にすると注釈側と値側の両方が診断を出す形
+    // (`c: lib.Hidden = lib.Hidden{y: 1}`で`not-exported`が2件)で**発行順がTS版と逆になる**。
+    // milestone 49でpkg修飾注釈が診断を出すようになるまでは`check_type_ann`が
+    // pkg修飾に対して無反応だったため、この順序差は表に出ていなかった(code reviewで発覚)
+    let annotated = c.type_node.as_ref().map(|type_node| {
+        check_type_ann(ctx, type_node);
+        resolve_type_ann(&ctx.type_ctx, type_node)
+    });
     let value_ty = infer_expr_single(ctx, &c.value);
-    let final_ty = match &c.type_node {
-        Some(type_node) => {
-            check_type_ann(ctx, type_node);
-            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
+    let final_ty = match annotated {
+        Some(declared) => {
             if !assignable_checked(&value_ty, &declared) {
                 ctx.error(
                     c.pos,
@@ -2623,8 +2755,20 @@ pub fn check_program_opts(program: &Program, require_main: bool) -> Vec<Diagnost
 // (5)トップレベル定数を検査+登録 → (6)`fn main`の形 → (7)関数本体を検査。
 // 診断は**それが出たファイル**へ振り分ける(ctx.diagnosticsは追記のみなので、各段階の
 // 前後の長さで区間を切り出す)
+// パッケージのシンボル表を持たない呼び出し口(単体テスト・単一ファイル経路)。
+// **組み込みパッケージだけは常に載せる**——`import "mesh/json"`は`.mesh`ソースを持たず
+// どの経路でも解決できる必要があるため
 pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(String, Vec<Diagnostic>)> {
+    check_package_with_registry(files, require_main, &builtin_package_exports())
+}
+
+pub fn check_package_with_registry(
+    files: &[(String, &Program)],
+    require_main: bool,
+    pkg_registry: &PackageRegistry,
+) -> Vec<(String, Vec<Diagnostic>)> {
     let mut ctx = FullCheckerCtx::new();
+    ctx.pkg_registry = pkg_registry.clone();
     // どの区間の診断がどのファイルのものかを記録する(start, end, file index)
     let mut spans: Vec<(usize, usize, usize)> = Vec::new();
     // milestone 29: struct/union型のレジストリを既存の`checker.rs`のリゾルバで構築する
@@ -4640,6 +4784,66 @@ mod tests {
         let b = parse("fn double(n: int) int {\n    return n * 2\n}\n").unwrap();
         let out = check_package(&[("a.mesh".to_string(), &a), ("b.mesh".to_string(), &b)], false);
         assert_eq!(out, vec![]);
+    }
+
+    #[test]
+    fn pkg修飾された型参照の3診断() {
+        // milestone 49: unknown-package → unknown-package-type → not-exported の順で判定する
+        // (TS版`resolvePackageType`と同じ)。`lib`は`Point`をexportし`Hidden`はしない
+        let lib = parse("export struct Point {\n    x: int\n}\n\nstruct Hidden {\n    y: int\n}\n").unwrap();
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
+
+        let cases = [
+            ("import \"lib\"\n\nfn main() {\n    p: nosuch.Point = 1\n    print(p)\n}\n", DiagnosticCode::UnknownPackage),
+            ("import \"lib\"\n\nfn main() {\n    p: lib.Nope = 1\n    print(p)\n}\n", DiagnosticCode::UnknownPackageType),
+            ("import \"lib\"\n\nfn main() {\n    p: lib.Hidden = 1\n    print(p)\n}\n", DiagnosticCode::NotExported),
+        ];
+        for (src, code) in cases {
+            let program = parse(src).expect("test source must parse");
+            let diags: Vec<Diagnostic> =
+                check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // **exportされた型は通す**——一律ANY扱いにすると`fn (p: lib.Point) show()`が
+        // `invalid-receiver-type`の誤検知になる(TS版はこの形を通す。実測で確認)
+        let ok = parse("import \"lib\"\n\nfn (p: lib.Point) show() int {\n    return 1\n}\n\nfn main() {\n    print(1)\n}\n").unwrap();
+        let diags: Vec<Diagnostic> =
+            check_package_with_registry(&[("main.mesh".to_string(), &ok)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn トップレベルconstは型注釈を値より先に検査する() {
+        // TS版`checkPackage`の順序(注釈→値)。逆にすると注釈側と値側の両方が診断を出す形で
+        // **発行順がTS版と逆になる**(code reviewで発覚・両CLIで再現確認済み)。
+        // pkg修飾注釈が診断を出すようになるまで表に出ていなかった順序差
+        let lib = parse("struct Hidden {\n    y: int\n}\n").unwrap();
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
+        let program = parse("import \"lib\"\n\nc: lib.Hidden = lib.Hidden{y: 1}\n\nfn main() {\n    print(1)\n}\n").unwrap();
+        let diags: Vec<Diagnostic> =
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        // 注釈(3:4)が値(3:17)より先
+        assert!(diags[0].pos.col < diags[1].pos.col, "{diags:?}");
+    }
+
+    #[test]
+    fn 表に無いパッケージについては診断を出さない() {
+        // 単体テストのように依存を読み込まない経路がある。「知らない」を「無い」と混同すると
+        // 誤検知になるので、レジストリに載っていないパッケージは素通りさせる
+        let src = "import \"lib\"\n\nfn main() {\n    p: lib.Whatever = 1\n    print(p)\n}\n";
+        assert!(check(src).is_empty(), "{:?}", check(src));
+    }
+
+    #[test]
+    fn 組み込みパッケージは常に解決できる() {
+        // `mesh/json`等は`.mesh`ソースを持たないので、レジストリを渡さない経路でも
+        // 解決できないと誤検知になる(codegen側の定義を流用している)
+        let src = "import \"mesh/json\"\n\nfn main() {\n    v: json.Value = json.Value{kind: \"null\"}\n    print(v)\n}\n";
+        assert!(check(src).is_empty(), "{:?}", check(src));
     }
 
     #[test]

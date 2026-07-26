@@ -35,7 +35,10 @@ pub fn is_builtin(name: &str) -> bool {
 
 // パッケージがexportする名前→型の表。TS版`PackageSymbols`(types/fns/consts)に相当。
 // レジストリ(下記)のキーはパッケージ名(importエイリアス)、この中のキーはパッケージ内の
-// 素の(pkg修飾されていない)宣言名——他パッケージから`alias.Name`で引くときにこの2段で引く
+// 素の(pkg修飾されていない)宣言名——他パッケージから`alias.Name`で引くときにこの2段で引く。
+// **姉妹の表がもう1つある**: `full_checker::PackageExports`(milestone 49)は
+// **未exportのシンボルも`exported`フラグ付きで**持つ診断用の可視性の表。こちらは
+// 「生成に必要な型情報」、あちらは「見えるかどうか」——目的が違うので別々に持っている
 #[derive(Clone, Default)]
 pub struct PackageSymbols {
     pub types: HashMap<String, Type>,

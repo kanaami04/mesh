@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**62種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜48を消化した
+**現在地**: Rust移植の診断は**65種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜49を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,9 +20,11 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
-   `unknown-package-type` / `not-exported`)— 構造変更が一番大きい代わりに、いま検出漏れとして
-   積み上がっている領域をまとめて塞げる。撤去条件(2)を終わらせるには最終的に避けて通れない
+1. **パッケージ跨ぎの「呼び出し側」**(`unknown-package-function` /
+   `package-symbol-is-a-type` / 関数側の `not-exported` / `package-as-value`)——
+   milestone 49で**型参照側は移植済み**(レジストリの土台も入った)。残るのは呼び出しの中身で、
+   `package-as-value` は import alias を `scopes[0]` へ直接入れている作りを外す必要があり、
+   呼び出し側とセットでないと `lib.add(...)` の target が `undefined-name` になる
 2. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
    (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
    式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
@@ -41,12 +43,27 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 直近5マイルストーンのうち4回、**実装者の検証を通り抜けた不具合をcode reviewが見つけた**。
 共通していたのは「入力そのものが壊れているケース」だった(タイポした型名 / 値にならない式 /
-壊れた宣言の後ろの型 / 同名の宣言)。そこで:
+壊れた宣言の後ろの型 / 同名の宣言)。**milestone 47・48では2回連続で「Rust側だけに出る
+診断」(偽陽性=最悪の分類)を出しており**、どちらも同じ形だった——下記2'を必ず回すこと。そこで:
 
 1. **TS版を先に実測してから実装する**。診断の**位置・件数・順序**まで測る——TS版は
    同じ注釈を2回報告する場所(関数シグネチャ)があり、想像で書くと必ずずれる
 2. **「壊れた入力」の定型セットを毎回回す**: 未知の型名 / 同名の宣言 / 型宣言の循環 /
    値にならない式(void)/ 壊れた宣言の後ろに正常な宣言、の組み合わせ
+2'. **その回で「弾く/特別扱いする」ようにした名前を、あらゆる参照経路から使ってみる**
+   (milestone 47・48の偽陽性はどちらもこれで防げた)。**「弾いたのに登録が残っている」
+   のが典型的な原因**——型注釈(引数・戻り値・ローカル)/ structフィールド / structリテラルの
+   名前 / レシーバ / `is`・matchのパターン / 関数の引数として渡す、を機械的に一周する。
+   milestone 47は「循環aliasの名前でstructリテラルを構築」、48は「弾かれた型名を関数
+   シグネチャで使う」を入れておらず、どちらも本物の誤検知を出荷しかけた
+2''. **そのマイルストーンが偽にしたコメントを機械的に探す**。**milestone 46〜49で4回連続、
+   code reviewの指摘の大半がこれだった**(実装は正しいのに、周りのコメントが
+   「その診断は未移植」「pkg修飾は対象外」等と言ったまま残る)。出荷前に、今回移植した
+   診断コード名・機能名で `grep -rn "<名前>" rust/src docs todo.md` を回し、
+   **「未移植」「対象外」「次段階」「候補」**と書かれた行を1件ずつ潰す。
+   `docs/handoff.md`の「既知の限界」リストは特に取り消し線の付け忘れが多い。
+   あわせて**新しく`pub(crate)`にした関数**には利用者が増えた旨を書く(2箇所に
+   書かれた定義がずれる、というこの移植で何度も踏んだ形の予防)
 3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
    **コマンドごとに**必要で、これを忘れるとビルドが走らず古いバイナリで測ることになる
    (実際に起きた)
@@ -1100,9 +1117,18 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `name-conflicts-with-package`も同時に入れた**——そこはRust版が`already-declared`という
      誤ったコードを出していた箇所(milestone 30以来の既知の限界)。診断コードは60→62種。
      詳細はtodo.mdの当該項目
+   - ✅ **milestone 49(2026-07-26)でパッケージ跨ぎ(型参照側)**。`unknown-package` /
+     `unknown-package-type` / `not-exported`。**構造変更が本体**——TS版はレジストリの各
+     シンボルに`exported`フラグを持ち「無い」と「あるがexportされていない」を区別するが、
+     Rust版のレジストリ(codegen用)はexport済みしか載せないため`not-exported`が原理的に
+     出せなかった。full_checker専用の可視性の表を新設し、`check_all_opts`が全パッケージぶんを
+     先に組み立てて渡す形にした。**組み込みパッケージ(`mesh/json`等)を忘れると即誤検知**に
+     なるので、codegen側の`*_stdlib_symbols`をそのまま流用している。診断コードは62→65種。
+     **pkg修飾型のモデル化は対象外**(診断だけで、型は引き続きANY)。詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
-     pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系・`package-as-value`とセット)・
-     structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化。
+     pkg修飾**呼び出し**の中身(`unknown-package-function`系・`package-as-value`とセット)・
+     structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化・
+     pkg修飾型のモデル化(milestone 49は診断だけで型はANYのまま)。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
@@ -1121,8 +1147,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        (4)`cannot-infer-type`は空配列リテラル限定(milestone 33)——`s := Status{foo: 1}`のように
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
-       (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
-       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
+       (6)~~pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外~~
+       → **milestone 49で解消**(`unknown-package`/`unknown-package-type`/`not-exported`を
+       型参照側だけ移植。**pkg修飾の「呼び出し」側と型のモデル化は引き続き未対応**——
+       `lib.f()`の中身の検査とpkg修飾型のフィールド検証は効かない)、
        (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
        `not-callable`も移植した)、
        (8)~~素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない~~
