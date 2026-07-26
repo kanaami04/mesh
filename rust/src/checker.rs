@@ -225,8 +225,9 @@ impl CheckerCtx {
 
 // 型注釈(構文)を内部表現の型へ変換。TS版`checker/types-resolve.ts`のresolveTypeのうち、
 // このRust移植で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying、milestone 19)は
-// `ctx.struct_types`/`ctx.union_types`(resolve_type_declsが埋める——自己参照する宣言は
-// 解決中の時点でも空のplaceholderが既に登録されているため、ここでそのまま見つかる)を引き、
+// `lookup_named_type`——`ctx.struct_types`/`ctx.union_types`/`ctx.alias_types`の3表
+// (resolve_type_declsが埋める。struct/unionは自己参照する宣言でも解決中の時点で空の
+// placeholderが既に登録されているため、ここでそのまま見つかる。素のaliasはmilestone 46)を引き、
 // それでも無ければ名前だけを覚えた空フィールドのstruct型として素通しする(未宣言の型名の
 // フォールバック)。この関数自体は読み取り専用(&CheckerCtx)のまま——`resolve_type_decls`
 // 側が呼び出し前に依存する型を先に解決しておく(`resolve_named_type`参照)
@@ -286,8 +287,9 @@ pub fn resolve_return_type(ctx: &CheckerCtx, ret: &Option<TypeNode>) -> Type {
     ret.as_ref().map(|r| resolve_type_node(ctx, r)).unwrap_or(VOID)
 }
 
-// トップレベルのtype宣言(struct・union型alias)をすべて`ctx.struct_types`/`ctx.union_types`
-// へ解決する。milestone 19: TS版`resolveAlias`(`src/checker/types-resolve.ts:109-192`)と
+// トップレベルのtype宣言をすべてレジストリへ解決する——struct宣言は`ctx.struct_types`、
+// union型aliasは`ctx.union_types`、**素のalias**(`type Count = int`、milestone 46)は
+// `ctx.alias_types`。milestone 19: TS版`resolveAlias`(`src/checker/types-resolve.ts:109-192`)と
 // 同じ「名前ごとにオンデマンド+memo化で再帰的に解決する」方式へ全面書き換え——以前の
 // 「DFSで循環を問答無用で拒否 → 固定点反復」方式(自己参照を一律非対応にしていた)を廃止した。
 // `Type::Struct.fields`/`Type::Union`の中身がRc<OnceCell<_>>で共有可能になったため
@@ -327,8 +329,10 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
 }
 
 // 名前ひとつぶんの宣言をオンデマンドで解決する(TS版`resolveAlias`の移植)。既に
-// `ctx.struct_types`/`ctx.union_types`にあれば(解決済み、または解決中でplaceholderが
-// 登録済みのいずれか)即座に戻る——これがmemoization兼reentrancy停止になる。ローカル
+// 3表のどれか(`lookup_named_type`)にあれば(解決済み、または解決中でplaceholderが
+// 登録済みのいずれか)即座に戻る——これがmemoization兼reentrancy停止になる。ただし
+// 素のalias(milestone 46)はplaceholderを配れないので、そちらの再入は`resolving`集合で
+// 見る(下記`other`アーム)。ローカル
 // 宣言でない名前(pkg修飾/未知の名前)は対象外——`resolve_type_node`のフォールバックに任せる
 fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &TypeDecl>, resolving: &mut HashSet<String>) -> Result<(), String> {
     if ctx.lookup_named_type(name).is_some() {

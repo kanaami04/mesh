@@ -261,10 +261,6 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
 // **catch-allを復活させないこと**: 新しい式をASTへ足したらここがコンパイルエラーになり、
 // 「検査するか、しないなら理由を書いてANYを返す」という判断を必ず強制できる
 // (黙って未検査のまま出荷される事故が、この移植で最も繰り返した失敗だった)
-// 型の中に「レジストリに存在しないstruct名」が含まれるか。checker.rsのリゾルバは
-// 未知の型名・pkg修飾型を殻struct(フィールド0個)へフォールバックさせるので、その型を
-// full_checker側の値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)は
-// レジストリに載らないので除外する
 // その型が「**宣言そのものが存在しない**型名」の殻structか(milestone 46)。TS版は
 // この形をANYへ解決する(`resolveAlias`が`unknown-type`を出して`ANY`を返す)ので、
 // 「TS版ならどんな値でも代入できる位置」の目印になる。`has_unregistered_struct`との違いは
@@ -277,6 +273,11 @@ fn is_undeclared_shell_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
         if name != types::ANONYMOUS_STRUCT_NAME && !name.contains('.') && !ctx.declared_types.contains(name))
 }
 
+// 型の中に「レジストリに存在しないstruct名」が含まれるか。checker.rsのリゾルバは
+// 未知の型名・pkg修飾型を殻struct(フィールド0個)へフォールバックさせるので、その型を
+// full_checker側の値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)は
+// レジストリに載らないので除外する。**入れ子まで再帰的に見る**のが上の
+// `is_undeclared_shell_struct`との違い(そちらは型そのものだけを見る)
 fn has_unregistered_struct(ctx: &crate::checker::CheckerCtx, t: &Type) -> bool {
     fn go(ctx: &crate::checker::CheckerCtx, t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
         match t {
