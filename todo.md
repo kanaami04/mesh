@@ -3434,6 +3434,57 @@
                 examples全22件の`mesh run`も一致。プローブは型名の誤りをあらゆる位置
                 (関数の引数・戻り値・structフィールド・type alias本体・ローカル注釈・
                 レシーバ・matchのパターン・`is`のターゲット・`any`)へ置いたものを用意した。
+        - [x] **milestone 46: 素の型aliasの解決(`type Count = int`)**
+              ✅ 2026-07-26実装。milestone 45のcode reviewで記録した「素のaliasがレジストリで
+              解決されない」穴の根治。引き継ぎ文書には検査側の1症状(判別可能unionの
+              disambiguationで**TS版と違う診断コード**が出る)だけを記録していたが、実測すると
+              穴はもっと広く、**Rust版はそもそも素のaliasを含むプログラムを実行できなかった**
+              (`codegen`が「structでもunionでもないtype宣言」を丸ごとErrにしていた)。
+              - **原因**: `checker.rs`の`resolve_type_decls`が`TypeNode::StructType`/`Union`の
+                宣言しか解決せず、素のaliasは登録されない。参照側は「空フィールドの殻struct」へ
+                フォールバックするので、その型注釈が絡む検査が全部素通りしていた。
+              - **直し方は(b)の根治を選んだ**(引き継ぎ文書の候補(a)=検査側だけの小さいガードでは、
+                実行できない問題も偽陽性も残るため)。TS版`resolveAlias`の**第3分岐**
+                (struct/unionのknot-tyingに対し、素のaliasは`resolvingAliases`集合で循環を見て
+                `resolveType`するだけ)をそのまま移植し、`CheckerCtx`に3つ目の姉妹テーブル
+                `alias_types`を追加した。**循環はErrにせずANYを登録する**のが要点——Errにすると
+                `resolve_type_decls`が走査全体を打ち切り、後続のstruct宣言まで巻き添えで
+                未登録になる(既存の限界を新しい入力へ広げてしまう)。`type-alias-cycle`診断
+                自体はmilestone 43でfull_checker側が既に出している。
+              - `codegen`のゲートを撤去(型は実行時に消えるので生成JSは変わらない)。
+                **唯一残した非対応が`error type`の素のalias**——TS版が
+                `error-type-must-be-struct`/`error-type-aliases-existing`で**必ず**拒否する形で、
+                中途半端に登録するとis_error_typeが立たないまま失敗型として扱われ、milestone 3/8の
+                `?`安全ガードを崩す。レジストリにも載せず明確なErrにしている。
+              - あわせて修正した3件:
+                (1) **fix(a)相当**: 判別可能unionの候補絞り込みが未宣言の型名(`cb: Bogus`)の
+                フィールドで候補を全滅させ`discriminated-union-no-match`という**違うコード**を
+                出していた。TS版は未宣言の型名をANYへ解決するので候補は絶対に減らない——
+                新設`is_undeclared_shell_struct`で判定し`ambiguous`まで到達させる
+                (`has_unregistered_struct`と違い入れ子を見ず、レジストリではなく
+                `declared_types`で判定するのが要点)。
+                (2) **同名の型宣言が「後勝ち」だった**——`type Count = int`/`type Count = string`に
+                対して`x: Count = 1`が`cannot use int as string`という**TS版に無い誤診断**に
+                なった。full_checker側の`alias_decls`は同じ理由で既に先勝ちだったので揃えた。
+                (3) `has_unregistered_struct`を`&FullCheckerCtx`→`&CheckerCtx`受けにして
+                型注釈の解決からも使えるようにした。
+              - **既知の意図的な差**: aliasをレシーバ型に使う形(`type Q = P` +
+                `fn (q: Q) show()`)は、Rust版が「receiver type 'Q' is not a declared struct」で
+                コンパイル時に止める。TS版はcheckを通したうえで**実行時にpanicする**
+                (`__m_P_show is not defined`)TS版自身のバグなので、追随せずErrのままにした。
+              - **検証**(TS版と突き合わせ): 素のaliasのプローブ21本(型注釈/structフィールド/
+                関数引数/戻り値/配列・map・chan・関数型のalias/循環3種/未宣言の型名/
+                同名宣言/`error type`の2形/pkg跨ぎのexport)+「壊れた入力」定型セット10本。
+                全`.mesh`計59ファイルで差は6件のみで、いずれも**未移植診断による検出漏れ**
+                (`not-a-struct`/`already-declared`/`error-type-*`と、裸union循環で走査が
+                打ち切られる既存の限界)。**Rust側だけに出る診断・違うコードは0件**。
+                変更前後は`git worktree`でHEADのバイナリを建てて比較し、変化した13ファイルが
+                すべてTS版へ寄る方向であることを1件ずつ確認した。examples全23本の実行
+                (新規`examples/type_alias.mesh`含む)がTS版と一致、生成JSもbyte-for-byte一致。
+                `fmt`の往復も両実装で一致(milestone 9/11でフォーマッタの欠落バグを2度
+                踏んでいるため毎回見る)。
+              - 診断コードは58種のまま(新しいコードの追加ではなく既存の穴の修正)。
+                テスト576→589件(+13)。clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3441,7 +3492,7 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 45まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 46まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
         107種 vs 58種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を

@@ -6,47 +6,31 @@
 ## 次のセッションでやること(2026-07-26時点)
 
 **現在地**: Rust移植の診断は**58種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜45を消化した
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜46を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
-### 最有力の次の一歩: 素の型aliasがレジストリで解決されない
+**milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
+のような素のaliasが登録されるようになり、そもそもRust版で実行できなかった問題ごと解消した)。
+その調査で**未移植だと確定した診断**が下記候補の1・3に反映してある。
 
-**症状**: `type Handler = fn(int) int` のような**素のalias**(structでもunionでもない宣言)を
-structのフィールド型に使うと、TS版が `discriminated-union-ambiguous` を出す入力に対して
-Rust版は `discriminated-union-no-match` という**違うコード**を出す。
-
-```mesh
-type Handler = fn(int) int
-struct A { cb: Handler }
-struct B { cb: Handler }
-type AB = A | B
-fn real(x: int) int { return x }
-fn main() { print(AB{cb: real}) }
-```
-
-**原因**: `rust/src/checker.rs` の `resolve_named_type` は `TypeNode::StructType`/`TypeNode::Union`
-の宣言しか解決しない(`resolve_type_decls` の `type_decls` フィルタ)。素のaliasは登録されず、
-参照側は「空フィールドの殻struct」へフォールバックする。`infer_struct_lit` は
-`has_unregistered_struct` でこれを弾くが、**`resolve_union_lit_member` の候補絞り込みには
-同じガードが無い**。
-
-**直し方の候補**: (a) `resolve_union_lit_member` にも同じガードを入れる(小さい・検出漏れ側)、
-(b) `resolve_type_decls` が素のaliasも解決するようにする(根治だが、checker.rsはcodegenも
-使うので影響範囲が広い。codegen側の回帰確認が要る)。**コードが違うのは検出漏れより悪い**
-(milestone 40〜41で立てた基準)ので、少なくとも(a)は入れる。
-
-### そのほかの候補(おおよその優先順)
+### 次の一歩の候補(おおよその優先順)
 
 1. **`not-a-struct` / `narrow-required`** — 非structへのメンバーアクセスと、unionのまま
-   `.field` を触る形。milestone 39でunionをモデル化済みなので`narrow-required`は実際に効く
+   `.field` を触る形。milestone 39でunionをモデル化済みなので`narrow-required`は実際に効く。
+   `not-a-struct`はmilestone 46で「素のaliasの名前で構築する」形(`type Count = int` に対する
+   `Count{n: 1}`)が未検出だと実測済み
 2. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
    `unknown-package-type` / `not-exported`)— 構造変更が一番大きい代わりに、いま検出漏れとして
    積み上がっている領域をまとめて塞げる。撤去条件(2)を終わらせるには最終的に避けて通れない
 3. **型宣言の名前衝突**(`already-declared` / `builtin-type-redeclared` /
    `name-conflicts-with-package`)— milestone 43のcode reviewで「同名の型宣言」を扱った際に
-   未移植だと確認済み
-4. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-5. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+   未移植だと確認済み。milestone 46で**レジストリ側は先勝ちに揃えた**(TS版と同じく最初の
+   宣言が勝つ)ので、あとは診断を出すだけの状態になっている
+4. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
+   — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
+   無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
+5. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+6. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1084,6 +1068,14 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      関数型を解決するようになり(引数・戻り値のどこかがANYへ縮退したら全体をANY、という
      unionと同じ規則)、full_checker側の突き合わせは`assignable_checked`(どちらかにANYが
      潜んでいたら比較しない)へ集約した。診断コードは57→58種
+   - ✅ **milestone 46(2026-07-26)で素の型alias(`type Count = int`)の解決**。下記(8)の根治。
+     `CheckerCtx`に3つ目の姉妹テーブル`alias_types`を追加し、TS版`resolveAlias`の第3分岐
+     (knot-tyingが使えないので`resolvingAliases`集合で循環を見る)を移植した。**循環はErrに
+     せずANYを登録する**——Errにすると`resolve_type_decls`が走査全体を打ち切り、後続の
+     struct宣言まで巻き添えで未登録になる。あわせて`codegen`のゲート(素のaliasを含む
+     プログラムは**そもそも実行できなかった**)を撤去し、同名の型宣言を先勝ちに揃えた
+     (後勝ちだとTS版に無い誤診断が出た)。**新しい診断コードは足していない**(58種のまま——
+     既存の穴の修正)。詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
@@ -1103,15 +1095,16 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
        (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
        `not-callable`も移植した)、
-       (8)**素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない**
-       (milestone 45のcode reviewで発見・PR前後で同じなので既存の穴): checker.rsの
-       `resolve_named_type`はStructType/Unionの宣言しか解決しないため、そのaliasを
-       フィールド型に使うと「空フィールドの殻struct」になる。`infer_struct_lit`は
-       `has_unregistered_struct`で弾くが、**`resolve_union_lit_member`の候補絞り込みには
-       同じガードが無い**ので、TS版が`discriminated-union-ambiguous`を出す入力に
-       `discriminated-union-no-match`という**違うコード**を出す。コードが違うのは
-       検出漏れより悪いので、次のmilestoneの有力候補。いずれもモデル化を
-       進める中でまとめて対応する候補
+       (8)~~素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない~~
+       → **milestone 46で解消**(調べると穴は記録より広く、Rust版はそもそも素のaliasを
+       含むプログラムを実行できなかった。`type Count = int`を経由した型注釈の検査が
+       全部素通りし、逆に`b.n + 1`のような正しい式にRust版だけが`invalid operation`という
+       **偽陽性**を出してもいた)、
+       (9)**`error type`の素のalias**(`error type Oops = int` / `error type E = Bad`)は
+       `mesh check`が無診断で通す(TS版は`error-type-must-be-struct`/
+       `error-type-aliases-existing`)。`run`/`build`はcodegenの明確なErrで止まるので、
+       **検査とビルドで結論が食い違う数少ない箇所**(milestone 46で実測・意図的に
+       この形にした。詳細はtodo.md)。いずれもモデル化を進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置
 (オラクル)**で、各milestoneは「TS版と`mesh check`/生成JSを突き合わせて完全一致」で検証している。

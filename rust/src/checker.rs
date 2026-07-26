@@ -62,6 +62,12 @@ pub struct CheckerCtx {
     // 名前→解決済みのunion型(`type X = A | B`、milestone 7・判別可能union対応)。
     // struct_typesと並ぶ姉妹テーブル——resolve_type_declsが同じknot-tying方式で埋める
     union_types: HashMap<String, Type>,
+    // 名前→解決済みの**素のalias**(`type Count = int` / `type Handler = fn(int) int` のように
+    // structでもunionでもない`type`宣言、milestone 46)。TS版はresolvedAliases 1つの表で
+    // struct/union/素のaliasを区別せず扱うが、Rust版はknot-tying(Rc<OnceCell>)の有無で
+    // 扱いが違うため3つ目の姉妹テーブルとして分けている。**knot-tyingは無い**——素のaliasは
+    // 空の器を先に配れないので、循環は`resolving`集合で見てANYを登録する(resolve_named_type参照)
+    alias_types: HashMap<String, Type>,
     pkg: String,                     // 現在処理中パッケージ名("main"かimportエイリアス名)
     import_aliases: HashSet<String>, // 現在処理中パッケージのimportエイリアス集合
     // struct名(既にpkg修飾済み)→メソッド名→関数型。全パッケージ共有——struct名が
@@ -86,6 +92,7 @@ impl CheckerCtx {
             fn_decls: HashMap::new(),
             struct_types: HashMap::new(),
             union_types: HashMap::new(),
+            alias_types: HashMap::new(),
             pkg: "main".to_string(),
             import_aliases: HashSet::new(),
             method_table: HashMap::new(),
@@ -105,6 +112,7 @@ impl CheckerCtx {
         self.fn_decls.clear();
         self.struct_types.clear();
         self.union_types.clear();
+        self.alias_types.clear();
         self.scopes = vec![HashMap::new()];
     }
 
@@ -179,6 +187,33 @@ impl CheckerCtx {
         self.union_types.get(name)
     }
 
+    pub fn declare_alias(&mut self, name: &str, ty: Type) {
+        self.alias_types.insert(name.to_string(), ty);
+    }
+
+    pub fn lookup_alias(&self, name: &str) -> Option<&Type> {
+        self.alias_types.get(name)
+    }
+
+    // 型注釈に書かれた名前の解決(milestone 46)。TS版`resolvedAliases`は1つの表なので、
+    // 3表を「struct → union → 素のalias」の順に引くのがTS版の1回のlookupに相当する。
+    // 名前は3表で重複しない(resolve_named_typeがどれか1つにだけ登録する)ので順序に意味は無い
+    pub fn lookup_named_type(&self, name: &str) -> Option<&Type> {
+        self.struct_types.get(name).or_else(|| self.union_types.get(name)).or_else(|| self.alias_types.get(name))
+    }
+
+    // structリテラル(`User{...}`・`Resp{kind: "ok"}`)の**名前**として使える型の解決。
+    // `lookup_named_type`と違い、素のaliasは**struct/unionを指すときだけ**通す
+    // (`type Q = P`で`Q{x: 1}`と書ける——TS版も同じ。`type Count = int`に対する
+    // `Count{...}`はTS版が`not-a-struct`診断で弾く形なので、ここでは解決せず
+    // 従来どおり殻structへフォールバックさせ、codegen側の明確なErrに委ねる)
+    pub fn lookup_constructible_type(&self, name: &str) -> Option<&Type> {
+        self.struct_types
+            .get(name)
+            .or_else(|| self.union_types.get(name))
+            .or_else(|| self.alias_types.get(name).filter(|t| matches!(t, Type::Struct { .. } | Type::Union { .. })))
+    }
+
     pub fn declare_method(&mut self, struct_name: &str, method_name: &str, ty: Type) {
         self.method_table.entry(struct_name.to_string()).or_default().insert(method_name.to_string(), ty);
     }
@@ -190,8 +225,9 @@ impl CheckerCtx {
 
 // 型注釈(構文)を内部表現の型へ変換。TS版`checker/types-resolve.ts`のresolveTypeのうち、
 // このRust移植で必要な部分を移植。ユーザー定義のtype alias解決(knot-tying、milestone 19)は
-// `ctx.struct_types`/`ctx.union_types`(resolve_type_declsが埋める——自己参照する宣言は
-// 解決中の時点でも空のplaceholderが既に登録されているため、ここでそのまま見つかる)を引き、
+// `lookup_named_type`——`ctx.struct_types`/`ctx.union_types`/`ctx.alias_types`の3表
+// (resolve_type_declsが埋める。struct/unionは自己参照する宣言でも解決中の時点で空の
+// placeholderが既に登録されているため、ここでそのまま見つかる。素のaliasはmilestone 46)を引き、
 // それでも無ければ名前だけを覚えた空フィールドのstruct型として素通しする(未宣言の型名の
 // フォールバック)。この関数自体は読み取り専用(&CheckerCtx)のまま——`resolve_type_decls`
 // 側が呼び出し前に依存する型を先に解決しておく(`resolve_named_type`参照)
@@ -224,9 +260,11 @@ pub fn resolve_type_node(ctx: &CheckerCtx, node: &TypeNode) -> Type {
             "error" => ERROR,
             "none" => NONE,
             "closed" => types::CLOSED,
-            // union型alias(`type Status = "active" | "banned"`、milestone 7)はstruct_typesに
-            // 無ければunion_typesも試す。どちらにも無ければ従来通り殻structへフォールバック
-            _ => ctx.lookup_struct(name).or_else(|| ctx.lookup_union(name)).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
+            // union型alias(`type Status = "active" | "banned"`、milestone 7)と
+            // 素のalias(`type Count = int`、milestone 46)もstruct_typesと同じ経路で引く
+            // (`lookup_named_type`が3表を順に見る)。どれにも無ければ従来通り殻structへ
+            // フォールバック——未宣言の型名は診断を出さずに素通しする、というこのリゾルバの既定方針
+            _ => ctx.lookup_named_type(name).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
         },
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_node(ctx, elem))),
         TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node(ctx, elem))),
@@ -249,8 +287,9 @@ pub fn resolve_return_type(ctx: &CheckerCtx, ret: &Option<TypeNode>) -> Type {
     ret.as_ref().map(|r| resolve_type_node(ctx, r)).unwrap_or(VOID)
 }
 
-// トップレベルのtype宣言(struct・union型alias)をすべて`ctx.struct_types`/`ctx.union_types`
-// へ解決する。milestone 19: TS版`resolveAlias`(`src/checker/types-resolve.ts:109-192`)と
+// トップレベルのtype宣言をすべてレジストリへ解決する——struct宣言は`ctx.struct_types`、
+// union型aliasは`ctx.union_types`、**素のalias**(`type Count = int`、milestone 46)は
+// `ctx.alias_types`。milestone 19: TS版`resolveAlias`(`src/checker/types-resolve.ts:109-192`)と
 // 同じ「名前ごとにオンデマンド+memo化で再帰的に解決する」方式へ全面書き換え——以前の
 // 「DFSで循環を問答無用で拒否 → 固定点反復」方式(自己参照を一律非対応にしていた)を廃止した。
 // `Type::Struct.fields`/`Type::Union`の中身がRc<OnceCell<_>>で共有可能になったため
@@ -261,20 +300,42 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
     // json struct(milestone 9)もTS版と同じく普通のstructとして解決する——`is_json`は
     // decode<X>自動生成(json_decode.rs)の対象を決めるだけのフラグで、struct自体の
     // 型解決(構築・フィールドアクセス)には一切影響しない
-    let type_decls: Vec<&TypeDecl> = types.iter().filter(|t| matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. })).collect();
-    let decls: HashMap<&str, &TypeDecl> = type_decls.iter().map(|d| (d.name.as_str(), *d)).collect();
+    // milestone 46: struct/unionに加えて**素のalias**(`type Count = int`)も解決する。
+    // 唯一の例外が`error type`の素のalias——TS版は本体が非struct形なら
+    // `error-type-must-be-struct`、既存の名前付き型なら`error-type-aliases-existing`で
+    // **必ず**拒否する(無名`{...}`やunion形はここではなくStructType/Unionの分岐に来る)ので、
+    // 解決してよい形が1つも無い。中途半端に登録すると「is_error_typeが立たないまま
+    // 失敗型として扱われる」というmilestone 3/8の`?`安全ガードを崩す穴になるため、
+    // 登録せずcodegen側の明確なErr(generate_packageのゲート)に委ねる
+    let type_decls: Vec<&TypeDecl> = types
+        .iter()
+        .filter(|t| matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) || !t.is_error)
+        .collect();
+    // **先勝ち(first-wins)で引く**。同名の型宣言が2つあるとき、TS版は最初の宣言だけを
+    // `typeTable`へ入れて2つ目を`already-declared`で弾く(その診断自体は未移植)。素直な
+    // `collect()`は**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」食い違いが
+    // 起きる——`type Count = int` / `type Count = string`に対して`x: Count = 1`が
+    // `cannot use int as string`という**TS版に無い誤診断**になった(milestone 46の検証で発覚。
+    // full_checker側の`alias_decls`は同じ理由で既に先勝ちにしてある)
+    let mut decls: HashMap<&str, &TypeDecl> = HashMap::new();
+    for d in &type_decls {
+        decls.entry(d.name.as_str()).or_insert(*d);
+    }
+    let mut resolving: HashSet<String> = HashSet::new();
     for decl in &type_decls {
-        resolve_named_type(ctx, &decl.name, &decls)?;
+        resolve_named_type(ctx, &decl.name, &decls, &mut resolving)?;
     }
     Ok(())
 }
 
 // 名前ひとつぶんの宣言をオンデマンドで解決する(TS版`resolveAlias`の移植)。既に
-// `ctx.struct_types`/`ctx.union_types`にあれば(解決済み、または解決中でplaceholderが
-// 登録済みのいずれか)即座に戻る——これがmemoization兼reentrancy停止になる。ローカル
+// 3表のどれか(`lookup_named_type`)にあれば(解決済み、または解決中でplaceholderが
+// 登録済みのいずれか)即座に戻る——これがmemoization兼reentrancy停止になる。ただし
+// 素のalias(milestone 46)はplaceholderを配れないので、そちらの再入は`resolving`集合で
+// 見る(下記`other`アーム)。ローカル
 // 宣言でない名前(pkg修飾/未知の名前)は対象外——`resolve_type_node`のフォールバックに任せる
-fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &TypeDecl>) -> Result<(), String> {
-    if ctx.lookup_struct(name).is_some() || ctx.lookup_union(name).is_some() {
+fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &TypeDecl>, resolving: &mut HashSet<String>) -> Result<(), String> {
+    if ctx.lookup_named_type(name).is_some() {
         return Ok(());
     }
     let Some(decl) = decls.get(name).copied() else { return Ok(()) };
@@ -292,7 +353,7 @@ fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &T
             ctx.declare_struct(name, Type::Struct { name: qualified, fields: Rc::clone(&cell), is_error_type: decl.is_error });
             let mut resolved_fields = Vec::with_capacity(fields.len());
             for f in fields {
-                ensure_deps_resolved(ctx, &f.type_node, decls)?;
+                ensure_deps_resolved(ctx, &f.type_node, decls, resolving)?;
                 resolved_fields.push(types::StructField { name: f.name.clone(), type_: resolve_type_node(ctx, &f.type_node) });
             }
             let _ = cell.set(resolved_fields);
@@ -304,7 +365,7 @@ fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &T
             let cell: Rc<OnceCell<types::UnionBody>> = Rc::new(OnceCell::new());
             ctx.declare_union(name, Type::Union { body: Rc::clone(&cell) }); // knot-tying: 先に登録
             for m in members {
-                ensure_deps_resolved(ctx, m, decls)?;
+                ensure_deps_resolved(ctx, m, decls, resolving)?;
             }
             let raw_members: Vec<Type> = members.iter().map(|m| resolve_type_node(ctx, m)).collect();
             // 「structを挟まない裸のunion同士の相互参照」チェック(TS版resolveAliasの
@@ -338,7 +399,37 @@ fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &T
             };
             let _ = cell.set(final_ub);
         }
-        _ => {}
+        // 素のalias(`type Count = int` / `type Handler = fn(int) int` / `type Q = P`、
+        // milestone 46)。TS版`resolveAlias`の最後の分岐(`resolvingAliases`で循環を見て
+        // `resolveType`するだけ)の移植。**knot-tyingは使えない**——`int`や`fn(int) int`には
+        // 後から中身を差し込める器(Rc<OnceCell>)が無いので、struct/unionのように
+        // 「空のplaceholderを先に登録」ができない。代わりに「いま解決中の名前」の集合で
+        // 再入を検出する
+        other => {
+            // 循環(`type A = A` / `type A = B` + `type B = A` / `type A = A[]`)。
+            // TS版は`type-alias-cycle`診断を出してANYを返す——**Errで走査全体を打ち切らない**
+            // ことが重要で、ここでErrにすると後続の型宣言が丸ごと未登録になり、無関係な
+            // structのリテラル検証まで無診断で素通りしてしまう(full_checker側
+            // `check_package`のコメントにある既存の限界を、新しい入力へ広げてしまう)。
+            // 診断自体は full_checker の`resolve_alias`が既に出している(milestone 43)ので、
+            // ここは型を決める役割だけを担い、TS版と同じANYを登録して先へ進む
+            if resolving.contains(name) {
+                ctx.declare_alias(name, types::ANY);
+                return Ok(());
+            }
+            resolving.insert(name.to_string());
+            // 依存の解決が失敗しても`resolving`は必ず戻す(?で早期returnすると
+            // 集合に名前が残り、無関係な後続の宣言が誤って循環扱いされる)
+            let deps = ensure_deps_resolved(ctx, other, decls, resolving);
+            resolving.remove(name);
+            deps?;
+            let resolved = resolve_type_node(ctx, other);
+            // 循環の巻き戻りで既にANYが登録されていたらそれを尊重する(TS版も
+            // 循環を検出した時点でANYに決まり、外側の解決結果で上書きしない)
+            if ctx.lookup_alias(name).is_none() {
+                ctx.declare_alias(name, resolved);
+            }
+        }
     }
     Ok(())
 }
@@ -349,11 +440,11 @@ fn resolve_named_type(ctx: &mut CheckerCtx, name: &str, decls: &HashMap<&str, &T
 // 事前ステップ——TS版`resolveType`が名前に出会うたびオンデマンドで`resolveAlias`へ
 // 再帰するのと同じ探索を、既存の`collect_referenced_names`(循環検出用に元々あった、
 // TypeNodeの全バリアントを正しく辿りpkg修飾名を除外するロジック)を再利用して行う
-fn ensure_deps_resolved(ctx: &mut CheckerCtx, node: &TypeNode, decls: &HashMap<&str, &TypeDecl>) -> Result<(), String> {
+fn ensure_deps_resolved(ctx: &mut CheckerCtx, node: &TypeNode, decls: &HashMap<&str, &TypeDecl>, resolving: &mut HashSet<String>) -> Result<(), String> {
     let mut referenced = Vec::new();
     collect_referenced_names(node, &mut referenced);
     for dep_name in referenced {
-        resolve_named_type(ctx, &dep_name, decls)?;
+        resolve_named_type(ctx, &dep_name, decls, resolving)?;
     }
     Ok(())
 }
@@ -850,7 +941,7 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // として返す(どのexampleも構築直後の式自体の型を厳密に使わないため、実害は無い。
         // §計画参照)
         Expr::StructLit { name, pkg: None, .. } => {
-            ctx.lookup_struct(name).or_else(|| ctx.lookup_union(name)).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false))
+            ctx.lookup_constructible_type(name).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false))
         }
         // フィールドアクセス。targetがstruct型でnameが宣言済みフィールドならその型を返す。
         // メソッド名(フィールドではない名前)はここでは解決しない——裸のメンバー値として
@@ -2394,6 +2485,90 @@ mod tests {
 
     fn union_decl(name: &str, members: Vec<TypeNode>) -> TypeDecl {
         TypeDecl { name: name.to_string(), node: TypeNode::Union { members, pos: pos(), multiline: false }, exported: false, is_error: false, is_json: false, pos: pos() }
+    }
+
+    // 素のalias(`type Count = int`——structでもunionでもないtype宣言、milestone 46)
+    fn alias_decl(name: &str, node: TypeNode) -> TypeDecl {
+        TypeDecl { name: name.to_string(), node, exported: false, is_error: false, is_json: false, pos: pos() }
+    }
+
+    #[test]
+    fn 素のalias型が登録されresolve_type_nodeで解決できる() {
+        let types = vec![
+            alias_decl("Count", name_type("int")),
+            alias_decl("Handler", TypeNode::FnType { params: vec![name_type("int")], ret: Some(Box::new(name_type("int"))), pos: pos() }),
+        ];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        assert!(types::type_equals(&resolve_type_node(&ctx, &name_type("Count")), &INT));
+        let handler = resolve_type_node(&ctx, &name_type("Handler"));
+        let Type::Fn { params, ret } = &handler else { panic!("expected fn type, got {}", types::type_to_string(&handler)) };
+        assert!(types::type_equals(&params[0], &INT) && types::type_equals(ret, &INT));
+    }
+
+    #[test]
+    fn 素のaliasは前方参照でも他のaliasを辿って解決できる() {
+        // Aは自分より後ろで宣言されたBを参照する(オンデマンド解決なので宣言順に依存しない)
+        let types = vec![alias_decl("A", name_type("B")), alias_decl("B", name_type("string"))];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        assert!(types::type_equals(&resolve_type_node(&ctx, &name_type("A")), &STRING));
+    }
+
+    #[test]
+    fn 素のaliasの循環はanyになり走査を打ち切らない() {
+        // `type A = A` / `type B = C` + `type C = B`。**Errにしない**のが要点——Errにすると
+        // 後続のstruct宣言まで巻き添えで未登録になり、無関係なstructのリテラル検証が
+        // 無診断で素通りしてしまう(type-alias-cycle診断自体はfull_checker側が出す)
+        let types = vec![
+            alias_decl("A", name_type("A")),
+            alias_decl("B", name_type("C")),
+            alias_decl("C", name_type("B")),
+            struct_decl("Ok", &[("n", name_type("int"))]),
+        ];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        for cyclic in ["A", "B", "C"] {
+            assert!(matches!(ctx.lookup_alias(cyclic), Some(Type::Any)), "{cyclic} should be ANY");
+        }
+        // 循環の後ろに宣言されたstructはちゃんと解決されている
+        let Some(Type::Struct { fields, .. }) = ctx.lookup_struct("Ok") else { panic!("expected struct Ok") };
+        assert_eq!(fields.get().expect("resolved").len(), 1);
+    }
+
+    #[test]
+    fn 同名の型宣言は先勝ちで解決される() {
+        // TS版は2つ目を`already-declared`で弾き、typeTableには最初の宣言だけを入れる。
+        // 後勝ちだと`x: Count = 1`が`cannot use int as string`という誤診断になる
+        let types = vec![alias_decl("Count", name_type("int")), alias_decl("Count", name_type("string"))];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        assert!(types::type_equals(&resolve_type_node(&ctx, &name_type("Count")), &INT));
+    }
+
+    #[test]
+    fn error_typeの素のaliasは登録しない() {
+        // TS版は`error-type-must-be-struct`/`error-type-aliases-existing`で必ず拒否する形。
+        // 中途半端に登録するとis_error_typeが立たないまま失敗型として扱われる穴になるので、
+        // レジストリには載せずcodegen側の明確なErrに委ねる
+        let mut decl = alias_decl("Oops", name_type("int"));
+        decl.is_error = true;
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &[decl]).unwrap();
+        assert!(ctx.lookup_alias("Oops").is_none());
+    }
+
+    #[test]
+    fn 素のaliasがstructを指すときだけstructリテラルの名前として使える() {
+        let types = vec![
+            struct_decl("P", &[("x", name_type("int"))]),
+            alias_decl("Q", name_type("P")),   // struct を指す → 構築名として使える
+            alias_decl("N", name_type("int")), // int を指す → 使えない(殻へフォールバック)
+        ];
+        let mut ctx = CheckerCtx::new();
+        resolve_type_decls(&mut ctx, &types).unwrap();
+        assert!(matches!(ctx.lookup_constructible_type("Q"), Some(Type::Struct { .. })));
+        assert!(ctx.lookup_constructible_type("N").is_none());
     }
 
     #[test]

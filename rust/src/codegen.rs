@@ -210,11 +210,19 @@ impl Codegen {
         // 〈json_decode.rs、main.rsでparse直後に済ませてある〉の対象を決めるだけで、
         // struct自体の型解決には影響しない)+ error struct宣言(milestone 3)+
         // 判別可能union型alias(`type X = A | B`、milestone 7)+ error typeのunion形式
-        // (`error type X = A | B`、milestone 8)まで
+        // (`error type X = A | B`、milestone 8)+ **素のalias**(`type Count = int`、
+        // milestone 46)まで。型aliasは実行時に何も生成しない(JSに型は無い)ので、
+        // ここでの仕事は「checkerのレジストリに載る形か」を確かめることだけ。
+        // 残る唯一の非対応が`error type`の素のalias——TS版が`error-type-must-be-struct` /
+        // `error-type-aliases-existing`で必ず拒否する形で、レジストリ側もあえて登録しない
+        // (checker.rsの`resolve_type_decls`のコメント参照)ため、ここで明確なErrにする
         let all_types: Vec<TypeDecl> = files.iter().flat_map(|f| f.program.types.iter().cloned()).collect();
         for t in &all_types {
-            if !matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) {
-                return Err(format!("codegen: only plain struct declarations and union type aliases are supported so far (type '{}' at {}:{})", t.name, t.pos.line, t.pos.col));
+            if t.is_error && !matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) {
+                return Err(format!(
+                    "codegen: error type '{}' must be struct-shaped — use an inline struct shape ({{ ... }}) or a union of them ({}:{})",
+                    t.name, t.pos.line, t.pos.col
+                ));
             }
         }
         checker::resolve_type_decls(&mut self.ctx, &all_types)?;
@@ -272,7 +280,10 @@ impl Codegen {
             let resolved = match &t.node {
                 TypeNode::StructType { .. } => self.ctx.lookup_struct(&t.name).cloned(),
                 TypeNode::Union { .. } => self.ctx.lookup_union(&t.name).cloned(),
-                _ => None,
+                // milestone 46: 素のalias(`export type Count = int`)も同じ`symbols.types`へ
+                // 登録する——union型aliasを登録し忘れていたmilestone 8のバグと同じ形の穴
+                // (登録漏れは`pkg.Name`注釈が殻structへ静かにフォールバックする)
+                _ => self.ctx.lookup_alias(&t.name).cloned(),
             };
             if let Some(ty) = resolved {
                 symbols.types.insert(t.name.clone(), ty);
@@ -1119,12 +1130,7 @@ impl Codegen {
                     // pkg無し(milestone 12): 未宣言の型名は既存のresolve_type_node/infer_exprと
                     // 同じ「空フィールドの殻structへフォールバック」——それ自体は落とさず、
                     // フィールド検証の方で自然にunknown-field/missing-fieldsとして顕在化させる
-                    None => self
-                        .ctx
-                        .lookup_struct(name)
-                        .or_else(|| self.ctx.lookup_union(name))
-                        .cloned()
-                        .unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
+                    None => self.ctx.lookup_constructible_type(name).cloned().unwrap_or_else(|| types::struct_ty(name.clone(), vec![], false)),
                 };
                 // milestone 16: pkg修飾側もフィールド名/型/判別可能unionのdisambiguationを
                 // 実際に検証するようにした(以前はmilestone 8の"all"ヒューリスティック
@@ -2870,6 +2876,32 @@ mod tests {
     fn union型aliasの名前でstruct_literalを構築できる() {
         let js = gen_body("type Resp = { kind: \"ok\" } | { kind: \"err\" }\nfn main() {\n  r := Resp{kind: \"ok\"}\n  print(r)\n}");
         assert!(js.contains("const r = ({ kind: \"ok\" });"), "got: {js}");
+    }
+
+    #[test]
+    fn 素のalias宣言はコード生成を止めない() {
+        // milestone 46以前は「structでもunionでもないtype宣言」を丸ごとErrにしていたため、
+        // `type Count = int`が1つあるだけでプログラム全体が実行できなかった。
+        // 型は実行時に消えるので、生成JSは素のaliasが無いときと同じ形になる
+        let js = gen_body("type Count = int\nfn main() {\n  c: Count = 1\n  print(c + 1)\n}");
+        // `__iarith`が選ばれる = `Count`がintとして解決できている(殻structならANYへ落ちる)
+        assert!(js.contains("__iarith"), "got: {js}");
+    }
+
+    #[test]
+    fn 素のaliasがstructを指すならその名前で構築できる() {
+        let js = gen_body("struct P {\n  x: int\n}\ntype Q = P\nfn main() {\n  q := Q{x: 1}\n  print(q)\n}");
+        assert!(js.contains("const q = ({ x: 1 });"), "got: {js}");
+    }
+
+    #[test]
+    fn error_typeの素のaliasは明確なerrになる() {
+        // TS版が`error-type-must-be-struct`/`error-type-aliases-existing`で必ず拒否する形。
+        // レジストリにも載せない(checker.rsのresolve_type_decls参照)ので、ここで止める
+        for src in ["error type Oops = int\nfn main() {\n  print(1)\n}", "error struct Bad {\n  msg: string\n}\nerror type E = Bad\nfn main() {\n  print(1)\n}"] {
+            let err = gen_js(src).unwrap_err();
+            assert!(err.contains("must be struct-shaped"), "got: {err}");
+        }
     }
 
     #[test]

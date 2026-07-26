@@ -204,7 +204,22 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
                 // クラッシュと同じ形)
                 _ => match tc.lookup_union(name) {
                     Some(t) if safe_to_compare(t) => t.clone(),
-                    _ => ANY,
+                    // **milestone 46からは素のalias**(`type Count = int`)も解決する。
+                    // aliasの中身は任意の型なので、unionと同じ`safe_to_compare`(未解決の
+                    // union bodyを配らない)に加えて`is_fully_modeled`も要求する——
+                    // 中にANYが潜む型(`type M = map<string, Foo|none>`等)をレジストリ側の
+                    // 完全解決された宣言型と突き合わせると誤検知になる、というこの移植で
+                    // 何度も踏んだ穴への門番(`assignable_checked`と同じ考え方)。
+                    // 未登録のstruct名(`type C = Bogus`が解決する殻struct)もここで落とす——
+                    // 素のalias以外の経路では殻structが型注釈から出てくることは無く、
+                    // その前提の上に`has_unregistered_struct`等のガードが載っているため
+                    _ => match tc.lookup_alias(name) {
+                        // 中身がunionなら上のunion分岐と同じ基準にそろえる(aliasを1枚
+                        // 挟んだだけで扱いが変わらないように)
+                        Some(t @ Type::Union { .. }) if safe_to_compare(t) => t.clone(),
+                        Some(t) if safe_to_compare(t) && is_fully_modeled(t) && !has_unregistered_struct(tc, t) => t.clone(),
+                        _ => ANY,
+                    },
                 },
             },
         },
@@ -246,15 +261,28 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
 // **catch-allを復活させないこと**: 新しい式をASTへ足したらここがコンパイルエラーになり、
 // 「検査するか、しないなら理由を書いてANYを返す」という判断を必ず強制できる
 // (黙って未検査のまま出荷される事故が、この移植で最も繰り返した失敗だった)
+// その型が「**宣言そのものが存在しない**型名」の殻structか(milestone 46)。TS版は
+// この形をANYへ解決する(`resolveAlias`が`unknown-type`を出して`ANY`を返す)ので、
+// 「TS版ならどんな値でも代入できる位置」の目印になる。`has_unregistered_struct`との違いは
+// 2つ——(1)入れ子を見ず型そのものだけを見る(`Bogus[]`はTS版でも`ANY[]`であって
+// 何でも入るわけではない)、(2)レジストリではなく`declared_types`で判定する
+// (宣言はあるが解決に失敗して殻になっただけの型は、TS版側では本物の型なので除く)。
+// pkg修飾名(`mathutil.Point`)も除く——TS版はレジストリから本物の型を引ける
+fn is_undeclared_shell_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
+    matches!(t, Type::Struct { name, .. }
+        if name != types::ANONYMOUS_STRUCT_NAME && !name.contains('.') && !ctx.declared_types.contains(name))
+}
+
 // 型の中に「レジストリに存在しないstruct名」が含まれるか。checker.rsのリゾルバは
 // 未知の型名・pkg修飾型を殻struct(フィールド0個)へフォールバックさせるので、その型を
 // full_checker側の値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)は
-// レジストリに載らないので除外する
-fn has_unregistered_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
-    fn go(ctx: &FullCheckerCtx, t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
+// レジストリに載らないので除外する。**入れ子まで再帰的に見る**のが上の
+// `is_undeclared_shell_struct`との違い(そちらは型そのものだけを見る)
+fn has_unregistered_struct(ctx: &crate::checker::CheckerCtx, t: &Type) -> bool {
+    fn go(ctx: &crate::checker::CheckerCtx, t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
         match t {
             Type::Struct { name, fields, .. } => {
-                if name != types::ANONYMOUS_STRUCT_NAME && ctx.type_ctx.lookup_struct(name).is_none() {
+                if name != types::ANONYMOUS_STRUCT_NAME && ctx.lookup_struct(name).is_none() {
                     return true;
                 }
                 let ptr = Rc::as_ptr(fields);
@@ -725,7 +753,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // 未知の型名はANYへ(matchのパターンと同じ理由——TS版の`resolveType`に揃える)
             let target_ty = if unknown_type_name(ctx, target) { ANY } else { crate::checker::resolve_type_node(&ctx.type_ctx, target) };
             // 殻structが残る経路(pkg修飾など)と未解決unionは判定しない(検出漏れ側)
-            if !has_unregistered_struct(ctx, &target_ty) && safe_to_compare(&target_ty) && safe_to_compare(&t) {
+            if !has_unregistered_struct(&ctx.type_ctx, &target_ty) && safe_to_compare(&target_ty) && safe_to_compare(&t) {
                 match &t {
                     Type::Union { body } => {
                         let members = body.get().expect("safe_to_compareで確認済み").members.clone();
@@ -933,9 +961,13 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     // (union構築なら**絞り込んだメンバーではなくunion自身**——TS版と同じ。match/isで
     // 絞り込むまで常にunionとして扱うことで、mut再代入やwideningを新規に考えずに済む)、
     // `display_name`は診断に出す名前(union構築なら書かれたunion名。メンバーは無名なので)
-    let (member_ty, result_ty, display_name) = match ctx.type_ctx.lookup_struct(name) {
+    // milestone 46: `lookup_constructible_type`は素のaliasも(**struct/unionを指すときだけ**)
+    // 引く——`type Q = P`と書いて`Q{x: 1}`で構築する形はTS版が通す。`type Count = int`に
+    // 対する`Count{...}`はTS版が`not-a-struct`で弾く形だが、その診断自体が未移植なので
+    // 従来どおりANY(検出漏れ側)のままにする
+    let (member_ty, result_ty, display_name) = match ctx.type_ctx.lookup_constructible_type(name) {
         Some(t @ Type::Struct { name: sname, .. }) => (t.clone(), t.clone(), sname.clone()),
-        _ => match ctx.type_ctx.lookup_union(name).cloned() {
+        _ => match ctx.type_ctx.lookup_constructible_type(name).cloned().filter(|t| matches!(t, Type::Union { .. })) {
             Some(union_ty) => match resolve_union_lit_member(ctx, &union_ty, name, fields, &field_types, pos) {
                 Some(member) => (member, union_ty, name.to_string()),
                 None => return ANY, // 絞り込み失敗(診断は出し済み)or struct memberが無いunion
@@ -976,7 +1008,7 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
                 // フォールバックさせるので、そのまま照合すると`struct Box { n: Bogus }`に対する
                 // `Box{n: 1}`が`cannot use int as Bogus`という**TS版に無い誤検知**になる
                 // (TS版は未知の型をANYへ解決するので照合自体が起きない。実装中に発覚)
-                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(ctx, &decl.type_) && !assignable_checked(ty, &decl.type_) {
+                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(&ctx.type_ctx, &decl.type_) && !assignable_checked(ty, &decl.type_) {
                     ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
                 }
             }
@@ -1087,7 +1119,22 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
         candidates.retain(|m| {
             let Some(mf) = struct_fields_of(m) else { return false };
             fields.iter().zip(field_types).all(|(f, ty)| match mf.iter().find(|d| d.name == f.name) {
-                Some(d) if !is_checkable_field_type(&d.type_) => {
+                // **未宣言の型名のフィールドは候補を減らさない**(milestone 46)。
+                // `struct A { cb: Bogus }`のような未宣言の型名はレジストリでは「空フィールドの
+                // 殻struct」になるので、突き合わせると必ず不一致になり候補を全滅させて
+                // `discriminated-union-no-match`という**TS版と違うコード**になっていた。
+                // TS版は未宣言の型名を(`unknown-type`を出したうえで)**ANYへ**解決するので
+                // その位置の照合は必ず通る——つまりTS版でも候補は絶対に減らない。だから
+                // `undecidable`にはせず候補を残し、`ambiguous`まで到達させてよい。
+                // 判定に`declared_types`(レジストリの中身とは独立に集めた宣言名の集合)を
+                // 使うのが要点: 「宣言はあるが解決に失敗して殻になった」型はTS版側では
+                // 本物の型なので、それは下の`undecidable`側(黙って諦める)に落とす
+                Some(d) if is_undeclared_shell_struct(ctx, &d.type_) => true,
+                // 縮退する型(fn/union等)や、**入れ子に**未登録structを含む型
+                // (`cb: Bogus[]`——TS版では`ANY[]`であって「何でも入る」とは限らない)は
+                // 突き合わせられない。TS版なら一意に絞れる可能性が残るので、ambiguousと
+                // 決めつけずに黙って諦める(誤検知ではなく検出漏れ側に倒す)
+                Some(d) if !is_checkable_field_type(&d.type_) || has_unregistered_struct(&ctx.type_ctx, &d.type_) => {
                     undecidable = true;
                     true
                 }
@@ -2068,7 +2115,7 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
                     let pt = if unknown_type_name(ctx, node) { ANY } else { crate::checker::resolve_type_node(&ctx.type_ctx, node) };
                     // 殻structが残る経路(pkg修飾型・struct形パターンの中の未知の型名)は
                     // 引き続き判定不能として飛ばす——上記の「何にでも一致する」問題を避けるため
-                    if has_unregistered_struct(ctx, &pt) {
+                    if has_unregistered_struct(&ctx.type_ctx, &pt) {
                         undecidable = true;
                         undecidable_any = true;
                         continue;
@@ -2946,6 +2993,48 @@ mod tests {
         }
         // ANYは免除する(full_checkerが型を諦めた先はANYなので、そこで出すと誤検知)
         assert_eq!(check("fn main() {\n    print(str(unknownThing()))\n}\n").iter().filter(|d| d.code == DiagnosticCode::NotCallable).count(), 0);
+    }
+
+    #[test]
+    fn 素のalias型が型注釈として突き合わせに効く() {
+        // milestone 46以前は`type Count = int`がレジストリに載らず、参照側が
+        // 「空フィールドの殻struct」へフォールバックしていたため全部素通りしていた
+        for (src, code) in [
+            ("type Count = int\n\nfn main() {\n    x: Count = \"s\"\n    print(x)\n}\n", DiagnosticCode::TypeMismatch),
+            ("type Count = int\n\nstruct Box {\n    n: Count\n}\n\nfn main() {\n    print(Box{n: \"s\"})\n}\n", DiagnosticCode::TypeMismatch),
+            ("type Names = string[]\n\nfn take(ns: Names) int {\n    return len(ns)\n}\n\nfn main() {\n    print(take(42))\n}\n", DiagnosticCode::TypeMismatch),
+            ("type Count = int\n\nfn main() {\n    c: Count = 1\n    print(c())\n}\n", DiagnosticCode::NotCallable),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+    }
+
+    #[test]
+    fn 素のalias経由の関数型フィールドも呼び出しが照合される() {
+        let src = "type Handler = fn(int) int\n\nstruct H {\n    cb: Handler\n}\n\nfn real(x: int) int {\n    return x\n}\n\nfn main() {\n    h := H{cb: real}\n    print(h.cb(\"s\"))\n}\n";
+        let diags = check(src);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn 素のalias経由のフィールドは算術で誤診断しない() {
+        // milestone 46以前は`b.n`の型が殻struct`Count`になり、TS版が通す式に対して
+        // Rust版だけが`invalid operation: Count + int`という**偽陽性**を出していた
+        let src = "type Count = int\n\nstruct Box {\n    n: Count\n}\n\nfn main() {\n    b := Box{n: 1}\n    print(b.n + 1)\n}\n";
+        assert!(check(src).is_empty(), "{:?}", check(src));
+    }
+
+    #[test]
+    fn 未宣言の型名のフィールドを持つunionはambiguousになる() {
+        // TS版は未宣言の型名をANYへ解決するので候補が減らず`discriminated-union-ambiguous`。
+        // Rust版は殻structと突き合わせて候補を全滅させ、**違うコード**
+        // (`discriminated-union-no-match`)を出していた
+        let src = "struct A {\n    cb: Bogus\n}\n\nstruct B {\n    cb: Bogus\n}\n\ntype AB = A | B\n\nfn main() {\n    print(AB{cb: 1})\n}\n";
+        let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![DiagnosticCode::UnknownType, DiagnosticCode::UnknownType, DiagnosticCode::DiscriminatedUnionAmbiguous], "{codes:?}");
     }
 
     #[test]

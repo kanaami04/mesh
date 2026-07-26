@@ -1,0 +1,53 @@
+// 型alias: 既存の型に別名を付ける
+// struct/unionの宣言だけでなく、素の型(スカラー・配列・map・関数型)にも名前を付けられる
+type UserId = int
+
+type Tags = string[]
+
+type Scores = map<string, int>
+
+type Transform = fn(int) int
+
+struct User {
+	id: UserId
+	tags: Tags
+}
+
+// aliasは「別名」であって新しい型ではない —— UserIdはintとして扱える
+fn describe(u: User) string {
+	return "user #" + str(u.id) + " (" + str(len(u.tags)) + " tags)"
+}
+
+fn apply(n: UserId, f: Transform) UserId {
+	return f(n)
+}
+
+fn double(n: int) int {
+	return n * 2
+}
+
+fn main() {
+	u := User{id: 7, tags: ["admin", "beta"]}
+	print(describe(u))
+	// aliasを付けた型どうし・元の型との間で自由に行き来できる
+	print(apply(u.id, double))
+	print(apply(3, fn(n: int) int { return n + 1 }))
+	scores: Scores = map<string, int>{"alice": 30, "bob": 25}
+	print(len(scores))
+	print(sum([1, 2, 3]))
+	// aliasの先がstructなら、そのalias名で構築もできる
+	a := Account{id: 9, tags: []}
+	print(describe(a))
+}
+
+type Account = User
+
+type Numbers = int[]
+
+fn sum(ns: Numbers) int {
+	mut total := 0
+	for _, n := range ns {
+		total = total + n
+	}
+	return total
+}
