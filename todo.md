@@ -3528,6 +3528,51 @@
                 25ファイルがTS版と完全一致**(残り1件も未移植の`already-declared`が
                 足りないだけで、新しく出した`not-a-struct`自体はTS版と一致)。
                 examples全23本の実行も回帰なし。テスト589件維持、clippyクリーン。
+        - [x] **milestone 48: 型宣言の名前衝突(`already-declared` / `builtin-type-redeclared` /
+              `name-conflicts-with-package`)**
+              ✅ 2026-07-26実装。診断コード60→62種(`already-declared`はローカル変数用に
+              既にあったので、型宣言側の適用を追加した形)。milestone 43のcode reviewで
+              未移植と分かって以来、検証スイープで**一番よく当たる検出漏れ**だった。
+              - **TS版`checker/modules.ts`のcheckPackage冒頭がそのまま移植元**。組み込み型名 →
+                importエイリアスと衝突 → 既に宣言済み、の順に判定し、どれかに当たったら
+                その宣言は**登録しない**(TS版の`continue`)。import aliasの集合は型登録より
+                前に要るので、Rust版でも先に集めるよう順序を変えた(TS版も
+                `createCheckerCtx`へ渡す前に作っている)。
+              - **実測しないと外す挙動が2つ**: (1)**弾かれた宣言は本体も解決しない**——
+                TS版の2周目は`typeTable.get(td.name) === td.node`で登録済みの宣言だけを
+                解決するので、`type int = Bogus`は`builtin-type-redeclared`だけで
+                `unknown-type`は出ない。(2)**報告順が位置順ではない**——名前衝突は全ファイルを
+                1周してから本体解決へ進むので、`type A = Bogus` / `type A = int`では
+                2行目のalready-declaredが1行目のunknown-typeより先に出る。
+              - `already-declared`は**登録済みの名前**と比べる。同名が3つあれば2件報告し、
+                組み込み名/エイリアス衝突で弾かれた宣言は登録されないので、同名が2つなら
+                2回とも同じ診断が出る(TS版と同じ)。
+              - **値側(fn/const/ローカル変数)の`name-conflicts-with-package`も同時に入れた**。
+                そこはRust版が`already-declared`という**誤ったコード**を出していた箇所で
+                (milestone 30以来の既知の限界。import aliasは`declare`を通さず直接
+                `scopes[0]`へ入れているため、重複チェックに引っかかっていた)、**検出漏れより
+                悪い分類**なので同じ回で塞いだ。TS版`declareBinding`と同じく
+                already-declaredより前に判定する。TS版が続けて出す`package-as-value`
+                (`lib`を値として参照する形)は別診断で未移植——そのぶんの検出漏れは残る。
+              - `BUILTIN_TYPE_NAMES`は**`any`を含む9個**(H-1で型としては撤去されたが名前は
+                予約のまま)。`none`/`closed`はキーワードなのでパーサーが先に構文エラーにする
+                ——両実装で実測して同じことを確認済み。
+              - **既存テスト1件の期待値を更新**(milestone 46の「同名の型宣言があっても最初の
+                宣言で解決する」)。「その診断自体は未移植=検出漏れ側」という前提で書かれて
+                いたので、3ケースすべてにalready-declaredが加わる。**TS版へ問い合わせて
+                位置・順序まで一致を確認してから**書き換えた(handoffの検証手順どおり)。
+              - **検証**(TS版と突き合わせ): プローブ15本(組み込み名4種・重複2種・
+                import alias衝突・import先パッケージの複数ファイル・`mesh test`経路・
+                弾かれた宣言の本体・報告順3種)+「壊れた入力」定型セット7本
+                (自己参照の組み込み名・同名3連・循環alias+重複・`error type`重複・
+                `json struct`との衝突・組み込み名2連・alias衝突2連)。
+                全`.mesh`計133ファイルで差は8件のみで、**いずれも未移植診断による検出漏れ**
+                (`error-type-*`×2・`unknown-type`・`type-alias-cycle`後の走査打ち切り・
+                unionフィールドの`narrow-required`・`json-struct-missing-import`の書式差
+                〈mainの時点から存在する既存の別問題〉・`package-as-value`×2)。
+                **Rust側だけに出る診断は0件**。`git worktree`でmainのバイナリと比較すると
+                **20ファイルの挙動が変化し、全てTS版と一致**。examples全23本の実行も回帰なし。
+                テスト594→598件(+4)、clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3535,9 +3580,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 47まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 48まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 60種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 62種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。
