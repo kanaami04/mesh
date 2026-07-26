@@ -26,15 +26,22 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 2. **`builtin-as-value`**(`print(print)`のように組み込み関数を値として参照する形)——
    milestone 50のcode reviewで未移植と判明。`is_builtin`の分岐に1行足すだけなので、
    軽い回に単独で入れられる
-3. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
+3. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側):
+   (a)`has_unregistered_struct`が**ローカルの`struct_types`しか見ない**ため、
+   フィールドの宣言型が他パッケージのstructだと値の型検査が丸ごと免除される
+   (`lib2.Container{item: 5}`をTS版は弾くがRust版は素通り)——ここが一番効く。
+   (b)pkg修飾**union**のstructリテラル(`lib.Shape{...}`)は未モデル化で
+   `discriminated-union-*`が出ない。(c)`http.listen`のように**戻り値がunionの関数型**は
+   `is_fully_modeled`でシグネチャ全体がANYへ落ち、コールバックの形が検査されない
+4. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
    `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
    `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
    波及するため独立したマイルストーンにするのが妥当
-4. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
+5. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
    — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
    無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
-5. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-6. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+6. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+7. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -59,11 +66,14 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    「その診断は未移植」「pkg修飾は対象外」等と言ったまま残る)。出荷前に、今回移植した
    診断コード名・機能名で `grep -rn "<名前>" rust/src docs todo.md` を回し、
    **「未移植」「対象外」「次段階」「候補」**と書かれた行を1件ずつ潰す。
-   **診断名だけでは足りない**——その回で**撤去した仕組みの名前**(識別子・フィールド名)でも
-   grepする。milestone 50は`scopes[0]`への登録を撤去したのに診断名でしかgrepせず、
-   「import aliasは直接scopes[0]へ入れている」と現在形で書いたコメントを2箇所残した
-   (code reviewで発覚)。`docs/handoff.md`の「既知の限界」リストは特に取り消し線の
-   付け忘れが多い。
+   **3種類の検索語を回す**: (a)移植した診断名、(b)その回で**撤去した仕組みの名前**
+   (識別子・フィールド名)、(c)その回で**効くようになった機能の名前**——(c)が抜けると
+   「〜は効かない」「〜はANYへ潰れる」と書いた**能力の説明**が残る(milestone 51で7件残し、
+   うち4件は`resolve_type_ann`のように**変更した関数自身のdocコメント**だった)。
+   **変更した関数のdocコメントは必ず読み直す**のが一番取りこぼしにくい。
+   (b)の実例: milestone 50は`scopes[0]`への登録を撤去したのに診断名でしかgrepせず、
+   「import aliasは直接scopes[0]へ入れている」と現在形で書いたコメントを2箇所残した。
+   `docs/handoff.md`の「既知の限界」リストは特に取り消し線の付け忘れが多い。
    あわせて**新しく`pub(crate)`にした関数**には利用者が増えた旨を書く(2箇所に
    書かれた定義がずれる、というこの移植で何度も踏んだ形の予防)
 3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
@@ -1145,15 +1155,13 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      副産物として`safe_to_compare`のunion再帰ガード漏れ(スタックオーバーフロー)も修正。
      詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
-     structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化・
-     **pkg修飾シンボルの型のモデル化**(milestone 49・50は診断だけで型はANYのまま——
-     `lib.add(1)`の引数照合が効かない)。
+     structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
+     unionフィールドのモデル化。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
-     1つの名前空間で検査する`check_package`。**パッケージ跨ぎ〈pkg修飾の中身〉の診断も
-     milestone 49〈型参照側〉・50〈呼び出し側〉で移植済み**——残るのはpkg修飾シンボルの
-     型のモデル化だけ)
+     1つの名前空間で検査する`check_package`。**パッケージ跨ぎは診断も型のモデル化も
+     milestone 49〈型参照側〉・50〈呼び出し側〉・51〈型〉で完了**)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)~~import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出す~~
        → **milestone 48で解消**(型宣言側とセットで`declare`にも同じ分岐を入れた。
@@ -1169,8 +1177,8 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
        (6)~~pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外~~
        → **milestone 49で解消**(`unknown-package`/`unknown-package-type`/`not-exported`を
-       型参照側だけ移植。**pkg修飾の「呼び出し」側と型のモデル化は引き続き未対応**——
-       `lib.f()`の中身の検査とpkg修飾型のフィールド検証は効かない)、
+       型参照側を移植。**呼び出し側はmilestone 50、型のモデル化はmilestone 51で解消**——
+       `lib.f()`の引数照合も`lib.Point{...}`のフィールド検証も効く)、
        (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
        `not-callable`も移植した)、
        (8)~~素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない~~
@@ -1245,6 +1253,10 @@ todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+
      - **過去PRコメントを読ませるときは対象PRを列挙する**。「full_checker.rsを触った過去PRを
        探して」と投げると`gh pr list`から数十件を舐めて終わらない。「#67 #69 #73 #74 #75 だけ、
        各PRに`gh pr view <n> --json comments`を1回ずつ」と縛ったら**2分半で完了**した
+     - **確認項目を列挙しすぎない**(milestone 51で発生)。「共有ctxのリーク・`begin_package`の
+       順序・再帰ガード・キーの作り方…」と7項目を挙げたら、1項目ずつ実機で追う作業になって
+       終わらなくなった。**観点は3つまで**に絞り、残りは偽陽性狩り(実機で総当たり)に任せる
+       ——実際、挙げた観点の大半はそちらが実機で検証していた
      - **件数やclippyの検証に`git worktree`+フルビルドを使わせない**。
        「PR本文の主張を鵜呑みにせず検証せよ」とだけ書くと、base commitと比較するために
        worktreeを作ってフルビルド(Rustで数十秒)を何度も回す。**現在のツリーで

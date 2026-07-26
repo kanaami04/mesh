@@ -36,10 +36,11 @@
 // フォールスルー。下記`check_if`)と`or`式の走査を追加した——これが無いと、unionを返すように
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
-// 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
+// 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・型パラメータ。
 // match式の中身・`or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は
-// 引き続き対象外(**パッケージ跨ぎはmilestone 49〈型参照側〉・50〈呼び出し側〉で移植済み**
-// ——残るのはpkg修飾シンボルの**型**のモデル化だけで、`lib.add(1)`の引数照合は効かない。
+// 引き続き対象外(**パッケージ跨ぎはmilestone 49〈型参照側〉・50〈呼び出し側〉・
+// 51〈型のモデル化〉で移植済み**——`lib.add(1)`の引数照合も`lib.Point{...}`のフィールド
+// 検証も効く。
 // **非structへのメンバーアクセス〈not-a-struct〉と
 // union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
@@ -197,9 +198,9 @@ impl FullCheckerCtx {
 }
 
 // 型注釈を解決する。スカラー(int/float/...)+ milestone 29から**名前付きstruct**
-// (type_ctxのレジストリ経由)を解決する。**配列/map/channel/union/関数型/pkg修飾型は
-// 引き続きANY**(milestone 33で配列、milestone 34でmap/channelがこの縮退から卒業した
-// ——下記Array/MapType/Chanアーム。残るのはunion/関数型/pkg修飾型/型パラメータ)。
+// (type_ctxのレジストリ経由)を解決する。milestone 33で配列、34でmap/channel、
+// **51でpkg修飾型**(exportされ完全にモデル化できているものだけ)がANY縮退から卒業した。
+// **残る縮退はunion/関数型/型パラメータ**。
 // 縮退させた型はレジストリ側の完全解決された型と突き合わせてはいけない(`is_fully_modeled`
 // 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
@@ -1038,7 +1039,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
 }
 
 // struct-litのフィールド値の型検査を行ってよい宣言型か。full_checkerが縮退させる型
-// (union/関数型/pkg修飾型/型パラメータ、およびそれらを内側に含むコレクション
+// (union/関数型/型パラメータ、およびそれらを内側に含むコレクション
 // ——resolve_type_annがANY相当にする)は、
 // レジストリ側(checker.rsが完全解決)の型と突き合わせると誤検知するので検査しない。
 // スカラー・struct・literal・none/closed等はfull_checker側の値の型が信頼できるので検査する
@@ -2705,9 +2706,9 @@ fn block_always_terminates(block: &Block) -> bool {
 
 // 関数のシグネチャ型(Type::Fn)。milestone 26でcheck_programがトップレベル関数を
 // この型で登録するようになり、呼び出し側の個数・型照合(argument-count/type-mismatch)が
-// 効くようになった。params/retはスカラースコープで解決する(union/struct/配列/pkg修飾型は
-// resolve_type_annでANYへ潰れる(struct型はmilestone 29から解決される)——個数照合は
-// 常に効き、型照合はスカラー+structで効く)。
+// 効くようになった。params/retは`resolve_type_ann`で解決する(union/関数型/型パラメータは
+// ANYへ潰れる。structはmilestone 29、配列/map/channelは33/34、**pkg修飾型は51**から
+// 解決される——個数照合は常に効き、型照合は解決できた型で効く)。
 // TS版`checkPackage`もトップレベル関数を通常のdeclareBindingでFn型として登録する
 fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
     let params = f.params.iter().map(|p| resolve_type_ann(tc, &p.type_node)).collect();
