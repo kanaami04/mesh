@@ -317,5 +317,48 @@ else
 fi
 rm -rf "$mockdir"
 
+# ---------------------------------------------------------------------------
+# 5. git worktree の注意喚起フック（remind-worktree.sh）
+# ---------------------------------------------------------------------------
+
+# $1 = 期待（match / nomatch）, $2 = 説明, $3 = コマンド文字列
+check_wt() {
+  local want=$1 desc=$2 cmd=$3 got
+  if hook_is_worktree_add "$cmd"; then got=match; else got=nomatch; fi
+  [ "$got" = "$want" ] && ok || ng "$(printf '%s\n  期待=%s 実際=%s\n  入力: %s' "$desc" "$want" "$got" "$cmd")"
+}
+
+check_wt match   '素のworktree add'      'git worktree add /tmp/base HEAD~1'
+check_wt match   '先行するcd'            'cd /repo && git worktree add /tmp/base main'
+check_wt match   'セミコロン区切り'      'echo start; git worktree add /tmp/base main'
+check_wt match   'サブシェル'            '(git worktree add /tmp/base main)'
+check_wt match   '余分な空白'            'git   worktree   add   /tmp/base'
+check_wt match   'gitのグローバルオプション' 'git -C /repo worktree add /tmp/base main'
+check_wt match   '環境変数の前置'        'GIT_DIR=x git worktree add /tmp/base'
+check_wt match   'env 経由'              'env git worktree add /tmp/base'
+# 発火してはいけない形（後片付け・確認のコマンドを止めない）
+check_wt nomatch 'worktree list'         'git worktree list'
+check_wt nomatch 'worktree remove'       'git worktree remove /tmp/base'
+check_wt nomatch 'worktree prune'        'git worktree prune'
+check_wt nomatch '文中の言及'            'echo "git worktree add をこれから使う"'
+check_wt nomatch '別コマンドのadd'       'git add -A'
+check_wt nomatch 'オプション値の中の言及' 'git commit -m "worktree add をやめた"'
+check_wt match   'gitの-cオプション'     'git -c core.pager=cat worktree add /tmp/base'
+check_wt nomatch '無関係なコマンド'      'cargo build'
+
+# 実際にフックを起動したときの応答を確認する（ask 応答で、理由に後片付けが含まれること）
+out=$(printf '{"tool_input":{"command":"git worktree add /tmp/base main"}}' | /bin/bash ./remind-worktree.sh 2>/dev/null)
+if printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "ask"' >/dev/null 2>&1; then ok; else ng "$(printf 'worktree addにはask応答を返すべき\n  出力: %s' "$out")"; fi
+if printf '%s' "$out" | jq -re '.hookSpecificOutput.permissionDecisionReason' 2>/dev/null | grep -q 'worktree remove'; then ok; else ng "$(printf '理由に後片付けの手順(worktree remove)を含めるべき\n  出力: %s' "$out")"; fi
+# 対象外のコマンドでは何も出さない（素通り）
+out=$(printf '{"tool_input":{"command":"git worktree list"}}' | /bin/bash ./remind-worktree.sh 2>/dev/null)
+[ -z "$out" ] && ok || ng "$(printf 'worktree list では素通りすべき\n  出力: %s' "$out")"
+# **fail-open**: 依存ツールが無くても作成を止めない（enforce-code-review.sh とは逆の方針）
+emptydir=$(mktemp -d)
+out=$(printf '{"tool_input":{"command":"git worktree add /tmp/base main"}}' \
+  | PATH="$emptydir" HOME=/nonexistent-home /bin/bash ./remind-worktree.sh 2>/dev/null)
+[ -z "$out" ] && ok || ng "$(printf 'jq等が無い環境では素通り(fail-open)すべき\n  出力: %s' "$out")"
+rm -rf "$emptydir"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

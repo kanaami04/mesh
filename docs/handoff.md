@@ -769,6 +769,16 @@ TS実装(477テスト)はそのまま本番として動き続けており、Rust
   この場で発覚した——「コンパイルが通った」だけでは検知できないクラスの不具合なので、
   今後もcodegen関連の変更は必ず生成JSを実行して確認すること(このmilestoneから
   「本当に動く」ことの確認が可能になったので、以後のmilestoneでも同様に徹底する)
+- **教訓(2026-07-26に事故)**: 「変更前後の挙動を比べる」ために **`git stash` を使わない**。
+  作業ツリーが既にクリーンだと`git stash`は**何も保存せず**、続く`git stash pop`が
+  **スタックに元からあった無関係なstash**を展開して競合を起こす(実際に
+  `rust/src/full_checker.rs`が`UU`になった。同じ罠をレビュー用エージェントも踏んでいた)。
+  そもそも比較したいのが「別のコミット」なら、未コミット変更を退避するstashでは目的を
+  達成できない。**比較は必ず別のworktreeで行い、終わったら消す**——手順は
+  `.claude/skills/git-worktree/SKILL.md`(スキル`git-worktree`)。
+  `git worktree add`を打つと`.claude/hooks/remind-worktree.sh`が後片付けの手順を添えて
+  確認を求める(このフックは**fail-open**——`enforce-code-review.sh`と違い、壊れたときは
+  素通りする。目的が注意喚起であり、止めるコストの方が大きいため)
 - **開発環境**: Rustのバージョンは`mise.toml`で固定済みなので`mise install`で入る
   (セットアップ全般は docs/setup.md)。CIには`rust-test`ジョブ(build+clippy+test)を新設済み
 
