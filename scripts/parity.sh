@@ -17,7 +17,13 @@ cd "$(dirname "$0")/.."
 UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1
 
+# **必ずリポジトリルートから走らせる**(上の cd)。相対パスのまま別ディレクトリで実行すると
+# 全件が「差あり」になる誤った計測になる——実際にセッション中2回踏んだ
 RUST_BIN=rust/target/debug/mesh
+if [ ! -f "src/cli.ts" ]; then
+	echo "error: リポジトリルートが見つからない(このスクリプトは scripts/ に置いたまま実行すること)" >&2
+	exit 2
+fi
 if [ ! -x "$RUST_BIN" ]; then
 	echo "error: $RUST_BIN が無い。先に 'cargo build --manifest-path rust/Cargo.toml' を実行すること" >&2
 	exit 2
