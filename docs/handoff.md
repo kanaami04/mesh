@@ -56,6 +56,14 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    名前 / レシーバ / `is`・matchのパターン / 関数の引数として渡す、を機械的に一周する。
    milestone 47は「循環aliasの名前でstructリテラルを構築」、48は「弾かれた型名を関数
    シグネチャで使う」を入れておらず、どちらも本物の誤検知を出荷しかけた
+2''. **そのマイルストーンが偽にしたコメントを機械的に探す**。**milestone 46〜49で4回連続、
+   code reviewの指摘の大半がこれだった**(実装は正しいのに、周りのコメントが
+   「その診断は未移植」「pkg修飾は対象外」等と言ったまま残る)。出荷前に、今回移植した
+   診断コード名・機能名で `grep -rn "<名前>" rust/src docs todo.md` を回し、
+   **「未移植」「対象外」「次段階」「候補」**と書かれた行を1件ずつ潰す。
+   `docs/handoff.md`の「既知の限界」リストは特に取り消し線の付け忘れが多い。
+   あわせて**新しく`pub(crate)`にした関数**には利用者が増えた旨を書く(2箇所に
+   書かれた定義がずれる、というこの移植で何度も踏んだ形の予防)
 3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
    **コマンドごとに**必要で、これを忘れるとビルドが走らず古いバイナリで測ることになる
    (実際に起きた)
@@ -1139,8 +1147,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        (4)`cannot-infer-type`は空配列リテラル限定(milestone 33)——`s := Status{foo: 1}`のように
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
-       (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
-       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
+       (6)~~pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外~~
+       → **milestone 49で解消**(`unknown-package`/`unknown-package-type`/`not-exported`を
+       型参照側だけ移植。**pkg修飾の「呼び出し」側と型のモデル化は引き続き未対応**——
+       `lib.f()`の中身の検査とpkg修飾型のフィールド検証は効かない)、
        (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
        `not-callable`も移植した)、
        (8)~~素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない~~

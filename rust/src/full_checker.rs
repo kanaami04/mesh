@@ -37,8 +37,10 @@
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
 // 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
-// pkg修飾struct・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
-// run/buildへのゲート統合は引き続き対象外(**非structへのメンバーアクセス〈not-a-struct〉と
+// pkg修飾**呼び出し**の中身・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
+// run/buildへのゲート統合は引き続き対象外(**milestone 49でpkg修飾の「型参照」側は移植済み**
+// ——`lib.Point{...}`の名前解決も含む。残るのは呼び出しの中身とフィールド検証。
+// **非structへのメンバーアクセス〈not-a-struct〉と
 // union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
@@ -338,8 +340,9 @@ fn assignable_checked(from: &Type, to: &Type) -> bool {
     types::assignable(from, to)
 }
 
-// その型注釈が「未知の裸の型名」か(レシーバのANY差し替え判定用)。
-// pkg修飾・組み込み・型パラメータ・レジストリにある名前はfalse
+// その型注釈が「未知の型名」か(レシーバのANY差し替え判定用)。組み込み・型パラメータ・
+// レジストリにある名前はfalse。**milestone 49からpkg修飾名も見る**——解決できなければ
+// (未import/未定義/未export)true(下記`package_type_resolves`)
 fn unknown_type_name(ctx: &FullCheckerCtx, node: &TypeNode) -> bool {
     // milestone 49: pkg修飾された型名も「解決できなければ未知」として扱う——TS版
     // `resolvePackageType`が未import/未定義/未exportのどれでもANYを返すため。
@@ -568,9 +571,10 @@ fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
 // 登録時と本体検査時の2回`resolveType`を通るため——`fn f(x: Bogus)`で2件出る。
 // 実測して確認した)。順序も「型宣言 → シグネチャ登録 → 本体」で揃えている。
 //
-// pkg修飾の型(`math.Point`)はこの一歩では**検査しない**(TS版の`unknown-package`/
-// `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。
-// 検出漏れ側に倒す)
+// pkg修飾の型(`math.Point`)は**milestone 49から検査する**——`unknown-package` /
+// `unknown-package-type` / `not-exported`(下記`check_package_type_ref`)。
+// ただし**型そのものは引き続きANY**(pkg修飾型のモデル化は別マイルストーン)なので、
+// その型のフィールド検証などは効かない
 // pkg修飾型が解決できるか(診断は出さない版)。TS版`resolvePackageType`が本物の型を返すのは
 // 「importされている & その名前の型がある & exportされている」の3つが揃ったときだけで、
 // それ以外は全部ANY——`unknown_type_name`がその判定に使う。
@@ -1119,7 +1123,8 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
 // `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
 // 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
 // (判別可能unionのタグdisambiguation・名前付きstruct同士のunionのフィールド集合解決。
-// 下記`resolve_union_lit_member`)に対応した。pkg修飾structは次段階のためANYを返す。
+// 下記`resolve_union_lit_member`)に対応した。**milestone 49でpkg修飾structの名前解決**
+// (`lib.Point{...}`の3診断)を追加——ただしフィールド検証はまだで、型はANYを返す。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
     let field_types: Vec<Type> = fields.iter().map(|f| infer_expr_single(ctx, &f.value)).collect();
@@ -2695,11 +2700,18 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
 // これによりmilestone 23で追加した名前衝突検査(reserved-word/builtin-redeclared/
 // already-declared/shadowing)がローカル変数と同じdeclare()経由で自動的に効く
 fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
+    // **型注釈を値より先に解決する**(TS版`checkPackage`の`const declared = c.typeNode ? ...`が
+    // `checkExprSingle(c.value)`より前にある)。逆にすると注釈側と値側の両方が診断を出す形
+    // (`c: lib.Hidden = lib.Hidden{y: 1}`で`not-exported`が2件)で**発行順がTS版と逆になる**。
+    // milestone 49でpkg修飾注釈が診断を出すようになるまでは`check_type_ann`が
+    // pkg修飾に対して無反応だったため、この順序差は表に出ていなかった(code reviewで発覚)
+    let annotated = c.type_node.as_ref().map(|type_node| {
+        check_type_ann(ctx, type_node);
+        resolve_type_ann(&ctx.type_ctx, type_node)
+    });
     let value_ty = infer_expr_single(ctx, &c.value);
-    let final_ty = match &c.type_node {
-        Some(type_node) => {
-            check_type_ann(ctx, type_node);
-            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
+    let final_ty = match annotated {
+        Some(declared) => {
             if !assignable_checked(&value_ty, &declared) {
                 ctx.error(
                     c.pos,
@@ -4800,6 +4812,22 @@ mod tests {
         let diags: Vec<Diagnostic> =
             check_package_with_registry(&[("main.mesh".to_string(), &ok)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn トップレベルconstは型注釈を値より先に検査する() {
+        // TS版`checkPackage`の順序(注釈→値)。逆にすると注釈側と値側の両方が診断を出す形で
+        // **発行順がTS版と逆になる**(code reviewで発覚・両CLIで再現確認済み)。
+        // pkg修飾注釈が診断を出すようになるまで表に出ていなかった順序差
+        let lib = parse("struct Hidden {\n    y: int\n}\n").unwrap();
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
+        let program = parse("import \"lib\"\n\nc: lib.Hidden = lib.Hidden{y: 1}\n\nfn main() {\n    print(1)\n}\n").unwrap();
+        let diags: Vec<Diagnostic> =
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        // 注釈(3:4)が値(3:17)より先
+        assert!(diags[0].pos.col < diags[1].pos.col, "{diags:?}");
     }
 
     #[test]
