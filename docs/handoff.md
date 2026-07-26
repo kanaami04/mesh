@@ -22,9 +22,14 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 1. **pkg修飾シンボルの「型」のモデル化** — milestone 49・50で**パッケージ跨ぎの診断は
    ひととおり移植済み**だが、`try_package_member`も`resolve_type_ann`もANYを返すので
-   **型は渡っていない**。そのため`lib.add(1)`の引数照合(TS版は`argument-count`)や
-   pkg修飾型のフィールド検証が効かない。レジストリに`Type`を載せる必要があり、
-   codegen側の`checker::PackageSymbols`と統合するか併存させるかの設計判断が要る
+   **型は渡っていない**。レジストリに`Type`を載せる必要があり、codegen側の
+   `checker::PackageSymbols`と統合するか併存させるかの設計判断が要る。
+   **milestone 50のcode reviewで実測した、これで塞がる検出漏れ**:
+   `lib.add(1)`の`argument-count` / `lib.Point{x: "oops"}`のフィールド型不一致・
+   missing-field・unknown-field / `lib.add(1,2) is int`の`union-required` /
+   `lib.add(1,2).nofield`の`not-a-struct`
+   (別件で`print(print)`の`builtin-as-value`も未移植だと分かった——こちらは
+   `is_builtin`分岐に1行足すだけなので、上記とは独立にいつでも入れられる)
 2. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
    (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
    式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
@@ -61,7 +66,11 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    「その診断は未移植」「pkg修飾は対象外」等と言ったまま残る)。出荷前に、今回移植した
    診断コード名・機能名で `grep -rn "<名前>" rust/src docs todo.md` を回し、
    **「未移植」「対象外」「次段階」「候補」**と書かれた行を1件ずつ潰す。
-   `docs/handoff.md`の「既知の限界」リストは特に取り消し線の付け忘れが多い。
+   **診断名だけでは足りない**——その回で**撤去した仕組みの名前**(識別子・フィールド名)でも
+   grepする。milestone 50は`scopes[0]`への登録を撤去したのに診断名でしかgrepせず、
+   「import aliasは直接scopes[0]へ入れている」と現在形で書いたコメントを2箇所残した
+   (code reviewで発覚)。`docs/handoff.md`の「既知の限界」リストは特に取り消し線の
+   付け忘れが多い。
    あわせて**新しく`pub(crate)`にした関数**には利用者が増えた旨を書く(2箇所に
    書かれた定義がずれる、というこの移植で何度も踏んだ形の予防)
 3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
@@ -1141,7 +1150,9 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
-     1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
+     1つの名前空間で検査する`check_package`。**パッケージ跨ぎ〈pkg修飾の中身〉の診断も
+     milestone 49〈型参照側〉・50〈呼び出し側〉で移植済み**——残るのはpkg修飾シンボルの
+     型のモデル化だけ)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)~~import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出す~~
        → **milestone 48で解消**(型宣言側とセットで`declare`にも同じ分岐を入れた。

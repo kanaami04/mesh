@@ -162,10 +162,11 @@ impl FullCheckerCtx {
             return;
         }
         // milestone 48: importエイリアスと同じ名前のfn/const/変数(TS版`declareBinding`の
-        // 同じ位置の分岐)。**already-declaredより前**に見るのが要点——import aliasは
-        // `declare`を通さず直接scopes[0]へ入れている(下記check_packageのコメント参照)ため、
-        // この分岐が無いと下のcontains_keyに引っかかって`already-declared`という
-        // **TS版と違うコード**になっていた(milestone 30以来の既知の限界)
+        // 同じ位置の分岐)。**already-declaredより前**に見るのはTS版と同じ順序だから。
+        // milestone 30〜49はimport aliasを`scopes[0]`へ直接入れていたため、この分岐が
+        // 無いと下のcontains_keyに引っかかって`already-declared`という**TS版と違うコード**に
+        // なっていた(milestone 50でその登録自体を撤去したので、いまその経路は無い——
+        // ただしTS版もこの位置で判定するので分岐はそのまま残す)
         if self.import_aliases.contains(name) {
             self.error(pos, DiagnosticCode::NameConflictsWithPackage, format!("'{name}' conflicts with an imported package name"));
             return;
@@ -4942,8 +4943,8 @@ mod tests {
     fn importエイリアスと同名の宣言はname_conflicts_with_package() {
         // 型宣言側(TS版`checker/modules.ts`)と値側(TS版`declareBinding`)の両方。
         // **値側はmilestone 48以前`already-declared`という誤ったコードを出していた**
-        // ——import aliasは`declare`を通さず直接scopes[0]へ入れるので、重複チェックに
-        // 引っかかっていた(milestone 30以来の既知の限界)
+        // ——当時はimport aliasを`declare`を通さず直接`scopes[0]`へ入れていたので重複
+        // チェックに引っかかっていた(その登録自体はmilestone 50で撤去済み)
         for src in [
             "import \"lib\"\n\ntype lib = int\n\nfn main() {\n    print(1)\n}\n",
             "import \"lib\"\n\nstruct lib {\n    x: int\n}\n\nfn main() {\n    print(1)\n}\n",
