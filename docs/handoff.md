@@ -1007,7 +1007,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      循環を`Err`で返して走査全体を打ち切るので位置も件数も合わない)。診断コードは55→56種。
      struct/array越しの再帰を循環にしない区別、報告位置(宣言位置と参照位置の使い分け)、
      報告順(メンバーを全部解決してから判定)まで実測で合わせている
-   - 残る候補: **診断の続き**——`defer-requires-call`・
+   - ✅ **milestone 44(2026-07-26)で`defer-requires-call`**——`defer`の後ろが呼び出しでなければ
+     弾く。TS版と同じく「呼び出しかどうか」を先に見て打ち切る(順序を逆にすると本来の診断が
+     消える)。診断コードは56→57種
+   - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。

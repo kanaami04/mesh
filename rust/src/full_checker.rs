@@ -1736,8 +1736,20 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
         }
         Stmt::DeferStmt { call, .. } => {
-            // deferする呼び出しも戻り値なしでよい
-            infer_expr(ctx, call);
+            // milestone 44: **呼び出しであることの検査が先**(TS版`statements.ts`と同じ順序)。
+            // 呼び出しでない式をそのまま検査しても、位置のずれた別の診断になるだけで
+            // 本来報告すべき「呼び出しじゃない」が消える(TS版のコメントにもそう書いてある。
+            // 例: `defer 5`は式として検査しても何のエラーにもならない)
+            if !matches!(call, Expr::Call { .. }) {
+                ctx.error(
+                    call.pos(),
+                    DiagnosticCode::DeferRequiresCall,
+                    "'defer' must be followed by a function or method call, e.g. 'defer f(x)'",
+                );
+            } else {
+                // deferする呼び出しは戻り値なしでよい(voidを許す位置)
+                infer_expr(ctx, call);
+            }
         }
     }
 }
@@ -2873,6 +2885,53 @@ mod tests {
 
 
     // --- milestone 43: type-alias-cycle -----------------------------------------------
+
+
+    // --- milestone 44: defer-requires-call ---------------------------------------------
+
+    #[test]
+    fn deferは呼び出し以外を弾く() {
+        // TS版と同じく「呼び出しかどうか」を先に見る——呼び出しでない式をそのまま検査しても
+        // 位置のずれた別の診断になるだけで、本来の「呼び出しじゃない」が消える
+        for src in [
+            "fn main() {\n    defer 5\n}\n",
+            "fn main() {\n    defer \"hi\"\n}\n",
+            "fn main() {\n    defer 1 + 2\n}\n",
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::DeferRequiresCall);
+            assert_eq!(diags[0].message, "'defer' must be followed by a function or method call, e.g. 'defer f(x)'");
+        }
+        // 関数値の参照(呼び出していない)も弾く
+        let ident = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    defer work\n}\n");
+        assert_eq!(ident.len(), 1, "{ident:?}");
+        assert_eq!(ident[0].code, DiagnosticCode::DeferRequiresCall);
+        // フィールドアクセス・添字・チャネル受信・spawnも呼び出しではない
+        for src in [
+            "struct Box {\n    n: int\n}\n\nfn main() {\n    b := Box{n: 1}\n    defer b.n\n}\n",
+            "fn main() {\n    xs := [1, 2]\n    defer xs[0]\n}\n",
+            "fn main() {\n    ch := chan<int>(1)\n    defer <-ch\n}\n",
+            "fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    defer spawn work(1)\n}\n",
+        ] {
+            let diags = check(src);
+            assert!(diags.iter().any(|d| d.code == DiagnosticCode::DeferRequiresCall), "{src} -> {diags:?}");
+        }
+    }
+
+    #[test]
+    fn 正しいdeferは診断を出さず引数も検査される() {
+        // 自由関数・メソッド・括弧付き(parserが外すのでCallのまま)は通る
+        assert_eq!(check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    defer work(1)\n    defer (work(2))\n}\n"), vec![]);
+        assert_eq!(
+            check("struct Box {\n    n: int\n}\n\nfn (b: Box) shut() {\n    print(\"shut\")\n}\n\nfn main() {\n    b := Box{n: 1}\n    defer b.shut()\n}\n"),
+            vec![]
+        );
+        // 呼び出しなら中身(引数)も検査される
+        let bad_arg = check("fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    defer work(\"no\")\n}\n");
+        assert_eq!(bad_arg.len(), 1, "{bad_arg:?}");
+        assert_eq!(bad_arg[0].code, DiagnosticCode::TypeMismatch);
+    }
 
     #[test]
     fn 裸のunion循環をtype_alias_cycleで報告する() {
