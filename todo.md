@@ -3485,6 +3485,49 @@
                 踏んでいるため毎回見る)。
               - 診断コードは58種のまま(新しいコードの追加ではなく既存の穴の修正)。
                 テスト576→589件(+13)。clippyクリーン。
+        - [x] **milestone 47: `not-a-struct` / `narrow-required`**
+              ✅ 2026-07-26実装。引き継ぎ文書の候補リスト先頭。**非structへのメンバーアクセス**と
+              **unionのまま`.field`を触る形**の2診断。診断コード58→60種。
+              - **本題は診断の追加ではなく経路の統一だった**。TS版はメンバー参照とメソッド呼び出しの
+                両方が`memberFieldType`(struct→union→非struct→ANYの4分岐)という**1本の共通関数**を
+                通り、そこを抜けた先は`checkCallOfValue`に集まる。Rust版はこの構造が無く、
+                呼び出し形の「struct以外」は**引数だけ推論してANYを返して終わり**だった。
+                `member_field_type`と`check_call_of_value`を切り出してTS版と同じ2段構えにしたら、
+                狙った2診断に加えて**`not-callable`の取りこぼしも同時に埋まった**
+                (`p.x()`〈xはint〉——TS版は`memberFieldType`→`checkCallOfValue`の連鎖で自然に出る形で、
+                Rust版だけ無診断だった)。
+              - **実測して初めて分かった順序**(想像で書くとずれる箇所): (1)呼び出し形では
+                member側の診断が**引数の推論より先**に出る(`n.foo(bogus)`→not-a-struct→undefined-name)、
+                (2)逆に`not-callable`は**引数の後**に出る(`p.x(bogus)`→undefined-name→not-callable)。
+                つまり発行順は位置順ではない。TS版`checkCallOfValue`が引数を先に評価してから
+                not-callableを出す構造をそのまま移植して合わせた。
+              - **位置**はmember式の**開始位置**(=targetの位置)で、フィールド名の位置ではない。
+              - **表示できない型では黙る**——`type_to_string`はunion bodyが埋まっている前提で
+                `.expect()`するので、裸のunion循環で空のまま残った型を表示しようとするとパニックする
+                (milestone 37の`mesh test`クラッシュと同じ形)。両診断とも`safe_to_compare`で
+                ガードした。`not-callable`側にも同じガードを追加している。
+              - **既存テスト2件の期待値を更新**した——`explain`の「TS版には説明があるがRust版が
+                まだ出さない診断」の例に`narrow-required`を使っていた(`src/explain.rs`と
+                `tests/cli.rs`)。未移植の`generic-inference-failed`へ差し替え。
+                **モデル化が進むとこの例は毎回古くなる**ので、その旨をコメントに書いた。
+              - **意図的にスコープ外**: (1)struct literalの名前が**未宣言**のとき
+                (`Bogus{n: 1}`)TS版は`not-a-struct`ではなく`unknown-type`を出す(実測)。
+                別診断なので今回は入れず、素のaliasとして登録済みの名前だけを`not-a-struct`の
+                対象にした。(2)**unionを持つstructフィールド**(`struct Node { next: Node | none }`の
+                `n.next.next`)は`widen_field_type`がunionをANYへ潰すため`narrow-required`が
+                出ない。`is_fully_modeled`がunionを「モデル化できていない」扱いにしている
+                既存の設計の帰結で、ここを変えると全比較経路に波及するため別マイルストーン。
+              - **検証**(TS版と突き合わせ): not-a-struct/narrow-required系のプローブ27本
+                (int/string/bool/float/配列/map/chan/void/呼び出し結果へのメンバーアクセス・
+                メソッド呼び出し形・union各種〈`T|none`・`T|error`・判別可能union〉・
+                絞り込み後・struct literalの名前・診断の順序3種)+「壊れた入力」定型セット8本。
+                全`.mesh`計103ファイルで差は8件のみで、**いずれも未移植診断による検出漏れ**
+                (`already-declared`×2・`error-type-*`×2・`unknown-type`・`type-alias-cycle`後の
+                走査打ち切り・上記unionフィールド)。**Rust側だけに出る診断は0件**。
+                `git worktree`でmainのバイナリと比較すると**26ファイルの挙動が変化し、
+                25ファイルがTS版と完全一致**(残り1件も未移植の`already-declared`が
+                足りないだけで、新しく出した`not-a-struct`自体はTS版と一致)。
+                examples全23本の実行も回帰なし。テスト589件維持、clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3492,9 +3535,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 46まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 47まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 58種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 60種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

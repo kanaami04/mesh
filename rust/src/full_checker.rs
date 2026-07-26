@@ -37,8 +37,9 @@
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
 // 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
-// pkg修飾struct・非structへのメンバーアクセス(not-a-struct)・match式の中身・
-// `or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は引き続き対象外
+// pkg修飾struct・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
+// run/buildへのゲート統合は引き続き対象外(**非structへのメンバーアクセス〈not-a-struct〉と
+// union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
 // 同じ進め方)。
 
@@ -622,43 +623,19 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                             }
                         };
                     }
-                    // milestone 45: 関数値フィールドの呼び出し(`h.cb(1)`)。関数型を
-                    // モデル化したのでフィールド型が`Type::Fn`のまま届く——TS版
-                    // (`memberFieldType`→`checkCallOfValue`)と同じく引数を照合する
-                    let field_ty = fcell.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| widen_field_type(f.type_.clone()));
-                    if let Some(Type::Fn { params, ret }) = field_ty {
-                        let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
-                        check_args_against(ctx, *pos, args, &arg_tys, &params);
-                        return *ret;
-                    }
                 }
-                // struct以外/フィールド呼び出し: 引数だけ推論してANY(targetは上で評価済み——
-                // 二重評価を避けるためここで完結させ、generic経路へは落とさない)
-                for a in args {
-                    infer_expr_single(ctx, a);
-                }
-                return ANY;
+                // メソッド対象でなければ、memberを通常どおり「値」として評価して呼び出す
+                // ——TS版`calls.ts`の最後の2行(`memberFieldType`→`checkCallOfValue`)と
+                // 同じ2段構え。structフィールドが関数値のケース(`h.cb(1)`、milestone 45)・
+                // union未絞り込み(narrow-required)・非struct(not-a-struct)・関数でない
+                // フィールドの呼び出し(not-callable)が**すべてこの1本の経路に集まる**
+                // (milestone 47でここを統一するまでは、引数だけ推論してANYを返していた)。
+                // targetは上で評価済みなので二重評価は起きない
+                let member_ty = member_field_type(ctx, &tgt, name, *mpos);
+                return check_call_of_value(ctx, member_ty, args, *pos);
             }
             let callee_ty = infer_expr_single(ctx, callee);
-            let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
-            // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
-            // 非ジェネリック自由関数をシグネチャ付きで登録)なら個数・各引数の型を照合する
-            // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
-            // (`f := add; f(1,2)`)もcalleeがType::Fnとして伝播するので同じく照合される
-            // (TS版`checkCallOfValue`も同じ経路)。pkg修飾呼び出し・メソッド呼び出し・
-            // ジェネリック関数はcalleeがANYになるため対象外——従来どおりANYを返す
-            if let Type::Fn { params, ret } = &callee_ty {
-                let (params, ret) = (params.clone(), (**ret).clone());
-                check_args_against(ctx, *pos, args, &arg_tys, &params);
-                ret
-            } else if matches!(callee_ty, Type::Any) {
-                ANY
-            } else {
-                // milestone 45: 関数でない値の呼び出し(TS版`calls.ts`の`checkCallOfValue`)。
-                // **ANYは免除**する——full_checkerが型を諦めた先はANYなので、そこで出すと誤検知になる
-                ctx.error(*pos, DiagnosticCode::NotCallable, format!("cannot call non-function type {}", types::type_to_string(&callee_ty)));
-                ANY
-            }
+            check_call_of_value(ctx, callee_ty, args, *pos)
         }
         // milestone 29: 名前付きstructリテラルのフィールド検証。pkg修飾・判別可能union構築は
         // 次段階(下記infer_struct_litがANYを返す)
@@ -918,29 +895,85 @@ fn check_args_against(ctx: &mut FullCheckerCtx, call_pos: Pos, args: &[Expr], ar
     }
 }
 
-// structのフィールドアクセス読み取り(`u.name`)の型解決(milestone 30)。TS版
-// `memberFieldType`(src/checker/calls.ts)のstruct分岐の移植。field→型・
-// 宣言済みメソッド名→method-not-called・それ以外→unknown-field。target が struct 以外
-// (union/scalar/any)はこの一歩ではANY(union の narrow-required・not-a-struct は次段階)
+// 「値を呼び出す」形の検査(TS版`checkCallOfValue`、src/checker/calls.ts)。calleeの型が
+// 確定したあとの共通処理で、自由関数呼び出しとメンバー呼び出しのフォールバックが共有する
+// (milestone 47で切り出した——それまでは自由関数側にインラインで書かれていた)。
+// **引数を先に推論してから**not-callableを出す順序までTS版と同じ(逆にすると
+// `p.x(bogus)`でundefined-nameとnot-callableの**発行順**がTS版とずれる。実測で確認)
+fn check_call_of_value(ctx: &mut FullCheckerCtx, callee_ty: Type, args: &[Expr], pos: Pos) -> Type {
+    let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
+    // milestone 26: calleeがユーザー定義関数(Type::Fn。check_programが
+    // 非ジェネリック自由関数をシグネチャ付きで登録)なら個数・各引数の型を照合する
+    // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
+    // (`f := add; f(1,2)`)もcalleeがType::Fnとして伝播するので同じく照合される。
+    // pkg修飾呼び出し・ジェネリック関数はcalleeがANYになるため対象外
+    if let Type::Fn { params, ret } = &callee_ty {
+        let (params, ret) = (params.clone(), (**ret).clone());
+        check_args_against(ctx, pos, args, &arg_tys, &params);
+        return ret;
+    }
+    if matches!(callee_ty, Type::Any) {
+        return ANY;
+    }
+    // milestone 45: 関数でない値の呼び出し。**ANYは免除**する——full_checkerが型を諦めた先は
+    // ANYなので、そこで出すと誤検知になる。表示できない型でも黙る(type_to_stringが
+    // 未解決unionで`.expect()`するため)
+    if safe_to_compare(&callee_ty) {
+        ctx.error(pos, DiagnosticCode::NotCallable, format!("cannot call non-function type {}", types::type_to_string(&callee_ty)));
+    }
+    ANY
+}
+
+// メンバーアクセス(`u.name`)の型解決。TS版`memberFieldType`(src/checker/calls.ts)の移植で、
+// **メンバー参照とメソッド呼び出しの両方から使う共通部分**(TS版と同じ構成)。
+// **targetの型は呼び出し元が既に確定させて渡す**——TS版が明記している「targetは一度だけ
+// 評価する」不変条件のため(二重評価すると`undef.foo`のようなケースでundefined-nameが2回出る)。
+// 分岐の順序もTS版どおり: struct(field→method-not-called→unknown-field、milestone 30)→
+// union(narrow-required、milestone 47)→ ANY以外(not-a-struct、milestone 47)→ ANYは無診断
+fn member_field_type(ctx: &mut FullCheckerCtx, tgt: &Type, name: &str, pos: Pos) -> Type {
+    if let Type::Struct { name: sname, fields: fcell, .. } = tgt {
+        let Some(fs) = fcell.get() else {
+            return ANY; // 未解決(knot-tying中)——素通り
+        };
+        if let Some(f) = fs.iter().find(|f| f.name == name) {
+            return widen_field_type(f.type_.clone());
+        }
+        // フィールドではない——メソッドなら method-not-called、そうでなければ unknown-field
+        if ctx.type_ctx.lookup_method(sname, name).is_some() {
+            ctx.error(pos, DiagnosticCode::MethodNotCalled, format!("'{name}' is a method — call it like {name}(...)"));
+            return ANY;
+        }
+        let field_names = fs.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+        ctx.error(pos, DiagnosticCode::UnknownField, format!("{} has no field '{name}' (fields: {field_names})", types::type_to_string(tgt)));
+        return ANY;
+    }
+    // milestone 47: unionのまま`.field`を触る形。**絞り込みは型の話であってフローの話ではない**
+    // ——`if v is int {...}`の中では`narrow`済みの型が届くので、ここには来ない
+    if matches!(tgt, Type::Union { .. }) {
+        // **中身が解決できていないunionでは診断を出さない**——`type_to_string`はunion bodyが
+        // 埋まっている前提で`.expect()`するため、裸のunion循環などで空のまま残った型を
+        // 表示しようとするとパニックする(milestone 37の`mesh test`クラッシュと同じ形)
+        if safe_to_compare(tgt) {
+            ctx.error(
+                pos,
+                DiagnosticCode::NarrowRequired,
+                format!("cannot access field or method on {} — narrow it first (with 'is' or 'match')", types::type_to_string(tgt)),
+            );
+        }
+        return ANY;
+    }
+    // milestone 47: structでもunionでもない型へのメンバーアクセス。**ANYは免除**する——
+    // full_checkerが型を諦めた先はANYなので、そこで出すと誤検知になる(milestone 45の
+    // not-callableと同じ考え方)。表示できない型でも黙る(上のunionと同じ理由)
+    if !matches!(tgt, Type::Any) && safe_to_compare(tgt) {
+        ctx.error(pos, DiagnosticCode::NotAStruct, format!("{} has no fields", types::type_to_string(tgt)));
+    }
+    ANY
+}
+
 fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
     let tgt = infer_expr_single(ctx, target);
-    let Type::Struct { name: sname, fields: fcell, .. } = &tgt else {
-        return ANY;
-    };
-    let Some(fs) = fcell.get() else {
-        return ANY;
-    };
-    if let Some(f) = fs.iter().find(|f| f.name == name) {
-        return widen_field_type(f.type_.clone());
-    }
-    // フィールドではない——メソッドなら method-not-called、そうでなければ unknown-field
-    if ctx.type_ctx.lookup_method(sname, name).is_some() {
-        ctx.error(pos, DiagnosticCode::MethodNotCalled, format!("'{name}' is a method — call it like {name}(...)"));
-        return ANY;
-    }
-    let field_names = fs.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
-    ctx.error(pos, DiagnosticCode::UnknownField, format!("{} has no field '{name}' (fields: {field_names})", types::type_to_string(&tgt)));
-    ANY
+    member_field_type(ctx, &tgt, name, pos)
 }
 
 // structリテラル(`User{...}`・`Resp{kind: "ok", ...}`)のフィールド検証。TS版
@@ -963,8 +996,8 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     // `display_name`は診断に出す名前(union構築なら書かれたunion名。メンバーは無名なので)
     // milestone 46: `lookup_constructible_type`は素のaliasも(**struct/unionを指すときだけ**)
     // 引く——`type Q = P`と書いて`Q{x: 1}`で構築する形はTS版が通す。`type Count = int`に
-    // 対する`Count{...}`はTS版が`not-a-struct`で弾く形だが、その診断自体が未移植なので
-    // 従来どおりANY(検出漏れ側)のままにする
+    // 対する`Count{...}`はstruct/unionのどちらでもないので引かず、**milestone 47から**
+    // 下のNoneアームで`not-a-struct`を出す
     let (member_ty, result_ty, display_name) = match ctx.type_ctx.lookup_constructible_type(name) {
         Some(t @ Type::Struct { name: sname, .. }) => (t.clone(), t.clone(), sname.clone()),
         _ => match ctx.type_ctx.lookup_constructible_type(name).cloned().filter(|t| matches!(t, Type::Union { .. })) {
@@ -972,7 +1005,22 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
                 Some(member) => (member, union_ty, name.to_string()),
                 None => return ANY, // 絞り込み失敗(診断は出し済み)or struct memberが無いunion
             },
-            None => return ANY,
+            // milestone 47: struct/unionのどちらでもない名前での構築(`type S = string`に
+            // 対する`S{...}`)はTS版が`not-a-struct`で弾く。**素のaliasとして登録されている
+            // 名前だけ**を対象にする——未宣言の名前(`Bogus{...}`)はTS版では`unknown-type`
+            // という別の診断になり(実測で確認)、そちらは未移植なので黙って諦める
+            None => {
+                // **ANYへ解決したaliasは免除する**——TS版`expressions.ts`も
+                // `if (t.kind === "any") return ANY;`で同じ免除を先に置いている
+                // (「解決自体が失敗——エラーは報告済み」)。milestone 46で循環alias
+                // (`type A = A`)をANYとして登録するようにしたので、`.is_some()`だけ見ると
+                // `type-alias-cycle`に**not-a-structを重ねて出す誤検知**になる
+                // (code reviewで発覚・両CLIで再現確認済み)
+                if ctx.type_ctx.lookup_alias(name).is_some_and(|t| !matches!(t, Type::Any)) {
+                    ctx.error(pos, DiagnosticCode::NotAStruct, format!("'{name}' is not a struct"));
+                }
+                return ANY;
+            }
         },
     };
     let Type::Struct { fields: decl_cell, .. } = &member_ty else {
@@ -2993,6 +3041,72 @@ mod tests {
         }
         // ANYは免除する(full_checkerが型を諦めた先はANYなので、そこで出すと誤検知)
         assert_eq!(check("fn main() {\n    print(str(unknownThing()))\n}\n").iter().filter(|d| d.code == DiagnosticCode::NotCallable).count(), 0);
+    }
+
+    #[test]
+    fn 非structへのメンバーアクセスはnot_a_struct() {
+        for (src, ty) in [
+            ("fn main() {\n    n := 1\n    print(n.foo)\n}\n", "int"),
+            ("fn main() {\n    b := true\n    print(b.x)\n}\n", "bool"),
+            ("fn main() {\n    xs := [1, 2]\n    print(xs.length)\n}\n", "int[]"),
+            ("fn main() {\n    c := chan<int>(1)\n    print(c.x)\n}\n", "chan<int>"),
+            // 呼び出し形(`n.foo()`)も同じ経路に入る——TS版`memberFieldType`と同じ共通化
+            ("fn main() {\n    n := 1\n    n.foo()\n}\n", "int"),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::NotAStruct, "{src} -> {diags:?}");
+            assert_eq!(diags[0].message, format!("{ty} has no fields"));
+        }
+        // ANYは免除する(full_checkerが型を諦めた先はANYなので、そこで出すと誤検知)
+        assert_eq!(check("fn main() {\n    print(unknownThing.x)\n}\n").iter().filter(|d| d.code == DiagnosticCode::NotAStruct).count(), 0);
+    }
+
+    #[test]
+    fn union型のままのメンバーアクセスはnarrow_required() {
+        let src = "fn f() int | none {\n    return 1\n}\n\nfn main() {\n    v := f()\n    print(v.x)\n}\n";
+        let diags = check(src);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::NarrowRequired);
+        assert_eq!(diags[0].message, "cannot access field or method on int | none — narrow it first (with 'is' or 'match')");
+        // 絞り込んだ後は出ない(narrowingは型の話なので、絞り込み済みの型がここへ届く)
+        let narrowed = "struct P {\n    x: int\n}\n\nfn f() P | none {\n    return P{x: 1}\n}\n\nfn main() {\n    v := f()\n    if v is P {\n        print(v.x)\n    }\n}\n";
+        assert!(check(narrowed).is_empty(), "{:?}", check(narrowed));
+    }
+
+    #[test]
+    fn 呼び出し形ではmember側の診断が引数より先に出る() {
+        // **発行順は位置順ではない**——TS版で実測した順序をそのまま再現している。
+        // not-a-structはmemberFieldTypeが引数評価より前に出し、not-callableは
+        // checkCallOfValueが引数を評価した後に出す
+        let first = check("fn main() {\n    n := 1\n    n.foo(bogus)\n}\n");
+        assert_eq!(first.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::NotAStruct, DiagnosticCode::UndefinedName], "{first:?}");
+        let second = check("struct P {\n    x: int\n}\n\nfn main() {\n    p := P{x: 1}\n    p.x(bogus)\n}\n");
+        assert_eq!(second.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UndefinedName, DiagnosticCode::NotCallable], "{second:?}");
+    }
+
+    #[test]
+    fn 関数でないフィールドの呼び出しはnot_callable() {
+        // milestone 47の経路統一で埋まった取りこぼし(`memberFieldType`→`checkCallOfValue`の連鎖)
+        let diags = check("struct P {\n    x: int\n}\n\nfn main() {\n    p := P{x: 1}\n    p.x()\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::NotCallable);
+    }
+
+    #[test]
+    fn structでない名前でのstructリテラル構築はnot_a_struct() {
+        let diags = check("type S = string\n\nfn main() {\n    print(S{n: 1})\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::NotAStruct);
+        assert_eq!(diags[0].message, "'S' is not a struct");
+        // **未宣言の名前はTS版では`unknown-type`**(別診断・未移植)なので黙る
+        assert!(check("fn main() {\n    print(Bogus{n: 1})\n}\n").is_empty());
+        // **循環aliasはANYへ解決されるので免除する**——`type-alias-cycle`に重ねて
+        // not-a-structを出すとTS版に無い誤検知になる(code reviewで発覚)
+        for src in ["type A = A\n\nfn main() {\n    print(A{n: 1})\n}\n", "type A = B\n\ntype B = A\n\nfn main() {\n    print(A{n: 1})\n}\n"] {
+            let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+            assert_eq!(codes, vec![DiagnosticCode::TypeAliasCycle], "{src} -> {codes:?}");
+        }
     }
 
     #[test]

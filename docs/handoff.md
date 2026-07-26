@@ -5,32 +5,39 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**58種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜46を消化した
+**現在地**: Rust移植の診断は**60種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜47を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
 のような素のaliasが登録されるようになり、そもそもRust版で実行できなかった問題ごと解消した)。
-その調査で**未移植だと確定した診断**が下記候補の1・3に反映してある。
+**milestone 47で`not-a-struct`/`narrow-required`も移植済み**——本題は診断の追加ではなく、
+TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の移植だった(Rust版は
+メンバー参照とメソッド呼び出しで別々にフォールバックしていた)。その調査で**未移植だと
+確定した診断**が下記候補に反映してある。
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **`not-a-struct` / `narrow-required`** — 非structへのメンバーアクセスと、unionのまま
-   `.field` を触る形。milestone 39でunionをモデル化済みなので`narrow-required`は実際に効く。
-   `not-a-struct`はmilestone 46で「素のaliasの名前で構築する」形(`type Count = int` に対する
-   `Count{n: 1}`)が未検出だと実測済み
-2. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
+1. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
    `unknown-package-type` / `not-exported`)— 構造変更が一番大きい代わりに、いま検出漏れとして
    積み上がっている領域をまとめて塞げる。撤去条件(2)を終わらせるには最終的に避けて通れない
-3. **型宣言の名前衝突**(`already-declared` / `builtin-type-redeclared` /
+2. **型宣言の名前衝突**(`already-declared` / `builtin-type-redeclared` /
    `name-conflicts-with-package`)— milestone 43のcode reviewで「同名の型宣言」を扱った際に
    未移植だと確認済み。milestone 46で**レジストリ側は先勝ちに揃えた**(TS版と同じく最初の
-   宣言が勝つ)ので、あとは診断を出すだけの状態になっている
-4. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
+   宣言が勝つ)ので、あとは診断を出すだけの状態になっている。milestone 47の検証でも
+   103ファイル中の差8件のうち2件がこれだった——**いま一番よく当たる検出漏れ**
+3. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
+   (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
+   式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
+4. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
+   `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
+   `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
+   波及するため独立したマイルストーンにするのが妥当
+5. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
    — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
    無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
-5. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-6. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+6. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+7. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1076,10 +1083,20 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      プログラムは**そもそも実行できなかった**)を撤去し、同名の型宣言を先勝ちに揃えた
      (後勝ちだとTS版に無い誤診断が出た)。**新しい診断コードは足していない**(58種のまま——
      既存の穴の修正)。詳細はtodo.mdの当該項目
+   - ✅ **milestone 47(2026-07-26)で`not-a-struct` + `narrow-required`**。**本題は診断の追加
+     ではなく経路の統一**——TS版はメンバー参照とメソッド呼び出しの両方が`memberFieldType`
+     (struct→union→非struct→ANYの4分岐)という1本の共通関数を通り、その先は
+     `checkCallOfValue`に集まる。Rust版はこの構造が無く、呼び出し形の「struct以外」は
+     引数だけ推論してANYを返して終わりだった。`member_field_type`/`check_call_of_value`を
+     切り出してTS版と同じ2段構えにしたことで、狙った2診断に加えて**`not-callable`の
+     取りこぼし**(`p.x()`〈xはint〉)も同時に埋まった。実測しないと外す点が2つ:
+     (1)呼び出し形ではmember側の診断が**引数の推論より先**、(2)`not-callable`は**引数の後**
+     ——発行順は位置順ではない。診断コードは58→60種。詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
-     非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
+     型宣言の名前衝突(`already-declared`系)・structリテラルの未宣言名(`unknown-type`)。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
+     (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
@@ -1087,7 +1104,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        そのfn/constの引数照合が素通りする(milestone 30のcode review記録のうち唯一残った項目)、
        (2)~~型注釈の`unknown-type`が未移植のため、未知の型名のレシーバは何も出ない~~
        → **milestone 42で解消**(TS版と同じ`unknown-type`+`invalid-receiver-type`が出る)、
-       (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)、
+       (3)~~`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)~~
+       → **milestone 47で解消**(`narrow-required`・`not-callable`の取りこぼしも同時に埋めた。
+       ただし**unionを持つstructフィールド**〈`n.next.next`〉は`widen_field_type`が
+       unionをANYへ潰すため引き続き検出漏れ)、
        (4)`cannot-infer-type`は空配列リテラル限定(milestone 33)——`s := Status{foo: 1}`のように
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
