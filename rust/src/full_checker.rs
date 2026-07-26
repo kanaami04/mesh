@@ -37,9 +37,9 @@
 // なった読みが`if v is closed { break }`の後で誤って弾かれる(誤検知)。
 // **これでコレクション(配列/map/channel)はひととおりモデル化できた**。
 // 残る縮退はunion型注釈・関数型注釈(`fn(...)`全体)・pkg修飾型・型パラメータ。
-// pkg修飾**呼び出し**の中身・match式の中身・`or`の4診断・値位置のvoid-used-as-value・
-// run/buildへのゲート統合は引き続き対象外(**milestone 49でpkg修飾の「型参照」側は移植済み**
-// ——`lib.Point{...}`の名前解決も含む。残るのは呼び出しの中身とフィールド検証。
+// match式の中身・`or`の4診断・値位置のvoid-used-as-value・run/buildへのゲート統合は
+// 引き続き対象外(**パッケージ跨ぎはmilestone 49〈型参照側〉・50〈呼び出し側〉で移植済み**
+// ——残るのはpkg修飾シンボルの**型**のモデル化だけで、`lib.add(1)`の引数照合は効かない。
 // **非structへのメンバーアクセス〈not-a-struct〉と
 // union targetの`narrow-required`はmilestone 47で対応済み**)
 // ——アーキテクチャが正しいと分かった時点で、機能ごとに広げていく方針(既存21マイルストーンと
@@ -575,6 +575,56 @@ fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
 // `unknown-package-type` / `not-exported`(下記`check_package_type_ref`)。
 // ただし**型そのものは引き続きANY**(pkg修飾型のモデル化は別マイルストーン)なので、
 // その型のフィールド検証などは効かない
+// `pkg.symbol`(パッケージ修飾メンバー参照)の解決を試みる。TS版`calls.ts`の
+// `tryPackageMember`の移植(milestone 50)。呼び出し形(`lib.add(1)`)とメンバー参照形
+// (`f := lib.add`)の両方から呼ぶ——TS版も`inferCall`と`expressions.ts`のmemberケースで共有する。
+//
+// **返り値の意味に注意**: `None`は「そもそもpkg修飾参照ではない」だけ。pkg修飾参照だと
+// 分かったら診断を出したうえで**必ず`Some`を返す**(TS版と同じ設計——判定と診断が同じ関数に
+// 同居しているので、呼び出し元は`Some`を受け取ったらそれ以上targetを評価してはいけない)。
+// **ローカル束縛が優先**する(TS版`lookup(ctx, alias) !== undefined`と同じ)——
+// import aliasと同名の変数はmilestone 48の`name-conflicts-with-package`で弾かれるが、
+// 弾かれた後も本体の検査は続くのでこの順序が要る
+fn try_package_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Option<Type> {
+    let Expr::Ident { name: alias, .. } = target else { return None };
+    if ctx.lookup(alias).is_some() {
+        return None; // ローカル束縛が勝つ
+    }
+    if !ctx.import_aliases.contains(alias) {
+        return None;
+    }
+    // **表に無いパッケージは黙って素通り**(milestone 49と同じ理由——検査経路によっては
+    // 依存を読み込まないため、「知らない」を「無い」と混同すると誤検知になる)
+    let Some(syms) = ctx.pkg_registry.get(alias) else {
+        return Some(ANY);
+    };
+    // F-9c: 関数だけでなくトップレベル定数(`pkg.CONST`)も同じ経路で解決する
+    let visible = syms.fns.get(name).or_else(|| syms.consts.get(name)).copied();
+    let is_exported_type = syms.types.get(name) == Some(&true);
+    match visible {
+        None => {
+            if is_exported_type {
+                ctx.error(
+                    pos,
+                    DiagnosticCode::PackageSymbolIsAType,
+                    format!("'{name}' is a type — use {alias}.{name} in a type position, or {alias}.{name}{{...}} to construct it"),
+                );
+            } else {
+                ctx.error(pos, DiagnosticCode::UnknownPackageFunction, format!("package '{alias}' has no exported function or constant '{name}'"));
+            }
+        }
+        Some(false) => ctx.error(
+            pos,
+            DiagnosticCode::NotExported,
+            format!("'{name}' is not exported by package '{alias}' — add 'export' to its declaration"),
+        ),
+        // **型は返さない**(pkg修飾シンボルのモデル化は別マイルストーン)。ANYを返すので
+        // 引数照合等は効かない——検出漏れ側に倒す既定方針
+        Some(true) => {}
+    }
+    Some(ANY)
+}
+
 // pkg修飾型が解決できるか(診断は出さない版)。TS版`resolvePackageType`が本物の型を返すのは
 // 「importされている & その名前の型がある & exportされている」の3つが揃ったときだけで、
 // それ以外は全部ANY——`unknown_type_name`がその判定に使う。
@@ -712,6 +762,12 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 b.ty.clone()
             } else if crate::checker::is_builtin(name) {
                 ANY
+            } else if ctx.import_aliases.contains(name) {
+                // milestone 50: パッケージ名を値として使った(`print(lib)`)。TS版
+                // `expressions.ts`も束縛が見つからなかった後のこの位置で判定する
+                // ——import aliasをスコープへ入れないからこそ出せる診断
+                ctx.error(*pos, DiagnosticCode::PackageAsValue, format!("'{name}' is a package — use it as a qualifier like {name}.something"));
+                ANY
             } else {
                 // 文言はTS版`expressions.ts:253`と同じ`undefined: 'x'`(milestone 22で
                 // `'x' is not defined`という独自文言になっていたのをmilestone 31で揃えた——
@@ -742,6 +798,13 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             // undefined-nameが2回出る。TS版`calls.ts:78-80`が「targetは一度だけ評価する」と
             // 明記している不変条件。code reviewで発覚し再現確認済み)
             if let Expr::Member { target, name, pos: mpos } = &**callee {
+                // milestone 50: `lib.add(1)`のようなパッケージ修飾呼び出しを**targetを評価する前に**
+                // 解決する(TS版`inferCall`も`tryPackageMember`を先に呼ぶ)。Someが返ったら
+                // targetは評価しない——`lib`は値ではないので、評価すると`package-as-value`の
+                // 誤検知になる
+                if let Some(pkg_ty) = try_package_member(ctx, target, name, *mpos) {
+                    return check_call_of_value(ctx, pkg_ty, args, *pos);
+                }
                 let tgt = infer_expr_single(ctx, target);
                 if let Type::Struct { name: sname, fields: fcell, .. } = &tgt {
                     let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
@@ -1049,7 +1112,8 @@ fn check_call_of_value(ctx: &mut FullCheckerCtx, callee_ty: Type, args: &[Expr],
     // 非ジェネリック自由関数をシグネチャ付きで登録)なら個数・各引数の型を照合する
     // (TS版`checkArgsAgainst`)。ローカル変数に束縛した関数値の呼び出し
     // (`f := add; f(1,2)`)もcalleeがType::Fnとして伝播するので同じく照合される。
-    // pkg修飾呼び出し・ジェネリック関数はcalleeがANYになるため対象外
+    // pkg修飾呼び出し(milestone 50で`try_package_member`が解決する)・ジェネリック関数は
+    // calleeがANYになるため引数照合の対象外——pkg修飾シンボルの型のモデル化は別回
     if let Type::Fn { params, ret } = &callee_ty {
         let (params, ret) = (params.clone(), (**ret).clone());
         check_args_against(ctx, pos, args, &arg_tys, &params);
@@ -1115,6 +1179,11 @@ fn member_field_type(ctx: &mut FullCheckerCtx, tgt: &Type, name: &str, pos: Pos)
 }
 
 fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
+    // milestone 50: `f := lib.add`のような**呼び出しを伴わない**pkg修飾参照。呼び出し形と
+    // 同じ`try_package_member`を通す(TS版も`expressions.ts`のmemberケースで共有する)
+    if let Some(pkg_ty) = try_package_member(ctx, target, name, pos) {
+        return pkg_ty;
+    }
     let tgt = infer_expr_single(ctx, target);
     member_field_type(ctx, &tgt, name, pos)
 }
@@ -2865,22 +2934,15 @@ pub fn check_package_with_registry(
     // milestone 30/31: メソッド表(struct名→メソッド名→Type::Fn)を構築する
     // (`declare_method`。milestone 31から宣言時の4診断つき)
     // (メソッド表と関数シグネチャは同じループで登録する——下記参照)
-    // milestone 30: import alias(`import "mathutil"`→`mathutil`、`import "mesh/json"`→`json`)を
-    // ANYとしてscopes[0]へ登録する。full_checkerはimport/パッケージを解決しないが、登録しないと
-    // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
-    // 誤検知される——milestone 30でMember/メソッド呼び出しがtargetを推論するようになり顕在化。
-    // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)。
-    // **milestone 48**: `declare()`を通さず直接insertするのは今も同じだが、`declare()`側に
-    // `import_aliases`の分岐を入れたので、import aliasと同名のfn/constはTS版と同じ
-    // `name-conflicts-with-package`になる(それまでは重複チェックに引っかかって
-    // `already-declared`という**誤ったコード**を出していた)。そのfn/constの実型が登録されず
-    // 呼び出しの引数照合が素通りする副作用は**TS版も同じ**(TS版もそこでreturnする)。
-    // 残る差はTS版が続けて出す`package-as-value`(`lib`を値として参照する形)の未移植のみ
-    for (_, program) in files {
-        for imp in &program.imports {
-            ctx.scopes[0].insert(imp.alias.clone(), Binding { ty: ANY, mutable: false });
-        }
-    }
+    // milestone 30〜49はimport alias(`mathutil`・`json`等)をANYとして`scopes[0]`へ登録して
+    // いた——登録しないと`mathutil.add(...)`のtargetがundefined-nameに誤検知されるため。
+    // **milestone 50でその登録を撤去した**。`try_package_member`がtargetを評価する前に
+    // pkg修飾参照を解決するようになったので、targetが値として評価されることはもう無い。
+    // 撤去が必要だったのは`package-as-value`のため——TS版はimport aliasをスコープに
+    // 入れないので、裸の`lib`は「束縛が無い」経路に落ちてそこで専用の診断になる
+    // (登録したままだと束縛が見つかってしまい、この診断が原理的に出せない)。
+    // なお`declare()`側のimport alias衝突チェック(milestone 48)はこの登録とは独立で、
+    // `ctx.import_aliases`を直接見ているので影響を受けない
     // TS版`checker/modules.ts`のcheckPackageと同じ順序: 先に全関数の名前をscopes[0]へ
     // 登録してから(前方参照・相互再帰を許すため——本体はまだ検査しない)、トップレベル
     // 定数を検査+登録し、最後に関数本体を検査する。
@@ -4395,8 +4457,10 @@ mod tests {
 
     #[test]
     fn pkg修飾アクセスは誤検知しない() {
-        // import alias(mathやjson)はANYとして登録されるので、pkg.func(...) のtargetが
-        // undefined-nameにならない(pkg修飾の中身の検査は次段階)
+        // milestone 50から`try_package_member`がtargetを評価する前に解決するので、
+        // pkg.func(...) のtargetがundefined-nameにならない(それまではimport aliasを
+        // ANYとしてscopes[0]へ登録することで回避していた)。**表に無いパッケージなので
+        // 中身の診断は出ない**——`check`はレジストリを渡さない経路
         let diags = check("import \"mathutil\"\nfn main() {\n    x := mathutil.add(1, 2)\n    print(x)\n}\n");
         assert_eq!(diags, vec![]);
     }
@@ -4812,6 +4876,34 @@ mod tests {
         let diags: Vec<Diagnostic> =
             check_package_with_registry(&[("main.mesh".to_string(), &ok)], true, &registry).into_iter().flat_map(|(_, d)| d).collect();
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn pkg修飾呼び出しの3診断とpackage_as_value() {
+        let lib = parse("export struct Point {\n    x: int\n}\n\nexport fn add(a: int, b: int) int {\n    return a + b\n}\n\nfn secret() int {\n    return 1\n}\n\nexport LIMIT := 10\n\nHIDDEN := 5\n").unwrap();
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), collect_package_exports(&[("l.mesh".to_string(), &lib)]));
+        let run = |src: &str| -> Vec<Diagnostic> {
+            let program = parse(src).expect("test source must parse");
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).into_iter().flat_map(|(_, d)| d).collect()
+        };
+        for (src, code) in [
+            ("import \"lib\"\n\nfn main() {\n    print(lib.nope(1, 2))\n}\n", DiagnosticCode::UnknownPackageFunction),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.secret())\n}\n", DiagnosticCode::NotExported),
+            // 定数も関数と同じ経路(F-9c)。未exportならnot-exported
+            ("import \"lib\"\n\nfn main() {\n    print(lib.HIDDEN)\n}\n", DiagnosticCode::NotExported),
+            // 型を関数として呼ぶと専用の診断になる
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Point(1))\n}\n", DiagnosticCode::PackageSymbolIsAType),
+            // パッケージ名を値として使う(import aliasをスコープへ入れないから出せる)
+            ("import \"lib\"\n\nfn main() {\n    print(lib)\n}\n", DiagnosticCode::PackageAsValue),
+        ] {
+            let diags = run(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // 正常な形は素通り(呼び出し・定数・呼び出しを伴わない関数値参照・structリテラル)
+        let ok = "import \"lib\"\n\nfn main() {\n    print(lib.add(1, 2))\n    print(lib.LIMIT)\n    f := lib.add\n    print(f(1, 2))\n    print(lib.Point{x: 1})\n}\n";
+        assert!(run(ok).is_empty(), "{:?}", run(ok));
     }
 
     #[test]
