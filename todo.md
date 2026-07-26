@@ -3267,6 +3267,31 @@
                 1つずつ発火させるものに加え、メソッド内の`?`・無名関数の中の`?`
                 (ret_stackの入れ子)・mapの読みに対する`or`・`detach`・引数位置の`or`など
                 誤検知を狙うものを用意した。
+        - [x] **milestone 41: `void-used-as-value`(値位置のvoid)——checkExprSingleの二層構造**
+              ✅ 2026-07-26実装。milestone 40のcode reviewで「これが無いためにprop/or/matchが
+              TS版と違うコードを出す」と判明して優先度が上がった項目。借りを返した。
+              - **TS版と同じ2段構造にした**: `infer_expr`(voidを許す)と
+                `infer_expr_single`(値が要る場所。voidなら`void-used-as-value`を出して
+                **ANYへ差し替える**)。TS版の`checkExpr`/`checkExprSingle`の移植で、
+                voidを許すのは**6種類の位置だけ**——式文・`defer`・代入先・`spawn`する
+                呼び出し・match/selectのアーム本体(+select既定アーム)。残り43箇所は
+                すべて`infer_expr_single`を通す。
+              - **ANYへ差し替えるのが要**。voidをそのまま下流へ流すとprop/or/matchが
+                「unionではない」と判断してTS版と違うコードを出す——milestone 40では
+                3箇所でvoidを個別に免除する応急処置を入れていたが、二層化で不要になったので
+                外した(応急処置が構造的な対処に置き換わった形)。
+              - 診断コードは53種のまま(`void-used-as-value`自体はmilestone 22から
+                「戻り値なし関数でのreturn値」用に存在していた。今回はそれが**値位置全般**へ
+                広がった)。
+              - 新規テスト2件・既存1件を強化(558→559件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計99ファイル。voidを
+                **あらゆる値位置**へ置いたプローブ12本(`x := work(1)`・引数・二項演算・
+                文字列補間・ifの条件・配列リテラル・structフィールド・チャネル送信・
+                型注釈つき宣言・void関数からの`return work(1)`〈TS版は診断が**2件**出る〉、
+                および許される位置〈式文/defer/spawn・全アームvoidのmatch〉)を新設し、
+                **すべて出力・終了コードが一致**。全体でも差が出るのは未移植の診断
+                (`unknown-type`・`type-alias-cycle`)が絡む3ファイルのみで、
+                **Rust側だけに出る診断は0件**。examples全22件の`mesh run`も一致。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3274,7 +3299,7 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 40まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 41まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
         107種 vs 53種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を

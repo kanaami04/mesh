@@ -977,9 +977,12 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      無名関数の本体)。あわせて`?`の5診断と`or`の4診断を移植し、診断コードは44→53種。
      **catch-allは復活させないこと**——新しい式を足すとコンパイルエラーになり、
      「検査するか、しないなら理由を書く」判断を強制できる
-   - 残る候補: **診断の続き**——**値位置の`void-used-as-value`**(TS版`checkExprSingle`相当。
-     milestone 40のcode reviewで「これが無いとprop/or/matchがTS版と違うコードを出す」と
-     判明したため優先度が上がった)・型名そのものの検査(`unknown-type`/`type-alias-cycle`。
+   - ✅ **milestone 41(2026-07-26)で`void-used-as-value`(値位置のvoid)**——TS版と同じ
+     `checkExpr`/`checkExprSingle`の2段構造にした。voidを許すのは6種類の位置だけ
+     (式文・defer・代入先・spawnする呼び出し・match/selectのアーム本体)で、
+     それ以外は`infer_expr_single`がvoidをANYへ差し替える。milestone 40で入れた
+     「voidを個別に免除する」応急処置は不要になり撤去
+   - 残る候補: **診断の続き**——型名そのものの検査(`unknown-type`/`type-alias-cycle`。
      milestone 39でこれが無いために「未知の型名は判定不能として飛ばす」対処が要った)・
      pkg修飾struct/pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`)・
      union targetの`narrow-required`。
