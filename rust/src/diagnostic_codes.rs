@@ -92,6 +92,15 @@ diagnostic_codes! {
     MatchNotExhaustive => "match-not-exhaustive",
     MixedVoidArms => "mixed-void-arms",
     EmptySelect => "empty-select",
+    PropContextNotString => "prop-context-not-string",
+    PropRequiresFailureUnion => "prop-requires-failure-union",
+    PropNothingToPropagate => "prop-nothing-to-propagate",
+    PropContextStructuredError => "prop-context-structured-error",
+    PropReturnTypeMismatch => "prop-return-type-mismatch",
+    OrNeverFails => "or-never-fails",
+    OrRequiresBinding => "or-requires-binding",
+    OrNoSuccessValue => "or-no-success-value",
+    OrFallbackTypeMismatch => "or-fallback-type-mismatch",
 }
 
 impl std::fmt::Display for DiagnosticCode {
