@@ -1007,7 +1007,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      循環を`Err`で返して走査全体を打ち切るので位置も件数も合わない)。診断コードは55→56種。
      struct/array越しの再帰を循環にしない区別、報告位置(宣言位置と参照位置の使い分け)、
      報告順(メンバーを全部解決してから判定)まで実測で合わせている
-   - 残る候補: **診断の続き**——`defer-requires-call`・
+   - ✅ **milestone 44(2026-07-26)で`defer-requires-call`**——`defer`の後ろが呼び出しでなければ
+     弾く。TS版と同じく「呼び出しかどうか」を先に見て打ち切る(順序を逆にすると本来の診断が
+     消える)。診断コードは56→57種
+   - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
@@ -1023,7 +1026,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
        (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
-       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。いずれもモデル化を
+       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
+       (7)**関数値の型照合が効かない場面がある**(milestone 44のcode reviewで発見・スコープ外):
+       `chan<fn() void>`へ`fn(int) void`を送る/`(<-fch)()`のように受信した関数値を呼ぶ、で
+       TS版は`type-mismatch`と`not-callable`を出すがRust版は無診断。`not-callable`自体が
+       未移植で、関数型の代入互換性(`resolve_type_ann`が関数型をANYへ畳む)とセットの課題。いずれもモデル化を
        進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置
