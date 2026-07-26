@@ -64,6 +64,8 @@ diagnostic_codes! {
     DivisionByZero => "division-by-zero",
     ArgumentCount => "argument-count",
     BuiltinArgType => "builtin-arg-type",
+    BuiltinTypeRedeclared => "builtin-type-redeclared",
+    NameConflictsWithPackage => "name-conflicts-with-package",
     UnknownField => "unknown-field",
     NotAStruct => "not-a-struct",
     NarrowRequired => "narrow-required",

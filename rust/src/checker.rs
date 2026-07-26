@@ -312,7 +312,8 @@ pub fn resolve_type_decls(ctx: &mut CheckerCtx, types: &[TypeDecl]) -> Result<()
         .filter(|t| matches!(t.node, TypeNode::StructType { .. } | TypeNode::Union { .. }) || !t.is_error)
         .collect();
     // **先勝ち(first-wins)で引く**。同名の型宣言が2つあるとき、TS版は最初の宣言だけを
-    // `typeTable`へ入れて2つ目を`already-declared`で弾く(その診断自体は未移植)。素直な
+    // `typeTable`へ入れて2つ目を`already-declared`で弾く(**その診断もmilestone 48で移植済み**
+    // ——full_checker側の名前検査ループが出す。このリゾルバ自体は従来どおり診断を出さない)。素直な
     // `collect()`は**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」食い違いが
     // 起きる——`type Count = int` / `type Count = string`に対して`x: Count = 1`が
     // `cannot use int as string`という**TS版に無い誤診断**になった(milestone 46の検証で発覚。

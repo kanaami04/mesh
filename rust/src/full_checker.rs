@@ -92,6 +92,10 @@ pub struct FullCheckerCtx {
     // 型も丸ごと未登録になる。どちらも「宣言はされている」ので`unknown-type`は誤検知になる
     // (code reviewで2人が別々の再現手順で発見)
     declared_types: std::collections::HashSet<String>,
+    // milestone 48: このパッケージのimportエイリアス集合(TS版`CheckerCtx.importAliases`)。
+    // 型宣言側(`check_package`冒頭)と値側(`declare`)の両方が`name-conflicts-with-package`の
+    // 判定に使う——TS版もこの2箇所で同じ集合を引いている
+    import_aliases: std::collections::HashSet<String>,
     // milestone 43: 型宣言の本体(名前→宣言)と、その解決状態。TS版`resolveAlias`の
     // メモ化(`resolvedAliases`)+解決中マーク(`resolvingAliases`)に対応する。
     // `type-alias-cycle`は「解決中のunion placeholderが**裸で**メンバーに現れた」ことで
@@ -113,6 +117,7 @@ impl FullCheckerCtx {
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
             declared_types: std::collections::HashSet::new(),
+            import_aliases: std::collections::HashSet::new(),
             alias_decls: HashMap::new(),
             alias_state: HashMap::new(),
             resolving_plain: std::collections::HashSet::new(),
@@ -147,6 +152,15 @@ impl FullCheckerCtx {
         }
         if crate::checker::is_builtin(name) {
             self.error(pos, DiagnosticCode::BuiltinRedeclared, format!("'{name}' is a builtin function and cannot be redeclared"));
+            return;
+        }
+        // milestone 48: importエイリアスと同じ名前のfn/const/変数(TS版`declareBinding`の
+        // 同じ位置の分岐)。**already-declaredより前**に見るのが要点——import aliasは
+        // `declare`を通さず直接scopes[0]へ入れている(下記check_packageのコメント参照)ため、
+        // この分岐が無いと下のcontains_keyに引っかかって`already-declared`という
+        // **TS版と違うコード**になっていた(milestone 30以来の既知の限界)
+        if self.import_aliases.contains(name) {
+            self.error(pos, DiagnosticCode::NameConflictsWithPackage, format!("'{name}' conflicts with an imported package name"));
             return;
         }
         if self.scopes.last().expect("scopes is never empty").contains_key(name) {
@@ -407,6 +421,13 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
 // struct/array/map/chan/関数型に包まれた参照は循環にならない、というTS版の区別そのもの。
 // あわせて`unknown-type`/`any-type-removed`もここで出す(TS版も`resolveType`が
 // 解決しながら報告する。型宣言の中の診断はこの経路だけから出る)
+// 組み込み型名(TS版`checker/context.ts`の`BUILTIN_TYPE_NAMES`)。`type`/`struct`宣言の名前に
+// 使えない。**`any`も含む**——H-1で型としては撤去されたが、名前としては予約されたまま
+// (TS版と同じ)。**`none`だけはレクサーのキーワード**なのでパーサーが先に構文エラーにし、
+// ここへは届かない。`closed`はキーワードではなく普通の識別子(型解決側で特別扱いしている
+// だけ)なので、ここまで来て`builtin-type-redeclared`になる——両実装で実測して確認済み
+const BUILTIN_TYPE_NAMES: [&str; 9] = ["int", "float", "string", "bool", "void", "error", "none", "closed", "any"];
+
 fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
     match node {
         // pkg修飾はスコープ外(check_type_annと同じ理由)
@@ -2617,19 +2638,69 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let all_types: Vec<crate::ast::TypeDecl> = files.iter().flat_map(|(_, p)| p.types.iter().cloned()).collect();
     // **宣言されている型名を先に集める**(レジストリの中身とは独立に。上記
-    // `declared_types`のコメント参照)
+    // `declared_types`のコメント参照)。**milestone 48で`rejected`を除くようにした**——
+    // 名前の時点で弾かれた宣言はTS版の`typeTable`にも入らないので、その名前を型注釈で使えば
+    // TS版は`unknown-type`を出す。除かないとその検出漏れが残る(下の`rejected`を作った後で
+    // 差し引く。集合を作る順序の都合でここでは一旦全部入れる)
     ctx.declared_types = all_types.iter().map(|t| t.name.clone()).collect();
     // **先勝ち(first-wins)で登録する**。同じ名前の型宣言が2つあるとき、TS版は最初の宣言だけを
-    // `typeTable`へ入れて2つ目は`already-declared`で弾く(その診断自体はRust版に未移植)。
+    // `typeTable`へ入れて2つ目は`already-declared`で弾く(**その診断もmilestone 48で移植済み**
+    // ——下の名前検査ループが出す)。
     // `collect()`は素直に書くと**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」
     // という食い違いが起きて、診断が消えたり無関係な宣言の位置に付いたりした
     // (code reviewで発覚: `type A = Bogus` / `type A = int` で`unknown-type`が消え、
     // `type A = int` / `type A = A | string` では1行目に`type-alias-cycle`が付いた)
+    // milestone 48: **型宣言の名前そのものの検査**(TS版`checker/modules.ts`のcheckPackage冒頭)。
+    // 組み込み型名 → importエイリアスと衝突 → 既に宣言済み、の順に判定し、**どれかに当たったら
+    // その宣言は登録しない**(TS版の`continue`)。import aliasの集合は型登録より前に要るので
+    // ここで先に集める(TS版も`createCheckerCtx`へ渡す前に作っている)。
+    // TS版は全ファイルを1周してから解決へ進むので、報告順は「全ファイルの名前衝突 →
+    // 全ファイルの本体解決」になる——`type A = Bogus` / `type A = int`で
+    // already-declared(2行目)がunknown-type(1行目)より先に出るのはこの順序の結果(実測で確認)
+    ctx.import_aliases = files.iter().flat_map(|(_, p)| p.imports.iter().map(|i| i.alias.clone())).collect();
+    let import_aliases = ctx.import_aliases.clone();
+    // 名前検査を通って実際に登録された型名(TS版の`typeTable`相当)。already-declaredは
+    // **登録済みの名前**と比べる——組み込み名/エイリアス衝突で弾かれた宣言は登録されないので、
+    // 同名が2つあれば2回とも同じ診断が出る(TS版と同じ)
+    let mut registered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // 名前の時点で弾かれた型名。**本体の解決もしない**——TS版の2周目が
+    // `typeTable.get(td.name) === td.node`で登録済みの宣言だけを解決するのと同じ。
+    // これが無いと`type int = Bogus`にTS版が出さないunknown-typeまで出てしまう(実測で確認)
+    let mut rejected: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, (_, program)) in files.iter().enumerate() {
+        let start = ctx.diagnostics.len();
+        for t in &program.types {
+            if BUILTIN_TYPE_NAMES.contains(&t.name.as_str()) {
+                ctx.error(t.pos, DiagnosticCode::BuiltinTypeRedeclared, format!("'{}' is a builtin type and cannot be redeclared", t.name));
+                rejected.insert(&t.name);
+            } else if import_aliases.contains(&t.name) {
+                ctx.error(t.pos, DiagnosticCode::NameConflictsWithPackage, format!("'{}' conflicts with an imported package name", t.name));
+                rejected.insert(&t.name);
+            } else if !registered.insert(&t.name) {
+                // 2つ目以降は登録しない(1つ目が既に登録済み=先勝ち)。`rejected`には入れない
+                // ——1つ目の宣言は正当なので本体の解決は行う
+                ctx.error(t.pos, DiagnosticCode::AlreadyDeclared, format!("type '{}' is already declared", t.name));
+            }
+        }
+        spans.push((start, ctx.diagnostics.len(), i));
+    }
+    // 弾かれた名前は「宣言されていない」扱いにする(上記`declared_types`のコメント参照)
+    ctx.declared_types.retain(|n| !rejected.contains(n.as_str()));
     ctx.alias_decls = HashMap::new();
     for t in &all_types {
+        if rejected.contains(t.name.as_str()) {
+            continue;
+        }
         ctx.alias_decls.entry(t.name.clone()).or_insert_with(|| t.clone());
     }
-    let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
+    // **弾いた宣言はレジストリにも入れない**(milestone 48)。TS版`checkPackage`は3つの検査に
+    // 引っかかった宣言で`continue`し、`typeTable.set`まで到達しない——つまりその名前は
+    // 型注釈から見て「未知の型」になり、TS版では**ANYへ解決される**。ここで渡してしまうと
+    // `struct io {...}`(import "mesh/io"と衝突)の`io`が本物のstructとして登録され、
+    // `fn use(v: io)`の引数照合が効いて`cannot use int as io`という**TS版に無い誤検知**に
+    // なっていた(code reviewで発覚・両CLIで再現確認済み)
+    let registered_types: Vec<crate::ast::TypeDecl> = all_types.iter().filter(|t| !rejected.contains(t.name.as_str())).cloned().collect();
+    let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &registered_types);
     // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
     // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
     // (関数シグネチャが2回出るのとは対照的。実測で確認)。報告順も
@@ -2637,6 +2708,10 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for t in &program.types {
+            // milestone 48: 名前の時点で弾かれた宣言は本体も解決しない(上記`rejected`参照)
+            if rejected.contains(t.name.as_str()) {
+                continue;
+            }
             // milestone 43: 宣言そのものを起点に解決する(posは**宣言の位置**)。
             // 本体の中の`unknown-type`/`any-type-removed`もこの歩きから出る
             resolve_alias(&mut ctx, &t.name, t.pos);
@@ -2651,11 +2726,12 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
     // 誤検知される——milestone 30でMember/メソッド呼び出しがtargetを推論するようになり顕在化。
     // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)。
-    // **既知の限界**: `declare()`を通さず直接insertするため、import aliasと同名のfn/constが
-    // あると、後続のfn/const登録が`declare()`で`already-declared`になる(TS版は専用の
-    // `name-conflicts-with-package`診断を出すが未移植)。その際そのfn/constの実型が
-    // 登録されず呼び出しの引数照合が素通りする副作用もある——稀な衝突(import名と同名の
-    // fn/const)につき次段階でname-conflicts-with-package診断とセットで対応する候補
+    // **milestone 48**: `declare()`を通さず直接insertするのは今も同じだが、`declare()`側に
+    // `import_aliases`の分岐を入れたので、import aliasと同名のfn/constはTS版と同じ
+    // `name-conflicts-with-package`になる(それまでは重複チェックに引っかかって
+    // `already-declared`という**誤ったコード**を出していた)。そのfn/constの実型が登録されず
+    // 呼び出しの引数照合が素通りする副作用は**TS版も同じ**(TS版もそこでreturnする)。
+    // 残る差はTS版が続けて出す`package-as-value`(`lib`を値として参照する形)の未移植のみ
     for (_, program) in files {
         for imp in &program.imports {
             ctx.scopes[0].insert(imp.alias.clone(), Binding { ty: ANY, mutable: false });
@@ -3253,17 +3329,62 @@ mod tests {
     fn 同名の型宣言があっても最初の宣言で解決する() {
         // 回帰(code reviewで発覚): 名前→宣言の表を後勝ちで作ると、「最初の宣言の名前で
         // 2つ目の本体を解決する」という食い違いが起きる。TS版は最初の宣言だけを登録して
-        // 2つ目は`already-declared`で弾く(その診断自体はRust版に未移植=検出漏れ側)ので、
-        // **先勝ち**に揃える。
+        // 2つ目は`already-declared`で弾くので、**先勝ち**に揃える。
+        // **milestone 48で期待値を更新**——`already-declared`自体を移植したので、どのケースも
+        // その診断が先頭に加わる(3件ともTS版へ問い合わせて位置・順序まで一致を確認済み)。
+        // **報告順が位置順ではない**点に注目: 名前衝突は全ファイルを1周してから本体解決へ
+        // 進むので、2行目のalready-declaredが1行目の本体診断より先に出る
         // (1)1つ目の本体の診断が消えていた
         let lost = check("type A = Bogus\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
-        assert_eq!(lost.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType], "{lost:?}");
-        // (2)2つ目の本体の循環が、1つ目の宣言の位置に付いていた
+        assert_eq!(lost.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::AlreadyDeclared, DiagnosticCode::UnknownType], "{lost:?}");
+        // (2)2つ目の本体の循環が、1つ目の宣言の位置に付いていた(2つ目は登録されないので
+        // 循環自体は報告されない——already-declaredだけが出るのが正しい)
         let bogus_cycle = check("type A = int\ntype A = A | string\n\nfn main() {\n    print(\"hi\")\n}\n");
-        assert_eq!(bogus_cycle, vec![], "{bogus_cycle:?}");
+        assert_eq!(bogus_cycle.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::AlreadyDeclared], "{bogus_cycle:?}");
         // (3)順序が逆だと診断が丸ごと消えていた
         let dropped = check("type A = A | string\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
-        assert_eq!(dropped.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::TypeAliasCycle], "{dropped:?}");
+        assert_eq!(
+            dropped.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::AlreadyDeclared, DiagnosticCode::TypeAliasCycle],
+            "{dropped:?}"
+        );
+    }
+
+    #[test]
+    fn 組み込み型名の再宣言はbuiltin_type_redeclared() {
+        // `none`だけはレクサーのキーワードなのでパーサーが先に構文エラーにし、ここへ届かない。
+        // `closed`はキーワードではないので普通に到達する(両実装で実測して確認済み)
+        for (src, name) in [
+            ("type int = string\n\nfn main() {\n    print(1)\n}\n", "int"),
+            ("struct string {\n    x: int\n}\n\nfn main() {\n    print(1)\n}\n", "string"),
+            ("type any = int\n\nfn main() {\n    print(1)\n}\n", "any"),
+            ("type void = int\n\nfn main() {\n    print(1)\n}\n", "void"),
+            ("type closed = int\n\nfn main() {\n    print(1)\n}\n", "closed"),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::BuiltinTypeRedeclared, "{src} -> {diags:?}");
+            assert_eq!(diags[0].message, format!("'{name}' is a builtin type and cannot be redeclared"));
+        }
+    }
+
+    #[test]
+    fn 弾かれた型宣言は本体を解決しない() {
+        // TS版の2周目は`typeTable.get(td.name) === td.node`で**登録済みの宣言だけ**を解決する。
+        // これが無いと`type int = Bogus`にTS版が出さないunknown-typeまで出てしまう(実測で確認)
+        let builtin = check("type int = Bogus\n\nfn main() {\n    print(1)\n}\n");
+        assert_eq!(builtin.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::BuiltinTypeRedeclared], "{builtin:?}");
+        // 2つ目の宣言も同様(先勝ちなので2つ目の本体は解決しない)
+        let dup = check("type A = int\ntype A = Bogus\n\nfn main() {\n    print(1)\n}\n");
+        assert_eq!(dup.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::AlreadyDeclared], "{dup:?}");
+    }
+
+    #[test]
+    fn 同名の型宣言が3つあれば2件報告する() {
+        // already-declaredは**登録済みの名前**と比べる(1つ目が登録され、2つ目と3つ目が弾かれる)
+        let src = "struct P {\n    x: int\n}\n\nstruct P {\n    x: int\n}\n\nstruct P {\n    x: int\n}\n\nfn main() {\n    print(P{x: 1})\n}\n";
+        let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![DiagnosticCode::AlreadyDeclared, DiagnosticCode::AlreadyDeclared], "{codes:?}");
     }
 
     #[test]
@@ -4519,6 +4640,39 @@ mod tests {
         let b = parse("fn double(n: int) int {\n    return n * 2\n}\n").unwrap();
         let out = check_package(&[("a.mesh".to_string(), &a), ("b.mesh".to_string(), &b)], false);
         assert_eq!(out, vec![]);
+    }
+
+    #[test]
+    fn importエイリアスと同名の宣言はname_conflicts_with_package() {
+        // 型宣言側(TS版`checker/modules.ts`)と値側(TS版`declareBinding`)の両方。
+        // **値側はmilestone 48以前`already-declared`という誤ったコードを出していた**
+        // ——import aliasは`declare`を通さず直接scopes[0]へ入れるので、重複チェックに
+        // 引っかかっていた(milestone 30以来の既知の限界)
+        for src in [
+            "import \"lib\"\n\ntype lib = int\n\nfn main() {\n    print(1)\n}\n",
+            "import \"lib\"\n\nstruct lib {\n    x: int\n}\n\nfn main() {\n    print(1)\n}\n",
+            "import \"lib\"\n\nfn lib() int {\n    return 2\n}\n\nfn main() {\n    print(1)\n}\n",
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::NameConflictsWithPackage, "{src} -> {diags:?}");
+            assert_eq!(diags[0].message, "'lib' conflicts with an imported package name");
+        }
+    }
+
+    #[test]
+    fn 弾かれた型宣言はレジストリにも入らない() {
+        // code reviewで発覚した**誤検知**の回帰: 弾いた宣言を`resolve_type_decls`へ渡していたため、
+        // `struct io`(import "mesh/io"と衝突)が本物のstructとして登録され、`fn use(v: io)`の
+        // 引数照合が効いて`cannot use int as io`というTS版に無い診断が出ていた。TS版は
+        // `typeTable.set`へ到達しないので、その名前は型注釈から見て未知=ANYになる
+        let src = "import \"mesh/io\"\n\nstruct io {\n    x: int\n}\n\nfn use(v: io) int {\n    return v.x\n}\n\nfn main() {\n    print(use(5))\n}\n";
+        let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+        assert_eq!(
+            codes,
+            vec![DiagnosticCode::NameConflictsWithPackage, DiagnosticCode::UnknownType, DiagnosticCode::UnknownType],
+            "{codes:?}"
+        );
     }
 
     #[test]
