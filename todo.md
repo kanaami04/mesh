@@ -3364,13 +3364,23 @@
               - milestone 42の型宣言パス(`check_type_decl_anns`)はこの歩きへ統合した——
                 型宣言の中の`unknown-type`/`any-type-removed`も同じ走査から出る
                 (TS版も`resolveAlias`が解決しながら報告する構造)。
-              - 診断コード55→56種。新規テスト4件(566→570件)。clippy(`-D warnings`)クリーン。
+              - **code reviewで発見・即修正した1件**(誤検知と検出漏れの両方): **同名の型宣言が
+                あると、名前→宣言の表が後勝ちになり「最初の宣言の名前で2つ目の本体を解決する」
+                食い違い**が起きていた。`type A = Bogus` / `type A = int`で`unknown-type`が
+                消え、`type A = int` / `type A = A | string`では**1行目に`type-alias-cycle`が
+                付き**、順序が逆だと診断が丸ごと消えた。TS版は最初の宣言だけを`typeTable`へ入れて
+                2つ目を`already-declared`で弾く(その診断自体はRust版に未移植)ので、
+                **先勝ち**に揃えた。回帰テスト1件追加。
+              - **既知の限界**: 型宣言の`already-declared`は未移植(検出漏れ側)。上記の
+                3ケースはいずれもRust版の出力がTS版の部分集合になっている。
+              - 診断コード55→56種。新規テスト5件(566→571件)。clippy(`-D warnings`)クリーン。
               - **検証**(TS版と突き合わせ): 循環の形を13通り(2つ巴/3つ巴/自己参照×union・
                 素のalias/struct越し/配列越し/判別可能union越し/`unknown-type`との混在/
                 2つの独立した循環/循環した型を関数で使う)用意し、**すべて出力・終了コードが一致**。
-                全体では全`.mesh` + プローブ計133ファイルで、差が出るのは他の未移植機能
-                (ジェネリック呼び出しの引数照合・`cannot-infer-type`の適用範囲)が絡む
-                2ファイルのみ、**Rust側だけに出る診断は0件**。examples全22件の`mesh run`も一致。
+                全体では全`.mesh` + プローブ計136ファイルで(修正後に再測定)、差が出るのは
+                他の未移植の診断(ジェネリック呼び出しの引数照合・`cannot-infer-type`の適用範囲・
+                型宣言の`already-declared`)が絡む5ファイルのみ、**Rust側だけに出る診断は0件**。
+                examples全22件の`mesh run`も一致。
                 examples全22件の`mesh run`も一致。プローブは型名の誤りをあらゆる位置
                 (関数の引数・戻り値・structフィールド・type alias本体・ローカル注釈・
                 レシーバ・matchのパターン・`is`のターゲット・`any`)へ置いたものを用意した。

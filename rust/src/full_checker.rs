@@ -2472,7 +2472,16 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // **宣言されている型名を先に集める**(レジストリの中身とは独立に。上記
     // `declared_types`のコメント参照)
     ctx.declared_types = all_types.iter().map(|t| t.name.clone()).collect();
-    ctx.alias_decls = all_types.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    // **先勝ち(first-wins)で登録する**。同じ名前の型宣言が2つあるとき、TS版は最初の宣言だけを
+    // `typeTable`へ入れて2つ目は`already-declared`で弾く(その診断自体はRust版に未移植)。
+    // `collect()`は素直に書くと**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」
+    // という食い違いが起きて、診断が消えたり無関係な宣言の位置に付いたりした
+    // (code reviewで発覚: `type A = Bogus` / `type A = int` で`unknown-type`が消え、
+    // `type A = int` / `type A = A | string` では1行目に`type-alias-cycle`が付いた)
+    ctx.alias_decls = HashMap::new();
+    for t in &all_types {
+        ctx.alias_decls.entry(t.name.clone()).or_insert_with(|| t.clone());
+    }
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
     // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
     // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
@@ -2879,6 +2888,24 @@ mod tests {
         assert_eq!(selfie.len(), 1, "{selfie:?}");
         assert_eq!((selfie[0].pos.line, selfie[0].pos.col), (1, 1));
         assert_eq!(selfie[0].message, "type alias cycle involving 'A'");
+    }
+
+
+    #[test]
+    fn 同名の型宣言があっても最初の宣言で解決する() {
+        // 回帰(code reviewで発覚): 名前→宣言の表を後勝ちで作ると、「最初の宣言の名前で
+        // 2つ目の本体を解決する」という食い違いが起きる。TS版は最初の宣言だけを登録して
+        // 2つ目は`already-declared`で弾く(その診断自体はRust版に未移植=検出漏れ側)ので、
+        // **先勝ち**に揃える。
+        // (1)1つ目の本体の診断が消えていた
+        let lost = check("type A = Bogus\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(lost.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType], "{lost:?}");
+        // (2)2つ目の本体の循環が、1つ目の宣言の位置に付いていた
+        let bogus_cycle = check("type A = int\ntype A = A | string\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(bogus_cycle, vec![], "{bogus_cycle:?}");
+        // (3)順序が逆だと診断が丸ごと消えていた
+        let dropped = check("type A = A | string\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(dropped.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::TypeAliasCycle], "{dropped:?}");
     }
 
     #[test]
