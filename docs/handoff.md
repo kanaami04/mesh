@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**62種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜48を消化した
+**現在地**: Rust移植の診断は**65種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜49を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,9 +20,11 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
-   `unknown-package-type` / `not-exported`)— 構造変更が一番大きい代わりに、いま検出漏れとして
-   積み上がっている領域をまとめて塞げる。撤去条件(2)を終わらせるには最終的に避けて通れない
+1. **パッケージ跨ぎの「呼び出し側」**(`unknown-package-function` /
+   `package-symbol-is-a-type` / 関数側の `not-exported` / `package-as-value`)——
+   milestone 49で**型参照側は移植済み**(レジストリの土台も入った)。残るのは呼び出しの中身で、
+   `package-as-value` は import alias を `scopes[0]` へ直接入れている作りを外す必要があり、
+   呼び出し側とセットでないと `lib.add(...)` の target が `undefined-name` になる
 2. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
    (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
    式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
@@ -1107,9 +1109,18 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `name-conflicts-with-package`も同時に入れた**——そこはRust版が`already-declared`という
      誤ったコードを出していた箇所(milestone 30以来の既知の限界)。診断コードは60→62種。
      詳細はtodo.mdの当該項目
+   - ✅ **milestone 49(2026-07-26)でパッケージ跨ぎ(型参照側)**。`unknown-package` /
+     `unknown-package-type` / `not-exported`。**構造変更が本体**——TS版はレジストリの各
+     シンボルに`exported`フラグを持ち「無い」と「あるがexportされていない」を区別するが、
+     Rust版のレジストリ(codegen用)はexport済みしか載せないため`not-exported`が原理的に
+     出せなかった。full_checker専用の可視性の表を新設し、`check_all_opts`が全パッケージぶんを
+     先に組み立てて渡す形にした。**組み込みパッケージ(`mesh/json`等)を忘れると即誤検知**に
+     なるので、codegen側の`*_stdlib_symbols`をそのまま流用している。診断コードは62→65種。
+     **pkg修飾型のモデル化は対象外**(診断だけで、型は引き続きANY)。詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
-     pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系・`package-as-value`とセット)・
-     structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化。
+     pkg修飾**呼び出し**の中身(`unknown-package-function`系・`package-as-value`とセット)・
+     structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化・
+     pkg修飾型のモデル化(milestone 49は診断だけで型はANYのまま)。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを

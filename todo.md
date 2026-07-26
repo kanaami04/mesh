@@ -3573,6 +3573,42 @@
                 **Rust側だけに出る診断は0件**。`git worktree`でmainのバイナリと比較すると
                 **20ファイルの挙動が変化し、全てTS版と一致**。examples全23本の実行も回帰なし。
                 テスト594→598件(+4)、clippyクリーン。
+        - [x] **milestone 49: パッケージ跨ぎ(型参照側)**
+              ✅ 2026-07-26実装。診断コード62→65種(`unknown-package` /
+              `unknown-package-type` / `not-exported`)。候補リスト先頭の
+              「パッケージ跨ぎ」を**型参照側と呼び出し側に分けた前半**。
+              - **構造変更が本体**。TS版はレジストリの各シンボルに`exported`フラグを持ち、
+                「無い」と「あるがexportされていない」を区別する。Rust版のレジストリ
+                (`checker::PackageSymbols`、codegen用)は**exportされたものしか載せない**ので
+                `not-exported`が原理的に出せなかった。full_checker専用の可視性の表
+                (`PackageExports`: 名前→exported)を新設し、`check_all_opts`が全パッケージぶんを
+                先に組み立てて`check_package_with_registry`へ渡す形にした
+                (宣言を見るだけで作れるので検査順に依存せず、循環importでも素直に作れる)。
+              - **組み込みパッケージ(`mesh/json`/`mesh/io`/`mesh/http`)を忘れると即誤検知**に
+                なる(`json.parse(...)`が`unknown-package-function`になる)。codegen側の
+                `*_stdlib_symbols`を`pub(crate)`にして**そのまま流用**した——2箇所に書くと
+                必ずずれる、というこの移植で何度も踏んだ形を避けるため。
+              - **「知らない」と「無い」を混同しない**: レジストリに載っていないパッケージは
+                黙って素通りさせる(単体テストのように依存を読み込まない経路がある)。
+                同じ理由で`package_type_resolves`も「表に無ければ解決できる側」に倒す。
+              - **milestone 48で追加した検証手順2'(弾いた名前をあらゆる参照経路から使う)が
+                早速4件の穴を見つけた**——structフィールドの型・type alias本体・structリテラルの
+                名前・レシーバ。前2つは`walk_type_ref`、3つ目は`infer_struct_lit`、4つ目は
+                `unknown_type_name`に追加して塞いだ。
+              - **レシーバで危うく誤検知を出すところだった**: pkg修飾レシーバを一律ANYにすると
+                `fn (p: lib.Point) show()`(TS版が通す形)に`invalid-receiver-type`が出る。
+                実測してから「解決できるかどうか」で判定する形にした。
+              - **意図的にスコープ外(次のマイルストーン)**: (1)pkg修飾**呼び出し**の中身
+                (`unknown-package-function` / `package-symbol-is-a-type` / 関数側の
+                `not-exported`)、(2)`package-as-value`——これはimport aliasを`scopes[0]`へ
+                直接入れている現在の作りを外す必要があり、(1)とセットでないと
+                `lib.add(...)`のtargetが`undefined-name`になる。(3)**pkg修飾型のモデル化**
+                (今回は診断だけで、型は引き続きANY——フィールド検証等は効かない)。
+              - **検証**(TS版と突き合わせ): 参照経路スイープ13本(引数/戻り値/structフィールド/
+                ローカル注釈/配列・chanの中/type alias本体/structリテラル名/レシーバ〈未export・
+                export済みの両方〉)+ パッケージ系プローブ7本。全`.mesh`計140ファイルで
+                差は9件のみ(いずれも未移植診断による検出漏れ)、**Rust側だけに出る診断は0件**。
+                examples全23本の実行も回帰なし。テスト599→602件(+3)、clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3580,9 +3616,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 48まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 49まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 62種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 65種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

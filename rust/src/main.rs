@@ -246,11 +246,19 @@ fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<D
         }
         by_pkg.entry(u.pkg.clone()).or_default().push((u.file.clone(), &u.program));
     }
+    // milestone 49: **全パッケージのシンボル表を先に組み立てる**(pkg修飾参照の診断用)。
+    // 宣言を見るだけで作れるので検査順に依存せず、循環importがあっても素直に作れる。
+    // 組み込みパッケージ(mesh/json等)を先に入れ、ユーザーパッケージで上書きする
+    // ——TS版`stdlib.ts`のBUILTIN_PACKAGESもユーザー側と同じレジストリに載る
+    let mut pkg_registry = full_checker::builtin_package_exports();
+    for (pkg, files) in &by_pkg {
+        pkg_registry.insert(pkg.clone(), full_checker::collect_package_exports(files));
+    }
     let mut out = Vec::new();
     for pkg in dependency_order(&discovered, &parsed.units) {
         let files = &by_pkg[&pkg];
         let require_main = pkg == "main" && !test_mode;
-        out.extend(full_checker::check_package(files, require_main));
+        out.extend(full_checker::check_package_with_registry(files, require_main, &pkg_registry));
     }
     out
 }

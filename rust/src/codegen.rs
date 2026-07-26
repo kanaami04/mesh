@@ -1547,7 +1547,7 @@ impl Codegen {
 // のため、ここではシグネチャの登録だけでよい)。json.Valueのような自己参照/不透明structの
 // ワークアラウンドは一切不要——型はどちらも単純(引数無しの配列返却・string引数の
 // string|error返却)で、型システム上の罠は無い
-fn io_stdlib_symbols() -> checker::PackageSymbols {
+pub(crate) fn io_stdlib_symbols() -> checker::PackageSymbols {
     fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
         Type::Fn { params, ret: Box::new(ret) }
     }
@@ -1569,7 +1569,7 @@ fn io_stdlib_symbols() -> checker::PackageSymbols {
 // 扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明なヘルパー越しにしか
 // Valueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に分解する
 // 手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
-fn json_stdlib_symbols() -> checker::PackageSymbols {
+pub(crate) fn json_stdlib_symbols() -> checker::PackageSymbols {
     fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
         Type::Fn { params, ret: Box::new(ret) }
     }
@@ -1640,7 +1640,7 @@ fn json_stdlib_symbols() -> checker::PackageSymbols {
 // (struct_tyの非knot-tying経路でそのまま作れる)。ランタイムの実体(http$listen、
 // node:httpの動的import等)は既にprelude側に実装済み(TS版がC-6続きで実装したruntime.ts
 // をRust版もinclude_str!で共有しているため、ここではシグネチャの登録だけでよい)
-fn http_stdlib_symbols() -> checker::PackageSymbols {
+pub(crate) fn http_stdlib_symbols() -> checker::PackageSymbols {
     fn fn_ty(params: Vec<Type>, ret: Type) -> Type {
         Type::Fn { params, ret: Box::new(ret) }
     }
