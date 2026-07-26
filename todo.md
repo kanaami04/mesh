@@ -3609,6 +3609,38 @@
                 export済みの両方〉)+ パッケージ系プローブ7本。全`.mesh`計140ファイルで
                 差は9件のみ(いずれも未移植診断による検出漏れ)、**Rust側だけに出る診断は0件**。
                 examples全23本の実行も回帰なし。テスト599→602件(+3)、clippyクリーン。
+        - [x] **milestone 50: パッケージ跨ぎ(呼び出し側)+ `package-as-value`**
+              ✅ 2026-07-26実装。診断コード65→68種(`unknown-package-function` /
+              `package-symbol-is-a-type` / `package-as-value`。関数・定数側の
+              `not-exported`はmilestone 49で追加済みのコードを再利用)。
+              milestone 49の後半で、これで**候補リスト先頭のパッケージ跨ぎが片付いた**。
+              - **構造変更**: milestone 30以来、import alias(`mathutil`・`json`等)を
+                ANYとして`scopes[0]`へ登録していた——登録しないと`mathutil.add(...)`の
+                targetがundefined-nameに誤検知されるため。**この登録を撤去した**。
+                新設`try_package_member`(TS版`calls.ts`の`tryPackageMember`)が
+                **targetを評価する前に**pkg修飾参照を解決するので、targetが値として
+                評価されることがもう無い。撤去が必要だったのは`package-as-value`のためで、
+                TS版はimport aliasをスコープに入れないからこそ裸の`lib`が
+                「束縛が無い」経路に落ちて専用の診断になる(登録したままだと**原理的に
+                出せない**)。
+              - **`try_package_member`の返り値の意味**がTS版設計の肝: `None`は
+                「そもそもpkg修飾参照ではない」だけで、pkg修飾参照だと分かったら診断を
+                出したうえで**必ず`Some`を返す**(判定と診断が同じ関数に同居する)。
+                呼び出し元は`Some`を受けたらtargetを評価してはいけない。
+              - 呼び出し形(`lib.add(1)`)とメンバー参照形(`f := lib.add`)の両方から
+                同じ関数を通す——TS版も`inferCall`と`expressions.ts`のmemberケースで共有する。
+                定数(`pkg.CONST`)も関数と同じ経路(F-9c)。
+              - **意図的にスコープ外**: pkg修飾シンボルの**型**のモデル化。`lib.add(1)`の
+                引数照合(TS版は`argument-count`)は効かない——`try_package_member`はANYを
+                返すため。pkg修飾型のフィールド検証(milestone 49で先送りしたもの)と
+                同じブロックなので、まとめて別マイルストーンにする。
+              - **検証**: 呼び出し系プローブ8本 + **import aliasを値として使う経路の総当たり
+                8本**(二項演算/引数/配列リテラル/呼び出し/添字/structリテラル/正常形/
+                ローカル変数によるshadow)——`scopes[0]`からの撤去が構造変更なので重点的に
+                回した。全`.mesh`計156ファイルで差は**9件→7件へ減り**(`package-as-value`
+                2件が解消)、**Rust側だけに出る診断は0件**。examples全23本の実行も回帰なし。
+                手順2''(移植した診断名でgrepし「未移植/対象外/次段階」を潰す)も回して
+                4件のコメントdriftを自力で修正した。テスト603→604件(+1)、clippyクリーン。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3616,9 +3648,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 49まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 50まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 65種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 68種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**65種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜49を消化した
+**現在地**: Rust移植の診断は**68種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜50を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,11 +20,16 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **パッケージ跨ぎの「呼び出し側」**(`unknown-package-function` /
-   `package-symbol-is-a-type` / 関数側の `not-exported` / `package-as-value`)——
-   milestone 49で**型参照側は移植済み**(レジストリの土台も入った)。残るのは呼び出しの中身で、
-   `package-as-value` は import alias を `scopes[0]` へ直接入れている作りを外す必要があり、
-   呼び出し側とセットでないと `lib.add(...)` の target が `undefined-name` になる
+1. **pkg修飾シンボルの「型」のモデル化** — milestone 49・50で**パッケージ跨ぎの診断は
+   ひととおり移植済み**だが、`try_package_member`も`resolve_type_ann`もANYを返すので
+   **型は渡っていない**。レジストリに`Type`を載せる必要があり、codegen側の
+   `checker::PackageSymbols`と統合するか併存させるかの設計判断が要る。
+   **milestone 50のcode reviewで実測した、これで塞がる検出漏れ**:
+   `lib.add(1)`の`argument-count` / `lib.Point{x: "oops"}`のフィールド型不一致・
+   missing-field・unknown-field / `lib.add(1,2) is int`の`union-required` /
+   `lib.add(1,2).nofield`の`not-a-struct`
+   (別件で`print(print)`の`builtin-as-value`も未移植だと分かった——こちらは
+   `is_builtin`分岐に1行足すだけなので、上記とは独立にいつでも入れられる)
 2. **structリテラルの名前が未宣言のとき**(`Bogus{n: 1}`)TS版は`unknown-type`を出す
    (milestone 47で実測)。型注釈側の`unknown-type`はmilestone 42で移植済みなので、
    式側にも広げるだけ。typoで一番踏みやすい形なので費用対効果が高い
@@ -61,7 +66,11 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    「その診断は未移植」「pkg修飾は対象外」等と言ったまま残る)。出荷前に、今回移植した
    診断コード名・機能名で `grep -rn "<名前>" rust/src docs todo.md` を回し、
    **「未移植」「対象外」「次段階」「候補」**と書かれた行を1件ずつ潰す。
-   `docs/handoff.md`の「既知の限界」リストは特に取り消し線の付け忘れが多い。
+   **診断名だけでは足りない**——その回で**撤去した仕組みの名前**(識別子・フィールド名)でも
+   grepする。milestone 50は`scopes[0]`への登録を撤去したのに診断名でしかgrepせず、
+   「import aliasは直接scopes[0]へ入れている」と現在形で書いたコメントを2箇所残した
+   (code reviewで発覚)。`docs/handoff.md`の「既知の限界」リストは特に取り消し線の
+   付け忘れが多い。
    あわせて**新しく`pub(crate)`にした関数**には利用者が増えた旨を書く(2箇所に
    書かれた定義がずれる、というこの移植で何度も踏んだ形の予防)
 3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
@@ -1125,19 +1134,29 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      先に組み立てて渡す形にした。**組み込みパッケージ(`mesh/json`等)を忘れると即誤検知**に
      なるので、codegen側の`*_stdlib_symbols`をそのまま流用している。診断コードは62→65種。
      **pkg修飾型のモデル化は対象外**(診断だけで、型は引き続きANY)。詳細はtodo.mdの当該項目
+   - ✅ **milestone 50(2026-07-26)でパッケージ跨ぎ(呼び出し側)+ `package-as-value`**。
+     **構造変更**: milestone 30以来import aliasをANYとして`scopes[0]`へ登録していたのを撤去した。
+     新設`try_package_member`(TS版`tryPackageMember`)が**targetを評価する前に**pkg修飾参照を
+     解決するので登録が不要になり、同時に`package-as-value`が出せるようになった
+     (登録したままだと束縛が見つかってしまい**原理的に出せない**診断だった)。
+     返り値の`None`は「そもそもpkg修飾参照ではない」だけで、pkg修飾だと分かったら診断を
+     出したうえで必ず`Some`を返す——呼び出し元はそれ以上targetを評価してはいけない。
+     診断コードは65→68種。**pkg修飾シンボルの型のモデル化は引き続き対象外**。
+     詳細はtodo.mdの当該項目
    - 残る候補: **診断の続き**——
-     pkg修飾**呼び出し**の中身(`unknown-package-function`系・`package-as-value`とセット)・
      structリテラルの未宣言名(`unknown-type`)・unionフィールドのモデル化・
-     pkg修飾型のモデル化(milestone 49は診断だけで型はANYのまま)。
+     **pkg修飾シンボルの型のモデル化**(milestone 49・50は診断だけで型はANYのまま——
+     `lib.add(1)`の引数照合が効かない)。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**優先順の詳細は冒頭の「次の一歩の候補」節が一次情報源**——ここは分野の一覧に留める)
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
-     1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
+     1つの名前空間で検査する`check_package`。**パッケージ跨ぎ〈pkg修飾の中身〉の診断も
+     milestone 49〈型参照側〉・50〈呼び出し側〉で移植済み**——残るのはpkg修飾シンボルの
+     型のモデル化だけ)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)~~import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出す~~
-       → **milestone 48で解消**(型宣言側とセットで`declare`にも同じ分岐を入れた。ただし
-       TS版が続けて出す`package-as-value`〈`lib`を値として参照する形〉は未移植なので、
-       そのぶんの検出漏れは残る)、
+       → **milestone 48で解消**(型宣言側とセットで`declare`にも同じ分岐を入れた。
+       TS版が続けて出す`package-as-value`も**milestone 50で移植済み**)、
        (2)~~型注釈の`unknown-type`が未移植のため、未知の型名のレシーバは何も出ない~~
        → **milestone 42で解消**(TS版と同じ`unknown-type`+`invalid-receiver-type`が出る)、
        (3)~~`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)~~
