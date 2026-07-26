@@ -91,6 +91,13 @@ pub struct FullCheckerCtx {
     // 型も丸ごと未登録になる。どちらも「宣言はされている」ので`unknown-type`は誤検知になる
     // (code reviewで2人が別々の再現手順で発見)
     declared_types: std::collections::HashSet<String>,
+    // milestone 43: 型宣言の本体(名前→宣言)と、その解決状態。TS版`resolveAlias`の
+    // メモ化(`resolvedAliases`)+解決中マーク(`resolvingAliases`)に対応する。
+    // `type-alias-cycle`は「解決中のunion placeholderが**裸で**メンバーに現れた」ことで
+    // 検出するので、状態を持たずには判定できない
+    alias_decls: HashMap<String, crate::ast::TypeDecl>,
+    alias_state: HashMap<String, AliasState>,
+    resolving_plain: std::collections::HashSet<String>,
     // milestone 42: 今検査しているジェネリック関数の型パラメータ(`fn first<T>(...)`のT)。
     // `check_type_ann`が`unknown-type`の誤検知を出さないために要る——TS版の
     // `isTypeParam(ctx, name)`に対応する
@@ -105,6 +112,9 @@ impl FullCheckerCtx {
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
             declared_types: std::collections::HashSet::new(),
+            alias_decls: HashMap::new(),
+            alias_state: HashMap::new(),
+            resolving_plain: std::collections::HashSet::new(),
             type_params: Vec::new(),
         }
     }
@@ -271,10 +281,133 @@ fn unknown_type_name(ctx: &FullCheckerCtx, node: &TypeNode) -> bool {
     !ctx.declared_types.contains(name)
 }
 
-// 型宣言(`struct X { ... }` / `type X = ...`)の中に書かれた型注釈を検査する。
-// 宣言自身の名前は登録済みなので、見るのは中身だけ
-fn check_type_decl_anns(ctx: &mut FullCheckerCtx, decl: &crate::ast::TypeDecl) {
-    check_type_ann(ctx, &decl.node);
+// milestone 43: 型宣言の解決状態。TS版`resolveAlias`が「先に器を登録してから中身を埋める」
+// (knot-tying)ときの器の種類に対応する。
+// **`UnionPlaceholder`が裸でメンバーに現れたら循環**——TS版が
+// 「`kind === "union"` かつ `members` が空」で判定しているのと同じこと。structやarrayに
+// 包まれた参照は器が別物(struct/array)になるので安全、という区別もこれで表現できる
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AliasState {
+    UnionPlaceholder,
+    Resolved,
+    Any,
+}
+
+// TS版`resolveAlias`の移植(診断のみ)。**型の値は作らない**——値の解決はchecker.rsが
+// 担当しており、こちらは「宣言を歩いて診断を出す」ことだけを行う。
+//
+// posの渡し方がTS版の再現に効く: 宣言そのものを解決する最初の呼び出しには**宣言の位置**、
+// 本体の中から参照を辿るときは**その参照の位置**を渡す。`type A = A | int`が宣言位置(1:1)、
+// `type A = B | int` / `type B = A | string`が`B`の参照位置(1:10)で報告されるのは
+// この使い分けの結果(両CLIで実測して確認)
+fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
+    if let Some(st) = ctx.alias_state.get(name) {
+        return *st;
+    }
+    let Some(decl) = ctx.alias_decls.get(name).cloned() else {
+        // 宣言が無い名前(未知の型)は`walk_type_ref`側で`unknown-type`にする
+        return AliasState::Resolved;
+    };
+    match &decl.node {
+        // structは器を先に登録する(knot-tying)。フィールド越しの自己参照は正当なので
+        // 循環にはしない——`struct Node { next: Node | none }`が書けるのはこのため
+        TypeNode::StructType { fields, .. } => {
+            ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
+            for f in fields {
+                walk_type_ref(ctx, &f.type_node);
+            }
+            AliasState::Resolved
+        }
+        TypeNode::Union { members, .. } => {
+            ctx.alias_state.insert(name.to_string(), AliasState::UnionPlaceholder);
+            // **メンバーを全部解決してから**循環を判定する(TS版と同じ順序。途中で
+            // 打ち切るとメンバー側の`unknown-type`が出なくなる——実測で確認した)
+            let mut cyclic = false;
+            for m in members {
+                if walk_type_ref(ctx, m) == AliasState::UnionPlaceholder {
+                    cyclic = true;
+                }
+            }
+            if cyclic {
+                ctx.error(pos, DiagnosticCode::TypeAliasCycle, format!("type alias cycle involving '{name}'"));
+                ctx.alias_state.insert(name.to_string(), AliasState::Any);
+                return AliasState::Any;
+            }
+            ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
+            AliasState::Resolved
+        }
+        // 素のalias(`type A = B` / `type A = int[]`)。unionと違って器が無いので、
+        // 「解決中か」の集合で循環を見る(TS版の`resolvingAliases`)
+        other => {
+            if ctx.resolving_plain.contains(name) {
+                ctx.error(pos, DiagnosticCode::TypeAliasCycle, format!("type alias cycle involving '{name}'"));
+                return AliasState::Any;
+            }
+            ctx.resolving_plain.insert(name.to_string());
+            walk_type_ref(ctx, other);
+            ctx.resolving_plain.remove(name);
+            ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
+            AliasState::Resolved
+        }
+    }
+}
+
+// 型宣言の本体を歩く。**裸の名前参照だけ**が解決状態を返す(それ以外は必ず`Resolved`)——
+// struct/array/map/chan/関数型に包まれた参照は循環にならない、というTS版の区別そのもの。
+// あわせて`unknown-type`/`any-type-removed`もここで出す(TS版も`resolveType`が
+// 解決しながら報告する。型宣言の中の診断はこの経路だけから出る)
+fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
+    match node {
+        // pkg修飾はスコープ外(check_type_annと同じ理由)
+        TypeNode::Name { pkg: Some(_), .. } => AliasState::Resolved,
+        TypeNode::Name { name, pkg: None, pos } => match name.as_str() {
+            "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" => AliasState::Resolved,
+            "any" => {
+                ctx.error(
+                    *pos,
+                    DiagnosticCode::AnyTypeRemoved,
+                    "'any' is not a type in Mesh — use a specific type, or add a type annotation if this is for an empty array/map literal",
+                );
+                AliasState::Resolved
+            }
+            _ if ctx.alias_decls.contains_key(name) => resolve_alias(ctx, name, *pos),
+            _ => {
+                ctx.error(*pos, DiagnosticCode::UnknownType, format!("unknown type '{name}'"));
+                AliasState::Resolved
+            }
+        },
+        TypeNode::Array { elem, .. } | TypeNode::Chan { elem, .. } => {
+            walk_type_ref(ctx, elem);
+            AliasState::Resolved
+        }
+        TypeNode::MapType { key, value, .. } => {
+            walk_type_ref(ctx, key);
+            walk_type_ref(ctx, value);
+            AliasState::Resolved
+        }
+        TypeNode::Union { members, .. } => {
+            for m in members {
+                walk_type_ref(ctx, m);
+            }
+            AliasState::Resolved
+        }
+        TypeNode::StructType { fields, .. } => {
+            for f in fields {
+                walk_type_ref(ctx, &f.type_node);
+            }
+            AliasState::Resolved
+        }
+        TypeNode::FnType { params, ret, .. } => {
+            for p in params {
+                walk_type_ref(ctx, p);
+            }
+            if let Some(r) = ret {
+                walk_type_ref(ctx, r);
+            }
+            AliasState::Resolved
+        }
+        TypeNode::Literal { .. } => AliasState::Resolved,
+    }
 }
 
 // milestone 42: **型注釈そのものの検査**。TS版は`resolveType`/`resolveAlias`が解決しながら
@@ -2339,6 +2472,16 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // **宣言されている型名を先に集める**(レジストリの中身とは独立に。上記
     // `declared_types`のコメント参照)
     ctx.declared_types = all_types.iter().map(|t| t.name.clone()).collect();
+    // **先勝ち(first-wins)で登録する**。同じ名前の型宣言が2つあるとき、TS版は最初の宣言だけを
+    // `typeTable`へ入れて2つ目は`already-declared`で弾く(その診断自体はRust版に未移植)。
+    // `collect()`は素直に書くと**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」
+    // という食い違いが起きて、診断が消えたり無関係な宣言の位置に付いたりした
+    // (code reviewで発覚: `type A = Bogus` / `type A = int` で`unknown-type`が消え、
+    // `type A = int` / `type A = A | string` では1行目に`type-alias-cycle`が付いた)
+    ctx.alias_decls = HashMap::new();
+    for t in &all_types {
+        ctx.alias_decls.entry(t.name.clone()).or_insert_with(|| t.clone());
+    }
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
     // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
     // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
@@ -2347,7 +2490,9 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for t in &program.types {
-            check_type_decl_anns(&mut ctx, t);
+            // milestone 43: 宣言そのものを起点に解決する(posは**宣言の位置**)。
+            // 本体の中の`unknown-type`/`any-type-removed`もこの歩きから出る
+            resolve_alias(&mut ctx, &t.name, t.pos);
         }
         spans.push((start, ctx.diagnostics.len(), i));
     }
@@ -2725,6 +2870,80 @@ mod tests {
         assert_eq!(local[0].code, DiagnosticCode::UnknownType);
     }
 
+
+
+    // --- milestone 43: type-alias-cycle -----------------------------------------------
+
+    #[test]
+    fn 裸のunion循環をtype_alias_cycleで報告する() {
+        // 位置は**参照の位置**(`type A = B | int`の`B`)、名前は**そこで解決しようとした型**。
+        // TS版と実測で突き合わせた(TS版`resolveAlias`が`resolveType`経由で受け取るposと同じ)
+        let two = check("type A = B | int\ntype B = A | string\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(two.len(), 1, "{two:?}");
+        assert_eq!(two[0].code, DiagnosticCode::TypeAliasCycle);
+        assert_eq!(two[0].message, "type alias cycle involving 'B'");
+        assert_eq!((two[0].pos.line, two[0].pos.col), (1, 10));
+        // 自己参照は**宣言の位置**で報告される(最初の呼び出しに渡すposが宣言位置のため)
+        let selfie = check("type A = A | int\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(selfie.len(), 1, "{selfie:?}");
+        assert_eq!((selfie[0].pos.line, selfie[0].pos.col), (1, 1));
+        assert_eq!(selfie[0].message, "type alias cycle involving 'A'");
+    }
+
+
+    #[test]
+    fn 同名の型宣言があっても最初の宣言で解決する() {
+        // 回帰(code reviewで発覚): 名前→宣言の表を後勝ちで作ると、「最初の宣言の名前で
+        // 2つ目の本体を解決する」という食い違いが起きる。TS版は最初の宣言だけを登録して
+        // 2つ目は`already-declared`で弾く(その診断自体はRust版に未移植=検出漏れ側)ので、
+        // **先勝ち**に揃える。
+        // (1)1つ目の本体の診断が消えていた
+        let lost = check("type A = Bogus\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(lost.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType], "{lost:?}");
+        // (2)2つ目の本体の循環が、1つ目の宣言の位置に付いていた
+        let bogus_cycle = check("type A = int\ntype A = A | string\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(bogus_cycle, vec![], "{bogus_cycle:?}");
+        // (3)順序が逆だと診断が丸ごと消えていた
+        let dropped = check("type A = A | string\ntype A = int\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(dropped.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::TypeAliasCycle], "{dropped:?}");
+    }
+
+    #[test]
+    fn 素のalias同士の循環も報告する() {
+        // unionと違って器(placeholder)が無いので「解決中の集合」で見る(TS版resolvingAliases)
+        let pair = check("type A = B\ntype B = A\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(pair.len(), 1, "{pair:?}");
+        assert_eq!(pair[0].code, DiagnosticCode::TypeAliasCycle);
+        assert_eq!(pair[0].message, "type alias cycle involving 'A'");
+        assert_eq!((pair[0].pos.line, pair[0].pos.col), (2, 10));
+    }
+
+    #[test]
+    fn structや配列に包まれた再帰は循環にしない() {
+        // 器がstruct/arrayになるので「裸のunion参照同士」ではない——これを弾くと
+        // 連結リストや木構造が書けなくなる
+        assert_eq!(check("struct Node {\n    next: Node | none\n}\n\nfn main() {\n    print(\"hi\")\n}\n"), vec![]);
+        assert_eq!(
+            check("type Tree = { kind: \"leaf\" } | { kind: \"node\", left: Tree, right: Tree }\n\nfn main() {\n    print(\"hi\")\n}\n"),
+            vec![]
+        );
+        assert_eq!(check("type A = B | int\ntype B = A[] | string\n\nfn main() {\n    print(\"hi\")\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn 循環の報告はメンバー解決のあと_かつ一度だけ() {
+        // メンバーを全部解決してから循環を判定する(途中で打ち切るとメンバー側の
+        // unknown-typeが出なくなる)。TS版と同じ順序であることを固定する
+        let diags = check("type A = B | int\ntype B = A | Nope\n\nstruct C {\n    n: Wat\n}\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(
+            diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::UnknownType, DiagnosticCode::TypeAliasCycle, DiagnosticCode::UnknownType],
+            "{diags:?}"
+        );
+        // 循環した型を後から使っても再報告しない(解決結果をANYでメモ化するため)
+        let used = check("type A = B | int\ntype B = A | string\n\nfn f(x: A) int {\n    return 1\n}\n\nfn main() {\n    print(str(f(1)))\n}\n");
+        assert_eq!(used.iter().filter(|d| d.code == DiagnosticCode::TypeAliasCycle).count(), 1, "{used:?}");
+    }
 
     #[test]
     fn 宣言されている型名はレジストリに無くてもunknown_typeにしない() {

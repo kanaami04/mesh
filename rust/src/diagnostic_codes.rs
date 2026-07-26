@@ -103,6 +103,7 @@ diagnostic_codes! {
     OrFallbackTypeMismatch => "or-fallback-type-mismatch",
     UnknownType => "unknown-type",
     AnyTypeRemoved => "any-type-removed",
+    TypeAliasCycle => "type-alias-cycle",
 }
 
 impl std::fmt::Display for DiagnosticCode {

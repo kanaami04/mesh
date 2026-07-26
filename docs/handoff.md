@@ -1002,8 +1002,12 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      使ってはいけない——素のalias(`type UserId = int`)は載らず、`resolve_type_decls`が
      最初のErrで走査全体を打ち切るため壊れた宣言より後ろの型も載らない。宣言名の集合
      (`ctx.declared_types`)で判定する(どちらもcode reviewで誤検知として発覚)
-   - 残る候補: **診断の続き**——`type-alias-cycle`(TS版`resolveAlias`のメモ化+placeholder検出を
-     移植しないと位置・件数が合わないのでmilestone 42から分けた)・`defer-requires-call`・
+   - ✅ **milestone 43(2026-07-26)で`type-alias-cycle`**(裸のunion循環)。TS版`resolveAlias`と
+     同じ「メモ化+placeholder」の歩きをfull_checker側に持たせた(checker.rsのリゾルバは
+     循環を`Err`で返して走査全体を打ち切るので位置も件数も合わない)。診断コードは55→56種。
+     struct/array越しの再帰を循環にしない区別、報告位置(宣言位置と参照位置の使い分け)、
+     報告順(メンバーを全部解決してから判定)まで実測で合わせている
+   - 残る候補: **診断の続き**——`defer-requires-call`・
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
