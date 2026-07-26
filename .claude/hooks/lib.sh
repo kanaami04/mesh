@@ -102,6 +102,25 @@ hook_is_pr_merge() {
   return 1
 }
 
+# 断片が `git worktree add` の呼び出しかを判定する(hook_segment_is_merge と同じ考え方——
+# 行頭から環境変数代入・ラッパーコマンド・シェルキーワードを任意個許して一致を見る)。
+# `git worktree list` / `remove` / `prune` は対象外。文中の言及(echo等の引数)も拾わない。
+# gitのグローバルオプションは値を取るものがある(`git -C <path> worktree add`)ので、
+# 「`-`で始まる語 + 任意でその値」の繰り返しを許す(テストで発覚)。
+hook_segment_is_worktree_add() {
+  printf '%s' "$1" | grep -Eq \
+    '^[[:space:]]*((then|else|elif|do)[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-][^[:space:]]*)?)*[[:space:]]+worktree[[:space:]]+add\b'
+}
+
+# コマンド文字列に `git worktree add` の実際の呼び出しが含まれるかを判定する
+hook_is_worktree_add() {
+  local seg
+  while IFS= read -r seg; do
+    hook_segment_is_worktree_add "$seg" && return 0
+  done <<< "$(hook_split_segments "$1")"
+  return 1
+}
+
 # 文字列を JSON の値として安全な形にエスケープする（\ " タブ 改行 復帰）。
 # jq に依存せず bash 組み込みのパラメータ展開だけで行う — enforce-code-review.sh の
 # bail() は lib.sh を読み込む前に使われることがあるため、jq はもちろん sed/awk のような
@@ -125,6 +144,11 @@ hook_json_escape() {
 # フックとテストで同じ文字列を使うためにここへ切り出している(片方だけ直る事故を防ぐ)。
 hook_comment_first_lines_filter() {
   printf '%s' '.comments[].body | split("\n")[0] | sub("\r$"; "")'
+}
+
+# 確認(ask)応答。deny と違い「止める」ではなく「理由を見せて判断を仰ぐ」用途
+hook_ask() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$(hook_json_escape "$1")"
 }
 
 hook_deny() {
