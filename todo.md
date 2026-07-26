@@ -3292,6 +3292,41 @@
                 **すべて出力・終了コードが一致**。全体でも差が出るのは未移植の診断
                 (`unknown-type`・`type-alias-cycle`)が絡む3ファイルのみで、
                 **Rust側だけに出る診断は0件**。examples全22件の`mesh run`も一致。
+        - [x] **milestone 42: 型名そのものの検査(`unknown-type` / `any-type-removed`)**
+              ✅ 2026-07-26実装。撤去条件(2)の続き。milestone 39で「未知の型名は判定不能として
+              飛ばす」応急処置が必要だった原因を取り除いた。
+              - **構造**: TS版は`resolveType`/`resolveAlias`が解決しながら報告するが、Rust版は
+                解決をchecker.rs(診断を出さない最小リゾルバ)に任せているので、**検証だけを行う
+                `check_type_ann`**を新設し、TS版が`resolveType`を呼ぶのと同じ位置から呼ぶ。
+              - **報告の回数と順序をTS版に合わせた**(実測して確認): 型宣言の中は**1回**
+                (TS版は`resolveAlias`のメモ化)、関数シグネチャは**2回**(登録時と本体検査時)。
+                全体の順序は「型宣言 → シグネチャ登録 → 本体」。
+              - **未知の型名はANYへ解決する**(TS版の`resolveType`と同じ)。checker.rsは未知の
+                名前を「フィールド0個の殻struct」へフォールバックさせるので、そのまま使うと
+                (a)matchのパターンが**あらゆるstructメンバーに一致**する(milestone 39で踏んだ穴)、
+                (b)`struct Box { n: Bogus }`への`Box{n: 1}`が`cannot use int as Bogus`という
+                **TS版に無い誤検知**になる(実装中に発覚)。ANY差し替えと
+                `has_unregistered_struct`(殻structを含む型は照合しない)で両方を塞いだ。
+              - **既知の限界だった2件が解消**: (1)milestone 39の「未知の型名のパターンは
+                判定不能として飛ばす」——TS版と同じ`unknown-type`+`impossible-pattern`
+                (+`match-not-exhaustive`)が出るようになった。(2)handoff.mdに記載していた
+                「未知の型名のレシーバはTS版の`unknown-type`+`invalid-receiver-type`の
+                どちらも出ない」——両方出るようになった(`got any`という文言まで一致)。
+              - あわせて**`is`式の診断2種**も移植(`impossible-pattern` / `union-required`)。
+                TS版`expressions.ts`のisケースにあるもので、パターンの検査と同じ道具立てで書ける。
+              - ジェネリック関数の型パラメータ(`fn first<T>(xs: T[]) T`のT)は`ctx.type_params`で
+                追跡して除外する(しないと全面的な誤検知になる)。
+              - 診断コード53→55種(`unknown-type`・`any-type-removed`)。
+              - **スコープ外**(次の候補): `type-alias-cycle`はTS版の`resolveAlias`と同じ
+                「メモ化+placeholder検出」の歩き方を移植しないと位置・件数が合わないので分けた。
+                pkg修飾型の`unknown-package`/`unknown-package-type`/`not-exported`は
+                パッケージ跨ぎの検査とセット(いずれも検出漏れ側)。
+              - 新規テスト6件・既存3件を新しい挙動へ更新(559→565件)。clippy(`-D warnings`)クリーン。
+              - **検証**(TS版と突き合わせ): 全`.mesh` + プローブ計115ファイル。差が出るのは
+                `type-alias-cycle`が絡む2ファイルのみで、**Rust側だけに出る診断は0件**。
+                examples全22件の`mesh run`も一致。プローブは型名の誤りをあらゆる位置
+                (関数の引数・戻り値・structフィールド・type alias本体・ローカル注釈・
+                レシーバ・matchのパターン・`is`のターゲット・`any`)へ置いたものを用意した。
   - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
@@ -3299,9 +3334,9 @@
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 41まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-26時点、milestone 42まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 53種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 55種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

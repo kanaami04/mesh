@@ -982,22 +982,30 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      (式文・defer・代入先・spawnする呼び出し・match/selectのアーム本体)で、
      それ以外は`infer_expr_single`がvoidをANYへ差し替える。milestone 40で入れた
      「voidを個別に免除する」応急処置は不要になり撤去
-   - 残る候補: **診断の続き**——型名そのものの検査(`unknown-type`/`type-alias-cycle`。
-     milestone 39でこれが無いために「未知の型名は判定不能として飛ばす」対処が要った)・
-     pkg修飾struct/pkg修飾呼び出しの中身・非structへのメンバーアクセス(`not-a-struct`)・
-     union targetの`narrow-required`。
+   - ✅ **milestone 42(2026-07-26)で型名そのものの検査**(`unknown-type`/`any-type-removed`、
+     および`is`式の`impossible-pattern`/`union-required`)。診断コードは53→55種。
+     TS版と同じく**未知の型名はANYへ解決する**のが要——checker.rsは未知の名前を殻structへ
+     落とすので、そのまま使うとmatchのパターンが何にでも一致したりstructリテラルが
+     誤検知になったりする。milestone 39の「未知の型名は飛ばす」応急処置と、
+     「未知のレシーバ型に何も出ない」既知の限界がこれで解消した
+   - 残る候補: **診断の続き**——`type-alias-cycle`(TS版`resolveAlias`のメモ化+placeholder検出を
+     移植しないと位置・件数が合わないのでmilestone 42から分けた)・`defer-requires-call`・
+     pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
+     非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
      その後: generics推論(`generic-inference-failed`)・parser/lexerのDiagnosticCode統合。
      (**full_checkerの複数ファイル対応はmilestone 37で完了**——同一パッケージの全ファイルを
      1つの名前空間で検査する`check_package`。パッケージ跨ぎ〈pkg修飾の中身〉は引き続き未対応)
      - **既知の限界(未移植の診断。いずれも検出漏れ側)**: (1)import aliasと同名のfn/const→
        TS版は`name-conflicts-with-package`だがRust版は`already-declared`(誤ったコード)を出し
        そのfn/constの引数照合が素通りする(milestone 30のcode review記録のうち唯一残った項目)、
-       (2)型注釈の`unknown-type`が未移植のため、未知の型名のレシーバ(`fn (y: Bogus) f()`)は
-       TS版の`unknown-type`+`invalid-receiver-type`のどちらも出ない、
+       (2)~~型注釈の`unknown-type`が未移植のため、未知の型名のレシーバは何も出ない~~
+       → **milestone 42で解消**(TS版と同じ`unknown-type`+`invalid-receiver-type`が出る)、
        (3)`not-a-struct`(`c.n.foo()`のようなint上のメソッド呼び出し)、
        (4)`cannot-infer-type`は空配列リテラル限定(milestone 33)——`s := Status{foo: 1}`のように
        他の理由でANYへ落ちた宣言は引き続き無診断、(5)channelが未モデル化のため
-       `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ。いずれもモデル化を
+       `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
+       (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
+       `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。いずれもモデル化を
        進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置

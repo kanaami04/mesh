@@ -101,6 +101,8 @@ diagnostic_codes! {
     OrRequiresBinding => "or-requires-binding",
     OrNoSuccessValue => "or-no-success-value",
     OrFallbackTypeMismatch => "or-fallback-type-mismatch",
+    UnknownType => "unknown-type",
+    AnyTypeRemoved => "any-type-removed",
 }
 
 impl std::fmt::Display for DiagnosticCode {

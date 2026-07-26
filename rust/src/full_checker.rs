@@ -83,6 +83,10 @@ pub struct FullCheckerCtx {
     // Result即失敗で形が違うため、TS版`expressions.ts`/`calls.ts`を手本に診断蓄積形で
     // 書き直す)。詳細はtodo.md/handoff.md milestone 29参照
     type_ctx: crate::checker::CheckerCtx,
+    // milestone 42: 今検査しているジェネリック関数の型パラメータ(`fn first<T>(...)`のT)。
+    // `check_type_ann`が`unknown-type`の誤検知を出さないために要る——TS版の
+    // `isTypeParam(ctx, name)`に対応する
+    type_params: Vec<String>,
 }
 
 impl FullCheckerCtx {
@@ -92,6 +96,7 @@ impl FullCheckerCtx {
             ret_stack: Vec::new(),
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
+            type_params: Vec::new(),
         }
     }
 
@@ -213,6 +218,117 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
 // **catch-allを復活させないこと**: 新しい式をASTへ足したらここがコンパイルエラーになり、
 // 「検査するか、しないなら理由を書いてANYを返す」という判断を必ず強制できる
 // (黙って未検査のまま出荷される事故が、この移植で最も繰り返した失敗だった)
+// 型の中に「レジストリに存在しないstruct名」が含まれるか。checker.rsのリゾルバは
+// 未知の型名・pkg修飾型を殻struct(フィールド0個)へフォールバックさせるので、その型を
+// full_checker側の値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)は
+// レジストリに載らないので除外する
+fn has_unregistered_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
+    fn go(ctx: &FullCheckerCtx, t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
+        match t {
+            Type::Struct { name, fields, .. } => {
+                if name != types::ANONYMOUS_STRUCT_NAME && ctx.type_ctx.lookup_struct(name).is_none() {
+                    return true;
+                }
+                let ptr = Rc::as_ptr(fields);
+                if seen.contains(&ptr) {
+                    return false; // 自己参照(検査中)
+                }
+                let Some(fs) = fields.get() else { return false };
+                seen.push(ptr);
+                let found = fs.iter().any(|f| go(ctx, &f.type_, seen));
+                seen.pop();
+                found
+            }
+            Type::Array(e) | Type::Chan(e) => go(ctx, e, seen),
+            Type::Map { key, value } => go(ctx, key, seen) || go(ctx, value, seen),
+            Type::Fn { params, ret } => params.iter().any(|p| go(ctx, p, seen)) || go(ctx, ret, seen),
+            Type::Union { body } => body.get().is_some_and(|b| b.members.iter().any(|m| go(ctx, m, seen))),
+            _ => false,
+        }
+    }
+    go(ctx, t, &mut Vec::new())
+}
+
+// その型注釈が「未知の裸の型名」か(レシーバのANY差し替え判定用)。
+// pkg修飾・組み込み・型パラメータ・レジストリにある名前はfalse
+fn unknown_type_name(ctx: &FullCheckerCtx, node: &TypeNode) -> bool {
+    let TypeNode::Name { name, pkg: None, .. } = node else { return false };
+    if matches!(name.as_str(), "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" | "any") {
+        return false;
+    }
+    if ctx.type_params.iter().any(|t| t == name) {
+        return false;
+    }
+    ctx.type_ctx.lookup_struct(name).is_none() && ctx.type_ctx.lookup_union(name).is_none()
+}
+
+// 型宣言(`struct X { ... }` / `type X = ...`)の中に書かれた型注釈を検査する。
+// 宣言自身の名前は登録済みなので、見るのは中身だけ
+fn check_type_decl_anns(ctx: &mut FullCheckerCtx, decl: &crate::ast::TypeDecl) {
+    check_type_ann(ctx, &decl.node);
+}
+
+// milestone 42: **型注釈そのものの検査**。TS版は`resolveType`/`resolveAlias`が解決しながら
+// 診断を出すが、Rust版は解決をchecker.rs(診断を出さない最小リゾルバ)に任せている構造なので、
+// 「検証」だけを行うこの関数を、TS版が`resolveType`を呼ぶのと同じ位置から呼ぶ。
+//
+// **同じ注釈が2回報告されることがある**のはTS版の挙動そのまま(関数シグネチャは
+// 登録時と本体検査時の2回`resolveType`を通るため——`fn f(x: Bogus)`で2件出る。
+// 実測して確認した)。順序も「型宣言 → シグネチャ登録 → 本体」で揃えている。
+//
+// pkg修飾の型(`math.Point`)はこの一歩では**検査しない**(TS版の`unknown-package`/
+// `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する。
+// 検出漏れ側に倒す)
+fn check_type_ann(ctx: &mut FullCheckerCtx, node: &TypeNode) {
+    match node {
+        // pkg修飾はスコープ外(上記)
+        TypeNode::Name { pkg: Some(_), .. } => {}
+        TypeNode::Name { name, pkg: None, pos } => match name.as_str() {
+            "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" => {}
+            // H-1(2026-07-21決定): `any`は撤去済み——書かれたら常にエラー
+            "any" => ctx.error(
+                *pos,
+                DiagnosticCode::AnyTypeRemoved,
+                "'any' is not a type in Mesh — use a specific type, or add a type annotation if this is for an empty array/map literal",
+            ),
+            _ => {
+                // ジェネリック関数の型パラメータ(`fn first<T>(xs: T[]) T`のT)は未知ではない
+                if ctx.type_params.iter().any(|t| t == name) {
+                    return;
+                }
+                if ctx.type_ctx.lookup_struct(name).is_none() && ctx.type_ctx.lookup_union(name).is_none() {
+                    ctx.error(*pos, DiagnosticCode::UnknownType, format!("unknown type '{name}'"));
+                }
+            }
+        },
+        TypeNode::Array { elem, .. } | TypeNode::Chan { elem, .. } => check_type_ann(ctx, elem),
+        TypeNode::MapType { key, value, .. } => {
+            check_type_ann(ctx, key);
+            check_type_ann(ctx, value);
+        }
+        TypeNode::Union { members, .. } => {
+            for m in members {
+                check_type_ann(ctx, m);
+            }
+        }
+        TypeNode::StructType { fields, .. } => {
+            for f in fields {
+                check_type_ann(ctx, &f.type_node);
+            }
+        }
+        TypeNode::FnType { params, ret, .. } => {
+            for p in params {
+                check_type_ann(ctx, p);
+            }
+            if let Some(r) = ret {
+                check_type_ann(ctx, r);
+            }
+        }
+        // 文字列リテラル型("active")には名前が無い
+        TypeNode::Literal { .. } => {}
+    }
+}
+
 // milestone 41: **値が要る場所**で使う入口。TS版`checkExprSingle`の移植——voidが来たら
 // `void-used-as-value`を出してANYへ差し替える。
 //
@@ -352,6 +468,9 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // widenしたもの**(`["a","b"]`は`"a"[]`ではなく`string[]`)を要素型とし、
         // 残りの要素を照合する
         Expr::ArrayLit { elems, elem_type, .. } => {
+            if let Some(node) = elem_type {
+                check_type_ann(ctx, node);
+            }
             let declared = elem_type.as_ref().map(|node| resolve_type_ann(&ctx.type_ctx, node));
             let elem = match &declared {
                 Some(t) => t.clone(),
@@ -380,6 +499,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // milestone 34: mapリテラル(`map<string, int>{"a": 1}`)。キー/値の型は注釈から
         // 解決し、各エントリを照合する(TS版`expressions.ts`のmapLitケース)
         Expr::MapLit { key, value, entries, .. } => {
+            check_type_ann(ctx, key);
+            check_type_ann(ctx, value);
             let key_ty = resolve_type_ann(&ctx.type_ctx, key);
             let value_ty = resolve_type_ann(&ctx.type_ctx, value);
             for e in entries {
@@ -403,6 +524,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                     ctx.error(capacity.pos(), DiagnosticCode::TypeMismatch, format!("channel capacity must be int or none, got {}", types::type_to_string(&cap)));
                 }
             }
+            check_type_ann(ctx, elem);
             Type::Chan(Box::new(resolve_type_ann(&ctx.type_ctx, elem)))
         }
         // milestone 34: 受信(`<-ch`)は常に`T | closed`(mapの`V | none`と同じ理由——
@@ -420,8 +542,25 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         }
         // milestone 34: `x is T`はbool。値の型は変えないが、if文の条件に使われたときは
         // `check_if`が絞り込みに使う(下記`check_if`+`FullCheckerCtx::narrow`)
-        Expr::Is { operand, .. } => {
-            infer_expr_single(ctx, operand);
+        Expr::Is { operand, target, pos } => {
+            let t = infer_expr_single(ctx, operand);
+            // milestone 42: `x is Bogus`の型注釈もTS版は`resolveType`を通る(=`unknown-type`)
+            check_type_ann(ctx, target);
+            // 未知の型名はANYへ(matchのパターンと同じ理由——TS版の`resolveType`に揃える)
+            let target_ty = if unknown_type_name(ctx, target) { ANY } else { crate::checker::resolve_type_node(&ctx.type_ctx, target) };
+            // 殻structが残る経路(pkg修飾など)と未解決unionは判定しない(検出漏れ側)
+            if !has_unregistered_struct(ctx, &target_ty) && safe_to_compare(&target_ty) && safe_to_compare(&t) {
+                match &t {
+                    Type::Union { body } => {
+                        let members = body.get().expect("safe_to_compareで確認済み").members.clone();
+                        if !members.iter().any(|m| struct_pattern_matches(m, &target_ty)) {
+                            ctx.error(*pos, DiagnosticCode::ImpossiblePattern, format!("{} can never be {}", types::type_to_string(&t), types::type_to_string(&target_ty)));
+                        }
+                    }
+                    Type::Any => {}
+                    other => ctx.error(operand.pos(), DiagnosticCode::UnionRequired, format!("'is' needs a union-typed value, got {}", types::type_to_string(other))),
+                }
+            }
             BOOL
         }
         // milestone 34: `or`式(`m["k"] or 0`)。map読みが`V | none`を返すようになり、
@@ -453,6 +592,12 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         // 渡すコールバックは無名関数なので、ここを走査しないと実コードの相当部分が
         // 検査対象から漏れる(TS版`fnExpr`はfnTypeを返しつつ`checkFn`で本体も検査する)
         Expr::FnExpr { params, ret, body, .. } => {
+            for p in params {
+                check_type_ann(ctx, &p.type_node);
+            }
+            if let Some(r) = ret {
+                check_type_ann(ctx, r);
+            }
             let param_tys: Vec<Type> = params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)).collect();
             let ret_ty = ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
             // パラメータ用スコープ+本体スコープ(check_blockが自分でpushする)の2段構成は
@@ -648,7 +793,12 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
                 // (例: `cb: fn(int[]) int`へ名前付き関数を代入——fn_signatureのparam=ANY vs
                 // レジストリのparam=int[]で不一致になる。code reviewで発覚)。それらの型の
                 // フィールドはコレクション/関数型をモデル化する次段階まで検査をスキップ
-                if is_checkable_field_type(&decl.type_) && !types::assignable(ty, &decl.type_) {
+                // **未登録のstruct名を含む宣言型は突き合わせない**(milestone 42)。
+                // checker.rsのレジストリは未知の型名・pkg修飾型を「空フィールドの殻struct」へ
+                // フォールバックさせるので、そのまま照合すると`struct Box { n: Bogus }`に対する
+                // `Box{n: 1}`が`cannot use int as Bogus`という**TS版に無い誤検知**になる
+                // (TS版は未知の型をANYへ解決するので照合自体が起きない。実装中に発覚)
+                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(ctx, &decl.type_) && !types::assignable(ty, &decl.type_) {
                     ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
                 }
             }
@@ -1295,6 +1445,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             }
         }
         Stmt::TypedVarDecl { name, type_node, value, mutable, pos } => {
+            check_type_ann(ctx, type_node);
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
             let value_ty = infer_expr_single(ctx, value);
             if !types::assignable(&value_ty, &declared) {
@@ -1711,20 +1862,23 @@ fn infer_match(ctx: &mut FullCheckerCtx, subject_expr: &Expr, arms: &[MatchArm],
                     saw_wildcard = true;
                 }
                 MatchPattern::Type(node) => {
-                    // **未知の型名は判定しない**。`checker::resolve_type_node`は解決できない
-                    // 名前を「フィールド0個の殻struct」へフォールバックさせる(codegen用の
-                    // 寛容な設計)。それをそのまま使うと`struct_pattern_matches`の
-                    // 「パターンのフィールドが全て一致するか」が**空集合に対して真**になり、
-                    // 殻structが**あらゆるstructメンバーに一致**してしまう——タイポした型名の
-                    // アームが全メンバーをcoveredにし、正当なアームが
-                    // `unreachable-pattern`の誤検知になる(code reviewで発覚・両CLIで再現確認)。
-                    // TS版はここで`unknown-type`を出すが、その診断は未移植なので黙って諦める
-                    if !pattern_type_is_known(&ctx.type_ctx, node) {
+                    // milestone 42: パターンの型注釈もTS版は`resolveType`を通る(=`unknown-type`)
+                    check_type_ann(ctx, node);
+                    // **未知の型名はANYへ解決する**(TS版の`resolveType`と同じ)。
+                    // `checker::resolve_type_node`は解決できない名前を「フィールド0個の
+                    // 殻struct」へフォールバックさせる(codegen用の寛容な設計)ため、それを
+                    // そのまま使うと`struct_pattern_matches`の「パターンのフィールドが全て
+                    // 一致するか」が**空集合に対して真**になり、殻structが**あらゆるstruct
+                    // メンバーに一致**してしまう(milestone 39のcode reviewで発覚)。
+                    // ANYにすればどのメンバーとも等しくならず、TS版と同じ`impossible-pattern`になる
+                    let pt = if unknown_type_name(ctx, node) { ANY } else { crate::checker::resolve_type_node(&ctx.type_ctx, node) };
+                    // 殻structが残る経路(pkg修飾型・struct形パターンの中の未知の型名)は
+                    // 引き続き判定不能として飛ばす——上記の「何にでも一致する」問題を避けるため
+                    if has_unregistered_struct(ctx, &pt) {
                         undecidable = true;
                         undecidable_any = true;
                         continue;
                     }
-                    let pt = crate::checker::resolve_type_node(&ctx.type_ctx, node);
                     if !safe_to_compare(&pt) {
                         undecidable = true;
                         undecidable_any = true;
@@ -1873,28 +2027,6 @@ fn struct_pattern_matches(member: &Type, pattern: &Type) -> bool {
     pfs.iter().all(|p| mfs.iter().find(|m| m.name == p.name).is_some_and(|m| types::type_equals(&m.type_, &p.type_)))
 }
 
-// パターンに書かれた型注釈を`checker::resolve_type_node`で解決してよいか——つまり
-// **そこに現れる名前が全て実在する型か**の判定。実在しない名前は殻struct
-// (フィールド0個)へフォールバックされ、構造的な部分一致でどんなstructにも一致して
-// しまうため、解決する前にここで止める(上記`infer_match`のコメント参照)。
-// pkg修飾型も殻structへ落ちうるので判定不能扱いにする(TS版は`unknown-package-type`等を
-// 出すが、いずれも未移植)
-fn pattern_type_is_known(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> bool {
-    match node {
-        TypeNode::Name { pkg: Some(_), .. } => false,
-        TypeNode::Name { name, pkg: None, .. } => {
-            matches!(name.as_str(), "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed") || tc.lookup_struct(name).is_some() || tc.lookup_union(name).is_some()
-        }
-        TypeNode::Literal { .. } => true,
-        TypeNode::StructType { fields, .. } => fields.iter().all(|f| pattern_type_is_known(tc, &f.type_node)),
-        TypeNode::Union { members, .. } => members.iter().all(|m| pattern_type_is_known(tc, m)),
-        TypeNode::Array { elem, .. } | TypeNode::Chan { elem, .. } => pattern_type_is_known(tc, elem),
-        TypeNode::MapType { key, value, .. } => pattern_type_is_known(tc, key) && pattern_type_is_known(tc, value),
-        // 関数型など残りは保守的に判定不能
-        _ => false,
-    }
-}
-
 // `types::type_equals`/`types::union_of`へ渡しても**パニックしない**かの判定。
 // どちらも「unionのbody・structのfieldsは解決済み」を前提に`.expect()`するが、
 // `resolve_type_decls`は裸のunion循環などで解決に失敗すると中身が空のまま登録を残す
@@ -2025,8 +2157,19 @@ fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
 // 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり。下記のlookup_structガード参照)
 fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     let Some(recv) = &f.receiver else { return };
-    let recv_full = crate::checker::resolve_type_node(&ctx.type_ctx, &recv.type_node);
+    // TS版`declareMethod`と同じ順序: レシーバ型の解決(=ここで`unknown-type`が出る)→
+    // struct判定→組み込み名→フィールド衝突→重複メソッド→**最後に**パラメータ/戻り値の解決。
+    // パラメータの検査を前に出すと、重複メソッドなどで早期returnするケースの診断がTS版より
+    // 増えてしまう(実測して確認)
+    ctx.type_params = f.type_params.clone();
+    check_type_ann(ctx, &recv.type_node);
+    // **未知の型名はANY扱いにする**(milestone 42)。`resolve_type_node`は未知の名前を
+    // 「空フィールドの殻struct」へフォールバックさせるので、そのままだと
+    // `invalid-receiver-type`の文言が`got Bogus`になりTS版(`got any`——TS版のresolveTypeは
+    // 未知の型にANYを返す)と食い違う
+    let recv_full = if unknown_type_name(ctx, &recv.type_node) { ANY } else { crate::checker::resolve_type_node(&ctx.type_ctx, &recv.type_node) };
     let Type::Struct { name: sname, fields: fcell, .. } = &recv_full else {
+        ctx.type_params.clear();
         ctx.error(
             recv.pos,
             DiagnosticCode::InvalidReceiverType,
@@ -2036,16 +2179,18 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     };
     let sname = sname.clone();
     // **殻structのフォールバックを弾く**(code reviewで発覚・再現確認済み): `resolve_type_node`は
-    // 未知の型名・pkg修飾型を「空フィールドの殻struct」へフォールバックさせる(checker.rs)ため、
-    // 上のstruct判定だけでは`fn (y: Bogus) f()`のような未宣言のレシーバも通ってしまう。
+    // pkg修飾型を「空フィールドの殻struct」へフォールバックさせる(checker.rs)ため、
+    // 上のstruct判定だけでは`fn (p: math.Point) f()`のようなレシーバも通ってしまう。
     // レジストリに実在するstructでなければ、**登録も残りの診断もせず素通りさせる**——
-    // milestone 30の「レシーバが未宣言/非struct/pkg修飾なら登録しない(誤った名前で登録しない
-    // ため)」というガードを、resolve_type_node化の後も維持するもの。これが無いと、存在しない
-    // structに同名メソッドを2つ書いたときに`duplicate-method`という**TS版には無い誤検知**が出る
-    // (TS版はunknown-type+invalid-receiver-type。full_checkerはunknown-type未移植なので、
-    // 誤検知ではなく検出漏れ側に倒す既定方針どおり無診断にする)。
+    // これが無いと、実在しないstructに同名メソッドを2つ書いたときに`duplicate-method`という
+    // **TS版には無い誤検知**が出る。
+    // **milestone 42まで**は未宣言のレシーバ(`fn (y: Bogus) f()`)もここで落ちていたが、
+    // `unknown-type`を移植したので上のANY差し替え経由で`invalid-receiver-type`まで
+    // TS版と同じに出るようになった。今ここに残るのはpkg修飾のケース(パッケージ跨ぎの
+    // 検査を移植するまでは検出漏れ側)。
     // 型aliasが名前付きstructを指す場合は解決後の実名で引くので通る
     if ctx.type_ctx.lookup_struct(&sname).is_none() {
+        ctx.type_params.clear();
         return;
     }
     let field_names: Vec<String> = fcell.get().map(|fs| fs.iter().map(|fd| fd.name.clone()).collect()).unwrap_or_default();
@@ -2053,16 +2198,26 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // name」という専用の文言。declare()の"cannot be redeclared"とは別)
     if crate::checker::is_builtin(&f.name) {
         ctx.error(f.pos, DiagnosticCode::BuiltinRedeclared, format!("'{}' is a builtin function and cannot be used as a method name", f.name));
+        ctx.type_params.clear();
         return;
     }
     if field_names.contains(&f.name) {
         ctx.error(f.pos, DiagnosticCode::MethodFieldConflict, format!("{sname} already has a field named '{}'", f.name));
+        ctx.type_params.clear();
         return;
     }
     if ctx.type_ctx.lookup_method(&sname, &f.name).is_some() {
         ctx.error(f.pos, DiagnosticCode::DuplicateMethod, format!("{sname} already has a method named '{}'", f.name));
+        ctx.type_params.clear();
         return;
     }
+    for p in &f.params {
+        check_type_ann(ctx, &p.type_node);
+    }
+    if let Some(r) = &f.ret {
+        check_type_ann(ctx, r);
+    }
+    ctx.type_params.clear();
     let mut params = vec![resolve_type_ann(&ctx.type_ctx, &recv.type_node)];
     params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
     let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
@@ -2072,6 +2227,9 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
 }
 
 fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
+    // milestone 42: `check_type_ann`が型パラメータを未知の型と誤判定しないように立てておく
+    // (本体を抜けるときに必ず戻す——入れ子の無名関数は型パラメータを持たないので上書きでよい)
+    ctx.type_params = f.type_params.clone();
     // パラメータ用の外側スコープ+本体用のネストしたスコープ(check_block)という
     // 2段構成(TS版`checker/functions.ts`と同じ——pushScope〈パラメータ〉の後、
     // 本体はcheckBlockが自分でpushScopeする)。1段に潰すと、本体でパラメータ名を
@@ -2082,17 +2240,23 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // スコープへ、パラメータより先に宣言する(TS版`checkFn`と同じ順序)。これが無いと
     // メソッド本体の`u`がundefined-nameになるため、メソッド本体の検査とセットで入れた
     if let Some(recv) = &f.receiver {
+        check_type_ann(ctx, &recv.type_node);
         let rt = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
         ctx.declare(&recv.name, rt, recv.pos, false);
     }
     for p in &f.params {
+        check_type_ann(ctx, &p.type_node);
         let pt = resolve_type_ann(&ctx.type_ctx, &p.type_node);
         ctx.declare(&p.name, pt, p.pos, false);
+    }
+    if let Some(r) = &f.ret {
+        check_type_ann(ctx, r);
     }
     ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID));
     check_block(ctx, &f.body);
     ctx.ret_stack.pop();
     ctx.pop_scope();
+    ctx.type_params.clear();
 }
 
 // トップレベル定数(F-9c)。値の式はローカル変数宣言と同じくtype-mismatch/undefined-name
@@ -2104,6 +2268,7 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
     let value_ty = infer_expr_single(ctx, &c.value);
     let final_ty = match &c.type_node {
         Some(type_node) => {
+            check_type_ann(ctx, type_node);
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
             if !types::assignable(&value_ty, &declared) {
                 ctx.error(
@@ -2163,6 +2328,17 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let all_types: Vec<crate::ast::TypeDecl> = files.iter().flat_map(|(_, p)| p.types.iter().cloned()).collect();
     let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
+    // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
+    // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
+    // (関数シグネチャが2回出るのとは対照的。実測で確認)。報告順も
+    // 「型宣言 → シグネチャ登録 → 本体」でTS版と一致させている
+    for (i, (_, program)) in files.iter().enumerate() {
+        let start = ctx.diagnostics.len();
+        for t in &program.types {
+            check_type_decl_anns(&mut ctx, t);
+        }
+        spans.push((start, ctx.diagnostics.len(), i));
+    }
     // milestone 30/31: メソッド表(struct名→メソッド名→Type::Fn)を構築する
     // (`declare_method`。milestone 31から宣言時の4診断つき)
     // (メソッド表と関数シグネチャは同じループで登録する——下記参照)
@@ -2209,6 +2385,17 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
             if f.receiver.is_some() {
                 declare_method(&mut ctx, f);
             } else {
+                // milestone 42: 型注釈の検査(TS版もシグネチャ登録時にresolveTypeを通るので
+                // ここで1回目が出る。本体検査でもう1回出るのはTS版の挙動どおり)。
+                // ジェネリック関数の型パラメータを一時的に登録してから検査する
+                ctx.type_params = f.type_params.clone();
+                for p in &f.params {
+                    check_type_ann(&mut ctx, &p.type_node);
+                }
+                if let Some(r) = &f.ret {
+                    check_type_ann(&mut ctx, r);
+                }
+                ctx.type_params.clear();
                 let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
                 ctx.declare(&f.name, ty, f.pos, false);
             }
@@ -2506,17 +2693,102 @@ mod tests {
     }
 
 
+
+    // --- milestone 42: 型名そのものの検査 ---------------------------------------------
+
     #[test]
-    fn 未知の型名のパターンは判定しない() {
-        // 回帰(code reviewで発覚): `resolve_type_node`は解決できない名前を
+    fn 未知の型名はunknown_typeを報告する() {
+        // **関数シグネチャは2回報告される**(登録時と本体検査時。TS版の挙動そのまま——
+        // 実測で確認した)
+        let param = check("fn f(x: Bogus) int {\n    return 1\n}\n\nfn main() {\n    print(str(f(1)))\n}\n");
+        assert_eq!(param.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType, DiagnosticCode::UnknownType], "{param:?}");
+        assert_eq!(param[0].message, "unknown type 'Bogus'");
+        // 型宣言の中は1回だけ(TS版はresolveAliasのメモ化で1回)
+        let field = check("struct Box {\n    n: Bogus\n}\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(field.len(), 1, "{field:?}");
+        assert_eq!(field[0].code, DiagnosticCode::UnknownType);
+        // ローカルの型注釈
+        let local = check("fn main() {\n    x: Bogus = 1\n    print(str(x))\n}\n");
+        assert_eq!(local.len(), 1, "{local:?}");
+        assert_eq!(local[0].code, DiagnosticCode::UnknownType);
+    }
+
+    #[test]
+    fn anyは型として使えない() {
+        let diags = check("fn main() {\n    xs: any = 1\n    print(str(xs))\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, DiagnosticCode::AnyTypeRemoved);
+    }
+
+    #[test]
+    fn ジェネリック関数の型パラメータは未知の型ではない() {
+        // `fn first<T>(xs: T[]) T | none`のTを`unknown-type`にすると全面的な誤検知になる
+        assert_eq!(
+            check("fn first<T>(xs: T[]) T | none {\n    for _, x := range xs {\n        return x\n    }\n    return none\n}\n\nfn main() {\n    print(str(first([1, 2]) or 0))\n}\n"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn 未宣言のレシーバはunknown_typeとinvalid_receiver_typeになる() {
+        // TS版と同じ順序・文言(`got any`——未知の型はANYへ解決されるため)。
+        // milestone 42まではどちらも出せていなかった(handoff.mdの既知の限界に記載していた項目)
+        let diags = check("fn (y: Bogus) hello() string {\n    return \"hi\"\n}\n\nfn main() {\n    print(\"hi\")\n}\n");
+        assert_eq!(
+            diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::UnknownType, DiagnosticCode::InvalidReceiverType, DiagnosticCode::UnknownType],
+            "{diags:?}"
+        );
+        assert_eq!(diags[1].message, "method receiver must be a struct type, got any");
+    }
+
+    #[test]
+    fn 未知の型のフィールドは型照合の対象外() {
+        // 実装中に発覚: checker.rsのレジストリは未知の型名を殻structへ落とすので、
+        // そのまま照合すると`Box{n: 1}`が`cannot use int as Bogus`という
+        // **TS版に無い誤検知**になっていた(TS版は未知の型をANYへ解決するので照合が起きない)
+        let diags = check("struct Box {\n    n: Bogus\n}\n\nfn main() {\n    b := Box{n: 1}\n    print(str(b.n))\n}\n");
+        assert_eq!(diags.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType], "{diags:?}");
+    }
+
+    #[test]
+    fn is式のパターンも検査する() {
+        // union以外を`is`する
+        let not_union = check("fn main() {\n    n := 1\n    if n is int {\n        print(\"int\")\n    }\n}\n");
+        assert_eq!(not_union.len(), 1, "{not_union:?}");
+        assert_eq!(not_union[0].code, DiagnosticCode::UnionRequired);
+        assert_eq!(not_union[0].message, "'is' needs a union-typed value, got int");
+        // unionに存在しない型
+        let impossible = check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    if r is string {\n        print(\"s\")\n    }\n}\n");
+        assert_eq!(impossible.len(), 1, "{impossible:?}");
+        assert_eq!(impossible[0].code, DiagnosticCode::ImpossiblePattern);
+        // 正しい`is`は無診断
+        assert_eq!(check("fn f() int | error {\n    return 1\n}\n\nfn main() {\n    r := f()\n    if r is int {\n        print(str(r))\n    }\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn 未知の型名のパターンはanyへ解決する() {
+        // 回帰(milestone 39のcode reviewで発覚): `resolve_type_node`は解決できない名前を
         // 「フィールド0個の殻struct」へ落とすので、そのまま構造的部分一致にかけると
         // **あらゆるstructメンバーに一致**し、正当なアームが`unreachable-pattern`の
-        // 誤検知になっていた。判定不能として飛ばし、網羅性検査も止める(検出漏れ側)
+        // 誤検知になっていた。
+        // **milestone 42から**はTS版と同じくANYへ解決する——どのメンバーとも等しくないので
+        // `unknown-type`+`impossible-pattern`(+アームが足りなければ`match-not-exhaustive`)
+        // というTS版と同一の診断になる
         let src = "struct Ok {\n    user: string\n}\n\nstruct Err {\n    msg: string\n}\n\ntype Result = Ok | Err\n\nfn f() Result {\n    return Ok{user: \"a\"}\n}\n\nfn main() {\n    r := f()\n    match r {\n        Bogus => print(\"bogus\")\n        Ok => print(\"ok\")\n        Err => print(\"err\")\n    }\n}\n";
-        assert_eq!(check(src), vec![], "未知の型名で誤検知が出ている");
-        // 網羅性検査も止まる(判定不能なパターンが何をカバーしていたか分からないため)
+        let diags = check(src);
+        // 正当な`Ok`/`Err`のアームは咎められない(これが回帰の主眼)
+        assert!(diags.iter().all(|d| d.code != DiagnosticCode::UnreachablePattern), "{diags:?}");
+        assert_eq!(
+            diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::UnknownType, DiagnosticCode::ImpossiblePattern],
+            "{diags:?}"
+        );
         let only_bogus = "struct Ok {\n    user: string\n}\n\nstruct Err {\n    msg: string\n}\n\ntype Result = Ok | Err\n\nfn f() Result {\n    return Ok{user: \"a\"}\n}\n\nfn main() {\n    r := f()\n    match r {\n        Bogus => print(\"bogus\")\n    }\n}\n";
-        assert_eq!(check(only_bogus), vec![]);
+        assert_eq!(
+            check(only_bogus).iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::UnknownType, DiagnosticCode::ImpossiblePattern, DiagnosticCode::MatchNotExhaustive]
+        );
     }
 
     #[test]
@@ -2797,11 +3069,22 @@ mod tests {
     fn レシーバ付きのmainはエントリポイントとみなされずmissing_mainになる() {
         // メソッドの名前空間は自由関数と完全分離——`fn (r: R) main()`は
         // エントリポイントの`main`ではない(TS版も`!f.receiver`で除外する)。
-        // structはfull_checkerのスコープ外なのでメソッド本体は検査されないが、
-        // 名前だけは「自由関数のmainが無い」と判定されmissing-mainになるべき
+        // 名前は「自由関数のmainが無い」と判定されmissing-mainになる。
+        // **milestone 42から**、未宣言のレシーバ型`R`についてもTS版と同じ診断が出る
+        // (登録時のunknown-type→invalid-receiver-type→missing-main→本体検査のunknown-type
+        // という順序までTS版と一致。実測で確認)
         let diags = check("fn (r: R) main() {}\n");
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, DiagnosticCode::MissingMain);
+        let codes: Vec<DiagnosticCode> = diags.iter().map(|d| d.code).collect();
+        assert_eq!(
+            codes,
+            vec![
+                DiagnosticCode::UnknownType,
+                DiagnosticCode::InvalidReceiverType,
+                DiagnosticCode::MissingMain,
+                DiagnosticCode::UnknownType,
+            ],
+            "{diags:?}"
+        );
     }
 
     // ---- milestone 25: 演算子の妥当性検査 ----
@@ -3344,9 +3627,13 @@ mod tests {
         // 「空フィールドの殻struct」へフォールバックさせるため、殻を本物のstructと見なして
         // メソッド表へ登録してしまい、同名メソッドを2つ書くと存在しないstructについて
         // `duplicate-method`という**TS版には無い誤検知**が出ていた(TS版はunknown-type+
-        // invalid-receiver-type)。lookup_structガードで無診断(検出漏れ側)に戻した
+        // invalid-receiver-type)。lookup_structガードで登録しないようにして解消した。
+        // **milestone 42から**`unknown-type`+`invalid-receiver-type`がTS版と同じに出るが、
+        // `duplicate-method`は出ない(登録していないため)ことがこのテストの主眼
         let src = "fn (a: Bogus) f() int {\n    return 1\n}\nfn (b: Bogus) f() int {\n    return 2\n}\nfn main() {\n    print(\"x\")\n}\n";
-        assert_eq!(check(src), vec![]);
+        let diags = check(src);
+        assert!(diags.iter().all(|d| d.code != DiagnosticCode::DuplicateMethod), "{diags:?}");
+        assert!(diags.iter().all(|d| matches!(d.code, DiagnosticCode::UnknownType | DiagnosticCode::InvalidReceiverType)), "{diags:?}");
     }
 
     #[test]
