@@ -1032,7 +1032,15 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
        `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
        (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
-       `not-callable`も移植した)。いずれもモデル化を
+       `not-callable`も移植した)、
+       (8)**素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない**
+       (milestone 45のcode reviewで発見・PR前後で同じなので既存の穴): checker.rsの
+       `resolve_named_type`はStructType/Unionの宣言しか解決しないため、そのaliasを
+       フィールド型に使うと「空フィールドの殻struct」になる。`infer_struct_lit`は
+       `has_unregistered_struct`で弾くが、**`resolve_union_lit_member`の候補絞り込みには
+       同じガードが無い**ので、TS版が`discriminated-union-ambiguous`を出す入力に
+       `discriminated-union-no-match`という**違うコード**を出す。コードが違うのは
+       検出漏れより悪いので、次のmilestoneの有力候補。いずれもモデル化を
        進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置
