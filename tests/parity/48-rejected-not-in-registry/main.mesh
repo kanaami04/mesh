@@ -1,0 +1,13 @@
+import "mesh/io"
+
+struct io {
+	x: int
+}
+
+fn use(v: io) int {
+	return v.x
+}
+
+fn main() {
+	print(use(5))
+}

@@ -1,0 +1,3 @@
+main.mesh:2:10: error[type-alias-cycle]: type alias cycle involving 'A'
+  type B = A
+           ^

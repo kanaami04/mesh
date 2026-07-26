@@ -1,0 +1,7 @@
+import "lib"
+
+c: lib.Hidden = lib.Hidden{y: 1}
+
+fn main() {
+	print(1)
+}

@@ -1,0 +1,2 @@
+type Count = int
+fn main() { x: Count = "s" print(x) }

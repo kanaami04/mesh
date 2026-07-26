@@ -1,0 +1,3 @@
+main.mesh:5:8: error[unknown-field]: lib.Point has no field 'nofield' (fields: x, y)
+  	print(p.nofield)
+  	      ^

@@ -1,0 +1,4 @@
+import "lib"
+type lib = int
+fn use(x: lib) int { return 1 }
+fn main() { print(1) }

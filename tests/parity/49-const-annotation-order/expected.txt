@@ -1,0 +1,6 @@
+main.mesh:3:4: error[not-exported]: 'Hidden' is not exported by package 'lib' — add 'export' to its declaration
+  c: lib.Hidden = lib.Hidden{y: 1}
+     ^
+main.mesh:3:17: error[not-exported]: 'Hidden' is not exported by package 'lib' — add 'export' to its declaration
+  c: lib.Hidden = lib.Hidden{y: 1}
+                  ^

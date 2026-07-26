@@ -1,0 +1,6 @@
+import "lib"
+
+fn main() {
+	lib := 1
+	print(lib.add(1, 2))
+}

@@ -1,0 +1,10 @@
+import "mesh/json"
+
+json struct Cfg {
+	n: int
+}
+
+fn main() {
+	v := json.parse("{\"n\":1}")
+	print(v)
+}

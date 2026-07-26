@@ -1,0 +1,6 @@
+main.mesh:2:1: error[name-conflicts-with-package]: 'lib' conflicts with an imported package name
+  fn lib() int { return 2 }
+  ^
+main.mesh:3:19: error[package-as-value]: 'lib' is a package — use it as a qualifier like lib.something
+  fn main() { print(lib()) }
+                    ^

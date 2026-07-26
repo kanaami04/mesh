@@ -1,0 +1,2 @@
+type A = A
+fn main() { x: A = 1 print(x) }

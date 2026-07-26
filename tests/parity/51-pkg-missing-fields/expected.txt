@@ -1,0 +1,3 @@
+main.mesh:4:8: error[missing-fields]: missing field(s) in lib.Point: y
+  	print(lib.Point{x: 1})
+  	      ^

@@ -1,0 +1,2 @@
+struct Node { next: Node | none }
+fn main() { n := Node{next: none} print(n.next.next) }

@@ -1,0 +1,3 @@
+main.mesh:4:8: error[not-exported]: 'HIDDEN' is not exported by package 'lib' — add 'export' to its declaration
+  	print(lib.HIDDEN)
+  	      ^

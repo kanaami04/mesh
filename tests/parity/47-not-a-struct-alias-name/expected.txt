@@ -1,0 +1,3 @@
+main.mesh:2:19: error[not-a-struct]: 'S' is not a struct
+  fn main() { print(S{n: 1}) }
+                    ^

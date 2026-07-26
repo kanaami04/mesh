@@ -1,0 +1,9 @@
+main.mesh:2:1: error[name-conflicts-with-package]: 'lib' conflicts with an imported package name
+  type lib = int
+  ^
+main.mesh:3:11: error[unknown-type]: unknown type 'lib'
+  fn use(x: lib) int { return 1 }
+            ^
+main.mesh:3:11: error[unknown-type]: unknown type 'lib'
+  fn use(x: lib) int { return 1 }
+            ^

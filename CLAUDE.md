@@ -36,7 +36,13 @@ mise run playground     # ブラウザプレイグラウンド
 mise run run-examples   # examples/*.mesh を全部実行
 mise run rust-test      # cd rust && cargo test(Rust移植版)
 mise run rust-check     # cd rust && cargo clippy --all-targets
+mise run parity         # TS版(オラクル)とRust版のcheck出力を突き合わせる
+mise run drift          # 自分の変更が偽にしたコメントの候補を出す
 ```
+
+**Rust移植のマイルストーンを出荷する前に `mise run parity` と `mise run drift` を回す。**
+parityは「Rust側だけに出る診断」(この移植で最悪の不具合)があれば失敗する。
+driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
 
 環境構築(mise・system パッケージ・gh認証・`/code-review`プラグイン)は **docs/setup.md** が一次情報源。
 

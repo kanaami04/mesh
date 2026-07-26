@@ -1,0 +1,9 @@
+main.mesh:1:16: error[unknown-type]: unknown type 'Bogus'
+  struct A { cb: Bogus }
+                 ^
+main.mesh:2:16: error[unknown-type]: unknown type 'Bogus'
+  struct B { cb: Bogus }
+                 ^
+main.mesh:4:19: error[discriminated-union-ambiguous]: ambiguous — multiple members of 'AB' match the field(s) {cb}
+  fn main() { print(AB{cb: 1}) }
+                    ^

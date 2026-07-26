@@ -1,0 +1,6 @@
+main.mesh:1:20: error[not-a-struct]: int has no fields
+  fn main() { n := 1 n.foo(bogus) }
+                     ^
+main.mesh:1:26: error[undefined-name]: undefined: 'bogus'
+  fn main() { n := 1 n.foo(bogus) }
+                           ^

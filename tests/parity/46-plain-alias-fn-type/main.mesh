@@ -1,0 +1,3 @@
+type Handler = fn(int) int
+fn use(h: Handler) int { return h("s") }
+fn main() { print(use(fn(x: int) int { return x })) }

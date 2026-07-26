@@ -1,0 +1,6 @@
+main.mesh:2:30: error[undefined-name]: undefined: 'bogus'
+  fn main() { p := P{x: 1} p.x(bogus) }
+                               ^
+main.mesh:2:26: error[not-callable]: cannot call non-function type int
+  fn main() { p := P{x: 1} p.x(bogus) }
+                           ^

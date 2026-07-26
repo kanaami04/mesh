@@ -1,0 +1,4 @@
+struct A { cb: Bogus }
+struct B { cb: Bogus }
+type AB = A | B
+fn main() { print(AB{cb: 1}) }

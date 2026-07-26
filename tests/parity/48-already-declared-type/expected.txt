@@ -1,0 +1,3 @@
+main.mesh:2:1: error[already-declared]: type 'Count' is already declared
+  type Count = string
+  ^

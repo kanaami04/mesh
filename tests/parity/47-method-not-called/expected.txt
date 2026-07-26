@@ -1,0 +1,3 @@
+main.mesh:3:32: error[method-not-called]: 'show' is a method — call it like show(...)
+  fn main() { p := P{x: 1} print(p.show) }
+                                 ^

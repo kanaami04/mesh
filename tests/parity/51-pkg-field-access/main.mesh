@@ -1,0 +1,6 @@
+import "lib"
+
+fn main() {
+	p := lib.Point{x: 1, y: 2}
+	print(p.nofield)
+}

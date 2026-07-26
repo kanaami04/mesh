@@ -1,0 +1,9 @@
+import "lib"
+
+fn (h: lib.Hidden) show() int {
+	return 1
+}
+
+fn main() {
+	print(1)
+}

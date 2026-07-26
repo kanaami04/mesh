@@ -1,0 +1,2 @@
+error type Oops = int
+fn main() { print(1) }

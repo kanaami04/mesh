@@ -1,0 +1,6 @@
+import "lib"
+
+fn main() {
+	p: nosuch.Point = lib.Point{x: 1}
+	print(p)
+}
