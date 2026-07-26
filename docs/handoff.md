@@ -1010,6 +1010,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
    - ✅ **milestone 44(2026-07-26)で`defer-requires-call`**——`defer`の後ろが呼び出しでなければ
      弾く。TS版と同じく「呼び出しかどうか」を先に見て打ち切る(順序を逆にすると本来の診断が
      消える)。診断コードは56→57種
+   - ✅ **milestone 45(2026-07-26)で関数型のモデル化 + `not-callable`**。`resolve_type_ann`が
+     関数型を解決するようになり(引数・戻り値のどこかがANYへ縮退したら全体をANY、という
+     unionと同じ規則)、full_checker側の突き合わせは`assignable_checked`(どちらかにANYが
+     潜んでいたら比較しない)へ集約した。診断コードは57→58種
    - 残る候補: **診断の続き**——
      pkg修飾struct/pkg修飾呼び出しの中身(`unknown-package`系とセット)・
      非structへのメンバーアクセス(`not-a-struct`)・union targetの`narrow-required`。
@@ -1027,10 +1031,16 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
        `len(<-ch)`(TS版は`int[] | closed`を弾く)等は検出漏れ、
        (6)pkg修飾の型注釈(`math.Point`)は`check_type_ann`の対象外——`unknown-package`/
        `unknown-package-type`/`not-exported`はパッケージ跨ぎの検査とセットで移植する、
-       (7)**関数値の型照合が効かない場面がある**(milestone 44のcode reviewで発見・スコープ外):
-       `chan<fn() void>`へ`fn(int) void`を送る/`(<-fch)()`のように受信した関数値を呼ぶ、で
-       TS版は`type-mismatch`と`not-callable`を出すがRust版は無診断。`not-callable`自体が
-       未移植で、関数型の代入互換性(`resolve_type_ann`が関数型をANYへ畳む)とセットの課題。いずれもモデル化を
+       (7)~~関数値の型照合が効かない~~ → **milestone 45で解消**(関数型をモデル化し
+       `not-callable`も移植した)、
+       (8)**素の型alias(`type Handler = fn(int) int`)がレジストリで解決されない**
+       (milestone 45のcode reviewで発見・PR前後で同じなので既存の穴): checker.rsの
+       `resolve_named_type`はStructType/Unionの宣言しか解決しないため、そのaliasを
+       フィールド型に使うと「空フィールドの殻struct」になる。`infer_struct_lit`は
+       `has_unregistered_struct`で弾くが、**`resolve_union_lit_member`の候補絞り込みには
+       同じガードが無い**ので、TS版が`discriminated-union-ambiguous`を出す入力に
+       `discriminated-union-no-match`という**違うコード**を出す。コードが違うのは
+       検出漏れより悪いので、次のmilestoneの有力候補。いずれもモデル化を
        進める中でまとめて対応する候補
 
 **TS実装(`src/`)はいつ消せるか**: 現時点では消せない。TS版は旧実装ではなく**移植の検証装置

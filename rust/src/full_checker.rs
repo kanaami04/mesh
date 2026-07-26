@@ -215,6 +215,15 @@ fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
         TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_ann(tc, elem))),
         TypeNode::MapType { key, value, .. } => Type::Map { key: Box::new(resolve_type_ann(tc, key)), value: Box::new(resolve_type_ann(tc, value)) },
         TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_ann(tc, elem))),
+        // milestone 45: 関数型の注釈(`fn(int) int`)。**引数か戻り値が1つでもANYへ縮退したら
+        // 全体をANYにする**——縮退した関数型を完全解決された宣言型と突き合わせると必ず
+        // 不一致になり誤検知になる(milestone 29/32のcode reviewで2度踏んだ穴と同じ形)。
+        // unionのときと同じ「中身を完全に解決できたものだけがその型として残る」規則
+        TypeNode::FnType { params, ret, .. } => {
+            let ps: Vec<Type> = params.iter().map(|p| resolve_type_ann(tc, p)).collect();
+            let r = ret.as_ref().map(|r| resolve_type_ann(tc, r)).unwrap_or(VOID);
+            if ps.iter().any(types::contains_any) || types::contains_any(&r) { ANY } else { Type::Fn { params: ps, ret: Box::new(r) } }
+        }
         // milestone 39: 書き下しのunion注釈(`int | error`)。メンバーを1つずつ
         // `resolve_type_ann`で解決してから組む——**メンバーが1つでもANYへ縮退したら
         // `union_of`がANYを返す**(ANYの短絡)ので、「中身を完全に解決できたunionだけが
@@ -266,6 +275,19 @@ fn has_unregistered_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
         }
     }
     go(ctx, t, &mut Vec::new())
+}
+
+// full_checker側の型突き合わせはこれを通す。**どちらかにANYが潜んでいたら比較しない**——
+// 縮退した型(full_checker側)と完全解決された型(レジストリ側)を突き合わせると必ず
+// 不一致になり誤検知になる、というこの移植で何度も踏んだ穴への一般的な門番。
+// milestone 45で関数型をモデル化したことで、`fn(int) int`のように**中に**ANYが潜みうる型が
+// 増えたため、個別のガードではなくここへ集約した(スカラー同士の比較は素通りするので
+// 既存の検出力は落ちない)
+fn assignable_checked(from: &Type, to: &Type) -> bool {
+    if types::contains_any(from) || types::contains_any(to) {
+        return true;
+    }
+    types::assignable(from, to)
 }
 
 // その型注釈が「未知の裸の型名」か(レシーバのANY差し替え判定用)。
@@ -572,8 +594,15 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                             }
                         };
                     }
-                    // フィールド名の呼び出し(関数値フィールド等)——フィールド型はwidenでANYに
-                    // なるので引数照合は効かない(値呼び出しの照合はdefer)。下の共通処理で完結
+                    // milestone 45: 関数値フィールドの呼び出し(`h.cb(1)`)。関数型を
+                    // モデル化したのでフィールド型が`Type::Fn`のまま届く——TS版
+                    // (`memberFieldType`→`checkCallOfValue`)と同じく引数を照合する
+                    let field_ty = fcell.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| widen_field_type(f.type_.clone()));
+                    if let Some(Type::Fn { params, ret }) = field_ty {
+                        let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
+                        check_args_against(ctx, *pos, args, &arg_tys, &params);
+                        return *ret;
+                    }
                 }
                 // struct以外/フィールド呼び出し: 引数だけ推論してANY(targetは上で評価済み——
                 // 二重評価を避けるためここで完結させ、generic経路へは落とさない)
@@ -594,7 +623,12 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 let (params, ret) = (params.clone(), (**ret).clone());
                 check_args_against(ctx, *pos, args, &arg_tys, &params);
                 ret
+            } else if matches!(callee_ty, Type::Any) {
+                ANY
             } else {
+                // milestone 45: 関数でない値の呼び出し(TS版`calls.ts`の`checkCallOfValue`)。
+                // **ANYは免除**する——full_checkerが型を諦めた先はANYなので、そこで出すと誤検知になる
+                ctx.error(*pos, DiagnosticCode::NotCallable, format!("cannot call non-function type {}", types::type_to_string(&callee_ty)));
                 ANY
             }
         }
@@ -628,7 +662,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             for e in rest {
                 let t = infer_expr_single(ctx, e);
                 // 要素型がANY縮退を含むなら突き合わせない(milestone 29/32と同じ配慮)
-                if is_fully_modeled(&elem) && !types::assignable(&t, &elem) {
+                if is_fully_modeled(&elem) && !assignable_checked(&t, &elem) {
                     ctx.error(e.pos(), DiagnosticCode::TypeMismatch, format!("array element must be {}, got {}", types::type_to_string(&elem), types::type_to_string(&t)));
                 }
             }
@@ -648,10 +682,10 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             for e in entries {
                 let kt = infer_expr_single(ctx, &e.key);
                 let vt = infer_expr_single(ctx, &e.value);
-                if is_fully_modeled(&key_ty) && !types::assignable(&kt, &key_ty) {
+                if is_fully_modeled(&key_ty) && !assignable_checked(&kt, &key_ty) {
                     ctx.error(e.key.pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", types::type_to_string(&key_ty), types::type_to_string(&kt)));
                 }
-                if is_fully_modeled(&value_ty) && !types::assignable(&vt, &value_ty) {
+                if is_fully_modeled(&value_ty) && !assignable_checked(&vt, &value_ty) {
                     ctx.error(e.value.pos(), DiagnosticCode::TypeMismatch, format!("map value must be {}, got {}", types::type_to_string(&value_ty), types::type_to_string(&vt)));
                 }
             }
@@ -775,9 +809,11 @@ fn is_checkable_field_type(t: &Type) -> bool {
 fn is_fully_modeled(t: &Type) -> bool {
     match t {
         Type::Any => false,
-        // まだモデル化していない型(関数/union/型パラメータ)。resolve_type_annは
-        // これらをANYへ縮退させるので、レジストリ側の型と突き合わせられない
-        Type::Fn { .. } | Type::Union { .. } | Type::TypeParam(_) => false,
+        // union/型パラメータはまだレジストリ側と突き合わせない(unionは値側と宣言側で
+        // メンバーの解決経路が違いうるため)
+        Type::Union { .. } | Type::TypeParam(_) => false,
+        // milestone 45: 関数型も**引数・戻り値まで解決できていれば**突き合わせてよい
+        Type::Fn { params, ret } => params.iter().all(is_fully_modeled) && is_fully_modeled(ret),
         // コレクションは中身まで解決できていれば突き合わせてよい(milestone 33: 配列、
         // milestone 34: map/channel)
         Type::Array(elem) | Type::Chan(elem) => is_fully_modeled(elem),
@@ -814,7 +850,7 @@ fn infer_index(ctx: &mut FullCheckerCtx, target: &Expr, index: &Expr, pos: Pos) 
     // mapを先に分岐する(TS版と同じ順序)。読み取りは常に`V | none`——無いキーを
     // 無視できないというunion路線の帰結
     if let Type::Map { key, value } = &tgt {
-        if is_fully_modeled(key) && !types::assignable(&idx, key) {
+        if is_fully_modeled(key) && !assignable_checked(&idx, key) {
             ctx.error(index.pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", types::type_to_string(key), types::type_to_string(&idx)));
         }
         let value = (**value).clone();
@@ -848,7 +884,7 @@ fn check_args_against(ctx: &mut FullCheckerCtx, call_pos: Pos, args: &[Expr], ar
         ctx.error(call_pos, DiagnosticCode::ArgumentCount, format!("expected {} argument(s), got {}", params.len(), arg_tys.len()));
     }
     for (i, (at, pt)) in arg_tys.iter().zip(params.iter()).enumerate() {
-        if !types::assignable(at, pt) {
+        if !assignable_checked(at, pt) {
             ctx.error(args[i].pos(), DiagnosticCode::TypeMismatch, format!("argument {}: cannot use {} as {}", i + 1, types::type_to_string(at), types::type_to_string(pt)));
         }
     }
@@ -940,7 +976,7 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
                 // フォールバックさせるので、そのまま照合すると`struct Box { n: Bogus }`に対する
                 // `Box{n: 1}`が`cannot use int as Bogus`という**TS版に無い誤検知**になる
                 // (TS版は未知の型をANYへ解決するので照合自体が起きない。実装中に発覚)
-                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(ctx, &decl.type_) && !types::assignable(ty, &decl.type_) {
+                if is_checkable_field_type(&decl.type_) && !has_unregistered_struct(ctx, &decl.type_) && !assignable_checked(ty, &decl.type_) {
                     ctx.error(f.value.pos(), DiagnosticCode::TypeMismatch, format!("field '{}': cannot use {} as {}", f.name, types::type_to_string(ty), types::type_to_string(&decl.type_)));
                 }
             }
@@ -1055,7 +1091,7 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
                     undecidable = true;
                     true
                 }
-                Some(d) => types::assignable(ty, &d.type_),
+                Some(d) => assignable_checked(ty, &d.type_),
                 None => false,
             })
         });
@@ -1143,7 +1179,7 @@ fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Ex
             ctx.error(pos, DiagnosticCode::UseIsNone, "use 'is none' to test for none (== does not narrow the type)");
             return BOOL;
         }
-        if !types::assignable(&lt, &rt) && !types::assignable(&rt, &lt) {
+        if !assignable_checked(&lt, &rt) && !assignable_checked(&rt, &lt) {
             ctx.error(pos, DiagnosticCode::IncomparableTypes, format!("cannot compare {} with {}", types::type_to_string(&lt), types::type_to_string(&rt)));
         }
         return BOOL;
@@ -1303,14 +1339,14 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 2, pos)
                 && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("push() requires an array, got {}", ts(&at[0])))
                 && is_fully_modeled(&elem)
-                && !types::assignable(&at[1], &elem)
+                && !assignable_checked(&at[1], &elem)
             {
                 ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("cannot push {} into {}", ts(&at[1]), ts(&at[0])));
             }
             VOID
         }
         "error" => {
-            if expect_arity(ctx, name, n, 1, pos) && !types::assignable(&at[0], &STRING) {
+            if expect_arity(ctx, name, n, 1, pos) && !assignable_checked(&at[0], &STRING) {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("error() requires a string message, got {}", ts(&at[0])));
             }
             ERROR
@@ -1319,7 +1355,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 2, pos)
                 && let Some((key, _)) = require_map(ctx, &at[0], args[0].pos(), format!("delete() requires a map, got {}", ts(&at[0])))
                 && is_fully_modeled(&key)
-                && !types::assignable(&at[1], &key)
+                && !assignable_checked(&at[1], &key)
             {
                 ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("map key must be {}, got {}", ts(&key), ts(&at[1])));
             }
@@ -1335,7 +1371,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 2, pos)
                 && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("contains() requires an array, got {}", ts(&at[0])))
                 && is_fully_modeled(&elem)
-                && !types::assignable(&at[1], &elem)
+                && !assignable_checked(&at[1], &elem)
             {
                 ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("contains() second argument must be {}, got {}", ts(&elem), ts(&at[1])));
             }
@@ -1345,7 +1381,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 2, pos)
                 && let Some(elem) = require_array(ctx, &at[0], args[0].pos(), format!("indexOf() requires an array, got {}", ts(&at[0])))
                 && is_fully_modeled(&elem)
-                && !types::assignable(&at[1], &elem)
+                && !assignable_checked(&at[1], &elem)
             {
                 ctx.error(args[1].pos(), DiagnosticCode::TypeMismatch, format!("indexOf() second argument must be {}, got {}", ts(&elem), ts(&at[1])));
             }
@@ -1464,7 +1500,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             {
                 match &at[1] {
                     Type::Fn { params, ret } => {
-                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !types::assignable(&elem, &params[0])) {
+                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !assignable_checked(&elem, &params[0])) {
                             ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("filter() callback must take a single {} parameter", ts(&elem)));
                         }
                         if !types::type_equals(ret, &BOOL) && !matches!(**ret, Type::Any) {
@@ -1487,7 +1523,7 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             {
                 match &at[1] {
                     Type::Fn { params, .. } => {
-                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !types::assignable(&elem, &params[0])) {
+                        if params.len() != 1 || (is_fully_modeled(&elem) && is_fully_modeled(&params[0]) && !assignable_checked(&elem, &params[0])) {
                             ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("map() callback must take a single {} parameter", ts(&elem)));
                         }
                     }
@@ -1511,13 +1547,13 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
                         ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, "reduce() callback must take (accumulator, element)");
                     }
                     Type::Fn { params, ret } => {
-                        if is_fully_modeled(&params[0]) && !types::assignable(&at[2], &params[0]) {
+                        if is_fully_modeled(&params[0]) && !assignable_checked(&at[2], &params[0]) {
                             ctx.error(args[2].pos(), DiagnosticCode::TypeMismatch, format!("reduce() initial value must be {}, got {}", ts(&params[0]), ts(&at[2])));
                         }
-                        if is_fully_modeled(&elem) && is_fully_modeled(&params[1]) && !types::assignable(&elem, &params[1]) {
+                        if is_fully_modeled(&elem) && is_fully_modeled(&params[1]) && !assignable_checked(&elem, &params[1]) {
                             ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("reduce() callback's second parameter must accept {}", ts(&elem)));
                         }
-                        if is_fully_modeled(ret) && is_fully_modeled(&params[0]) && !types::assignable(ret, &params[0]) {
+                        if is_fully_modeled(ret) && is_fully_modeled(&params[0]) && !assignable_checked(ret, &params[0]) {
                             ctx.error(args[1].pos(), DiagnosticCode::CallbackSignatureMismatch, format!("reduce() callback must return {} (the accumulator type), got {}", ts(&params[0]), ts(ret)));
                         }
                     }
@@ -1590,11 +1626,15 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             check_type_ann(ctx, type_node);
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
             let value_ty = infer_expr_single(ctx, value);
-            if !types::assignable(&value_ty, &declared) {
+            if !assignable_checked(&value_ty, &declared) {
+                // **位置は値の式、文言はTS版`statements.ts`のtypedVarDeclと同じ**。
+                // milestone 45で関数型のプローブを書いていて気づいた既存の乖離
+                // (スカラーでも`x: int = "s"`で位置も文言もTS版と違っていた——
+                // 型注釈つき宣言に値の型不一致を置いたプローブが今まで無かった)
                 ctx.error(
-                    *pos,
+                    value.pos(),
                     DiagnosticCode::TypeMismatch,
-                    format!("cannot assign a value of type '{}' to '{name}' of type '{}'", types::type_to_string(&value_ty), types::type_to_string(&declared)),
+                    format!("cannot use {} as {}", types::type_to_string(&value_ty), types::type_to_string(&declared)),
                 );
             }
             ctx.declare(name, declared, *pos, *mutable);
@@ -1636,7 +1676,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
                 if types::type_equals(&expected, &VOID) {
                     ctx.error(v.pos(), DiagnosticCode::VoidUsedAsValue, "this function has no return value");
-                } else if !types::assignable(&value_ty, &expected) {
+                } else if !assignable_checked(&value_ty, &expected) {
                     ctx.error(
                         v.pos(),
                         DiagnosticCode::TypeMismatch,
@@ -1727,7 +1767,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             let v = infer_expr_single(ctx, value);
             match &ch {
                 Type::Chan(elem) => {
-                    if is_fully_modeled(elem) && !types::assignable(&v, elem) {
+                    if is_fully_modeled(elem) && !assignable_checked(&v, elem) {
                         ctx.error(*pos, DiagnosticCode::TypeMismatch, format!("cannot send {} to {}", types::type_to_string(&v), types::type_to_string(&ch)));
                     }
                 }
@@ -1778,7 +1818,7 @@ fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type,
             );
             return;
         }
-        if is_fully_modeled(&info.write) && !types::assignable(value_ty, &info.write) {
+        if is_fully_modeled(&info.write) && !assignable_checked(value_ty, &info.write) {
             ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&info.write)));
         }
         return;
@@ -1794,7 +1834,7 @@ fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type,
         Some(b) if !b.mutable => {
             ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' was declared without 'mut' and cannot be reassigned"));
         }
-        Some(b) if !types::assignable(value_ty, &b.ty) => {
+        Some(b) if !assignable_checked(value_ty, &b.ty) => {
             let declared_ty_str = types::type_to_string(&b.ty);
             ctx.error(*pos, DiagnosticCode::TypeMismatch, format!("cannot assign a value of type '{}' to '{name}' of type '{declared_ty_str}'", types::type_to_string(value_ty)));
         }
@@ -1877,7 +1917,7 @@ fn infer_prop(ctx: &mut FullCheckerCtx, operand: &Expr, context: Option<&Expr>, 
         // 戻り値型が未解決なら突き合わせない(assignableは解決済み前提で`.expect()`する)
         if safe_to_compare(&ret) {
             for f in &propagated {
-                if !types::assignable(f, &ret) {
+                if !assignable_checked(f, &ret) {
                     ctx.error(
                         pos,
                         DiagnosticCode::PropReturnTypeMismatch,
@@ -1944,7 +1984,7 @@ fn infer_or_else(ctx: &mut FullCheckerCtx, left: &Expr, right: &Expr, binding: O
     }
     let r = check_right(ctx, &t, right, binding, pos);
     // 右辺がANYへ縮退している場合はassignableが常に真になるので誤検知しない
-    if safe_to_compare(&r) && safe_to_compare(&rest) && !types::assignable(&r, &rest) {
+    if safe_to_compare(&r) && safe_to_compare(&rest) && !assignable_checked(&r, &rest) {
         ctx.error(right.pos(), DiagnosticCode::OrFallbackTypeMismatch, format!("'or' fallback must be {}, got {}", types::type_to_string(&rest), types::type_to_string(&r)));
     }
     rest
@@ -2424,7 +2464,7 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
         Some(type_node) => {
             check_type_ann(ctx, type_node);
             let declared = resolve_type_ann(&ctx.type_ctx, type_node);
-            if !types::assignable(&value_ty, &declared) {
+            if !assignable_checked(&value_ty, &declared) {
                 ctx.error(
                     c.pos,
                     DiagnosticCode::TypeMismatch,
@@ -2888,6 +2928,62 @@ mod tests {
 
 
     // --- milestone 44: defer-requires-call ---------------------------------------------
+
+
+    // --- milestone 45: 関数型のモデル化 / not-callable ---------------------------------
+
+    #[test]
+    fn 関数でない値の呼び出しはnot_callable() {
+        for (src, ty) in [
+            ("fn main() {\n    n := 1\n    print(str(n(2)))\n}\n", "int"),
+            ("fn main() {\n    s := \"hi\"\n    s()\n}\n", "\"hi\""),
+            ("struct Box {\n    n: int\n}\n\nfn main() {\n    b := Box{n: 1}\n    b()\n}\n", "Box"),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::NotCallable);
+            assert_eq!(diags[0].message, format!("cannot call non-function type {ty}"));
+        }
+        // ANYは免除する(full_checkerが型を諦めた先はANYなので、そこで出すと誤検知)
+        assert_eq!(check("fn main() {\n    print(str(unknownThing()))\n}\n").iter().filter(|d| d.code == DiagnosticCode::NotCallable).count(), 0);
+    }
+
+    #[test]
+    fn 関数型の注釈が突き合わせに効く() {
+        // 引数の型が違う関数を`fn(int) int`のパラメータへ渡す
+        let arg = check("fn takesString(s: string) int {\n    return 1\n}\n\nfn apply(f: fn(int) int, n: int) int {\n    return f(n)\n}\n\nfn main() {\n    print(str(apply(takesString, 3)))\n}\n");
+        assert_eq!(arg.len(), 1, "{arg:?}");
+        assert_eq!(arg[0].code, DiagnosticCode::TypeMismatch);
+        // structのフィールド・型注釈つき宣言・チャネルの要素型でも同じ
+        for src in [
+            "struct Handler {\n    cb: fn(int) int\n}\n\nfn takesString(s: string) int {\n    return 1\n}\n\nfn main() {\n    h := Handler{cb: takesString}\n    print(str(h.cb(1)))\n}\n",
+            "fn takesString(s: string) int {\n    return 1\n}\n\nfn main() {\n    f: fn(int) int = takesString\n    print(str(f(1)))\n}\n",
+            "fn work(n: int) {\n    print(str(n))\n}\n\nfn main() {\n    ch := chan<fn() void>(1)\n    ch <- work\n}\n",
+        ] {
+            let diags = check(src);
+            assert!(diags.iter().any(|d| d.code == DiagnosticCode::TypeMismatch), "{src} -> {diags:?}");
+        }
+        // 正しく合っていれば無診断(関数値フィールドの呼び出しの引数照合も効く)
+        assert_eq!(
+            check("fn twice(n: int) int {\n    return n * 2\n}\n\nfn apply(f: fn(int) int, n: int) int {\n    return f(n)\n}\n\nfn main() {\n    print(str(apply(twice, 3)))\n}\n"),
+            vec![]
+        );
+        let field_call = check("struct Handler {\n    cb: fn(int) int\n}\n\nfn twice(n: int) int {\n    return n * 2\n}\n\nfn main() {\n    h := Handler{cb: twice}\n    print(str(h.cb(\"no\")))\n}\n");
+        assert_eq!(field_call.len(), 1, "{field_call:?}");
+        assert_eq!(field_call[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn 型注釈つき宣言の型不一致は値の位置に出る() {
+        // milestone 45で関数型のプローブを書いていて気づいた既存の乖離の回帰テスト:
+        // 位置が文頭・文言も独自になっていた(TS版は値の位置に`cannot use X as Y`)。
+        // スカラーでも同じだったが、型注釈つき宣言に値の型不一致を置いたプローブが
+        // それまで無かったため見つかっていなかった
+        let diags = check("fn main() {\n    x: int = \"s\"\n    print(str(x))\n}\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].message, "cannot use \"s\" as int");
+        assert_eq!((diags[0].pos.line, diags[0].pos.col), (2, 14));
+    }
 
     #[test]
     fn deferは呼び出し以外を弾く() {
@@ -4046,7 +4142,13 @@ mod tests {
         // (2) 型だけが違う2メンバー(TS版なら型で一意に決まる正当なコード): Rust版は
         // no-matchの**誤検知**を出していた → 無診断になる(TS版と一致)
         let same_shape = "struct A {\n    cb: fn(int[]) int\n}\nstruct B {\n    cb: fn(int[]) int\n}\ntype AB = A | B\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    print(AB{cb: sum})\n}\n";
-        assert_eq!(check(same_shape), vec![]);
+        // **milestone 45で関数型をモデル化した結果、(1)はTS版と同じambiguousを出すように
+        // なった**(それまでは絞り切れず黙って諦めていた=検出漏れ側)。縮退が減ったぶん
+        // 検出力が上がった、という良い方向の変化
+        assert_eq!(
+            check(same_shape).iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::DiscriminatedUnionAmbiguous]
+        );
         let distinct_types = "struct A {\n    cb: fn(int[]) int\n}\nstruct B {\n    cb: fn(string) int\n}\ntype AB = A | B\nfn sum(xs: int[]) int {\n    return 0\n}\nfn main() {\n    print(AB{cb: sum})\n}\n";
         assert_eq!(check(distinct_types), vec![]);
         // (3) 値の型がトップレベルANYへ潰れる場合(配列リテラル)も同じ穴の別の現れ方——
@@ -4193,7 +4295,13 @@ mod tests {
         // 再帰的に判定してスキップする。**milestone 34でmapもモデル化されたので、
         // `map<string,int>[]`はもう縮退しない**(この例は正しく検査される側に移った)
         let degenerate = "struct Bag {\n    cbs: fn(int[]) int[]\n}\nfn pick(xs: int[]) int {\n    return 0\n}\nfn main() {\n    b := Bag{cbs: [pick]}\n    print(len(b.cbs))\n}\n";
-        assert_eq!(check(degenerate), vec![]);
+        // **milestone 45で関数型もモデル化された**ので、この例はもう縮退しない——
+        // `fn(int[]) int[]`のフィールドへ関数の配列を入れるのは型不一致で、その値に
+        // `len()`は使えない(TS版と実測で一致することを確認済み)
+        assert_eq!(
+            check(degenerate).iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec![DiagnosticCode::TypeMismatch, DiagnosticCode::BuiltinArgType]
+        );
         let modeled = "struct Bag {\n    rows: map<string, int>[]\n}\nfn main() {\n    b := Bag{rows: [map<string, int>{\"a\": 1}]}\n    print(len(b.rows))\n}\n";
         assert_eq!(check(modeled), vec![]);
     }
