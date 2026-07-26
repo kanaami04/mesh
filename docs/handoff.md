@@ -1,7 +1,73 @@
-# 引き継ぎ文書(2026-07-22時点)
+# 引き継ぎ文書(2026-07-26時点)
 
 > 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
 > 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
+
+## 次のセッションでやること(2026-07-26時点)
+
+**現在地**: Rust移植の診断は**58種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜45を消化した
+(詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
+
+### 最有力の次の一歩: 素の型aliasがレジストリで解決されない
+
+**症状**: `type Handler = fn(int) int` のような**素のalias**(structでもunionでもない宣言)を
+structのフィールド型に使うと、TS版が `discriminated-union-ambiguous` を出す入力に対して
+Rust版は `discriminated-union-no-match` という**違うコード**を出す。
+
+```mesh
+type Handler = fn(int) int
+struct A { cb: Handler }
+struct B { cb: Handler }
+type AB = A | B
+fn real(x: int) int { return x }
+fn main() { print(AB{cb: real}) }
+```
+
+**原因**: `rust/src/checker.rs` の `resolve_named_type` は `TypeNode::StructType`/`TypeNode::Union`
+の宣言しか解決しない(`resolve_type_decls` の `type_decls` フィルタ)。素のaliasは登録されず、
+参照側は「空フィールドの殻struct」へフォールバックする。`infer_struct_lit` は
+`has_unregistered_struct` でこれを弾くが、**`resolve_union_lit_member` の候補絞り込みには
+同じガードが無い**。
+
+**直し方の候補**: (a) `resolve_union_lit_member` にも同じガードを入れる(小さい・検出漏れ側)、
+(b) `resolve_type_decls` が素のaliasも解決するようにする(根治だが、checker.rsはcodegenも
+使うので影響範囲が広い。codegen側の回帰確認が要る)。**コードが違うのは検出漏れより悪い**
+(milestone 40〜41で立てた基準)ので、少なくとも(a)は入れる。
+
+### そのほかの候補(おおよその優先順)
+
+1. **`not-a-struct` / `narrow-required`** — 非structへのメンバーアクセスと、unionのまま
+   `.field` を触る形。milestone 39でunionをモデル化済みなので`narrow-required`は実際に効く
+2. **パッケージ跨ぎ**(pkg修飾structリテラル・pkg修飾呼び出しの中身、`unknown-package` /
+   `unknown-package-type` / `not-exported`)— 構造変更が一番大きい代わりに、いま検出漏れとして
+   積み上がっている領域をまとめて塞げる。撤去条件(2)を終わらせるには最終的に避けて通れない
+3. **型宣言の名前衝突**(`already-declared` / `builtin-type-redeclared` /
+   `name-conflicts-with-package`)— milestone 43のcode reviewで「同名の型宣言」を扱った際に
+   未移植だと確認済み
+4. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+5. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+   `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
+
+### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
+
+直近5マイルストーンのうち4回、**実装者の検証を通り抜けた不具合をcode reviewが見つけた**。
+共通していたのは「入力そのものが壊れているケース」だった(タイポした型名 / 値にならない式 /
+壊れた宣言の後ろの型 / 同名の宣言)。そこで:
+
+1. **TS版を先に実測してから実装する**。診断の**位置・件数・順序**まで測る——TS版は
+   同じ注釈を2回報告する場所(関数シグネチャ)があり、想像で書くと必ずずれる
+2. **「壊れた入力」の定型セットを毎回回す**: 未知の型名 / 同名の宣言 / 型宣言の循環 /
+   値にならない式(void)/ 壊れた宣言の後ろに正常な宣言、の組み合わせ
+3. **バイナリの更新時刻を確認してから測る**。`cargo`は`eval "$(mise env -s bash)"`が
+   **コマンドごとに**必要で、これを忘れるとビルドが走らず古いバイナリで測ることになる
+   (実際に起きた)
+4. **変更前後の比較は`git worktree`で行う**(`git stash`は禁止。理由は下記「教訓」節)
+5. **モデル化が進むと既存テストの期待値が変わる**——「縮退ゆえに黙っていた」テストは、
+   TS版に問い合わせて新しい挙動が正しいことを確認してから書き換える
+   (milestone 33/34/45で発生済み)
+6. 出荷は `milestone-ship` スキルの手順(検証→docs更新→PR作成)。**mergeはユーザーの明示
+   指示を待つ**
 
 ## このプロジェクトは何か
 
@@ -29,6 +95,10 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   ([[user-collaboration-style]] メモリ参照)
 
 ## 読む順番(新しいセッションはここから)
+
+**0. 上の「次のセッションでやること」節** — 今どこにいて次に何をするかはそこに書いてある。
+以下は背景を知るための読み順。
+
 
 1. **README.md** — 言語仕様の外向けまとめ・チュートリアル・組み込み関数表
 2. **docs/requirements.md** — 要件定義書。P1〜P6の設計原則、なぜこの言語を作るのか
@@ -92,7 +162,7 @@ AIエージェントでもMeshのコードを書ける、という実証実験(`
   H-2: `mesh/json`ヘルパー+`json struct`自動デコード)・**C-6続き**(`mesh/http` v1、
   サーバー専用の生ハンドラ+障害分離)。詳細は design-agenda.md H節・I節を参照
 
-## Rust移植の現状(2026-07-22、todo.md「Rust移植の開始」参照)
+## Rust移植の現状(2026-07-26更新、todo.md「Rust移植の開始」参照)
 
 TS実装(477テスト)はそのまま本番として動き続けており、Rust版は**並行して**
 `rust/`ディレクトリにゼロから育てている(TSを書き換えているわけではない)。
