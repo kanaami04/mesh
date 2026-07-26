@@ -423,8 +423,9 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
 // 解決しながら報告する。型宣言の中の診断はこの経路だけから出る)
 // 組み込み型名(TS版`checker/context.ts`の`BUILTIN_TYPE_NAMES`)。`type`/`struct`宣言の名前に
 // 使えない。**`any`も含む**——H-1で型としては撤去されたが、名前としては予約されたまま
-// (TS版と同じ)。`none`/`closed`はキーワードなのでパーサーが先に構文エラーにするが、
-// TS版の集合をそのまま持つ方が「なぜここに無いのか」を考えずに済む(両実装で実測して確認済み)
+// (TS版と同じ)。**`none`だけはレクサーのキーワード**なのでパーサーが先に構文エラーにし、
+// ここへは届かない。`closed`はキーワードではなく普通の識別子(型解決側で特別扱いしている
+// だけ)なので、ここまで来て`builtin-type-redeclared`になる——両実装で実測して確認済み
 const BUILTIN_TYPE_NAMES: [&str; 9] = ["int", "float", "string", "bool", "void", "error", "none", "closed", "any"];
 
 fn walk_type_ref(ctx: &mut FullCheckerCtx, node: &TypeNode) -> AliasState {
@@ -2637,10 +2638,14 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // (type-alias-cycle等)を入れる次段階でここも部分解決へ改善する候補
     let all_types: Vec<crate::ast::TypeDecl> = files.iter().flat_map(|(_, p)| p.types.iter().cloned()).collect();
     // **宣言されている型名を先に集める**(レジストリの中身とは独立に。上記
-    // `declared_types`のコメント参照)
+    // `declared_types`のコメント参照)。**milestone 48で`rejected`を除くようにした**——
+    // 名前の時点で弾かれた宣言はTS版の`typeTable`にも入らないので、その名前を型注釈で使えば
+    // TS版は`unknown-type`を出す。除かないとその検出漏れが残る(下の`rejected`を作った後で
+    // 差し引く。集合を作る順序の都合でここでは一旦全部入れる)
     ctx.declared_types = all_types.iter().map(|t| t.name.clone()).collect();
     // **先勝ち(first-wins)で登録する**。同じ名前の型宣言が2つあるとき、TS版は最初の宣言だけを
-    // `typeTable`へ入れて2つ目は`already-declared`で弾く(その診断自体はRust版に未移植)。
+    // `typeTable`へ入れて2つ目は`already-declared`で弾く(**その診断もmilestone 48で移植済み**
+    // ——下の名前検査ループが出す)。
     // `collect()`は素直に書くと**後勝ち**になり、「最初の宣言の名前で2つ目の本体を解決する」
     // という食い違いが起きて、診断が消えたり無関係な宣言の位置に付いたりした
     // (code reviewで発覚: `type A = Bogus` / `type A = int` で`unknown-type`が消え、
@@ -2679,6 +2684,8 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
         }
         spans.push((start, ctx.diagnostics.len(), i));
     }
+    // 弾かれた名前は「宣言されていない」扱いにする(上記`declared_types`のコメント参照)
+    ctx.declared_types.retain(|n| !rejected.contains(n.as_str()));
     ctx.alias_decls = HashMap::new();
     for t in &all_types {
         if rejected.contains(t.name.as_str()) {
@@ -2686,7 +2693,14 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
         }
         ctx.alias_decls.entry(t.name.clone()).or_insert_with(|| t.clone());
     }
-    let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &all_types);
+    // **弾いた宣言はレジストリにも入れない**(milestone 48)。TS版`checkPackage`は3つの検査に
+    // 引っかかった宣言で`continue`し、`typeTable.set`まで到達しない——つまりその名前は
+    // 型注釈から見て「未知の型」になり、TS版では**ANYへ解決される**。ここで渡してしまうと
+    // `struct io {...}`(import "mesh/io"と衝突)の`io`が本物のstructとして登録され、
+    // `fn use(v: io)`の引数照合が効いて`cannot use int as io`という**TS版に無い誤検知**に
+    // なっていた(code reviewで発覚・両CLIで再現確認済み)
+    let registered_types: Vec<crate::ast::TypeDecl> = all_types.iter().filter(|t| !rejected.contains(t.name.as_str())).cloned().collect();
+    let _ = crate::checker::resolve_type_decls(&mut ctx.type_ctx, &registered_types);
     // milestone 42: **型宣言の中の型注釈**(structのフィールド型・type aliasの本体)を検査する。
     // TS版は`resolveAlias`がメモ化しつつ解決時に報告するので**宣言ごとに1回**だけ出る
     // (関数シグネチャが2回出るのとは対照的。実測で確認)。報告順も
@@ -2712,11 +2726,12 @@ pub fn check_package(files: &[(String, &Program)], require_main: bool) -> Vec<(S
     // `mathutil.add(...)`のtarget `mathutil`が(変数でも組み込みでもないため)undefined-nameに
     // 誤検知される——milestone 30でMember/メソッド呼び出しがtargetを推論するようになり顕在化。
     // pkg修飾アクセス自体はtargetがANYになり素通り(pkg修飾の中身の検査は次段階)。
-    // **既知の限界**: `declare()`を通さず直接insertするため、import aliasと同名のfn/constが
-    // あると、後続のfn/const登録が`declare()`で`already-declared`になる(TS版は専用の
-    // `name-conflicts-with-package`診断を出すが未移植)。その際そのfn/constの実型が
-    // 登録されず呼び出しの引数照合が素通りする副作用もある——稀な衝突(import名と同名の
-    // fn/const)につき次段階でname-conflicts-with-package診断とセットで対応する候補
+    // **milestone 48**: `declare()`を通さず直接insertするのは今も同じだが、`declare()`側に
+    // `import_aliases`の分岐を入れたので、import aliasと同名のfn/constはTS版と同じ
+    // `name-conflicts-with-package`になる(それまでは重複チェックに引っかかって
+    // `already-declared`という**誤ったコード**を出していた)。そのfn/constの実型が登録されず
+    // 呼び出しの引数照合が素通りする副作用は**TS版も同じ**(TS版もそこでreturnする)。
+    // 残る差はTS版が続けて出す`package-as-value`(`lib`を値として参照する形)の未移植のみ
     for (_, program) in files {
         for imp in &program.imports {
             ctx.scopes[0].insert(imp.alias.clone(), Binding { ty: ANY, mutable: false });
@@ -3337,12 +3352,14 @@ mod tests {
 
     #[test]
     fn 組み込み型名の再宣言はbuiltin_type_redeclared() {
-        // `none`/`closed`はキーワードなのでパーサーが先に構文エラーにする(両実装で確認済み)
+        // `none`だけはレクサーのキーワードなのでパーサーが先に構文エラーにし、ここへ届かない。
+        // `closed`はキーワードではないので普通に到達する(両実装で実測して確認済み)
         for (src, name) in [
             ("type int = string\n\nfn main() {\n    print(1)\n}\n", "int"),
             ("struct string {\n    x: int\n}\n\nfn main() {\n    print(1)\n}\n", "string"),
             ("type any = int\n\nfn main() {\n    print(1)\n}\n", "any"),
             ("type void = int\n\nfn main() {\n    print(1)\n}\n", "void"),
+            ("type closed = int\n\nfn main() {\n    print(1)\n}\n", "closed"),
         ] {
             let diags = check(src);
             assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
@@ -4641,6 +4658,21 @@ mod tests {
             assert_eq!(diags[0].code, DiagnosticCode::NameConflictsWithPackage, "{src} -> {diags:?}");
             assert_eq!(diags[0].message, "'lib' conflicts with an imported package name");
         }
+    }
+
+    #[test]
+    fn 弾かれた型宣言はレジストリにも入らない() {
+        // code reviewで発覚した**誤検知**の回帰: 弾いた宣言を`resolve_type_decls`へ渡していたため、
+        // `struct io`(import "mesh/io"と衝突)が本物のstructとして登録され、`fn use(v: io)`の
+        // 引数照合が効いて`cannot use int as io`というTS版に無い診断が出ていた。TS版は
+        // `typeTable.set`へ到達しないので、その名前は型注釈から見て未知=ANYになる
+        let src = "import \"mesh/io\"\n\nstruct io {\n    x: int\n}\n\nfn use(v: io) int {\n    return v.x\n}\n\nfn main() {\n    print(use(5))\n}\n";
+        let codes: Vec<_> = check(src).iter().map(|d| d.code).collect();
+        assert_eq!(
+            codes,
+            vec![DiagnosticCode::NameConflictsWithPackage, DiagnosticCode::UnknownType, DiagnosticCode::UnknownType],
+            "{codes:?}"
+        );
     }
 
     #[test]
