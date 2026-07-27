@@ -4024,9 +4024,16 @@
               `run`/`build`のゲートに入る(milestone 35〜38で完了)
         - [ ] (2) full_checkerが複数ファイル/パッケージ対応になり、診断が実用上必要な範囲を
               カバーする(107種すべてが必要かは別途判断)
-        - [ ] (3) TSのテスト資産をRust側へ移植する——特に`tests/e2e.test.ts`と
-              `tests/card-completeness.test.ts`(後者は`src/card.ts`の主張と実装の乖離を
-              CIで検出している唯一の仕組み)
+        - [x] (3) TSのテスト資産をRust側へ移植する
+              → 2026-07-27(撤去 段階3)。**領域別に数えるとRust側の方が多い**ものがほとんどで、
+              `e2e`(TS 177 vs Rust 184)・`checker`(202 vs 309)・`parser`(45 vs 77)は移植不要だった。
+              **丸ごと欠けていた観点は2つだけ**:
+              - `rust/tests/http.rs` — `mesh/http`の実行時テスト6件。Rust側は`mesh check`を
+                見るテストしか無く、**サーバーが実際に動くかを一度も確かめていなかった**。
+                HTTPクライアントは`std::net`で素書き(依存クレート0を維持)
+              - `rust/tests/fmt_corpus.rs` — `mesh fmt`がexamples全体でべき等かつ意味を変えないか。
+                意味保存は整形前後を実行して標準出力を比べる
+              `card-completeness`は段階2で移植済み(Rust実装のリストを見る形にしたので撤去後も残る)
         - [ ] (4) `playground/`(ブラウザで`main.ts`をその場でバンドル)と`editors/vscode`の移行。
               **ここが一番重い**——playgroundはwasmビルドが要る。`bench/`・`demo/todo-api`も対象
         - [x] (5) 一定期間CIで**両実装を並走**させ、examples/テスト全体で差分ゼロを確認してから撤去
