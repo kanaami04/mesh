@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-const CARD_TS: &str = include_str!("../../src/card.ts");
+const CARD_TS: &str = include_str!("../embedded/card.ts");
 
 // テンプレートリテラルの中身を取り出し、JSのエスケープ(`\\`・`` \` ``・`\$`)を解決する。
 // カード本文にはこの3種しか現れない(他のエスケープが増えたらここも足す必要がある——

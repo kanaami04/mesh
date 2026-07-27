@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 // TSの宣言部分(`export const PRELUDE = `や末尾の`;`)まで生成JSに混ざって壊れる。
 // バッククォートの中身だけを取り出す(ファイル全体でバッククォートはこの2箇所にしか
 // 現れない — ランタイム本体は文字列連結のみで書かれ、テンプレートリテラルを使っていない)
-const RUNTIME_TS: &str = include_str!("../../src/runtime.ts");
+const RUNTIME_TS: &str = include_str!("../embedded/runtime.ts");
 
 fn prelude() -> String {
     let start = RUNTIME_TS.find('`').expect("runtime.ts should wrap PRELUDE in a template literal") + 1;

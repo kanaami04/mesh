@@ -4014,9 +4014,12 @@
         現状の差(2026-07-27時点、milestone 59まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
         107種 vs 98種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
-        なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
-        `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
-        (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。
+        ~~なお`card.rs`/`explain.rs`はTS版のソースを`include_str!`で参照している~~
+        → **2026-07-27(撤去 段階2)で`rust/embedded/`へ複製して解消**。`codegen.rs`が
+        参照する`src/runtime.ts`も同様(こちらは当初の一覧から漏れていた)。
+        複製が腐らないよう`rust/tests/embedded_sync.rs`がバイト一致を強制し、
+        `tests/card-completeness.test.ts`は`rust/tests/card_completeness.rs`へ移植した
+        (**Rust実装の`BUILTINS`/`RESERVED`を見る形にしたので、TS撤去後も検査が残る**)。
         - [x] (1) Rust CLIが`run`/`build`/`fmt`/`test`/`card`を持ち、full_checkerが
               `run`/`build`のゲートに入る(milestone 35〜38で完了)
         - [ ] (2) full_checkerが複数ファイル/パッケージ対応になり、診断が実用上必要な範囲を

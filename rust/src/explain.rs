@@ -22,7 +22,7 @@
 
 use crate::diagnostic_codes::DiagnosticCode;
 
-const CODES_TS: &str = include_str!("../../src/diagnostic-codes.ts");
+const CODES_TS: &str = include_str!("../embedded/diagnostic-codes.ts");
 
 // `mesh explain <code>`の本文。未実装コード・未知のコードはNone
 pub fn explanation(code: &str) -> Option<String> {

@@ -54,8 +54,10 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-// JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)
-const RESERVED: &[&str] = &[
+// JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)。
+// **pub なのはカード完全性の検査(`rust/tests/card_completeness.rs`)から参照するため**
+// ——実装が受け付ける名前が`mesh card`に載っているか、をCIで見張っている
+pub const RESERVED: &[&str] = &[
     "await", "async", "function", "const", "let", "var", "class", "new", "this", "typeof", "instanceof", "in", "of", "yield", "delete", "void", "switch", "case", "default", "do", "while",
     "with", "export", "import", "extends", "super", "null", "undefined", "try", "catch", "finally", "throw", "eval", "arguments",
 ];

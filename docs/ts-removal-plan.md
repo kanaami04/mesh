@@ -19,7 +19,7 @@
 
 ## 撤去を阻む本当のブロッカーは3つ
 
-### A. Rustのビルドが `src/` の3ファイルに依存している
+### A. ~~Rustのビルドが `src/` の3ファイルに依存している~~ ✅ 段階2で解消
 
 `src/` を消すと **Rust版がコンパイルできなくなる**。単なるオラクル依存ではない。
 
@@ -29,9 +29,20 @@
 | `src/card.ts` | `rust/src/card.rs` | `mesh card` の本文 |
 | `src/diagnostic-codes.ts` | `rust/src/explain.rs` | `mesh explain` の説明文 |
 
-いずれも `include_str!` で埋め込んでいる。**撤去前に移送先を決める必要がある**。
-本文をRustへ複製すると `tests/card-completeness.test.ts`(card.tsの主張と実装の乖離を
-CIで検出している唯一の仕組み)の検証から外れる点に注意。
+いずれも `include_str!` で埋め込んでいた。**段階2で `rust/embedded/` へ複製し、
+Rust側を自己完結させた**(TS版を完全に廃止する方針のため、`shared/`のような中間形態は置かない)。
+
+複製で失うはずだったものは2つの番人で埋めてある:
+
+- `rust/tests/embedded_sync.rs` — **複製が原本とバイト一致するかを強制する**。
+  複製は放っておけば必ず腐るため。原本(`src/`)が消えたら自動的にskipし、
+  そのときこのファイルごと消してよい旨をコメントに書いてある
+- `rust/tests/card_completeness.rs` — `tests/card-completeness.test.ts` の移植。
+  **TS版はTS実装のリストを見ていたが、こちらはRust実装の`BUILTINS`/`RESERVED`を見る**
+  ——TS撤去後もカード完全性の検査が残る。「節が取れずに全部通る」空振りを検出するテストも付けた
+
+**`src/`を丸ごと消した状態で`cargo build`と全テストが通ることをworktreeで実測済み**
+(`mesh card`/`mesh explain`/`mesh run`の動作確認込み)。
 
 ### B. TS版は「移植の検証装置(オラクル)」でもある
 
@@ -62,18 +73,13 @@ Rust版でこれをやるにはwasmビルドが要る(現状 `rust/` にwasm対�
 
 `parity` 26秒 + `sweep` 10秒(実測)なのでCIに十分載る。両方が要るjobとして追加する。
 
-### 段階2: `include_str!` 3ファイルの移送先を決める(ブロッカーA)
+### 段階2: `include_str!` 3ファイルをRust側へ複製(ブロッカーA)— ✅ 完了
 
-**撤去そのものより先に片付ける**。ここが決まらないと撤去の見通しが立たない。
-選択肢と、それぞれで失うもの:
+kanayamaの判断で**選択肢2(Rustへ複製)**を採った——TS版を完全に廃止したいので、
+`shared/`のような「TS構文のファイルが残り続ける」中間形態は目的に合わない。
+複製で失う検証は上記2つの番人で埋めた。
 
-1. **`shared/` のような実装非依存のディレクトリへ移す** — TS/Rust両方から参照できる。
-   `runtime.ts` は「JSソースであること」に意味があるので移すだけで済む。
-   `card.ts`/`diagnostic-codes.ts` はTS構文のデータ定義なので、
-   移送先でもパーサ(Rust側の既存の抜き出しロジック)がそのまま使える
-2. **Rustへ本文を複製する** — `card-completeness.test.ts` の検証から外れる。**非推奨**
-3. **データをTS構文から別形式(TOML/JSON)へ移す** — 一番きれいだが、
-   `card-completeness.test.ts` と `card-subset.test.ts` の書き換えが要る
+**これで `src/` はRustのビルドに要らなくなった**。残る依存はオラクル(parity/sweep)としてだけ。
 
 ### 段階3: TSのテスト資産の移植(条件3)
 
@@ -94,7 +100,10 @@ Rust版でこれをやるにはwasmビルドが要る(現状 `rust/` にwasm対�
 2. `tests/parity/*/expected.txt` を「撤去時点の正解」として凍結し、
    `scripts/parity.sh` をスナップショット比較専用へ縮退(TS呼び出しを落とす)
 3. CIから `bun test` / `tsc --noEmit` を外す
-4. `src/` と `tests/*.test.ts` を削除
+4. `src/` と `tests/*.test.ts` を削除。**`tests/parity/` は消さない**
+   ——TS実装のテストと同じ`tests/`配下に居るが、こちらはRust側のコーパス
+   (段階2のworktree検証で、`tests/`ごと消して`corpus_coverage`が落ちて気づいた)
+5. `rust/tests/embedded_sync.rs` を削除(原本が無くなり何も守らなくなるため)
 
 **この順序は動かさない**。特に2を先にやらないと、撤去した瞬間に回帰検出手段が消える。
 
