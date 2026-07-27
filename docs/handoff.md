@@ -920,9 +920,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
 - **言語機能(コード生成)はほぼ移植済み**: struct/メソッド・判別可能union・match/is・
   配列/map・並行処理・モジュール・error type・自己参照型・defer・filter/map/reduce・
   `mesh/io`・`mesh/http`・`json struct`のデコード方向まで21マイルストーンで移植し、
-  生成JSは全exampleでTS版とbyte-for-byte一致することを確認済み。未移植な言語機能は
-  ジェネリック関数(F-1後半)・`json struct`のエンコード方向(design-agenda.md J節、
-  2026-07-24にTS側のみ実装)・`json.Value`の本物の自己参照型化くらい
+  生成JSは全exampleでTS版とbyte-for-byte一致することを確認済み。
+  **当時「未移植」として挙げていた3件——ジェネリック関数(F-1後半)・`json struct`の
+  エンコード方向・`json.Value`の本物の自己参照型化——はいずれも解消した**
+  (順にmilestone 64・66・65)
 - **大きく欠けているのはフルの型検査(診断)とCLI**: `rust/src/checker.rs`は
   冒頭コメントで明言している通り「最小リゾルバ」であって**フルcheckerの移植ではない**
   ——「診断は出さない」設計で、未解決の型は`Type::Any`へ黙ってフォールバックし

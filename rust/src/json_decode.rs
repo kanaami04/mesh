@@ -1,5 +1,7 @@
 // H-2(milestone 9): `json struct X { ... }` は decode<X>(v: json.Value) X | error を
 // 自動生成する。TS版`src/json-decode.ts`の移植。
+// **milestone 66で逆方向の`encode<X>(x: X) json.Value`も移植した**(このファイル後半。
+// design-agenda.md J節)——それまでRust版はデコード方向だけで、生成JSがTS版と食い違っていた。
 //
 // アプローチ(TS版と同じ): 生JSを手組みするのではなく、Meshの構文レベルのAST(Stmt/Expr)を
 // 合成し、通常のFnDeclとしてprogram.fnsへ追加する。こうすることで、以降のcheck/codegenの

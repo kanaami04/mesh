@@ -345,13 +345,12 @@
       アノテーションから生成するのと同じ発想)。検証を伴わない一方向の変換なので戻り値は
       `json.Value | error`ではなく素の`json.Value`。対応フィールド型・エラー
       (`json-struct-unsupported-field`/`json-struct-missing-import`)はデコード側と対称。
-      **TS版のみ実装**(`src/json-decode.ts`に`synthesizeJsonEncoders`を追加、
-      `compiler.ts`で`synthesizeJsonDecoders`の直後に呼ぶ)——Rust移植版
-      (`rust/src/json_decode.rs`)はTS版デコード部分を忠実に移植したものだが、
-      このエンコード方向はまだ移植していない。そのためdemo/todo-apiは意図的に
-      この新機能を使わないまま据え置いた(使うとRust版生成JSが`encodeTodo`未定義の
-      ランタイムエラーになり、デモの「TS版・Rust版どちらでも動く」という前提が
-      崩れるため)。テスト10件追加(checker 5件・e2e 5件) |
+      **milestone 66(2026-07-27)でRust移植版も実装済み**(`rust/src/json_decode.rs`の
+      `synthesize_json_encoders`)。生成JSはexamples全24本でTS版とバイト一致する。
+      それまでRust版に無かったため、demo/todo-apiは意図的にこの機能を使わないまま
+      据え置いていた(使うとRust版生成JSが`encodeTodo`未定義のランタイムエラーになり、
+      デモの「TS版・Rust版どちらでも動く」という前提が崩れるため)——
+      **この制約はmilestone 66で解けた**。テスト10件追加(checker 5件・e2e 5件) |
 | `mesh/http`(C-6続き) | ✅ | 2026-07-21実装(kanayamaと討議のうえ、案1=Go `net/http`直訳の
       生ハンドラ+単純listenを採用。ルーター内蔵は却下ではなく「v2でmesh/http自身に追加」と
       design-agenda.md C-6へ明記 — Meshにはまだサードパーティパッケージのエコシステムが無く
