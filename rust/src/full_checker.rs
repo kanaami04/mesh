@@ -3618,14 +3618,13 @@ pub fn check_package_shared(
     // 定数を検査+登録し、最後に関数本体を検査する。
     // milestone 26以降、非ジェネリックの自由関数は`fn_signature`でシグネチャ付き
     // (`Type::Fn`)で登録し、呼び出し側の個数・型照合(argument-count/type-mismatch)を
-    // 効かせる。**ジェネリック関数(`type_params`有り)だけは従来どおりANYで登録**——
-    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で
-    // 扱い、引数不足なら`generic-inference-failed`を出す。full_checkerはこの推論を
-    // 未実装なので、`Type::Fn`で登録するとTS版と違って`argument-count`を出してしまう
-    // (診断コードのTS非互換)。ANY登録で呼び出しを丸ごと対象外にしておく。
-    // **milestone 61で宣言時の検査だけは入った**(`validate_type_params`)——型パラメータ名の
-    // 衝突と推論可能性はシグネチャを見るだけで判定できるので、呼び出し時の推論とは独立に移植できる。
-    // 未移植なのは呼び出し側の`generic-inference-failed`のみ。
+    // 効かせる。**ジェネリック関数(`type_params`有り)だけは`scopes[0]`へANYで登録する**——
+    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で扱うので、
+    // ここで`Type::Fn`(型パラメータ入り)を配ると呼び出し側の照合がTS版と食い違う。
+    // milestone 62でその別経路を`generic_fns`+`infer_generic_call`として移植した:
+    // 直接呼び出し(`name(args)`)は推論を通り、引数不足なら`generic-inference-failed`、
+    // 引数過多なら`argument-count`になる(TS版と同じ)。**値として渡された場合
+    // (`f := identity`)だけはANYのまま**で、TS版が出す代入不可エラーは出ない(検出漏れ側)。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない

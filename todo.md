@@ -3804,6 +3804,30 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 62: ジェネリック呼び出しの型パラメータ推論(診断107/107達成)**
+              ✅ 2026-07-27実装。TS版`checker/generics.ts`の`unifyTypeParam`/
+              `substituteTypeParams`/`inferGenericCall`を移植し、最後の未移植診断
+              `generic-inference-failed`を埋めた。**TS版の107種すべてがRust版でも出る**。
+              - **誤検知の面を広げない設計**: `scopes[0]`側のANY登録は据え置き、
+                `generic_fns`という別表を`name(args)`の**直接呼び出し経路だけ**が引く形にした
+                (TS版`ctx.genericFns`と同じ構造)。値として渡した場合(`f := identity`)は
+                今までどおり対象外で、検出漏れ側に倒してある。
+              - **引数不足は`argument-count`ではなく`generic-inference-failed`**——束縛が
+                そろわない時点で降りるので`check_args_against`まで進まない。引数過多は
+                束縛がそろうので`argument-count`。どちらもTS版で実測。
+              - `generic_fn_signature`/`resolve_with_type_params`を新設。通常の
+                `resolve_type_ann`は型パラメータ名をANYへ落とすので、推論用にここだけ
+                `Type::TypeParam`を作る。合成規則(fn型/unionは中身が1つでもANYなら全体ANY)は
+                `resolve_type_ann`と揃えた。
+              - **検証手順の穴が1つ見つかった**: 比較スクリプトが「TS版もRust版も同じ
+                構文エラー」を一致として通すため、**パースできていない検証入力が
+                空振りしていた**(19個中3個)。構文エラーを弾くガードを入れて測り直し、
+                コーパスにも紛れ込んでいないか点検した。
+              - 検証: 実入力24種(パース確認込み)。`mise run parity` 130ファイル・誤検知0
+                (コーパス101→107)。テスト617件、clippyクリーン。
+              - **診断コードが揃っても検出範囲には穴が残る**——handoff「残っている検出漏れ」節に
+                3件(ジェネリック本体の型パラメータ検査 / 値として渡した場合 /
+                `cannot-infer-type`の範囲)を明記した。
         - [x] **milestone 61: 型パラメータの宣言時検査 + 未登録だった構文2種**
               ✅ 2026-07-27実装。診断コード102→106種(TS版107種)。
               - `generic-type-param-conflict` / `generic-type-param-not-inferable`:
