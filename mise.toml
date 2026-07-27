@@ -41,6 +41,10 @@ fi
 echo "[run-examples] $(ls examples/*.mesh | wc -l) 本すべて期待どおり"
 """
 
+[tasks.sweep]
+description = "組み合わせを機械的に作ってTS版と突き合わせる(parityが測れない「形の組み合わせ」用)"
+run = "scripts/sweep.sh"
+
 [tasks."rust-test"]
 description = "Rust移植版のテスト(rust/)"
 run = "cd rust && cargo test"

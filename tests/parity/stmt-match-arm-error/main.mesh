@@ -1,0 +1,15 @@
+fn main() {
+	u: int | string = 1
+	match u {
+		int => need(1)
+		string => print(0)
+	}
+}
+
+fn need(s: string) int {
+	return len(s)
+}
+
+fn fail() int | error {
+	return error("x")
+}

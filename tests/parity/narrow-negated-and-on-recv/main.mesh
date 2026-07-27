@@ -1,0 +1,20 @@
+fn take(n: int) int {
+	return n
+}
+
+struct Box {
+	v: int
+}
+
+fn maybe() int | none {
+	return 1
+}
+
+fn main() {
+	ch := chan<int>(1)
+	ch <- 1
+	x := <-ch
+	if !(x is none && 1 == 2) {
+		print(x + 1)
+	}
+}
