@@ -20,22 +20,11 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **戻り値がunionの関数型のシグネチャ検査** — `http.listen`のようにコールバックの戻り値が
-   unionだと`is_fully_modeled`でシグネチャ全体がANYへ落ち、形が検査されない
-   (milestone 51のcode reviewで実測。(a)は54、(b)は55で解消済み)。
-   **milestone 55で`is_fully_modeled`のunion緩和を試して取り下げている**——
-   `n.next.next`の`narrow-required`(下記2)は解消するが`json.Value`で誤検知が出て、
-   **どちらも自己参照なので「自己参照を除く」という軸では区別できない**。
-   別の軸(殻structかどうか等)を見つける必要がある
-2. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
-   `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
-   `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
-   波及するため独立したマイルストーンにするのが妥当
-3. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
+1. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
    — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
    無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
-4. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-5. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+2. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+3. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1178,6 +1167,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      pkg修飾分岐が`Type::Struct`だけを見ていたので、判別可能unionのdisambiguationごと
      素通りしていた。**`is_fully_modeled`のunion緩和は試して取り下げた**——検出漏れの解消と
      誤検知の防止が同じ判定にぶら下がっており、`mise run parity`が誤検知を機械的に捕まえた
+   - ✅ **milestone 56(2026-07-27)でunionのモデル化**。`is_fully_modeled`がunionを
+     受け入れるようにし、残っていたpkg修飾候補(c)と`narrow-required`の検出漏れが
+     **1つの変更で両方片付いた**。**軸は「自己参照かどうか」ではなく「空フィールドの殻structを
+     含むか」**だった(milestone 55で自己参照の軸を試して失敗している)。副作用として
+     TS版`stablePath`相当の**フィールドパスの絞り込み**が必要になり、そちらも移植した
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

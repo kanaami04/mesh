@@ -1,0 +1,7 @@
+import "mesh/http"
+
+fn main() {
+	http.listen(8080, fn(req: int) int {
+		return 1
+	})
+}

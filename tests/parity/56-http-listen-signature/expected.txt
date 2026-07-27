@@ -1,0 +1,6 @@
+main.mesh:4:14: error[type-mismatch]: argument 1: cannot use int as string
+  	http.listen(8080, fn(req: int) int {
+  	            ^
+main.mesh:4:20: error[type-mismatch]: argument 2: cannot use fn(int) int as fn(Request) Response
+  	http.listen(8080, fn(req: int) int {
+  	                  ^

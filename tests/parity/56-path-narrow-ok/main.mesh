@@ -1,0 +1,12 @@
+struct Node {
+	next: Node | none
+	n: int
+}
+
+fn main() {
+	a := Node{next: none, n: 1}
+	b := Node{next: a, n: 2}
+	if b.next is Node {
+		print(b.next.n)
+	}
+}

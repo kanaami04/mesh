@@ -1,0 +1,3 @@
+main.mesh:2:41: error[narrow-required]: cannot access field or method on Node | none — narrow it first (with 'is' or 'match')
+  fn main() { n := Node{next: none} print(n.next.next) }
+                                          ^

@@ -1077,13 +1077,66 @@ fn is_checkable_field_type(t: &Type) -> bool {
 // よいかの判定に使う——縮退した型を突き合わせると必ず不一致になり誤検知になる
 // (milestone 29/32のcode reviewで2度踏んだ穴)。milestone 33で配列をモデル化したことで
 // 「配列か否か」という粗い判定では足りなくなった(`int[]`は突き合わせてよいが、
-// 要素がANYへ潰れる`map<string,int>[]`は駄目)ため、再帰的な判定に置き換えている
+// 要素がANYへ潰れる`map<string,int>[]`は駄目)ため、再帰的な判定に置き換えている。
+// **milestone 56からunionも受け入れる**——ただし「空フィールドの殻struct」を含むものは除く
+// (下記`union_has_no_hollow_struct`)
+// 型の中に「空フィールドの殻struct」が含まれないか(milestone 56)。`json.Value`のように
+// 再帰位置を名前だけの殻に留めている型を突き合わせから外すための判定。
+// **無名struct(判別可能unionのメンバー)がフィールド0個なのは正当**(`{ kind: "null" }`)
+// なので、名前付きのものだけを見る。自己参照は`seen`で打ち切る(そこまで殻が無ければ良い)
+fn union_has_no_hollow_struct(t: &Type, seen: &mut Vec<*const ()>) -> bool {
+    match t {
+        Type::Union { body } => {
+            let ptr = Rc::as_ptr(body) as *const ();
+            if seen.contains(&ptr) {
+                return true; // 自己参照(検査中)——ここで打ち切ってよい
+            }
+            let Some(b) = body.get() else { return false };
+            seen.push(ptr);
+            let ok = b.members.iter().all(|m| union_has_no_hollow_struct(m, seen));
+            seen.pop();
+            ok
+        }
+        Type::Struct { name, fields, .. } => {
+            let Some(fs) = fields.get() else { return false };
+            // 名前付きなのにフィールドが0個 = 殻(`json.Value`の再帰位置・未知の型名の
+            // フォールバック)。無名structの0フィールドは正当なので除く
+            if name != types::ANONYMOUS_STRUCT_NAME && fs.is_empty() {
+                return false;
+            }
+            let ptr = Rc::as_ptr(fields) as *const ();
+            if seen.contains(&ptr) {
+                return true; // 自己参照(検査中)
+            }
+            seen.push(ptr);
+            let ok = fs.iter().all(|f| union_has_no_hollow_struct(&f.type_, seen));
+            seen.pop();
+            ok
+        }
+        Type::Array(e) | Type::Chan(e) => union_has_no_hollow_struct(e, seen),
+        Type::Map { key, value } => union_has_no_hollow_struct(key, seen) && union_has_no_hollow_struct(value, seen),
+        Type::Fn { params, ret } => params.iter().all(|p| union_has_no_hollow_struct(p, seen)) && union_has_no_hollow_struct(ret, seen),
+        Type::Any => false,
+        Type::TypeParam(_) => false,
+        _ => true,
+    }
+}
+
 fn is_fully_modeled(t: &Type) -> bool {
     match t {
         Type::Any => false,
-        // union/型パラメータはまだレジストリ側と突き合わせない(unionは値側と宣言側で
-        // メンバーの解決経路が違いうるため)
-        Type::Union { .. } | Type::TypeParam(_) => false,
+        Type::TypeParam(_) => false,
+        // milestone 56: unionも**中身まで完全に解決できていれば**突き合わせてよい。
+        // これで`struct Node { next: Node | none }`の`n.next.next`に`narrow-required`が
+        // 効く(milestone 47以来の検出漏れ)。
+        // **弾くのは「空フィールドの殻struct」を含むunion**——`json.Value`(milestone 9)は
+        // 再帰位置(`arr.items`/`obj.entries`の要素型)を**名前だけの殻**に留めており、
+        // 値側と宣言側で殻の実体が違いうるので突き合わせると誤検知になる
+        // (`examples/json_decode.mesh`が実際に落ちた)。
+        // **「自己参照かどうか」では区別できない**——`Node | none`も自己参照だが、そちらの
+        // 再帰位置は中身のある本物のstructで突き合わせて問題ない(milestone 55で
+        // その軸を試して取り下げた)。見るべきは**殻かどうか**だった
+        Type::Union { .. } => union_has_no_hollow_struct(t, &mut Vec::new()),
         // milestone 45: 関数型も**引数・戻り値まで解決できていれば**突き合わせてよい
         Type::Fn { params, ret } => params.iter().all(is_fully_modeled) && is_fully_modeled(ret),
         // コレクションは中身まで解決できていれば突き合わせてよい(milestone 33: 配列、
@@ -1095,10 +1148,11 @@ fn is_fully_modeled(t: &Type) -> bool {
 }
 
 // structフィールドの型を読み取り側へ返す際、full_checkerが完全にはモデル化できない型
-// (関数型/union、およびそれらを内側に含むコレクション)はANYへ畳む——`u.cbs`
-// (`fn(..)[]`フィールド)をbuiltinへ渡しても誤検知しないため。スカラー・struct・literal・
-// **中身まで解決できるコレクション**(milestone 33で配列、milestone 34でmap/channel)は
-// そのまま返す(`u.cells[0]`や`u.counts["k"]`のようなネストしたアクセスに型が伝播する)
+// (型パラメータ、およびANYを内側に含むコレクション)はANYへ畳む——`u.cbs`のような
+// フィールドをbuiltinへ渡しても誤検知しないため。スカラー・struct・literal・
+// **中身まで解決できるコレクション**(milestone 33で配列、milestone 34でmap/channel)・
+// **関数型**(milestone 45)・**殻structを含まないunion**(milestone 56)はそのまま返す
+// (`u.cells[0]`のようなネストしたアクセスや`n.next`の絞り込みに型が伝播する)
 fn widen_field_type(t: Type) -> Type {
     if is_checkable_field_type(&t) { t } else { ANY }
 }
@@ -1240,6 +1294,17 @@ fn member_field_type(ctx: &mut FullCheckerCtx, tgt: &Type, name: &str, pos: Pos)
     ANY
 }
 
+// 式の「安定した綴り」(`a` / `a.b` / `a.b.c`)。TS版`narrowing.ts`の`stablePath`の移植で、
+// **絞り込みのスコープキー**に使う。識別子とフィールドアクセスの連なりだけが対象——
+// 呼び出しや添字が挟まると同じ綴りでも別の値になりうるのでNone
+fn stable_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::Member { target, name, .. } => stable_path(target).map(|p| format!("{p}.{name}")),
+        _ => None,
+    }
+}
+
 fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
     // milestone 50: `f := lib.add`のような**呼び出しを伴わない**pkg修飾参照。呼び出し形と
     // 同じ`try_package_member`を通す(TS版も`expressions.ts`のmemberケースで共有する)
@@ -1247,6 +1312,15 @@ fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -
         return pkg_ty;
     }
     let tgt = infer_expr_single(ctx, target);
+    // **milestone 56**: フィールドパス(`b.next`)の絞り込みを見る。TS版`stablePath`と同じく
+    // 「`a.b.c` という安定した綴り」をスコープのキーにして、`if b.next is Node {...}` の中では
+    // 絞り込み済みの型を返す。これが無いと絞り込み済みなのに`narrow-required`が出る**誤検知**
+    // になった(milestone 56の検証で実測)
+    if let Some(path) = stable_path(target).map(|p| format!("{p}.{name}"))
+        && let Some(b) = ctx.lookup(&path)
+    {
+        return b.ty.clone();
+    }
     member_field_type(ctx, &tgt, name, pos)
 }
 
@@ -2700,6 +2774,24 @@ fn check_if(ctx: &mut FullCheckerCtx, if_stmt: &IfStmt) {
             Expr::Ident { name, .. } => ctx.lookup(name).filter(|b| !b.mutable && safe_to_compare(&b.ty)).map(|b| {
                 let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &b.ty, target);
                 (name.clone(), then_ty, else_ty)
+            }),
+            // **milestone 56**: フィールドパス(`b.next is Node`)も絞り込む。TS版`stablePath`と
+            // 同じで、綴りをキーにしてスコープへ入れる。型は既存のフィールド解決から取る
+            // (`ctx.lookup`には無い——パスは宣言された束縛ではないため)
+            m @ Expr::Member { .. } => stable_path(m).and_then(|path| {
+                // **根が`mut`な束縛なら絞り込まない**——TS版`stablePath`も
+                // `binding && !binding.mutable ? ... : null` で不変な束縛だけを対象にする。
+                // 再代入で中身が変わりうるため(識別子targetと同じ理由。実測で確認)
+                let root = path.split('.').next().unwrap_or(&path);
+                if ctx.lookup(root).is_none_or(|b| b.mutable) {
+                    return None;
+                }
+                let ty = infer_expr_single(ctx, m);
+                if !safe_to_compare(&ty) {
+                    return None;
+                }
+                let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &ty, target);
+                Some((path, then_ty, else_ty))
             }),
             _ => None,
         },
@@ -5127,6 +5219,22 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn unionフィールドの絞り込みがフィールドパスにも効く() {
+        // milestone 56: `is_fully_modeled`がunionを受け入れるようになった結果、
+        // `n.next.next`に`narrow-required`が効くようになった(milestone 47以来の検出漏れ)。
+        // 同時に**フィールドパスの絞り込み**(TS版`stablePath`)が要る——無いと
+        // `if b.next is Node { b.next.n }`が誤検知になる
+        let src = "struct Node {\n    next: Node | none\n    n: int\n}\n\nfn main() {\n    a := Node{next: none, n: 1}\n    b := Node{next: a, n: 2}\n    if b.next is Node {\n        print(b.next.n)\n    }\n}\n";
+        assert!(check(src).is_empty(), "{:?}", check(src));
+        // 絞り込みが無ければ出る
+        let bare = "struct Node {\n    next: Node | none\n}\n\nfn main() {\n    n := Node{next: none}\n    print(n.next.next)\n}\n";
+        assert_eq!(check(bare).iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::NarrowRequired], "{:?}", check(bare));
+        // **`mut`な束縛は絞り込まない**(TS版と同じ。再代入で中身が変わりうる)
+        let m = "struct Node {\n    next: Node | none\n    n: int\n}\n\nfn main() {\n    mut b := Node{next: none, n: 1}\n    if b.next is Node {\n        print(b.next.n)\n    }\n}\n";
+        assert_eq!(check(m).iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::NarrowRequired], "{:?}", check(m));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+main.mesh:9:9: error[narrow-required]: cannot access field or method on Node | none — narrow it first (with 'is' or 'match')
+  		print(b.next.n)
+  		      ^

@@ -1,0 +1,8 @@
+import "mesh/json"
+
+fn main() {
+	v := json.parse("{}") or _ => json.Value{kind: "null"}
+	if v is {kind: "obj"} {
+		print(len(v.entries))
+	}
+}
