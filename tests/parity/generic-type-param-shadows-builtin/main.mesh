@@ -1,0 +1,7 @@
+fn f<int>(x: int) int {
+	return x
+}
+
+fn main() {
+	print(1)
+}

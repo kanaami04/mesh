@@ -1,0 +1,7 @@
+fn f() (int, error) {
+	return 1
+}
+
+fn main() {
+	print(1)
+}

@@ -1,0 +1,3 @@
+main.mesh:3:1: error[generic-type-param-not-inferable]: type parameter 'T' must appear in a parameter type — it can't be inferred from the call site otherwise (e.g. 'T[]', not just as the return type)
+  fn f<T>(b: Box) T {
+  ^

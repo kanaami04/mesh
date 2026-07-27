@@ -1,0 +1,3 @@
+main.mesh:2:10: error[multiple-return-values-removed]: multiple return values were removed — return one value (use a union type like 'int | error')
+  	return 1, 2
+  	        ^
