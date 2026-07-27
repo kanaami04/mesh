@@ -4026,10 +4026,19 @@
               CIで検出している唯一の仕組み)
         - [ ] (4) `playground/`(ブラウザで`main.ts`をその場でバンドル)と`editors/vscode`の移行。
               **ここが一番重い**——playgroundはwasmビルドが要る。`bench/`・`demo/todo-api`も対象
-        - [ ] (5) 一定期間CIで**両実装を並走**させ、examples/テスト全体で差分ゼロを確認してから撤去
+        - [x] (5) 一定期間CIで**両実装を並走**させ、examples/テスト全体で差分ゼロを確認してから撤去
+              → 2026-07-27に`parity`ジョブを追加(`scripts/parity.sh`+`scripts/sweep.sh`+
+              Rust版CLIでのexamples実行)。**それまでCIは`bun test`と`cargo test`を別々に
+              走らせるだけで、両実装の出力を一度も比べていなかった**。parity 26秒+sweep 10秒
         - 現実的な進め方: (4)の直前まで進めて、TS版はしばらくCI上のオラクルとして残す。
           撤去は「Rust版が本番として十分」+「オラクルとしての役目も終わった」の両方が
           揃ってから
+        - **具体的な段取りは `docs/ts-removal-plan.md` に分離した**(2026-07-27)。
+          調査で分かった重要な点2つ:
+          - **`src/`を消すとRust版がビルドできない**。`runtime.ts`/`card.ts`/
+            `diagnostic-codes.ts`を`include_str!`で埋め込んでいるため。単なるオラクル依存ではない
+          - **`editors/vscode`はブロッカーではなかった**。中身はTextMate文法とエディタ設定だけで
+            TS実装に依存していない(条件(4)に挙がっていたが実測で確認)
 
 ## 言語機能(中期)
 
