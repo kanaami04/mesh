@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**69種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜53を消化した
+**現在地**: Rust移植の診断は**71種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜57を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,11 +20,8 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
-   — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
-   無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
-2. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-3. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+1. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+2. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1172,6 +1169,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      **1つの変更で両方片付いた**。**軸は「自己参照かどうか」ではなく「空フィールドの殻structを
      含むか」**だった(milestone 55で自己参照の軸を試して失敗している)。副作用として
      TS版`stablePath`相当の**フィールドパスの絞り込み**が必要になり、そちらも移植した
+   - ✅ **milestone 57(2026-07-27)で`error type`の形の検査**。**これで`mise run parity`の
+     差が0件になった**(102ファイルで検出漏れも誤検知も無い)。既存の名前付き型にタグを
+     付けるのを拒否するのが本質で、**判定はソースのTypeNodeを見る**(構文にしか現れない)。
+     診断コードは69→71種
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

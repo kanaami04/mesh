@@ -1,0 +1,10 @@
+error type E = { kind: "a", n: int } | { kind: "b", s: string }
+
+fn risky() int | E {
+	return E{kind: "a", n: 1}
+}
+
+fn main() {
+	v := risky() or e => 0
+	print(v)
+}

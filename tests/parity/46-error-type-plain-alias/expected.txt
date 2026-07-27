@@ -1,1 +1,3 @@
-main.mesh: no errors
+main.mesh:1:7: error[error-type-must-be-struct]: error type 'Oops' members must be struct-shaped (like a discriminated union) — got int
+  error type Oops = int
+        ^

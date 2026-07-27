@@ -1,0 +1,3 @@
+main.mesh:1:7: error[error-type-must-be-struct]: error type 'E' members must be struct-shaped (like a discriminated union) — got int
+  error type E = { kind: "a" } | int
+        ^

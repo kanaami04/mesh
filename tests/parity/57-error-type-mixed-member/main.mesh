@@ -1,0 +1,9 @@
+struct Plain {
+	n: int
+}
+
+error type E = { kind: "a" } | Plain
+
+fn main() {
+	print(1)
+}
