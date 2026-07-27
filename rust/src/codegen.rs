@@ -1593,39 +1593,42 @@ pub(crate) fn json_stdlib_symbols() -> checker::PackageSymbols {
 
     // json.Value = { kind: "str", s: string } | { kind: "num", n: float } | { kind: "bool", b: bool }
     //            | { kind: "null" } | { kind: "arr", items: Value[] } | { kind: "obj", entries: map<string, Value> }
-    // TS版はarr/objメンバーがValue自身を配列/map越しに参照する真の自己参照型(共有可変
-    // オブジェクトとして手組み)だが、Rustの所有権ベースのType表現では真の自己参照を
-    // 表せない(milestone 2以来の壁、examples/tree.mesh参照)。ここでは再帰位置
-    // (arr.items/obj.entriesの要素/値型)だけを名前だけの不透明な殻
-    // (is_error_instanceの再帰と紛れないよう`hollow_value`と呼ぶ)に置き換え、
-    // それ以外の各メンバー自身は本物の構造(kind判別フィールド+実フィールド)を持たせる——
-    // これにより`if v is {kind:"obj"} { len(v.entries) }`のような1階層の構造分解
-    // (TS版のF-14既存機能、json struct機能そのものより前からある、tests/e2e.test.ts:
-    // 1146-1160で確認)が正しい型で narrowing・フィールド推論される。2階層以上の
-    // 入れ子destructureだけがこのスコープ縮小の影響を受ける(is/matchの実行時テスト
-    // 自体はASTから直接組み立てるため2階層以上でも動く——影響を受けるのは
-    // checker側の型推論の精度だけ、milestone 7のgen_type_test参照)
-    let hollow_value = types::struct_ty("json.Value", vec![], false);
-    let value_ty = types::union_ty(
-        vec![
-            anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
-            anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
-            anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
-            anon_struct(vec![field("kind", Type::Literal("null".to_string()))]),
-            anon_struct(vec![field("kind", Type::Literal("arr".to_string())), field("items", Type::Array(Box::new(hollow_value.clone())))]),
-            anon_struct(vec![
-                field("kind", Type::Literal("obj".to_string())),
-                field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(hollow_value) }),
-            ]),
-        ],
-        // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
-        // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
-        // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
-        // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
-        // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
-        // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
-        Some("kind".to_string()),
-    );
+    //
+    // **milestone 65で真の自己参照型にした**(それまでは再帰位置——`arr.items`/`obj.entries`の
+    // 要素/値型——を「名前だけの殻struct」に置き換えていた)。殻だった頃は
+    // `union_has_no_hollow_struct`が`json.Value`を「モデル化できていない」と判定し、
+    // `json.parse`等の戻り値が`try_package_member`でANYへ落ちていた。その結果
+    // `v := json.parse(...)`のvがANYになり、TS版が出す`cannot-infer-type`を
+    // 移植できない(誤検知の山になる)という詰まりが残っていた。
+    //
+    // 「Rustの所有権ベースのType表現では真の自己参照を表せない」というmilestone 2当時の
+    // 制約は**milestone 19のknot-tying**(`Type::Union.body`が`Rc<OnceCell<UnionBody>>`)で
+    // 既に解消していた——`struct Node { next: Node | none }`が同じ仕組みで動いている。
+    // 先に空のセルでunionの器を作り、メンバーからその器を参照してから中身を`set`する
+    let value_cell: std::rc::Rc<std::cell::OnceCell<types::UnionBody>> = std::rc::Rc::new(std::cell::OnceCell::new());
+    let value_ty = Type::Union { body: value_cell.clone() };
+    value_cell
+        .set(types::UnionBody {
+            members: vec![
+                anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
+                anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
+                anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
+                anon_struct(vec![field("kind", Type::Literal("null".to_string()))]),
+                anon_struct(vec![field("kind", Type::Literal("arr".to_string())), field("items", Type::Array(Box::new(value_ty.clone())))]),
+                anon_struct(vec![
+                    field("kind", Type::Literal("obj".to_string())),
+                    field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(value_ty.clone()) }),
+                ]),
+            ],
+            // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
+            // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
+            // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
+            // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
+            // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
+            // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
+            discriminant_tag: Some("kind".to_string()),
+        })
+        .expect("作ったばかりのセルなので未設定");
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
     let mut types = HashMap::new();
