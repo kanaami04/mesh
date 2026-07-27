@@ -25,7 +25,7 @@ use mesh::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use mesh::explain;
 use mesh::formatter;
 use mesh::full_checker;
-use mesh::json_decode::synthesize_json_decoders;
+use mesh::json_decode::{synthesize_json_decoders, synthesize_json_encoders};
 use mesh::modules::{load_modules, load_modules_for_test, BUILTIN_PACKAGE_PATHS};
 use mesh::parser::parse;
 use mesh::test_discovery;
@@ -210,6 +210,12 @@ fn parse_modules(sources: Vec<mesh::modules::ModuleSource>) -> Result<ParsedModu
                 // `json-struct-missing-import`/`json-struct-unsupported-field`という
                 // TS版の診断コードも位置も付いていなかった
                 if let Err(e) = synthesize_json_decoders(&mut program) {
+                    return Err(LoadFailure::Parse { file: name, source: m.source.clone(), errors: vec![*e] });
+                }
+                // milestone 66: 同じ`json struct`から`encode<Name>`も合成する(decodeの裏返し)。
+                // TS版`compiler.ts`も同じ位置で両方を呼ぶ——合成した関数は普通のFnDeclとして
+                // 以降の型検査・codegenへそのまま乗る
+                if let Err(e) = synthesize_json_encoders(&mut program) {
                     return Err(LoadFailure::Parse { file: name, source: m.source.clone(), errors: vec![*e] });
                 }
                 units.push(ModuleUnit { pkg: m.pkg.clone(), file: name, program });

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# TS実装(オラクル)とRust移植版の `mesh check` 出力を突き合わせる。
+# TS実装(オラクル)とRust移植版の `mesh check` 出力、および **`mesh build` の生成JS** を
+# 突き合わせる。
 #
 # **この移植で最悪の不具合は「Rust側だけに出る診断」(誤検知)**なので、それを見つけたら
 # 失敗させる。逆向きの差(TS版だけに出る=検出漏れ)は移植途中なので情報として出すだけ。
@@ -8,6 +9,10 @@
 #
 #   scripts/parity.sh            # 突き合わせ(誤検知があれば非ゼロ終了)
 #   scripts/parity.sh --update   # Rust側の期待出力(expected.txt)を更新する
+#
+# **生成JSの比較はmilestone 66で足した**。それまで誰も生成コードを突き合わせておらず、
+# json structのエンコーダ合成が丸ごと未移植なことに長く気づけずにいた——診断が一致していても
+# 出力するJSが違えば移植は終わっていない。診断が出るケースはbuildできないので自動的に対象外。
 #
 # 対象は examples/*.mesh と tests/parity/*/main.mesh。後者は1ケース1ディレクトリで、
 # サブディレクトリを置けばパッケージ跨ぎも表現できる(エントリは常に main.mesh)。
@@ -38,6 +43,8 @@ fp=0     # Rust側だけに出る診断(誤検知)——これがあれば失敗
 miss=0   # TS版だけに出る診断(検出漏れ)——情報
 n=0
 updated=0
+jsn=0    # 生成JSを比較できた件数
+jsdiff=0 # 生成JSが食い違った件数——これも失敗
 
 targets=()
 for f in examples/*.mesh; do targets+=("$f"); done
@@ -63,7 +70,20 @@ for f in "${targets[@]}"; do
 		;;
 	esac
 
-	[ "$ts" = "$rs" ] && continue
+	# 診断が一致した(=両方ともbuildできる)ケースは**生成JSも突き合わせる**
+	if [ "$ts" = "$rs" ]; then
+		tsjs=$(mktemp) && rsjs=$(mktemp)
+		if bun src/cli.ts build "$f" -o "$tsjs" >/dev/null 2>&1 && "$RUST_BIN" build "$f" -o "$rsjs" >/dev/null 2>&1; then
+			jsn=$((jsn + 1))
+			if ! diff -q "$tsjs" "$rsjs" >/dev/null 2>&1; then
+				jsdiff=$((jsdiff + 1))
+				echo "CODEGEN-DIFF $f — 生成JSがTS版と違う"
+				diff "$tsjs" "$rsjs" | head -20 | sed 's/^/    /'
+			fi
+		fi
+		rm -f "$tsjs" "$rsjs"
+		continue
+	fi
 
 	only_rs=$(diff <(printf '%s\n' "$ts") <(printf '%s\n' "$rs") | grep '^>' | grep -o 'error\[[a-z-]*\]' | sort -u | tr '\n' ' ')
 	only_ts=$(diff <(printf '%s\n' "$ts") <(printf '%s\n' "$rs") | grep '^<' | grep -o 'error\[[a-z-]*\]' | sort -u | tr '\n' ' ')
@@ -82,8 +102,9 @@ if [ "$UPDATE" = "1" ]; then
 	echo "expected.txt を ${updated} 件更新した。**TS版との差が検出漏れだけであることを確認してからコミットすること**"
 fi
 echo "対象 ${n} ファイル / 検出漏れ ${miss} 件 / 誤検知・スナップショット差 ${fp} 件"
-[ "$fp" -eq 0 ] || {
-	echo "FAIL: Rust側だけに出る診断(またはスナップショット差)がある" >&2
+echo "生成JS比較 ${jsn} 件 / 差 ${jsdiff} 件"
+[ "$fp" -eq 0 ] && [ "$jsdiff" -eq 0 ] || {
+	echo "FAIL: Rust側だけに出る診断・スナップショット差・生成JSの差がある" >&2
 	exit 1
 }
-echo "OK: Rust側だけに出る診断は無い"
+echo "OK: Rust側だけに出る診断は無く、生成JSもTS版と一致"

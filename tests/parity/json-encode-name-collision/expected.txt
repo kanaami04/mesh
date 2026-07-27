@@ -1,0 +1,3 @@
+main.mesh:3:6: error[already-declared]: 'encodeUser' is already declared in this scope
+  json struct User {
+       ^

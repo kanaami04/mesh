@@ -1,0 +1,12 @@
+import "mesh/json"
+
+json struct Opt {
+	a: string | none
+	b: int[] | none
+	c: bool | none
+}
+
+fn main() {
+	o := Opt{a: none, b: none, c: none}
+	print(json.stringify(encodeOpt(o)))
+}

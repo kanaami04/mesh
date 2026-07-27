@@ -1,0 +1,13 @@
+import "mesh/json"
+
+json struct User {
+	name: string
+}
+
+fn encodeUser(u: User) json.Value {
+	return json.Value{kind: "null"}
+}
+
+fn main() {
+	print(1)
+}

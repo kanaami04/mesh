@@ -1,0 +1,9 @@
+import "mesh/json"
+
+json struct Nested {
+	xs: string[][]
+}
+
+fn main() {
+	print(1)
+}

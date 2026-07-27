@@ -647,14 +647,20 @@ impl Codegen {
     // `if x is T { ... }`という単純形(condが裸Identに対する`is`)ならnarrowing(milestone 7)
     // を適用する——TS版のnarrowing.ts/statements.tsと同じ目的で、codegen側の型依存判断
     // (`__iarith`等)を正しくするためだけに必要(生成JSの「形」自体は変えない、
-    // milestone 5のselect/orElseの束縛パターンと同じ設計)。`&&`/`||`/`!`との複合条件は
-    // 対象外のまま(実際のexampleに複合条件のnarrowingは存在しない)
+    // milestone 5のselect/orElseの束縛パターンと同じ設計)。
+    // **`!`(否定)も見る**(milestone 66)——json structのエンコーダ合成が
+    // `if !(__efv_x is none) { ... }`という形を生成するので、ここを見ないと合成コードの
+    // 型検査が`cannot use string | none as string`で落ちる。`&&`/`||`との複合条件は
+    // 対象外のまま(full_checker側はmilestone 65で対応済み。codegenは型依存判断のためだけに
+    // narrowingを使うので、落ちる形が出てから広げる)
     fn gen_if(&mut self, if_stmt: &IfStmt) -> CodegenResult<()> {
-        if let Expr::Is { operand, target, .. } = &if_stmt.cond
-            && let Expr::Ident { name, .. } = &**operand
+        if let Some((operand, target, negated)) = unwrap_is_cond(&if_stmt.cond)
+            && let Expr::Ident { name, .. } = operand
         {
             let subject_ty = checker::infer_expr(&self.ctx, operand);
-            let (then_ty, else_ty) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
+            let (t, e) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
+            // `!`はド・モルガンでthen/elseを入れ替えるだけ(TS版`narrowing.ts`と同じ)
+            let (then_ty, else_ty) = if negated { (e, t) } else { (t, e) };
             let cond = self.gen_expr(&if_stmt.cond)?;
             self.emit(format!("if ({cond}) {{"));
             self.ctx.push_scope();
@@ -1808,6 +1814,20 @@ fn visit_package(pkg: &str, deps: &HashMap<String, HashSet<String>>, state: &mut
     state.insert(pkg.to_string(), 2);
     order.push(pkg.to_string());
     Ok(())
+}
+
+// 条件式が`x is T`か`!(x is T)`(`!`は何重でもよい)なら、operand・target・否定の有無を返す
+// (milestone 66)。`&&`/`||`は対象外——codegen側のnarrowingは型依存判断のためだけに使うので、
+// 実際に落ちる形が出てから広げる方針(full_checkerは診断のためmilestone 65で全部対応済み)
+fn unwrap_is_cond(cond: &Expr) -> Option<(&Expr, &TypeNode, bool)> {
+    match cond {
+        Expr::Is { operand, target, .. } => Some((&**operand, target, false)),
+        Expr::Unary { op: TokenType::Bang, operand, .. } => {
+            let (inner, target, negated) = unwrap_is_cond(operand)?;
+            Some((inner, target, !negated))
+        }
+        _ => None,
+    }
 }
 
 // ブロックが必ず終端する(return/break/continueで終わる)かどうかの単純な判定
