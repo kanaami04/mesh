@@ -378,7 +378,7 @@ check_stash nomatch 'コミットメッセージ'   'git commit -m "git stash �
 # 引数の文字列としてコマンド名が現れる形(2026-07-27に実際に誤発火した)
 check_stash nomatch 'PRコメント本文'       'gh pr comment 87 --body "状態確認なら git stash list は通ります"'
 check_stash nomatch 'シングルクォート'     "echo 'git stash pop は禁止'"
-check_stash nomatch 'ヒアドキュメント風'   'gh pr comment 1 --body "git stash push -m x"'
+check_stash nomatch 'ダブルクォート内'     'gh pr comment 1 --body "git stash push -m x"'
 # ただしクォートの外に本物の呼び出しがあれば拾う
 check_stash match   '文字列の後に本物'     'echo "git stash は禁止" && git stash pop'
 check_wt match   'gitの-cオプション'     'git -c core.pager=cat worktree add /tmp/base'
