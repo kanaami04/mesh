@@ -1310,8 +1310,9 @@ fn validate_struct_lit_fields(
 // `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
 // 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
 // (判別可能unionのタグdisambiguation・名前付きstruct同士のunionのフィールド集合解決。
-// 下記`resolve_union_lit_member`)に対応した。pkg修飾structは**milestone 49で名前解決**
-// (`lib.Point{...}`の3診断)、**51でフィールド検証**(レジストリに型が載った)。
+// 下記`resolve_union_lit_member`)に対応した。pkg修飾は**milestone 49で名前解決**
+// (`lib.Point{...}`の3診断)、**51でフィールド検証**(レジストリに型が載った)、
+// **55でunionの構築**(`lib.Shape{kind: "circle", ...}`のdisambiguation)。
 // **milestone 52で未宣言名の`unknown-type`**——TS版と同じく**値の推論より先**に判定する
 // (逆にすると`Bogus{n: undefinedThing}`で発行順がずれる)。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
@@ -1331,16 +1332,25 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
     if let Some(pkg) = pkg {
         check_package_type_ref(ctx, pkg, name, pos);
         let resolved = if ctx.type_ctx.is_package_alias(pkg) { ctx.type_ctx.lookup_package_type(pkg, name).cloned() } else { None };
-        let Some(member_ty @ Type::Struct { .. }) = resolved else {
+        let Some(resolved) = resolved.filter(safe_to_compare) else {
             return ANY;
         };
-        if !safe_to_compare(&member_ty) {
-            return ANY;
-        }
-        // 診断に出す名前はTS版と同じ「解決済みの型自身の名前」(pkg修飾済み)
-        let display_name = types::type_to_string(&member_ty);
+        // **milestone 55: unionも通す**。それまでは`Type::Struct`だけを見ていたので、
+        // pkg修飾のunion(`lib.Shape{kind: "circle", ...}`)は判別可能unionの
+        // disambiguationごと素通りしていた。ローカルのunionと同じ`resolve_union_lit_member`を
+        // 使う——**診断に出す名前は「書かれた素の名前」**(`Shape`)で、TS版もunion構築では
+        // pkg修飾しない(メンバーは無名なので型自身の名前が使えない。実測で確認)
+        let (member_ty, display_name) = match &resolved {
+            Type::Struct { .. } => (resolved.clone(), types::type_to_string(&resolved)),
+            Type::Union { .. } => match resolve_union_lit_member(ctx, &resolved, name, fields, &field_types, pos) {
+                Some(member) => (member, name.to_string()),
+                None => return ANY, // 絞り込み失敗(診断は出し済み)
+            },
+            _ => return ANY,
+        };
         validate_struct_lit_fields(ctx, &member_ty, &display_name, fields, &field_types, pos);
-        return member_ty;
+        // 式全体の型は**union自身**(絞り込んだメンバーではない)——ローカルのunion構築と同じ
+        return resolved;
     }
     // 名前がregistryのstructなら従来どおり(milestone 29)。structでなければunion
     // (判別可能union構築、milestone 32)を試し、どちらでもなければ対象外——ANY
@@ -5117,6 +5127,34 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn pkg修飾unionのstructリテラルも判別可能unionとして検証される() {
+        // milestone 55: それまで`Type::Struct`だけを見ていたので、pkg修飾のunionは
+        // disambiguationごと素通りしていた
+        let lib = parse("export type Shape = { kind: \"circle\", r: int } | { kind: \"square\", s: int }\n").unwrap();
+        let (_, lib_exports) = check_package_in(&[("l.mesh".to_string(), &lib)], false, &builtin_package_exports(), "lib");
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), lib_exports);
+        let run = |src: &str| -> Vec<Diagnostic> {
+            let program = parse(src).expect("test source must parse");
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect()
+        };
+        for (src, code) in [
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Shape{r: 1})\n}\n", DiagnosticCode::DiscriminatedUnionTagMissing),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Shape{kind: \"nope\", r: 1})\n}\n", DiagnosticCode::DiscriminatedUnionNoMatch),
+            ("import \"lib\"\n\nfn main() {\n    print(lib.Shape{kind: \"circle\", r: \"oops\"})\n}\n", DiagnosticCode::TypeMismatch),
+        ] {
+            let diags = run(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // **診断に出す名前は書かれた素の名前**(`Shape`)——TS版もunion構築ではpkg修飾しない
+        let d = run("import \"lib\"\n\nfn main() {\n    print(lib.Shape{r: 1})\n}\n");
+        assert!(d[0].message.contains("'Shape{...}'"), "{:?}", d[0].message);
+        // 正しい形は素通り
+        assert!(run("import \"lib\"\n\nfn main() {\n    print(lib.Shape{kind: \"circle\", r: 1})\n}\n").is_empty());
     }
 
     #[test]

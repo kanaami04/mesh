@@ -1,0 +1,3 @@
+main.mesh:4:8: error[discriminated-union-tag-missing]: 'Shape{...}' needs its tag field 'kind' set to select a member (e.g. Shape{ kind: "...", ... })
+  	print(lib.Shape{r: 1})
+  	      ^

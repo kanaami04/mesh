@@ -1,0 +1,5 @@
+import "lib"
+
+fn main() {
+	print(lib.Shape{kind: "nope", r: 1})
+}
