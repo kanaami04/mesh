@@ -343,6 +343,8 @@ check_wt nomatch 'worktree prune'        'git worktree prune'
 check_wt nomatch '文中の言及'            'echo "git worktree add をこれから使う"'
 check_wt nomatch '別コマンドのadd'       'git add -A'
 check_wt nomatch 'オプション値の中の言及' 'git commit -m "worktree add をやめた"'
+check_wt nomatch 'PRコメント本文'        'gh pr comment 1 --body "git worktree add /tmp/x を使う"'
+check_wt match   '文字列の後に本物'      'echo "git worktree add" && git worktree add /tmp/x main'
 
 # ---------------------------------------------------------------------------
 # 6. git stash の拒否フック（block-git-stash.sh、issue #83）
@@ -373,6 +375,12 @@ check_stash nomatch 'stash show'           'git stash show -p'
 check_stash nomatch '文中の言及'           'echo "git stash は禁止"'
 check_stash nomatch '別コマンド'           'git status'
 check_stash nomatch 'コミットメッセージ'   'git commit -m "git stash をやめた"'
+# 引数の文字列としてコマンド名が現れる形(2026-07-27に実際に誤発火した)
+check_stash nomatch 'PRコメント本文'       'gh pr comment 87 --body "状態確認なら git stash list は通ります"'
+check_stash nomatch 'シングルクォート'     "echo 'git stash pop は禁止'"
+check_stash nomatch 'ヒアドキュメント風'   'gh pr comment 1 --body "git stash push -m x"'
+# ただしクォートの外に本物の呼び出しがあれば拾う
+check_stash match   '文字列の後に本物'     'echo "git stash は禁止" && git stash pop'
 check_wt match   'gitの-cオプション'     'git -c core.pager=cat worktree add /tmp/base'
 check_wt nomatch '無関係なコマンド'      'cargo build'
 
