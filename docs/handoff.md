@@ -36,44 +36,33 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    (`generic-inference-failed`)。**これで107/107**。`scopes[0]`側のANY登録は据え置き、
    `generic_fns`という別表を直接呼び出し経路だけが引く形にして誤検知の面を広げなかった
 
-### 残っている検出漏れ(診断コードは揃ったが検出範囲に穴がある箇所)
+### 残っている検出漏れ ✅ **milestone 65(2026-07-27)で全部埋まった**
 
-`mise run parity`が「TS版だけに出る」と報告する分。**誤検知ではないので出荷は止めないが、
-撤去条件(2)を本当に満たすにはここを埋める必要がある**。**milestone 63で3件埋めて残り2件**。
+`mise run parity` は **146ファイルで検出漏れ0・誤検知0**。TS版と出力が完全に一致している。
+撤去条件(2)=診断カバレッジは、コード数(107/107)と検出範囲の両方で満たした。
 
-- ~~ジェネリック関数の本体で型パラメータを型として検査していない~~ ✅ milestone 63で解消
-  (`resolve_ann`が`ctx.type_params`の間だけ`Type::TypeParam`を配る)
-- ~~ジェネリック関数を値として渡した場合~~ ✅ milestone 63で解消
-  (`scopes[0]`へ型パラメータ入りシグネチャを登録するようにした。直接呼び出しは
-  `infer_generic_call`が先にinterceptするので推論は効いたまま)
-- ~~組み込み`toInt`の戻り値がANY~~ ✅ milestone 63で解消(`int | error`を返す)
-- **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)。
-  **milestone 63でTS版の規則(`containsAny`)をそのまま入れる実験をしたところ、
-  誤検知は5ファイル・8件まで減り、しかも全部`json.Value`由来だった**——
-  `json.parse`等がANYを返すのはmilestone 51で誤検知を潰すために入れた意図的な縮退なので、
-  ここを直さない限りTS版の規則は入れられない。逆に言えば**残る障壁は`json.Value`のモデル化だけ**。
-  なおTS版のテストを見る限り、この診断の実入力は全部「文脈の無い空配列リテラル」なので、
-  実害のある検出漏れかどうかは疑わしい
-- **パッケージ修飾のジェネリック呼び出し**(`lib.pick(1, 2)`)——TS版は型パラメータが
-  残ったまま`type-mismatch`を出すが、Rust版は無診断。
-  **これはTS版が「pkg修飾のジェネリック呼び出しを丸ごと拒否する」という制限の再現**で、
-  埋めるには`try_package_member`の`is_fully_modeled`ゲート(milestone 51で誤検知を
-  潰した箇所)を緩める必要がある。妥当な呼び出しをRust版が拒否するようになる変更でもあり、
-  **TS版側を直す方が筋が良いかもしれない**。`tests/parity/generic-pkg-qualified-call/`が記録している
+**次に見るべきはparityコーパスの網羅性**。milestone 65で「mainで既に出荷されていた誤検知」を
+5種類見つけたが、**コーパスがその形(`!`/`&&`/`||`で包んだ条件式)を1つも含んでいなかった**
+から気づけずにいた。「parityが0件」は「コーパスに載っている形については一致」という意味しかない。
+新しい構文・新しい検査を足すときは、**コーパスに無い形を意識的に作って測る**こと。
 
-~~**なお診断とは別に、`rust/`の codegen はジェネリック関数を実装していない**~~
-✅ **milestone 64(2026-07-27)で解消**。`mesh run`/`build`が通り、
-**生成JSはTS版とバイト一致**する(JSは型消去なので型パラメータを外すだけ)。
-codegen側のリゾルバ(`checker.rs`)にも推論を通してある——通さないと
-`identity(Box{v: 7}).doubled()`のメンバー参照・メソッド解決が
-「名前がTの殻struct」で落ちる。`types.rs`の`unify_type_param`/`substitute_type_params`を
-full_checkerと**共有**している(2箇所に書くとずれるため)。
-`examples/generics.mesh`が動く実例。
+milestone 65で片付いた内容:
 
-**`mise run run-examples`は24本中7本しか実行していなかった**(milestone 64で発覚)。
-`set -e`のため、意図的にpanicする`defer_panic.mesh`(7本目)で打ち切られていた。
-1本落ちても止めず、期待どおり落ちる例を除いた失敗があるときだけ非ゼロで終わる形に直した。
-**このタスクの結果を「examplesは全部動く」の根拠に使うときは、修正前の記録を信用しないこと。**
+- **`json.Value`を真の自己参照型にした**(最大の障壁)。再帰位置(`arr.items`/`obj.entries`)を
+  「名前だけの殻struct」に留めていたため、`json.Value`全体が「モデル化できていない」扱いになり、
+  `json.parse`等の戻り値が`try_package_member`でANYへ落ちていた。
+  **「Rustの所有権ベースのType表現では真の自己参照を表せない」というmilestone 2当時のコメントは、
+  milestone 19のknot-tying(`Rc<OnceCell<UnionBody>>`)で既に偽になっていた**
+  ——`struct Node { next: Node | none }`が同じ仕組みで動いている。
+- **`cannot-infer-type`をTS版と同じ`containsAny`規則へ戻した**。milestone 33〜64は
+  「空の配列リテラル」という形だけに絞っていた。トップレベル定数にも効かせた
+  (関数本体側にしか入れていなかった)。
+- **narrowingの誤検知5種**。条件式が`!`/`&&`/`||`で包まれると絞り込みが丸ごと効かず、
+  TS版が出さない`type-mismatch`がRust側だけに出ていた。TS版`narrowing.ts`の
+  `collectFacts`を移植して解消。
+- **pkg修飾のジェネリック呼び出し**。`try_package_member`のゲートを
+  `modeled_allowing_type_params`にした(ANYは引き続き弾く——あちらは縮退の印だが、
+  `Type::TypeParam`は抽象型そのものなので比較して問題ない)。
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
 

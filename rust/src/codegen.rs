@@ -1571,13 +1571,11 @@ pub(crate) fn io_stdlib_symbols() -> checker::PackageSymbols {
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
 // 実装済み(H-2実装時にruntime.ts全体を移植済みのため、ここではシグネチャの登録だけでよい)。
 // json.Valueは真に自己参照する判別可能union(TS版はarr/objメンバーがValue自身を配列/map
-// 越しに参照する共有可変オブジェクトとして手組みする)。milestone 19でRust版でも
-// `Rc<OnceCell<_>>`によるknot-tyingで自己参照型自体は表現できるようになった
-// (examples/tree.mesh参照)が、json.Valueをその仕組みで本物の自己参照型として再定義する
-// こと自体は別のmilestone候補として見送っており、ここでは引き続き不透明な殻structとして
-// 扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明なヘルパー越しにしか
-// Valueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に分解する
-// 手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
+// 越しに参照する共有可変オブジェクトとして手組みする)。**milestone 65でRust版も
+// `Rc<OnceCell<_>>`によるknot-tying(milestone 19)で本物の自己参照型として組む形にした**
+// ——milestone 9〜64は再帰位置を不透明な殻structに留めており、そのせいで
+// `json.Value`全体が「モデル化できていない」扱いになって`json.parse`等の戻り値が
+// ANYへ落ち、`cannot-infer-type`をTS版と同じ規則で移植できずにいた
 // **full_checker側も同じ定義を流用する**(`builtin_package_exports`、milestone 49)——
 // 組み込みパッケージのシンボルを2箇所に書くと必ずずれるため。ここを変えると診断側にも効く。
 pub(crate) fn json_stdlib_symbols() -> checker::PackageSymbols {
@@ -2496,8 +2494,9 @@ mod tests {
         // code review発覚・実行確認済みの回帰(tests/e2e.test.ts:1146-1160、json struct機能
         // より前からある既存のmesh/json手書きdestructure): json.Valueを完全に不透明な殻
         // (フィールド無し)にすると、絞り込み後の`v.entries`がANY型になり`len()`が
-        // `.length`(mapには存在せずundefinedになる)を選んでしまっていた。arr/objの
-        // 再帰位置(items/entries)だけを不透明な殻に留め、それ以外の構造
+        // `.length`(mapには存在せずundefinedになる)を選んでしまっていた。
+        // **milestone 65からは再帰位置も本物の自己参照**なので、この形は一層強く保たれる。
+        // 当時は arr/obj の再帰位置(items/entries)だけを不透明な殻に留め、それ以外の構造
         // (kind判別フィールド+実フィールド)は本物のmap/配列型にすることで、1階層の
         // 絞り込み+フィールドアクセスが正しい型(map)で推論され`len`が`.size`を選ぶ
         let js = gen_body(
@@ -3469,11 +3468,10 @@ mod tests {
     #[test]
     fn json_valueの不透明な再帰位置への書き込みは今まで通りコンパイルできる() {
         // git historyレビュー発覚・実行確認済みの回帰: json.Valueの自己参照する再帰位置
-        // (`obj.entries`の値等、milestone 9で意図的に空フィールドの不透明な殻として
-        // 表現している)への書き込みが、この milestone の新しい検証で誤って
-        // unknown-fieldになっていた——2階層以上の入れ子destructureはchecker側の型推論の
-        // 精度が落ちるだけでrun時テストは動く、というmilestone 9の意図的なスコープ縮小の
-        // 範囲内なので、書き込みも今まで通り通す
+        // (`obj.entries`の値等)への書き込みが、この milestone の新しい検証で誤って
+        // unknown-fieldになっていた。**milestone 65で再帰位置は真の自己参照型になり、
+        // 「空フィールドの不透明な殻」ではなくなった**(milestone 9〜64の表現)——
+        // それでもこのテストが守る「書き込みは通る」という性質は変わらないので残す
         let js = gen_body(
             "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  if v is { kind: \"obj\" } {\n    for k, val := range v.entries {\n      if val is { kind: \"str\" } {\n        val.s = \"patched\"\n        print(val.s)\n      }\n    }\n  }\n}",
         );

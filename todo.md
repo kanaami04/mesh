@@ -3804,6 +3804,29 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 65: 残っていた検出漏れを全部埋める(parity 完全一致)**
+              ✅ 2026-07-27実装。`mise run parity` が **146ファイルで検出漏れ0・誤検知0**に
+              なった。撤去条件(2)をコード数(107/107)と検出範囲の両方で満たした。
+              - **`json.Value`を真の自己参照型にした**のが本丸。再帰位置を「名前だけの殻struct」に
+                留めていたため`json.Value`全体が「モデル化できていない」扱いになり、
+                `json.parse`等の戻り値がANYへ落ちていた——これが`cannot-infer-type`を
+                移植できない唯一の障壁だった(milestone 63の実験で特定済み)。
+                **「Rustでは真の自己参照を表せない」というmilestone 2当時のコメントは、
+                milestone 19のknot-tying(`Rc<OnceCell<UnionBody>>`)で既に偽になっていた**。
+              - **`cannot-infer-type`をTS版と同じ`containsAny`規則へ戻した**。あわせて
+                トップレベル定数にも効かせた(関数本体側にしか入れていなかった)。
+              - **narrowingの誤検知を5種見つけて潰した**。条件式が`!`/`&&`/`||`で包まれると
+                絞り込みが丸ごと効かず、TS版が出さない`type-mismatch`がRust側だけに出ていた。
+                **mainで既に出荷されていた誤検知**で、parityコーパスがこの形を1つも
+                含んでいなかったから気づけずにいた。TS版`narrowing.ts`の`collectFacts`を移植。
+              - **pkg修飾のジェネリック呼び出し**。`try_package_member`のゲートを
+                `modeled_allowing_type_params`へ。ANYは引き続き弾く。
+              - 既存テスト4件が検出漏れ/テストハーネス固有の状況を固定していたので、
+                TS版で実測してから期待値を直した。
+              - 検証: 実入力25種+examples全24本の実行一致。`mise run parity` 146ファイル
+                (コーパス117→123)。テスト625件、clippyクリーン。
+              - **教訓**: 「parityが0件」は「コーパスに載っている形については一致」の意味しかない。
+                新しい構文・検査を足すときは**コーパスに無い形を意識的に作って測る**。
         - [x] **milestone 64: ジェネリック関数のcodegen(mesh run/build が通る)**
               ✅ 2026-07-27実装。`codegen.rs`が`generic functions are not yet supported`で
               明確なErrにしていた制限を解消。**生成JSはTS版とバイト一致**する

@@ -1,0 +1,10 @@
+fn take(n: int) int {
+	return n
+}
+
+fn main() {
+	x: int | none = 1
+	if !(x is none) {
+		print(take(x))
+	}
+}

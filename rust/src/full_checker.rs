@@ -1273,8 +1273,9 @@ fn is_checkable_field_type(t: &Type) -> bool {
 // 要素がANYへ潰れる`map<string,int>[]`は駄目)ため、再帰的な判定に置き換えている。
 // **milestone 56からunionも受け入れる**——ただし「空フィールドの殻struct」を含むものは除く
 // (下記`union_has_no_hollow_struct`)
-// 型の中に「空フィールドの殻struct」が含まれないか(milestone 56)。`json.Value`のように
-// 再帰位置を名前だけの殻に留めている型を突き合わせから外すための判定。
+// 型の中に「空フィールドの殻struct」が含まれないか(milestone 56)。再帰位置を名前だけの殻に
+// 留めている型を突き合わせから外すための判定。**milestone 65で`json.Value`は真の自己参照型に
+// なったのでもう該当しない**——残る該当者は「宣言が存在しない型名」のフォールバック殻。
 // **無名struct(判別可能unionのメンバー)がフィールド0個なのは正当**(`{ kind: "null" }`)
 // なので、名前付きのものだけを見る。自己参照は`seen`で打ち切る(そこまで殻が無ければ良い)
 fn union_has_no_hollow_struct(t: &Type, seen: &mut Vec<*const ()>) -> bool {
@@ -1292,8 +1293,8 @@ fn union_has_no_hollow_struct(t: &Type, seen: &mut Vec<*const ()>) -> bool {
         }
         Type::Struct { name, fields, .. } => {
             let Some(fs) = fields.get() else { return false };
-            // 名前付きなのにフィールドが0個 = 殻(`json.Value`の再帰位置・未知の型名の
-            // フォールバック)。無名structの0フィールドは正当なので除く
+            // 名前付きなのにフィールドが0個 = 殻(未知の型名のフォールバック)。
+            // 無名structの0フィールドは正当なので除く
             if name != types::ANONYMOUS_STRUCT_NAME && fs.is_empty() {
                 return false;
             }
@@ -1338,13 +1339,14 @@ fn is_fully_modeled(t: &Type) -> bool {
         // milestone 56: unionも**中身まで完全に解決できていれば**突き合わせてよい。
         // これで`struct Node { next: Node | none }`の`n.next.next`に`narrow-required`が
         // 効く(milestone 47以来の検出漏れ)。
-        // **弾くのは「空フィールドの殻struct」を含むunion**——`json.Value`(milestone 9)は
-        // 再帰位置(`arr.items`/`obj.entries`の要素型)を**名前だけの殻**に留めており、
-        // 値側と宣言側で殻の実体が違いうるので突き合わせると誤検知になる
-        // (`examples/json_decode.mesh`が実際に落ちた)。
-        // **「自己参照かどうか」では区別できない**——`Node | none`も自己参照だが、そちらの
-        // 再帰位置は中身のある本物のstructで突き合わせて問題ない(milestone 55で
-        // その軸を試して取り下げた)。見るべきは**殻かどうか**だった
+        // **弾くのは「空フィールドの殻struct」を含むunion**。かつては`json.Value`が
+        // 再帰位置を名前だけの殻に留めていたためここで弾かれていたが、
+        // **milestone 65で真の自己参照型になったので通るようになった**
+        // (それが`json.parse`の戻り値をANYにしていた原因で、`cannot-infer-type`を
+        // TS版と同じ規則へ戻せなかった唯一の障壁だった)。
+        // **「自己参照かどうか」では区別できない**——`Node | none`も`json.Value`も自己参照だが、
+        // 中身のある本物のstructなら突き合わせて問題ない(milestone 55でその軸を試して
+        // 取り下げた)。見るべきは**殻かどうか**だった
         Type::Union { .. } => union_has_no_hollow_struct(t, &mut Vec::new()),
         // milestone 45: 関数型も**引数・戻り値まで解決できていれば**突き合わせてよい
         Type::Fn { params, ret } => params.iter().all(is_fully_modeled) && is_fully_modeled(ret),
@@ -2307,18 +2309,16 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 // `s = "b"`と別リテラルを代入できるように)。TS版statements.tsの
                 // `stmt.mutable ? widenLiteral(t) : t`と同じ
                 let ty = if *mutable { types::widen_literal(ty) } else { ty };
-                // milestone 33: 空の配列リテラル(`xs := []`)は要素型が決まらないので
-                // 型注釈を要求する(TS版`cannot-infer-type`)。**TS版の`containsAny`を
-                // そのまま移植すると誤検知の山になる**——full_checkerはmap/channel/union/
-                // pkg修飾など多くをANYへ縮退させており、TS版なら具体型がつく値
-                // (`m := {"a": 1}`等)まで「推論できない」と報告してしまうため。
-                // 空配列リテラルという**この診断の本来の引き金**だけに絞って移植する
-                // (他の形は、対応する型をモデル化するmilestoneで広げていく)。
-                // 値の検査で既に診断が出ている場合は二重に出さない(TS版の`alreadyErrored`)
-                if name != "_"
-                    && !already_errored
-                    && matches!(values.get(i), Some(Expr::ArrayLit { elems, elem_type: None, .. }) if elems.is_empty())
-                {
+                // 推論しきれなかった束縛は型注釈を要求する(TS版`statements.ts`と同じ
+                // `containsAny`規則)。値の検査で既に診断が出ている場合は二重に出さない
+                // (TS版の`alreadyErrored`)。
+                //
+                // **milestone 33〜64は「空の配列リテラル」という形だけに絞っていた**——
+                // full_checkerが多くの型をANYへ縮退させており、TS版なら具体型がつく値まで
+                // 「推論できない」と報告してしまうためだった。milestone 63で実験して測ったところ、
+                // 残る誤検知は**全部`json.Value`由来**(5ファイル・8件)で、milestone 65で
+                // それを真の自己参照型にしたことで消えた。TS版と同じ規則へ戻せる
+                if name != "_" && !already_errored && types::contains_any(&ty) {
                     ctx.error(
                         *pos,
                         DiagnosticCode::CannotInferType,
@@ -2978,6 +2978,9 @@ fn safe_to_compare(t: &Type) -> bool {
     go(t, &mut Vec::new(), &mut Vec::new())
 }
 
+// 「このパス(綴り)はこの型」という絞り込みの事実。TS版`narrowing.ts`の`Map<string, Type>`に対応する
+type NarrowFacts = Vec<(String, Type)>;
+
 // 条件式から絞り込みの事実を集める(TS版`checker/narrowing.ts`の`collectFacts`)。
 // then側/else側それぞれについて「このパスはこの型」という対応を返す。
 //
@@ -2986,7 +2989,7 @@ fn safe_to_compare(t: &Type) -> bool {
 // `type-mismatch`(`cannot use int | none as int`)がRust側だけに出る**誤検知**になる。
 // 5種類の形(`!(x is none)` / `x is int && ...` / 2変数の`&&` / `||`のelse側 / 二重否定)で
 // 実測して確認した(milestone 65)。
-fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (Vec<(String, Type)>, Vec<(String, Type)>) {
+fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
     match expr {
         Expr::Is { operand, target, .. } => {
             let found = match &**operand {
@@ -3050,7 +3053,7 @@ fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (Vec<(String, Type)>,
 
 // 両側の事実を重ねる(TS版`andFacts`)。同じパスが両側にあれば**右を勝たせる**
 // ——`x is int && x is none`のように後の条件の方が狭いため
-fn and_facts(left: Vec<(String, Type)>, right: Vec<(String, Type)>) -> Vec<(String, Type)> {
+fn and_facts(left: NarrowFacts, right: NarrowFacts) -> NarrowFacts {
     let mut out = left;
     for (path, ty) in right {
         match out.iter_mut().find(|(p, _)| *p == path) {
@@ -3401,7 +3404,9 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
         check_type_ann(ctx, type_node);
         resolve_ann(ctx, type_node)
     });
+    let diags_before = ctx.diagnostics.len();
     let value_ty = infer_expr_single(ctx, &c.value);
+    let already_errored = ctx.diagnostics.len() > diags_before;
     let final_ty = match annotated {
         Some(declared) => {
             if !assignable_checked(&value_ty, &declared) {
@@ -3413,7 +3418,26 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
             }
             declared
         }
-        None => value_ty,
+        None => {
+            // milestone 65: トップレベル定数にも`cannot-infer-type`を効かせる
+            // (TS版`checkPackage`も`declareBinding`の手前で同じ`containsAny`判定をする)。
+            // 関数本体側(`Stmt::VarDecl`)だけに入れていたので、`xs := []`をファイル直下に
+            // 書くと素通りしていた——TS版のテストが「トップレベル定数も同様に拒否される」を
+            // 明示的に固定しているケース(tests/checker.test.ts「F-9c」)
+            if c.name != "_" && !already_errored && types::contains_any(&value_ty) {
+                ctx.error(
+                    c.pos,
+                    DiagnosticCode::CannotInferType,
+                    format!(
+                        "cannot infer a complete type for '{}' (got {}) — add a type annotation, e.g. '{}: T[] = []'",
+                        c.name,
+                        types::type_to_string(&value_ty),
+                        c.name
+                    ),
+                );
+            }
+            value_ty
+        }
     };
     ctx.declare(&c.name, final_ty, c.pos, false);
 }
@@ -5186,6 +5210,47 @@ mod tests {
         assert_eq!(check_with_json(ok), vec![]);
     }
 
+    #[test]
+    fn 条件式が否定や論理演算で包まれても絞り込まれる() {
+        // milestone 65。**それまで`ident is T`しか見ておらず、`!`/`&&`/`||`で包むと
+        // 絞り込みが丸ごと効かなかった**——絞り込まれない値を使うとTS版が出さない
+        // `type-mismatch`がRust側だけに出る**誤検知**になる(mainで既に出荷されていた)。
+        // TS版`narrowing.ts`の`collectFacts`を移植して解消した
+        let take = "fn take(n: int) int {\n    return n\n}\n";
+        for cond in [
+            "if !(x is none) {\n        print(take(x))\n    }",
+            "if x is int && 1 == 1 {\n        print(take(x))\n    }",
+            "if !!(x is int) {\n        print(take(x))\n    }",
+            "if x is none || 1 == 2 {\n        print(0)\n    } else {\n        print(take(x))\n    }",
+        ] {
+            let src = format!("{take}fn main() {{\n    x: int | none = 1\n    {cond}\n}}\n");
+            assert_eq!(check(&src), vec![], "cond: {cond}");
+        }
+        // 2変数の`&&`も両方の事実が重なる
+        let src = format!("{take}fn main() {{\n    x: int | none = 1\n    y: int | none = 2\n    if x is int && y is int {{\n        print(take(x) + take(y))\n    }}\n}}\n");
+        assert_eq!(check(&src), vec![], "{src}");
+    }
+
+    #[test]
+    fn 推論しきれない束縛はcannot_infer_typeになる() {
+        // milestone 65でTS版と同じ`containsAny`規則へ戻した(milestone 33〜64は
+        // 「空の配列リテラル」という形だけに絞っていた——`json.Value`が縮退していたため)
+        let d = check("fn main() {\n    xs := []\n    print(xs)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::CannotInferType);
+
+        // **トップレベル定数でも効く**(milestone 65まで関数本体側にしか入れていなかった)
+        let d = check("xs := []\nfn main() {\n    print(xs)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::CannotInferType);
+
+        // `_`は対象外、既に診断が出ている値には重ねない(TS版の`alreadyErrored`)
+        assert_eq!(check("fn main() {\n    _ := []\n    print(1)\n}\n"), vec![]);
+        let d = check("fn main() {\n    x := bogus\n    print(x)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::UndefinedName);
+    }
+
     // ---- milestone 29: 名前付きstructリテラルのフィールド検証 ----
 
     const USER: &str = "struct User {\n    name: string\n    age: int\n}\n";
@@ -5327,9 +5392,13 @@ mod tests {
     fn pkg修飾アクセスは誤検知しない() {
         // milestone 50から`try_package_member`がtargetを評価する前に解決するので、
         // pkg.func(...) のtargetがundefined-nameにならない(それまではimport aliasを
-        // ANYとしてscopes[0]へ登録することで回避していた)。**表に無いパッケージなので
-        // 中身の診断は出ない**——`check`はレジストリを渡さない経路
-        let diags = check("import \"mathutil\"\nfn main() {\n    x := mathutil.add(1, 2)\n    print(x)\n}\n");
+        // ANYとしてscopes[0]へ登録することで回避していた)。
+        // **`check`はレジストリを渡さない経路なのでpkg member自体はANYになる**——
+        // milestone 65で`cannot-infer-type`がTS版と同じ`containsAny`規則になったため、
+        // その束縛だけが報告される。ここで確かめたいのは`undefined-name`が出ないことなので、
+        // 型注釈を付けてANYを避けた形で固定する(実CLIではレジストリが埋まるので
+        // この状況自体が起きない——`tests/parity/`の複数パッケージのケースが実使用側を担保する)
+        let diags = check("import \"mathutil\"\nfn main() {\n    x: int = mathutil.add(1, 2)\n    print(x)\n}\n");
         assert_eq!(diags, vec![]);
     }
 
@@ -5950,7 +6019,11 @@ mod tests {
             assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
         }
         // 正常な形は素通り(呼び出し・定数・呼び出しを伴わない関数値参照・structリテラル)
-        let ok = "import \"lib\"\n\nfn main() {\n    print(lib.add(1, 2))\n    print(lib.LIMIT)\n    f := lib.add\n    print(f(1, 2))\n    print(lib.Point{x: 1})\n}\n";
+        let ok = "import \"lib\"\n\nfn main() {\n    print(lib.add(1, 2))\n    print(lib.LIMIT)\n    f: fn(int, int) int = lib.add\n    print(f(1, 2))\n    print(lib.Point{x: 1})\n}\n";
+        // `f := lib.add`に型注釈を足したのは、このテストのレジストリが`type_of_value`を
+        // 持たないため`lib.add`がANYになり、milestone 65でTS版と同じ規則になった
+        // `cannot-infer-type`が出るから。実CLIではレジストリが埋まるので出ない
+        // (`tests/parity/`の複数パッケージのケースで実測済み)
         assert!(run(ok).is_empty(), "{:?}", run(ok));
     }
 
@@ -6264,10 +6337,10 @@ mod tests {
     #[test]
     fn structメンバーを持たないunionは素通りする() {
         // `type Status = "active" | "banned"`のようなリテラルunionに対する`Status{foo: 1}`は
-        // ANYへフォールバックし、ここでは無診断になる。
-        // **TS版はこの入力に`cannot-infer-type`を出す**——Rust版の`cannot-infer-type`は
-        // 空配列リテラル限定(milestone 33)なので、これは既知の検出漏れ
-        // (docs/handoff.md「残っている検出漏れ」節に記載)
-        assert_eq!(check("type Status = \"active\" | \"banned\"\nfn main() {\n    s := Status{foo: 1}\n    print(s)\n}\n"), vec![]);
+        // ANYへフォールバックする。**TS版はこの入力に`cannot-infer-type`を出す**ので、
+        // milestone 65で規則をTS版に揃えてからは一致する(それまでは既知の検出漏れだった)
+        let d = check("type Status = \"active\" | \"banned\"\nfn main() {\n    s := Status{foo: 1}\n    print(s)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::CannotInferType);
     }
 }
