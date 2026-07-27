@@ -1,0 +1,5 @@
+error type E = { kind: "a" } | int
+
+fn main() {
+	print(1)
+}

@@ -1,0 +1,5 @@
+error type E = Bogus
+
+fn main() {
+	print(1)
+}

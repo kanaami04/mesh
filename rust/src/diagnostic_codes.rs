@@ -115,6 +115,8 @@ diagnostic_codes! {
     UnknownType => "unknown-type",
     AnyTypeRemoved => "any-type-removed",
     TypeAliasCycle => "type-alias-cycle",
+    ErrorTypeMustBeStruct => "error-type-must-be-struct",
+    ErrorTypeAliasesExisting => "error-type-aliases-existing",
     DeferRequiresCall => "defer-requires-call",
     NotCallable => "not-callable",
 }

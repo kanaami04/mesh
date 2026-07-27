@@ -3761,15 +3761,34 @@
                 自己参照union`Tree`・union引数・unionフィールド・`Status`型alias)。
                 `mise run parity` 96ファイルで誤検知0件、**検出漏れが2件→1件**に減った。
                 コーパスに7ケース追加(66→73)。テスト609→610件、clippyクリーン。
+        - [x] **milestone 57: `error type`の形の検査**
+              ✅ 2026-07-27実装。診断コード69→71種(`error-type-must-be-struct` /
+              `error-type-aliases-existing`)。**これで`mise run parity`の差が0件になった**
+              (102ファイルで検出漏れも誤検知も無い)。
+              - **既存の名前付き型にタグを付けるのを拒否する**のが本質。許すとその型が使われる
+                他の場所すべてに`is_error_type`が漏れ、`?`/`or`の伝播対象が意図せず広がる。
+              - **ソースのTypeNodeを見る**のが要点。「`{...}`と書いたか既存の名前を書いたか」は
+                **構文にしか現れない**——解決してしまうとどちらも`Type::Struct`になる。
+                checker.rs側の`tag_error_union`も同じ判定をしているが、あちらは診断を出さず
+                まとめて`Err`にする最小リゾルバなので、2コードに分けるのはfull_checkerの仕事。
+              - **実測で2回直した**: (1)未宣言の名前(`error type E = Bogus`)は
+                `aliases-existing`ではなく**`must-be-struct`**——TS版が未知の型をANYへ解決する
+                ため。危うく**違う診断コード**を出すところだった。(2)その文言も`got any`で
+                揃える必要があった(`got Bogus`になっていた)。
+              - **検証**: プローブ12本(素のalias形・既存error struct・既存struct混在・
+                非struct混在・正常なunion形・単体error struct・普通のunion・重複メンバー・
+                未宣言名・pkg修飾メンバー・`?`/`or`伝播2種)。
+                `mise run parity` **102ファイルで差0件**、コーパスに6ケース追加(73→79)。
+                テスト610→611件、clippyクリーン。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-27時点、milestone 53まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-27時点、milestone 57まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 69種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 71種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

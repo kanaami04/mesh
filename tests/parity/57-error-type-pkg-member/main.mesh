@@ -1,0 +1,7 @@
+import "lib"
+
+error type E = lib.Item
+
+fn main() {
+	print(1)
+}

@@ -1,0 +1,9 @@
+error struct Bad {
+	msg: string
+}
+
+error type E = Bad
+
+fn main() {
+	print(1)
+}

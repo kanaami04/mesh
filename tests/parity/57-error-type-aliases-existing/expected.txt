@@ -1,0 +1,3 @@
+main.mesh:5:7: error[error-type-aliases-existing]: error type 'E' can't tag the existing type 'Bad' — use an inline struct shape ({ ... }) or declare a fresh 'error struct Bad { ... }' instead
+  error type E = Bad
+        ^

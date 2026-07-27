@@ -1,0 +1,3 @@
+main.mesh:3:7: error[error-type-aliases-existing]: error type 'E' can't tag the existing type 'lib.Item' — use an inline struct shape ({ ... }) or declare a fresh 'error struct lib.Item { ... }' instead
+  error type E = lib.Item
+        ^

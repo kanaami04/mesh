@@ -1,0 +1,6 @@
+main.mesh:1:16: error[unknown-type]: unknown type 'Bogus'
+  error type E = Bogus
+                 ^
+main.mesh:1:7: error[error-type-must-be-struct]: error type 'E' members must be struct-shaped (like a discriminated union) — got any
+  error type E = Bogus
+        ^

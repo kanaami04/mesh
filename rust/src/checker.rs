@@ -480,6 +480,9 @@ pub fn check_struct_type_field_names(node: &TypeNode) -> Result<(), String> {
 // 等しく失敗を表す」——discriminated unionの各バリアントがそれぞれ別の種類の失敗、
 // という設計)。診断を出さない設計なので、TS版の2つの診断(`error-type-must-be-struct`/
 // `error-type-aliases-existing`)はまとめて明確なErrにする
+// **診断はfull_checker側の`check_error_type_members`が出す**(milestone 57)——TS版は
+// `error-type-must-be-struct`と`error-type-aliases-existing`の2コードに分けるが、
+// こちらは診断を出さない最小リゾルバなのでまとめて`Err`にする
 fn tag_error_union(name: &str, source_members: &[TypeNode], resolved: Type) -> Result<Type, String> {
     if !source_members.iter().all(|m| matches!(m, TypeNode::StructType { .. })) {
         return Err(format!(

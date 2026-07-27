@@ -420,6 +420,83 @@ enum AliasState {
 // 本体の中から参照を辿るときは**その参照の位置**を渡す。`type A = A | int`が宣言位置(1:1)、
 // `type A = B | int` / `type B = A | string`が`B`の参照位置(1:10)で報告されるのは
 // この使い分けの結果(両CLIで実測して確認)
+// `error type X = ...` のメンバーが「このエイリアス専用に今まさに作られたstruct形」かを見る
+// (milestone 57。TS版`types-resolve.ts`の`tagErrorMembers`の診断部分)。
+// **既存の名前付き型にタグを付けるのは拒否する**——そうするとその型が使われる他の場所すべてに
+// `is_error_type`が漏れてしまう。`?`/`or`の伝播対象が意図せず広がるので、TS版はここを厳密に弾く。
+//
+// **ソースのTypeNodeを見る**のが要点(解決済みの型ではなく)。`{ ... }`と書かれたか、
+// 既存の名前を書いたかは構文にしか現れない——解決してしまうとどちらも`Type::Struct`になる。
+// checker.rs側の`tag_error_union`も同じ判定をしているが、あちらは診断を出さず
+// まとめて`Err`にする最小リゾルバなので、TS版と同じ2コードに分けるのはこちらの仕事
+fn check_error_type_members(ctx: &mut FullCheckerCtx, decl_name: &str, members: &[TypeNode], pos: Pos) {
+    for m in members {
+        match m {
+            // 無名`{...}`= このエイリアス専用に作られた形。正当
+            TypeNode::StructType { .. } => {}
+            // 既存の名前付き型への参照。pkg修飾も同じ(他パッケージの型を勝手にタグ付けできない)。
+            // **未宣言の名前は除く**——TS版は未知の型名をANYへ解決するので、
+            // 「既存の型にタグを付けようとした」ではなく「struct形でない」側の診断になる
+            // (`error type E = Bogus` で実測。違う診断コードを出すところだった)
+            TypeNode::Name { name, pkg, .. }
+                if pkg.is_some() || (!is_builtin_type_name(name) && ctx.declared_types.contains(name)) =>
+            {
+                let shown = match pkg {
+                    Some(p) => format!("{p}.{name}"),
+                    None => name.clone(),
+                };
+                ctx.error(
+                    pos,
+                    DiagnosticCode::ErrorTypeAliasesExisting,
+                    format!(
+                        "error type '{decl_name}' can't tag the existing type '{shown}' — use an inline struct \
+                         shape ({{ ... }}) or declare a fresh 'error struct {shown} {{ ... }}' instead"
+                    ),
+                );
+            }
+            // 組み込み型・配列・map・関数型など、そもそもstruct形でないもの
+            other => {
+                // **未宣言の名前は`any`と表示する**——TS版は未知の型をANYへ解決してから
+                // `typeToString`するため(実測で文言まで合わせた)
+                let shown = match other {
+                    TypeNode::Name { name, pkg: None, .. } if !is_builtin_type_name(name) => "any".to_string(),
+                    _ => type_node_display(other),
+                };
+                ctx.error(
+                    pos,
+                    DiagnosticCode::ErrorTypeMustBeStruct,
+                    format!("error type '{decl_name}' members must be struct-shaped (like a discriminated union) — got {shown}"),
+                );
+            }
+        }
+    }
+}
+
+// 組み込み型名か(`error type E = int`の判定用)
+fn is_builtin_type_name(name: &str) -> bool {
+    matches!(name, "int" | "float" | "string" | "bool" | "void" | "error" | "none" | "closed" | "any")
+}
+
+// 診断に出す型の綴り。TS版は解決済みの型を`typeToString`するが、ここでは解決前のTypeNodeしか
+// 無いので構文から組み立てる——**組み込み型はそのまま名前が出る**ので実用上一致する
+fn type_node_display(node: &TypeNode) -> String {
+    match node {
+        TypeNode::Name { name, pkg: Some(p), .. } => format!("{p}.{name}"),
+        TypeNode::Name { name, .. } => name.clone(),
+        TypeNode::Array { elem, .. } => format!("{}[]", type_node_display(elem)),
+        TypeNode::Chan { elem, .. } => format!("chan<{}>", type_node_display(elem)),
+        TypeNode::MapType { key, value, .. } => format!("map<{}, {}>", type_node_display(key), type_node_display(value)),
+        TypeNode::Literal { value, .. } => format!("{value:?}"),
+        TypeNode::FnType { params, ret, .. } => {
+            let ps = params.iter().map(type_node_display).collect::<Vec<_>>().join(", ");
+            let r = ret.as_deref().map(type_node_display).unwrap_or_else(|| "void".to_string());
+            format!("fn({ps}) {r}")
+        }
+        TypeNode::Union { members, .. } => members.iter().map(type_node_display).collect::<Vec<_>>().join(" | "),
+        TypeNode::StructType { .. } => "{ ... }".to_string(),
+    }
+}
+
 fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
     if let Some(st) = ctx.alias_state.get(name) {
         return *st;
@@ -453,6 +530,9 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
                 ctx.alias_state.insert(name.to_string(), AliasState::Any);
                 return AliasState::Any;
             }
+            if decl.is_error {
+                check_error_type_members(ctx, name, members, pos);
+            }
             ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
             AliasState::Resolved
         }
@@ -466,6 +546,11 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
             ctx.resolving_plain.insert(name.to_string());
             walk_type_ref(ctx, other);
             ctx.resolving_plain.remove(name);
+            if decl.is_error {
+                // 素のalias形は**メンバーが1つのunion**として扱う(TS版`tagErrorMembers`も
+                // `t.kind === "union" ? t.members : [t]`で同じ扱い)
+                check_error_type_members(ctx, name, std::slice::from_ref(other), pos);
+            }
             ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
             AliasState::Resolved
         }
@@ -475,7 +560,9 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
 // 型宣言の本体を歩く。**裸の名前参照だけ**が解決状態を返す(それ以外は必ず`Resolved`)——
 // struct/array/map/chan/関数型に包まれた参照は循環にならない、というTS版の区別そのもの。
 // あわせて`unknown-type`/`any-type-removed`もここで出す(TS版も`resolveType`が
-// 解決しながら報告する。型宣言の中の診断はこの経路だけから出る)
+// 解決しながら報告する)。**型宣言の中の診断はこの歩きと`resolve_alias`から出る**
+// ——`type-alias-cycle`(milestone 43)と`error type`の形の2診断(milestone 57)は
+// メンバー全体を見ないと判定できないので`resolve_alias`側にある
 // パッケージが持つシンボルとその可視性(milestone 49)。TS版`CheckerCtx.registry`の
 // `PackageSymbolEntry`に相当する——**未exportのシンボルも載せる**のが要点で、そうしないと
 // 「無い」と「あるがexportされていない」を区別できず`not-exported`が出せない
@@ -5219,6 +5306,38 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn error_typeの形が検査される() {
+        // milestone 57: TS版`tagErrorMembers`の2診断。**ソースのTypeNodeを見る**のが要点で、
+        // 「`{...}`と書いたか既存の名前を書いたか」は構文にしか現れない
+        for (src, code) in [
+            ("error type Oops = int\n\nfn main() {\n    print(1)\n}\n", DiagnosticCode::ErrorTypeMustBeStruct),
+            ("error type E = { kind: \"a\" } | int\n\nfn main() {\n    print(1)\n}\n", DiagnosticCode::ErrorTypeMustBeStruct),
+            (
+                "error struct Bad {\n    msg: string\n}\n\nerror type E = Bad\n\nfn main() {\n    print(1)\n}\n",
+                DiagnosticCode::ErrorTypeAliasesExisting,
+            ),
+            (
+                "struct Plain {\n    n: int\n}\n\nerror type E = { kind: \"a\" } | Plain\n\nfn main() {\n    print(1)\n}\n",
+                DiagnosticCode::ErrorTypeAliasesExisting,
+            ),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // **未宣言の名前は`aliases-existing`ではなく`must-be-struct`**——TS版が未知の型を
+        // ANYへ解決するため。文言も`got any`で揃える(実測で1回直した)
+        let unknown = check("error type E = Bogus\n\nfn main() {\n    print(1)\n}\n");
+        let codes: Vec<_> = unknown.iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![DiagnosticCode::UnknownType, DiagnosticCode::ErrorTypeMustBeStruct], "{codes:?}");
+        assert!(unknown[1].message.ends_with("got any"), "{}", unknown[1].message);
+        // 正当な形は素通り(無名`{...}`のunion・単体のerror struct・普通のunion)
+        assert!(check("error type E = { kind: \"a\", n: int } | { kind: \"b\" }\n\nfn main() {\n    print(1)\n}\n").is_empty());
+        assert!(check("error struct Bad {\n    msg: string\n}\n\nfn main() {\n    print(1)\n}\n").is_empty());
+        assert!(check("type Plain = { kind: \"a\" } | { kind: \"b\" }\n\nfn main() {\n    print(1)\n}\n").is_empty());
     }
 
     #[test]
