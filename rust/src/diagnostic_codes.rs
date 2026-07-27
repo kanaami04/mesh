@@ -105,6 +105,7 @@ diagnostic_codes! {
     RangeArity => "range-arity",
     CallbackSignatureMismatch => "callback-signature-mismatch",
     CannotInferType => "cannot-infer-type",
+    GenericInferenceFailed => "generic-inference-failed",
     GenericTypeParamConflict => "generic-type-param-conflict",
     GenericTypeParamNotInferable => "generic-type-param-not-inferable",
     NotAChannel => "not-a-channel",

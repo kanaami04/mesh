@@ -1,0 +1,13 @@
+struct Box {
+	v: int
+}
+
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn main() {
+	b := identity(Box{v: 1})
+	print(b.v)
+	print(b.nope)
+}

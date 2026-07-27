@@ -1,0 +1,23 @@
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn firstOf<T>(xs: T[]) T {
+	return xs[0]
+}
+
+fn apply<T>(cb: fn(T) T, v: T) T {
+	return cb(v)
+}
+
+fn keyList<K, V>(m: map<K, V>) int {
+	return len(m)
+}
+
+fn main() {
+	m := map<string, int>{"a": 1}
+	print(identity(1))
+	print(firstOf(["a"]))
+	print(apply(fn(n: int) int { return n }, 5))
+	print(keyList(m))
+}

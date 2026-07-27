@@ -1,0 +1,3 @@
+main.mesh:12:8: error[unknown-field]: Box has no field 'nope' (fields: v)
+  	print(b.nope)
+  	      ^

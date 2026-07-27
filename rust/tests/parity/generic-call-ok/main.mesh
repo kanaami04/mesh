@@ -1,0 +1,27 @@
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn first<T>(xs: T[]) T {
+	return xs[0]
+}
+
+fn unwrap<T>(x: T | none) T {
+	return identity(x)
+}
+
+fn apply<T>(cb: fn(T) T, v: T) T {
+	return cb(v)
+}
+
+fn keys<K, V>(m: map<K, V>) K[] {
+	return []
+}
+
+fn main() {
+	print(identity(1))
+	print(first(["a"]))
+	print(unwrap(3))
+	print(apply(fn(n: int) int { return n }, 5))
+	print(len(keys({"a": 1})))
+}

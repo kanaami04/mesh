@@ -409,7 +409,9 @@ fn explainは知らないコードをエラーにする() {
         out.stderr,
         "error: unknown diagnostic code 'no-such-code' (run 'mesh explain' with no code to list them all)\n"
     );
-    // TS版には説明があるが Rust版がまだ出さない診断も同じ扱い（実装済みの範囲だけ説明する）
-    // milestone 47で`narrow-required`を移植したので未移植の`generic-inference-failed`へ差し替え
-    assert_eq!(mesh(&["explain", "generic-inference-failed"]).code, 1);
+    // **milestone 62でTS版の107種を全部移植したので、「未移植だから説明しない」例はもう作れない**
+    // (この行はmilestone 47で`narrow-required`→`generic-inference-failed`と差し替えてきた)。
+    // 代わりにRust固有の安全弁——TS版に対応する説明文が無い`interpolation-too-deep`——で
+    // 「一覧の外は説明しない」ことを固定する
+    assert_eq!(mesh(&["explain", "interpolation-too-deep"]).code, 1);
 }
