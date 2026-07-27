@@ -26,7 +26,13 @@ fn mesh_bin() -> PathBuf {
     p.join("mesh")
 }
 
+// **`MESH_TEST_JS_RUNTIME`で明示指定できる**——bunとnodeでHTTPの応答形式が違い
+// (nodeはchunked transfer-encodingで返す)、手元がbunだと**CIのnodeでだけ落ちる**
+// 差を踏む。実際にこのテストの初版がそれで落ちた
 fn js_runtime() -> Option<&'static str> {
+    if let Ok(explicit) = std::env::var("MESH_TEST_JS_RUNTIME") {
+        return ["bun", "node"].into_iter().find(|c| *c == explicit);
+    }
     ["bun", "node"]
         .into_iter()
         .find(|c| Command::new(c).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()))
@@ -131,10 +137,35 @@ fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: 
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
     let status: u16 = status_line.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("ステータス行が読めない: {status_line:?}"));
-    let headers = lines
-        .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
-        .collect();
-    Res { status, headers, body: body.to_string() }
+    let headers: Vec<(String, String)> =
+        lines.filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))).collect();
+    // **chunked transfer-encodingを解く**。`Connection: close`を送ってもサーバーは
+    // chunkedで返してよく、実際にnodeはそうする(bunは素で返すため手元では素通りし、
+    // **CIのnodeで初めて落ちた**)。ここを解かないとボディに長さ行が混ざる
+    let chunked = headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked"));
+    let body = if chunked { decode_chunked(body) } else { body.to_string() };
+    Res { status, headers, body }
+}
+
+// `<長さ(16進)>\r\n<データ>\r\n` の繰り返しを、長さ0の塊まで読む
+fn decode_chunked(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some((size_line, after)) = rest.split_once("\r\n") {
+        // 拡張(`;`以降)は捨てる
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(size) = usize::from_str_radix(size_hex, 16) else { break };
+        if size == 0 {
+            break;
+        }
+        if after.len() < size {
+            out.push_str(after); // 途中で切れている(想定外だが握りつぶさず入るだけ入れる)
+            break;
+        }
+        out.push_str(&after[..size]);
+        rest = after[size..].strip_prefix("\r\n").unwrap_or(&after[size..]);
+    }
+    out
 }
 
 fn get(port: u16, path: &str) -> Res {
