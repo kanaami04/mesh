@@ -1,0 +1,15 @@
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn first<T>(xs: T[]) T {
+	return xs[0]
+}
+
+fn pair<A, B>(a: A, b: B) A {
+	return a
+}
+
+fn main() {
+	print(identity())
+}

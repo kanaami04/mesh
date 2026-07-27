@@ -155,12 +155,13 @@ mod tests {
     }
 
     #[test]
-    fn 未実装のコードは説明しない() {
-        // TS版には説明文があるが、Rust版のfull_checkerがまだ出さない診断
-        // (milestone 47で`narrow-required`を移植したので、未移植の`generic-inference-failed`へ
-        // 差し替えた。**モデル化が進むとこの例は毎回古くなる**——ここが落ちたら
-        // 「その診断を移植したから」であって退行ではない)
-        assert_eq!(explanation("generic-inference-failed"), None);
+    fn 存在しないコードは説明しない() {
+        // **milestone 62でTS版の107種を全部移植したので、「未実装だから説明しない」例は
+        // もう作れない**(この関数はもともと`narrow-required`→`generic-inference-failed`と
+        // 移植のたびに差し替えてきた)。残る不変条件は「TS版に無いコードは説明しない」だけ。
+        // `interpolation-too-deep`はRust固有の安全弁(parser.rsのMAX_INTERP_DEPTH)で、
+        // TS版に対応する説明文が無い——`DiagnosticCode`へ載せない理由そのもの
+        assert_eq!(explanation("interpolation-too-deep"), None);
         assert_eq!(explanation("no-such-code"), None);
     }
 

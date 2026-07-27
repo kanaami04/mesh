@@ -1,0 +1,3 @@
+main.mesh:14:8: error[generic-inference-failed]: cannot infer type parameter(s) 'T' of 'identity' from these arguments
+  	print(identity())
+  	      ^

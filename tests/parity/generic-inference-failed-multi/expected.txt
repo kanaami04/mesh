@@ -1,0 +1,3 @@
+main.mesh:18:8: error[generic-inference-failed]: cannot infer type parameter(s) 'K', 'V' of 'keyList' from these arguments
+  	print(keyList(5))
+  	      ^

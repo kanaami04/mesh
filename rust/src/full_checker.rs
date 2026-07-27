@@ -114,6 +114,11 @@ pub struct FullCheckerCtx {
     // `check_type_ann`が`unknown-type`の誤検知を出さないために要る——TS版の
     // `isTypeParam(ctx, name)`に対応する
     type_params: Vec<String>,
+    // milestone 62: ジェネリック関数の**型パラメータ入りシグネチャ**(TS版`ctx.genericFns`)。
+    // `scopes[0]`側は従来どおりANYのまま——ここは`name(args)`という**直接呼び出しの経路
+    // だけ**が引く別表で、値として渡された場合(`f := identity`)は今までどおり対象外
+    // (TS版はそのケースで型パラメータが残ったまま代入不可になるが、こちらは検出漏れ側)
+    generic_fns: std::collections::HashMap<String, (Vec<String>, Type)>,
 }
 
 impl FullCheckerCtx {
@@ -130,6 +135,7 @@ impl FullCheckerCtx {
             alias_state: HashMap::new(),
             resolving_plain: std::collections::HashSet::new(),
             type_params: Vec::new(),
+            generic_fns: std::collections::HashMap::new(),
         }
     }
 
@@ -1005,6 +1011,14 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             {
                 return infer_builtin_call(ctx, name, args, *pos);
             }
+            // milestone 62: ジェネリック関数の**直接呼び出し**(TS版`inferCall`の
+            // `ctx.genericFns.has`分岐。組み込みinterceptの直後という順序もTS版どおり)。
+            // shadowingは禁止なので名前だけで判定できる
+            if let Expr::Ident { name, .. } = &**callee
+                && ctx.generic_fns.contains_key(name)
+            {
+                return infer_generic_call(ctx, name, args, *pos);
+            }
             // milestone 30: メソッド呼び出し(`u.method(args)`)。calleeがMemberで
             // targetがstruct、nameがフィールドでなければメソッドとして解決する。ここで
             // interceptしないと、bareのフィールドアクセス(infer_member)がメソッド名を
@@ -1603,7 +1617,8 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
             // milestone 47: struct/unionのどちらでもない名前での構築(`type S = string`に
             // 対する`S{...}`)はTS版が`not-a-struct`で弾く。**素のaliasとして登録されている
             // 名前だけ**を対象にする——未宣言の名前(`Bogus{...}`)はTS版では`unknown-type`
-            // という別の診断になり(実測で確認)、そちらは未移植なので黙って諦める
+            // という別の診断になるので、ここで`not-a-struct`を出すと診断コードが食い違う
+            // (`unknown-type`自体は別経路が出す。milestone 62の点検で両者の一致を実測済み)
             None => {
                 // **ANYへ解決したaliasは免除する**——TS版`expressions.ts`も
                 // `if (t.kind === "any") return ANY;`で同じ免除を先に置いている
@@ -1636,7 +1651,8 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
     // つまりタグ不足(`compute_discriminant_tag`のErr)等で解決に失敗したunionは
     // **レジストリには居るがbodyだけ空**という状態で残る——ここで拾えるのはそのケース。
     // TS版も宣言時に`discriminated-union-tag-required`で報告済みなので二重報告しない
-    // (full_checkerは型宣言側の診断が未移植なので、実際には無診断=検出漏れになる。
+    // (full_checker側も宣言時に同じ診断を出す——milestone 62の点検で実測。
+    // `tests/parity/59-union-tag-required/`が記録している)。
     // なおresolve_type_declsは最初のErrで走査全体を打ち切るため、それ以降に宣言された型も
     // 巻き添えで未登録になる——check_program冒頭のコメントに記した既存の限界)
     let ub = body.get()?;
@@ -3080,6 +3096,166 @@ fn type_node_contains_param(node: &TypeNode, name: &str) -> bool {
     }
 }
 
+// ジェネリック関数のシグネチャを`Type::TypeParam`入りで組む(milestone 62)。
+// 通常の`fn_signature`が使う`resolve_type_ann`は型パラメータ名を「未知の型」としてANYへ
+// 落とすので、推論に使うにはここで型パラメータだけを先に拾う必要がある。
+//
+// **組み込み型名を型パラメータにした場合は拾わない**——TS版も`fn f<int>(x: int)`の`x`は
+// 組み込みのintのままで、型パラメータでは上書きされない(milestone 61で実測済み。
+// `validate_type_params`が同じ理由で分岐しているのと対になっている)
+fn generic_fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
+    let names: Vec<&str> = f.type_params.iter().map(String::as_str).filter(|n| !BUILTIN_TYPE_NAMES.contains(n)).collect();
+    let params = f.params.iter().map(|p| resolve_with_type_params(tc, &p.type_node, &names)).collect();
+    let ret = f.ret.as_ref().map(|r| resolve_with_type_params(tc, r, &names)).unwrap_or(VOID);
+    Type::Fn { params, ret: Box::new(ret) }
+}
+
+// `resolve_type_ann`と同じ形を辿りつつ、型パラメータ名だけ`Type::TypeParam`にする。
+// 合成の規則(fn型/unionは中身が1つでもANYなら全体をANY)も`resolve_type_ann`と揃える
+// ——`Type::TypeParam`自体はANYではないので、`fn(T) int`や`T | error`はそのまま残る
+fn resolve_with_type_params(tc: &crate::checker::CheckerCtx, node: &TypeNode, names: &[&str]) -> Type {
+    match node {
+        TypeNode::Name { name, pkg: None, .. } if names.contains(&name.as_str()) => Type::TypeParam(name.clone()),
+        TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_with_type_params(tc, elem, names))),
+        TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_with_type_params(tc, elem, names))),
+        TypeNode::MapType { key, value, .. } => Type::Map {
+            key: Box::new(resolve_with_type_params(tc, key, names)),
+            value: Box::new(resolve_with_type_params(tc, value, names)),
+        },
+        TypeNode::FnType { params, ret, .. } => {
+            let ps: Vec<Type> = params.iter().map(|p| resolve_with_type_params(tc, p, names)).collect();
+            let r = ret.as_ref().map(|r| resolve_with_type_params(tc, r, names)).unwrap_or(VOID);
+            if ps.iter().any(types::contains_any) || types::contains_any(&r) { ANY } else { Type::Fn { params: ps, ret: Box::new(r) } }
+        }
+        TypeNode::Union { members, .. } => {
+            let ms: Vec<Type> = members.iter().map(|m| resolve_with_type_params(tc, m, names)).collect();
+            if ms.iter().all(safe_to_compare) { types::union_of(ms) } else { ANY }
+        }
+        _ => resolve_type_ann(tc, node),
+    }
+}
+
+// 型パラメータが型のどこかに現れるか(TS版`generics.ts`の`containsAnyTypeParam`)。
+// unionのどのメンバーが型パラメータ側かを仕分けるのに使う
+fn contains_any_type_param(t: &Type) -> bool {
+    match t {
+        Type::TypeParam(_) => true,
+        Type::Array(e) | Type::Chan(e) => contains_any_type_param(e),
+        Type::Map { key, value } => contains_any_type_param(key) || contains_any_type_param(value),
+        Type::Fn { params, ret } => params.iter().any(contains_any_type_param) || contains_any_type_param(ret),
+        Type::Union { body } => body.get().is_some_and(|b| b.members.iter().any(contains_any_type_param)),
+        _ => false,
+    }
+}
+
+// 呼び出し引数から型パラメータを推論する(TS版`generics.ts`の`unifyTypeParam`)。
+// paramType(Tを含みうる)とarg_ty(検査済みの具体型)を並行に辿り、typeParamに**初めて**
+// 出会った位置の実引数型をそのまま束縛する。2回目以降の出現は上書きしない——食い違いは
+// 後段の`check_args_against`が通常の代入不可エラーとして報告する
+fn unify_type_param(param: &Type, arg: &Type, bindings: &mut Vec<(String, Type)>) {
+    match (param, arg) {
+        (Type::TypeParam(n), _) => {
+            if !bindings.iter().any(|(k, _)| k == n) {
+                bindings.push((n.clone(), arg.clone()));
+            }
+        }
+        (Type::Array(pe), Type::Array(ae)) | (Type::Chan(pe), Type::Chan(ae)) => unify_type_param(pe, ae, bindings),
+        (Type::Map { key: pk, value: pv }, Type::Map { key: ak, value: av }) => {
+            unify_type_param(pk, ak, bindings);
+            unify_type_param(pv, av, bindings);
+        }
+        (Type::Fn { params: pp, ret: pr }, Type::Fn { params: ap, ret: ar }) => {
+            for (p, a) in pp.iter().zip(ap.iter()) {
+                unify_type_param(p, a, bindings);
+            }
+            unify_type_param(pr, ar, bindings);
+        }
+        (Type::Union { body: pb }, _) => {
+            // `T | error`のようなunionを実引数の型と照合する。**arg側がunionでなくても
+            // 1メンバーのunionとして扱う**——`T | none`に素の値を渡すのは正当な呼び方で、
+            // union同士のときだけ推論できるのでは足りない(TS版のコメントどおり)。
+            // param側の「型パラメータを含まないメンバー」はarg側の対応するメンバーを
+            // 消費するだけ(値自体の食い違いは後段のcheck_args_againstに任せる)
+            let Some(pms) = pb.get().map(|b| &b.members) else { return };
+            let empty = Vec::new();
+            let arg_members: Vec<&Type> = match arg {
+                Type::Union { body } => body.get().map(|b| &b.members).unwrap_or(&empty).iter().collect(),
+                other => vec![other],
+            };
+            let mut used = vec![false; arg_members.len()];
+            for cm in pms.iter().filter(|m| !contains_any_type_param(m)) {
+                if let Some(i) = arg_members.iter().enumerate().position(|(i, am)| !used[i] && types::type_equals(cm, am)) {
+                    used[i] = true;
+                }
+            }
+            let remaining: Vec<Type> = arg_members.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, m)| (*m).clone()).collect();
+            let var_members: Vec<&Type> = pms.iter().filter(|m| contains_any_type_param(m)).collect();
+            if var_members.len() == 1 && !remaining.is_empty() {
+                let bound = if remaining.len() == 1 { remaining[0].clone() } else { types::union_of(remaining) };
+                unify_type_param(var_members[0], &bound, bindings);
+            } else if var_members.len() > 1 {
+                // 型パラメータを含むメンバーが複数ある稀なケース: 順番に対応させるベストエフォート
+                for (vm, r) in var_members.iter().zip(remaining.iter()) {
+                    unify_type_param(vm, r, bindings);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// 集めた束縛を型に適用してtypeParamを具体型へ置き換える(TS版`substituteTypeParams`)。
+// 束縛が無い型パラメータはANYになる——`infer_generic_call`が先に
+// `generic-inference-failed`を出して降りるので、通常はここへ来ない
+fn substitute_type_params(t: &Type, bindings: &[(String, Type)]) -> Type {
+    match t {
+        Type::TypeParam(n) => bindings.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap_or(ANY),
+        Type::Array(e) => Type::Array(Box::new(substitute_type_params(e, bindings))),
+        Type::Chan(e) => Type::Chan(Box::new(substitute_type_params(e, bindings))),
+        Type::Map { key, value } => Type::Map {
+            key: Box::new(substitute_type_params(key, bindings)),
+            value: Box::new(substitute_type_params(value, bindings)),
+        },
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.iter().map(|p| substitute_type_params(p, bindings)).collect(),
+            ret: Box::new(substitute_type_params(ret, bindings)),
+        },
+        Type::Union { body } => match body.get() {
+            Some(b) => types::union_of(b.members.iter().map(|m| substitute_type_params(m, bindings)).collect()),
+            None => t.clone(),
+        },
+        _ => t.clone(),
+    }
+}
+
+// ジェネリック関数の直接呼び出し(TS版`generics.ts`の`inferGenericCall`)。
+// 引数から型パラメータを推論 → シグネチャへ代入 → 通常の呼び出しと同じ照合に合流する。
+//
+// **推論に失敗したら`generic-inference-failed`を出してANYで降りる**のが要点で、
+// `check_args_against`へ進まないので`argument-count`は出ない——引数が足りない呼び出し
+// (`identity()`)でTS版が出すのは`argument-count`ではなく`generic-inference-failed`。
+// 逆に引数が多い場合(`identity(1, 2, 3)`)は束縛が全部そろうので`argument-count`になる。
+// どちらも実測で確認済み
+fn infer_generic_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: Pos) -> Type {
+    let Some((type_params, Type::Fn { params, ret })) = ctx.generic_fns.get(name).cloned() else {
+        return ANY; // 到達しないはず(登録時にFn型だけ入れる)
+    };
+    let arg_tys: Vec<Type> = args.iter().map(|a| infer_expr_single(ctx, a)).collect();
+    let mut bindings: Vec<(String, Type)> = Vec::new();
+    for (p, a) in params.iter().zip(arg_tys.iter()) {
+        unify_type_param(p, a, &mut bindings);
+    }
+    let missing: Vec<&String> = type_params.iter().filter(|p| !bindings.iter().any(|(k, _)| &k == p)).collect();
+    if !missing.is_empty() {
+        let list = missing.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", ");
+        ctx.error(pos, DiagnosticCode::GenericInferenceFailed, format!("cannot infer type parameter(s) {list} of '{name}' from these arguments"));
+        return ANY;
+    }
+    let param_tys: Vec<Type> = params.iter().map(|p| substitute_type_params(p, &bindings)).collect();
+    check_args_against(ctx, pos, args, &arg_tys, &param_tys);
+    substitute_type_params(&ret, &bindings)
+}
+
 fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
     let params = f.params.iter().map(|p| resolve_type_ann(tc, &p.type_node)).collect();
     let ret = f.ret.as_ref().map(|r| resolve_type_ann(tc, r)).unwrap_or(VOID);
@@ -3098,10 +3274,10 @@ fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
 // 揃えないと引数照合(milestone 31)が誤検知する(milestone 29/30と同じ配慮)。
 // **フィールドが勝つ**のは参照時のlookup順(infer_member/Callアームがフィールドを先に見る)
 // だが、そもそも同名のフィールドとメソッドはここでmethod-field-conflictとして弾かれる。
-// **既知の限界**: 未知の型名のレシーバ(`fn (y: Bogus) f()`)は`resolve_type_node`が
-// 「空フィールドの殻struct」へフォールバックするため、TS版が出す`unknown-type`+
-// `invalid-receiver-type`のどちらも出ない(full_checkerは型注釈のunknown-type検査自体が
-// 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり。下記のlookup_structガード参照)
+// 未知の型名のレシーバ(`fn (y: Bogus) f()`)については、milestone 42で型注釈の
+// `unknown-type`検査が入って以降**TS版と完全に一致する**(`unknown-type`が2回 +
+// `invalid-receiver-type`が1回、順序まで同じ。milestone 62の点検で実測)。
+// 下記のlookup_structガードはその上で「殻structをレシーバとして通さない」ためにある
 fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     let Some(recv) = &f.receiver else { return };
     // TS版`declareMethod`と同じ順序: レシーバ型の解決(=ここで`unknown-type`が出る)→
@@ -3444,14 +3620,13 @@ pub fn check_package_shared(
     // 定数を検査+登録し、最後に関数本体を検査する。
     // milestone 26以降、非ジェネリックの自由関数は`fn_signature`でシグネチャ付き
     // (`Type::Fn`)で登録し、呼び出し側の個数・型照合(argument-count/type-mismatch)を
-    // 効かせる。**ジェネリック関数(`type_params`有り)だけは従来どおりANYで登録**——
-    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で
-    // 扱い、引数不足なら`generic-inference-failed`を出す。full_checkerはこの推論を
-    // 未実装なので、`Type::Fn`で登録するとTS版と違って`argument-count`を出してしまう
-    // (診断コードのTS非互換)。ANY登録で呼び出しを丸ごと対象外にしておく。
-    // **milestone 61で宣言時の検査だけは入った**(`validate_type_params`)——型パラメータ名の
-    // 衝突と推論可能性はシグネチャを見るだけで判定できるので、呼び出し時の推論とは独立に移植できる。
-    // 未移植なのは呼び出し側の`generic-inference-failed`のみ。
+    // 効かせる。**ジェネリック関数(`type_params`有り)だけは`scopes[0]`へANYで登録する**——
+    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で扱うので、
+    // ここで`Type::Fn`(型パラメータ入り)を配ると呼び出し側の照合がTS版と食い違う。
+    // milestone 62でその別経路を`generic_fns`+`infer_generic_call`として移植した:
+    // 直接呼び出し(`name(args)`)は推論を通り、引数不足なら`generic-inference-failed`、
+    // 引数過多なら`argument-count`になる(TS版と同じ)。**値として渡された場合
+    // (`f := identity`)だけはANYのまま**で、TS版が出す代入不可エラーは出ない(検出漏れ側)。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
@@ -3486,6 +3661,10 @@ pub fn check_package_shared(
                 // TS版も型注釈の解決(`fnType`)の直後・`declareBinding`の前に呼ぶ
                 if !f.type_params.is_empty() {
                     validate_type_params(&mut ctx, f);
+                    // milestone 62: 直接呼び出しの推論用に型パラメータ入りシグネチャを覚える
+                    // (TS版`ctx.genericFns.set`と同じ位置)
+                    let sig = generic_fn_signature(&ctx.type_ctx, f);
+                    ctx.generic_fns.insert(f.name.clone(), (f.type_params.clone(), sig));
                 }
                 let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
                 ctx.declare(&f.name, ty, f.pos, false);
@@ -4788,12 +4967,61 @@ mod tests {
     }
 
     #[test]
-    fn ジェネリック関数の呼び出しはargument_count対象外で誤検知しない() {
-        // ジェネリック関数はANY登録なので個数検査されない——TS版は引数不足時に
-        // generic-inference-failedを出すが、full_checkerは型パラメータ推論が未実装のため
-        // 意図的に対象外(argument-countをTS非互換に出してしまうのを避ける)
-        let diags = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    identity(1, 2, 3)\n    print(1)\n}\n");
-        assert_eq!(diags, vec![]);
+    fn ジェネリック呼び出しは引数不足と引数過多で違う診断になる() {
+        // milestone 62で型パラメータ推論が入り、TS版と同じ挙動になった。
+        // **引数不足は`argument-count`ではなく`generic-inference-failed`**——束縛が
+        // そろわない時点で降りるので`check_args_against`まで進まない。逆に引数が多い場合は
+        // 束縛が全部そろうので通常の`argument-count`になる。どちらもTS版で実測済み
+        let head = "fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n";
+        let d = check(&format!("{head}    identity()\n    print(1)\n}}\n"));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::GenericInferenceFailed);
+        assert!(d[0].message.contains("cannot infer type parameter(s) 'T' of 'identity'"), "{d:?}");
+
+        let d = check(&format!("{head}    identity(1, 2, 3)\n    print(1)\n}}\n"));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::ArgumentCount);
+
+        // 正しい呼び出しは何も出さない(誤検知が最大のリスクなので明示的に固定する)
+        let d = check(&format!("{head}    print(identity(1))\n}}\n"));
+        assert_eq!(d, vec![], "{d:?}");
+    }
+
+    #[test]
+    fn 型パラメータはunion_map_配列_関数型の中からも推論される() {
+        // milestone 62。`unify_type_param`が辿る形をTS版`unifyTypeParam`と揃えてあることの固定。
+        // **unionは実引数がunionでなくても1メンバーのunionとして扱う**——`T | none`に素の値を
+        // 渡すのは正当な呼び方で、union同士のときだけ推論できるのでは足りない(TS版のコメント)
+        let cases = [
+            ("fn f<T>(x: T | none) int {\n    return 1\n}\n", "f(1)"),
+            ("fn f<T>(xs: T[]) int {\n    return len(xs)\n}\n", "f([1])"),
+            ("fn f<K, V>(m: map<K, V>) int {\n    return len(m)\n}\n", "f(map<string, int>{\"a\": 1})"),
+            ("fn f<T>(cb: fn(T) T) int {\n    return 1\n}\n", "f(fn(n: int) int { return n })"),
+            ("fn f<T>(c: chan<T>) int {\n    return 1\n}\n", "f(chan<int>(1))"),
+        ];
+        for (decl, call) in cases {
+            let d = check(&format!("{decl}fn main() {{\n    print({call})\n}}\n"));
+            assert!(d.is_empty(), "{call} は推論できるはず: {d:?}");
+        }
+    }
+
+    #[test]
+    fn 推論できない型パラメータは名前を並べて報告する() {
+        // milestone 62。複数落ちたときの文言(`'K', 'V'`)までTS版と一致することを固定する
+        let d = check("fn f<K, V>(m: map<K, V>) int {\n    return len(m)\n}\nfn main() {\n    print(f(5))\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::GenericInferenceFailed);
+        assert!(d[0].message.contains("type parameter(s) 'K', 'V' of 'f'"), "{d:?}");
+    }
+
+    #[test]
+    fn ジェネリック呼び出しの戻り値型は束縛から具体化される() {
+        // milestone 62。`identity("a")`のTは文字列リテラル型に束縛されるので、
+        // その値をintと足すと`invalid-operation`になる(TS版で実測)。
+        // 戻り値がANYのままだとこの診断は出ない——推論が効いていることの証拠
+        let d = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    s := identity(\"a\")\n    print(s + 1)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::InvalidOperation);
     }
 
     #[test]
@@ -5974,8 +6202,11 @@ mod tests {
 
     #[test]
     fn structメンバーを持たないunionは素通りする() {
-        // `type Status = "active" | "banned"`のようなリテラルunionはTS版も無診断で
-        // ANYへフォールバックする(cannot-infer-typeは未移植の別診断)
+        // `type Status = "active" | "banned"`のようなリテラルunionに対する`Status{foo: 1}`は
+        // ANYへフォールバックし、ここでは無診断になる。
+        // **TS版はこの入力に`cannot-infer-type`を出す**——Rust版の`cannot-infer-type`は
+        // 空配列リテラル限定(milestone 33)なので、これは既知の検出漏れ
+        // (docs/handoff.md「残っている検出漏れ」節に記載)
         assert_eq!(check("type Status = \"active\" | \"banned\"\nfn main() {\n    s := Status{foo: 1}\n    print(s)\n}\n"), vec![]);
     }
 }

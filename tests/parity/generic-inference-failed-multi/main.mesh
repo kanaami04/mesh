@@ -1,0 +1,19 @@
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn firstOf<T>(xs: T[]) T {
+	return xs[0]
+}
+
+fn apply<T>(cb: fn(T) T, v: T) T {
+	return cb(v)
+}
+
+fn keyList<K, V>(m: map<K, V>) int {
+	return len(m)
+}
+
+fn main() {
+	print(keyList(5))
+}

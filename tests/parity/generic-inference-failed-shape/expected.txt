@@ -1,0 +1,3 @@
+main.mesh:14:7: error[generic-inference-failed]: cannot infer type parameter(s) 'T' of 'first' from these arguments
+  	x := first(5)
+  	     ^
