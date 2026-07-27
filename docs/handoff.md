@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**68種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜52を消化した
+**現在地**: Rust移植の診断は**69種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜53を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,10 +20,7 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **`builtin-as-value`**(`print(print)`のように組み込み関数を値として参照する形)——
-   milestone 50のcode reviewで未移植と判明。`is_builtin`の分岐に1行足すだけなので、
-   軽い回に単独で入れられる
-2. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側):
+1. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側):
    (a)`has_unregistered_struct`が**ローカルの`struct_types`しか見ない**ため、
    フィールドの宣言型が他パッケージのstructだと値の型検査が丸ごと免除される
    (`lib2.Container{item: 5}`をTS版は弾くがRust版は素通り)——ここが一番効く。
@@ -1168,6 +1165,8 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `Bogus{n: undefinedThing}`の発行順が変わる。**新しい`mise run parity`/`drift`の
      初実戦**で、driftが古いコメントを1件検出し、出力の指示に従ってdocコメントを
      読み直したらgrepでは拾えないdriftをもう1件見つけた。詳細はtodo.mdの当該項目
+   - ✅ **milestone 53(2026-07-27)で`builtin-as-value`**。TS版と同じ位置に1分岐。
+     呼び出し形は`infer_call`が先にinterceptするので誤検知にならない。診断コードは68→69種
    - ✅ **milestone 53(2026-07-27)で`builtin-as-value`**。TS版と同じ位置に1分岐。
      呼び出し形は`infer_call`が先にinterceptするので誤検知にならない。診断コードは68→69種
    - 残る候補: **診断の続き**——

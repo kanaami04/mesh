@@ -3696,15 +3696,24 @@
               - **検証**: プローブ12本(未宣言名3種・typo・型alias名・診断順序・
                 正当な名前5種〈struct/判別可能union/error struct/json struct/generic〉・
                 循環alias・重複宣言)。テスト606件維持、clippyクリーン。
+        - [x] **milestone 53: `builtin-as-value`**
+              ✅ 2026-07-27実装。診断コード68→69種。`print(print)`のように組み込み関数を
+              **値として**参照する形。TS版`expressions.ts`と同じ位置(束縛が見つからなかった
+              後・import alias判定の前)に1分岐足すだけで済んだ——milestone 50のcode reviewで
+              「`is_builtin`の分岐に1行」と見積もっていたとおり。
+              - **呼び出し形(`print(1)`)は`infer_call`が先にinterceptする**のでここへ来ない。
+                誤検知にならないことをテストで固定した。
+              - 検証: プローブ4本(値参照・変数への束縛・正常な呼び出し・引数として渡す)。
+                parityコーパスに4ケース追加(53→57)。テスト606→607件、clippyクリーン。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-27時点、milestone 52まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-27時点、milestone 53まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 68種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 69種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。
