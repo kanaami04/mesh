@@ -3449,14 +3449,18 @@ pub fn check_package_shared(
     // 扱い、引数不足なら`generic-inference-failed`を出す。full_checkerはこの推論を
     // 未実装なので、`Type::Fn`で登録するとTS版と違って`argument-count`を出してしまう
     // (診断コードのTS非互換)。ANY登録で呼び出しを丸ごと対象外にしておく。
+    // **milestone 61で宣言時の検査だけは入った**(`validate_type_params`)——型パラメータ名の
+    // 衝突と推論可能性はシグネチャを見るだけで判定できるので、呼び出し時の推論とは独立に移植できる。
+    // 未移植なのは呼び出し側の`generic-inference-failed`のみ。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
     // (`src/checker/functions.ts`のコメント「グローバルscopeには置かない」参照。
     // メソッドの名前空間は自由関数と完全分離——異なるstructが同名メソッドを持てる)。
-    // structはmilestone 22/23とも対象外なので、メソッドは名前登録・本体検査どちらも
-    // 単純にスキップする(誤って自由関数と同じ扱いにすると、別々のstructの同名メソッドが
-    // already-declaredの誤検知になる)
+    // メソッドを自由関数と同じ`scopes[0]`へ入れてはいけない理由は上記のとおりで、
+    // 誤って同じ扱いにすると別々のstructの同名メソッドが`already-declared`の誤検知になる
+    // (`declare_method`自体は名前登録に加えてmilestone 31の宣言時4検査も行う——
+    // 「メソッドは丸ごと対象外」だったのはmilestone 22/23時点の話)
     // **1ファイルにつき1回のループ**でメソッド表と自由関数シグネチャの両方を登録する
     // (TS版`checkPackage`も`for (const fn of program.fns)`の中で`declareMethod`と
     // `declareBinding`へ振り分ける)。メソッドと自由関数で2周に分けると、同じファイルに

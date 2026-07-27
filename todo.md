@@ -3804,6 +3804,27 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 61: 型パラメータの宣言時検査 + 未登録だった構文2種**
+              ✅ 2026-07-27実装。診断コード102→106種(TS版107種)。
+              - `generic-type-param-conflict` / `generic-type-param-not-inferable`:
+                TS版`checker/generics.ts`の`validateTypeParams`を移植。TS版と同じく
+                **2周に分ける**(先に全部の衝突→次に全部の推論可能性)。位置はどちらも`fn`宣言。
+              - `top-level-mut-not-allowed` / `multiple-return-values-removed`:
+                **Rust版のparserが以前から出していた**のに列挙型へ載っておらず`mesh explain`から
+                静かに欠けていた(milestone 58と同じ状況)。位置・文言はTS版と完全一致を実測。
+              - `type_node_contains_param`はTS版と違い**解決済みの型ではなく型注釈(TypeNode)を
+                辿る**——full_checkerは`Type::TypeParam`を作らないため。辿る形(配列・chan・map・
+                fnのパラメータと戻り値・union)はTS版と揃えた。
+              - **組み込み型名を型パラメータにした場合だけ挙動が分かれる**:
+                `fn f<int>(x: int) int`はTS版だと`x: int`が組み込みのintのままなので
+                衝突と推論不可の**両方**が出るが、`fn f<Box>(x: Box)`(ユーザー宣言の型)は
+                型パラメータ側が勝って衝突だけ。実測で確認して明示的に分岐した。
+              - 検証: 14種の実入力+手順2'のスイープ8種。TS版との差は**すべて検出漏れ側**
+                (`generic-inference-failed`と、本体での`cannot return int as T`)。
+                `mise run parity` 124ファイル・誤検知0(コーパス94→101、検出漏れ1件は
+                上記`type-mismatch`で意図的に記録)。テスト614件、clippyクリーン。
+              - drift: `mise run drift`の候補は0件だったが、変更した関数のdocコメントを
+                読み直して2件見つけた(列挙型ヘッダの「21種」/「メソッドは丸ごと対象外」)。
         - [x] **milestone 60: importグラフの4診断**
               ✅ 2026-07-27実装。診断コード98→102種。TS版`src/checker/modules.ts`前半の
               `package-name-reserved` / `invalid-package-name` / `self-import` /

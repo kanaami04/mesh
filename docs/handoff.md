@@ -5,7 +5,7 @@
 
 ## 次のセッションでやること(2026-07-27時点)
 
-**現在地**: Rust移植の診断は**102種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**現在地**: Rust移植の診断は**106種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
 **撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜59を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
@@ -23,8 +23,13 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 1. ~~**import系4種**~~ ✅ **milestone 60(2026-07-27)で移植済み**
    (`package-name-reserved` / `invalid-package-name` / `self-import` / `import-cycle`)。
    未実装は**2種**まで減った
-2. **generics系2種**(`generic-type-param-conflict` / `generic-type-param-not-inferable`)
-   ——ジェネリック呼び出しが今もANY登録で素通りしている根本に触る。最大の塊
+2. ~~**generics系2種**~~ ✅ **milestone 61(2026-07-27)で移植済み**。宣言時の検査
+   (`validate_type_params`)はシグネチャを見るだけで済むので、呼び出し時の推論とは
+   独立に移植できた。同じ回で、parserが以前から出していたのに列挙型へ載っていなかった
+   `top-level-mut-not-allowed` / `multiple-return-values-removed` も追加(milestone 58と同じ状況)。
+   **残る未移植は`generic-inference-failed`の1種だけ**——これはジェネリック呼び出しの
+   ANY登録をやめて`unifyTypeParam`相当の推論を入れる回になる。ANY登録をやめると
+   `argument-count`の誤検知が出る危険があるので、推論とセットでないと着手できない
 3. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
 4. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
