@@ -1571,13 +1571,11 @@ pub(crate) fn io_stdlib_symbols() -> checker::PackageSymbols {
 // 登録する(generate_all_modules参照)。ランタイムの実体(json$parse等)は既にprelude側に
 // 実装済み(H-2実装時にruntime.ts全体を移植済みのため、ここではシグネチャの登録だけでよい)。
 // json.Valueは真に自己参照する判別可能union(TS版はarr/objメンバーがValue自身を配列/map
-// 越しに参照する共有可変オブジェクトとして手組みする)。milestone 19でRust版でも
-// `Rc<OnceCell<_>>`によるknot-tyingで自己参照型自体は表現できるようになった
-// (examples/tree.mesh参照)が、json.Valueをその仕組みで本物の自己参照型として再定義する
-// こと自体は別のmilestone候補として見送っており、ここでは引き続き不透明な殻structとして
-// 扱う(json struct合成のdecode<X>はjson.field/asXxx等の不透明なヘルパー越しにしか
-// Valueへ触れないため実害が無い、生の`is`/`match`でValueを直接構造的に分解する
-// 手書きデコーダだけがこのスコープ縮小の影響を受ける——milestone 9のスコープ外)
+// 越しに参照する共有可変オブジェクトとして手組みする)。**milestone 65でRust版も
+// `Rc<OnceCell<_>>`によるknot-tying(milestone 19)で本物の自己参照型として組む形にした**
+// ——milestone 9〜64は再帰位置を不透明な殻structに留めており、そのせいで
+// `json.Value`全体が「モデル化できていない」扱いになって`json.parse`等の戻り値が
+// ANYへ落ち、`cannot-infer-type`をTS版と同じ規則で移植できずにいた
 // **full_checker側も同じ定義を流用する**(`builtin_package_exports`、milestone 49)——
 // 組み込みパッケージのシンボルを2箇所に書くと必ずずれるため。ここを変えると診断側にも効く。
 pub(crate) fn json_stdlib_symbols() -> checker::PackageSymbols {
@@ -1593,39 +1591,42 @@ pub(crate) fn json_stdlib_symbols() -> checker::PackageSymbols {
 
     // json.Value = { kind: "str", s: string } | { kind: "num", n: float } | { kind: "bool", b: bool }
     //            | { kind: "null" } | { kind: "arr", items: Value[] } | { kind: "obj", entries: map<string, Value> }
-    // TS版はarr/objメンバーがValue自身を配列/map越しに参照する真の自己参照型(共有可変
-    // オブジェクトとして手組み)だが、Rustの所有権ベースのType表現では真の自己参照を
-    // 表せない(milestone 2以来の壁、examples/tree.mesh参照)。ここでは再帰位置
-    // (arr.items/obj.entriesの要素/値型)だけを名前だけの不透明な殻
-    // (is_error_instanceの再帰と紛れないよう`hollow_value`と呼ぶ)に置き換え、
-    // それ以外の各メンバー自身は本物の構造(kind判別フィールド+実フィールド)を持たせる——
-    // これにより`if v is {kind:"obj"} { len(v.entries) }`のような1階層の構造分解
-    // (TS版のF-14既存機能、json struct機能そのものより前からある、tests/e2e.test.ts:
-    // 1146-1160で確認)が正しい型で narrowing・フィールド推論される。2階層以上の
-    // 入れ子destructureだけがこのスコープ縮小の影響を受ける(is/matchの実行時テスト
-    // 自体はASTから直接組み立てるため2階層以上でも動く——影響を受けるのは
-    // checker側の型推論の精度だけ、milestone 7のgen_type_test参照)
-    let hollow_value = types::struct_ty("json.Value", vec![], false);
-    let value_ty = types::union_ty(
-        vec![
-            anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
-            anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
-            anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
-            anon_struct(vec![field("kind", Type::Literal("null".to_string()))]),
-            anon_struct(vec![field("kind", Type::Literal("arr".to_string())), field("items", Type::Array(Box::new(hollow_value.clone())))]),
-            anon_struct(vec![
-                field("kind", Type::Literal("obj".to_string())),
-                field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(hollow_value) }),
-            ]),
-        ],
-        // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
-        // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
-        // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
-        // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
-        // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
-        // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
-        Some("kind".to_string()),
-    );
+    //
+    // **milestone 65で真の自己参照型にした**(それまでは再帰位置——`arr.items`/`obj.entries`の
+    // 要素/値型——を「名前だけの殻struct」に置き換えていた)。殻だった頃は
+    // `union_has_no_hollow_struct`が`json.Value`を「モデル化できていない」と判定し、
+    // `json.parse`等の戻り値が`try_package_member`でANYへ落ちていた。その結果
+    // `v := json.parse(...)`のvがANYになり、TS版が出す`cannot-infer-type`を
+    // 移植できない(誤検知の山になる)という詰まりが残っていた。
+    //
+    // 「Rustの所有権ベースのType表現では真の自己参照を表せない」というmilestone 2当時の
+    // 制約は**milestone 19のknot-tying**(`Type::Union.body`が`Rc<OnceCell<UnionBody>>`)で
+    // 既に解消していた——`struct Node { next: Node | none }`が同じ仕組みで動いている。
+    // 先に空のセルでunionの器を作り、メンバーからその器を参照してから中身を`set`する
+    let value_cell: std::rc::Rc<std::cell::OnceCell<types::UnionBody>> = std::rc::Rc::new(std::cell::OnceCell::new());
+    let value_ty = Type::Union { body: value_cell.clone() };
+    value_cell
+        .set(types::UnionBody {
+            members: vec![
+                anon_struct(vec![field("kind", Type::Literal("str".to_string())), field("s", types::STRING)]),
+                anon_struct(vec![field("kind", Type::Literal("num".to_string())), field("n", types::FLOAT)]),
+                anon_struct(vec![field("kind", Type::Literal("bool".to_string())), field("b", types::BOOL)]),
+                anon_struct(vec![field("kind", Type::Literal("null".to_string()))]),
+                anon_struct(vec![field("kind", Type::Literal("arr".to_string())), field("items", Type::Array(Box::new(value_ty.clone())))]),
+                anon_struct(vec![
+                    field("kind", Type::Literal("obj".to_string())),
+                    field("entries", Type::Map { key: Box::new(types::STRING), value: Box::new(value_ty.clone()) }),
+                ]),
+            ],
+            // milestone 12: 6メンバー全てが"kind"を共有タグとして持つ(値は全て異なるリテラル)ため、
+            // `find_discriminant_tag`を通せば得られるのと同じ値をここで直接設定しておく。
+            // json.Valueは`.mesh`のTypeDeclではなくRustコードとして直接組み立てられるため
+            // resolve_type_decls(に組み込まれたcompute_discriminant_tag)を経由しない——
+            // ここで計算し忘れると、pkg修飾struct literalのdisambiguationが将来
+            // resolve_struct_lit_member経由になった際にNoneのまま素通りしてしまう
+            discriminant_tag: Some("kind".to_string()),
+        })
+        .expect("作ったばかりのセルなので未設定");
     let array_of_value = Type::Array(Box::new(value_ty.clone()));
 
     let mut types = HashMap::new();
@@ -2493,8 +2494,9 @@ mod tests {
         // code review発覚・実行確認済みの回帰(tests/e2e.test.ts:1146-1160、json struct機能
         // より前からある既存のmesh/json手書きdestructure): json.Valueを完全に不透明な殻
         // (フィールド無し)にすると、絞り込み後の`v.entries`がANY型になり`len()`が
-        // `.length`(mapには存在せずundefinedになる)を選んでしまっていた。arr/objの
-        // 再帰位置(items/entries)だけを不透明な殻に留め、それ以外の構造
+        // `.length`(mapには存在せずundefinedになる)を選んでしまっていた。
+        // **milestone 65からは再帰位置も本物の自己参照**なので、この形は一層強く保たれる。
+        // 当時は arr/obj の再帰位置(items/entries)だけを不透明な殻に留め、それ以外の構造
         // (kind判別フィールド+実フィールド)は本物のmap/配列型にすることで、1階層の
         // 絞り込み+フィールドアクセスが正しい型(map)で推論され`len`が`.size`を選ぶ
         let js = gen_body(
@@ -3466,11 +3468,10 @@ mod tests {
     #[test]
     fn json_valueの不透明な再帰位置への書き込みは今まで通りコンパイルできる() {
         // git historyレビュー発覚・実行確認済みの回帰: json.Valueの自己参照する再帰位置
-        // (`obj.entries`の値等、milestone 9で意図的に空フィールドの不透明な殻として
-        // 表現している)への書き込みが、この milestone の新しい検証で誤って
-        // unknown-fieldになっていた——2階層以上の入れ子destructureはchecker側の型推論の
-        // 精度が落ちるだけでrun時テストは動く、というmilestone 9の意図的なスコープ縮小の
-        // 範囲内なので、書き込みも今まで通り通す
+        // (`obj.entries`の値等)への書き込みが、この milestone の新しい検証で誤って
+        // unknown-fieldになっていた。**milestone 65で再帰位置は真の自己参照型になり、
+        // 「空フィールドの不透明な殻」ではなくなった**(milestone 9〜64の表現)——
+        // それでもこのテストが守る「書き込みは通る」という性質は変わらないので残す
         let js = gen_body(
             "import \"mesh/json\"\nfn main() {\n  v := json.parse(\"1\") or _ => json.Value{kind: \"null\"}\n  if v is { kind: \"obj\" } {\n    for k, val := range v.entries {\n      if val is { kind: \"str\" } {\n        val.s = \"patched\"\n        print(val.s)\n      }\n    }\n  }\n}",
         );

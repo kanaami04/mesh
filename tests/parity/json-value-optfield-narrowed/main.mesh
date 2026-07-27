@@ -1,0 +1,9 @@
+import "mesh/json"
+
+fn main() {
+	v := json.parse("{\"a\":1}") or _ => json.Value{kind: "null"}
+	f := json.optField(v, "a")
+	if !(f is none) {
+		print(json.asInt(f) or _ => 0)
+	}
+}
