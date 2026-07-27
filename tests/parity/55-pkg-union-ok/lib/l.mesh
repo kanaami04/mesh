@@ -1,0 +1,11 @@
+export type Shape = { kind: "circle", r: int } | { kind: "square", s: int }
+
+export type Pair = A | B
+
+export struct A {
+	x: int
+}
+
+export struct B {
+	y: int
+}

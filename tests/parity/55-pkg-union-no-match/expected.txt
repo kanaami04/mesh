@@ -1,0 +1,3 @@
+main.mesh:4:8: error[discriminated-union-no-match]: no member of 'Shape' has kind: "nope" (valid kind values: "circle" | "square")
+  	print(lib.Shape{kind: "nope", r: 1})
+  	      ^

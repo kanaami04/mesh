@@ -20,10 +20,13 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側。
-   (a)は**milestone 54で解消済み**): (b)pkg修飾**union**のstructリテラル(`lib.Shape{...}`)は
-   未モデル化で`discriminated-union-*`が出ない。(c)`http.listen`のように**戻り値がunionの
-   関数型**は`is_fully_modeled`でシグネチャ全体がANYへ落ち、コールバックの形が検査されない
+1. **戻り値がunionの関数型のシグネチャ検査** — `http.listen`のようにコールバックの戻り値が
+   unionだと`is_fully_modeled`でシグネチャ全体がANYへ落ち、形が検査されない
+   (milestone 51のcode reviewで実測。(a)は54、(b)は55で解消済み)。
+   **milestone 55で`is_fully_modeled`のunion緩和を試して取り下げている**——
+   `n.next.next`の`narrow-required`(下記2)は解消するが`json.Value`で誤検知が出て、
+   **どちらも自己参照なので「自己参照を除く」という軸では区別できない**。
+   別の軸(殻structかどうか等)を見つける必要がある
 2. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
    `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
    `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
@@ -1171,6 +1174,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      だと検査が丸ごと免除されていた。**`is_package_alias`を条件に入れてはいけない**のが要点
      ——この名前は型注釈の参照ではなく解決済みの型が持つ名前で、現在のパッケージのimportとは
      無関係(実測で1回踏んだ)。新しい診断コードは足していない
+   - ✅ **milestone 55(2026-07-27)でpkg修飾unionのstructリテラル**。`infer_struct_lit`の
+     pkg修飾分岐が`Type::Struct`だけを見ていたので、判別可能unionのdisambiguationごと
+     素通りしていた。**`is_fully_modeled`のunion緩和は試して取り下げた**——検出漏れの解消と
+     誤検知の防止が同じ判定にぶら下がっており、`mise run parity`が誤検知を機械的に捕まえた
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

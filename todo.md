@@ -3721,6 +3721,24 @@
                 structのフィールド・正しい形・コレクション越し・union型・未export・未知の型名・
                 自己参照structとの併用)。`mise run parity` 85ファイルで**誤検知0件**、
                 コーパスに5ケース追加(57→62)。テスト607→608件、clippyクリーン。
+        - [x] **milestone 55: pkg修飾unionのstructリテラル**
+              ✅ 2026-07-27実装。**新しい診断コードは足していない**(69種のまま)。
+              milestone 51のcode reviewで記録した検出漏れ(b)。
+              - **原因**: `infer_struct_lit`のpkg修飾分岐が`Type::Struct`だけを見ていたので、
+                pkg修飾のunion(`lib.Shape{kind: "circle", ...}`)は判別可能unionの
+                disambiguationごと素通りしていた。ローカルのunionと同じ
+                `resolve_union_lit_member`を通すようにした。
+              - **診断に出す名前は「書かれた素の名前」**(`Shape`)。TS版もunion構築では
+                pkg修飾しない——メンバーは無名なので型自身の名前が使えないため(実測で確認)。
+              - **`is_fully_modeled`のunion緩和は試して取り下げた**。`n.next.next`の
+                `narrow-required`(候補4)は確かに解消するが、`json.Value`で誤検知が出る。
+                自己参照を除外しようとしたが、**`Node | none`も`json.Value`もどちらも
+                自己参照**なので、この軸では区別できないと分かった——検出漏れの解消と
+                誤検知の防止が同じ判定にぶら下がっている。**`mise run parity`が
+                この誤検知を機械的に捕まえた**(スクリプト化の効果が出た最初の例)。
+              - **検証**: プローブ5本(タグ欠落・タグ値不一致・正常・名前付きstruct同士の
+                union・フィールド型不一致)。`mise run parity` 89ファイルで誤検知0件、
+                コーパスに4ケース追加(62→66)。テスト608→609件、clippyクリーン。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/

@@ -1,0 +1,3 @@
+main.mesh:4:37: error[type-mismatch]: field 'r': cannot use "oops" as int
+  	print(lib.Shape{kind: "circle", r: "oops"})
+  	                                   ^
