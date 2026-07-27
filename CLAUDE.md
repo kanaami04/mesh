@@ -37,6 +37,7 @@ mise run run-examples   # examples/*.mesh を全部実行
 mise run rust-test      # cd rust && cargo test(Rust移植版)
 mise run rust-check     # cd rust && cargo clippy --all-targets
 mise run parity         # TS版(オラクル)とRust版のcheck出力を突き合わせる
+mise run sweep          # 「形の組み合わせ」を機械生成してTS版と突き合わせる(parityの死角)
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
 
 scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
@@ -44,8 +45,14 @@ scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エー�
 ```
 
 **Rust移植のマイルストーンを出荷する前に `mise run parity` と `mise run drift` を回す。**
-parityは「Rust側だけに出る診断」(この移植で最悪の不具合)があれば失敗する。
+parityは「Rust側だけに出る診断」(この移植で最悪の不具合)と**生成JSの差**があれば失敗する。
 driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
+
+**parityは「コーパスに載っている形」しか測れない。** milestone 65で見つけた誤検知5種は
+`!`/`&&`/`||`で包んだ条件式——**単体では全部コーパスにある要素の組み合わせ**だったので
+parityは0件のまま通り続けていた。**検査の効き方を変えたら `mise run sweep` も回す**
+(軸の直積を機械生成して突き合わせる)。新しい構文を足したら
+`rust/tests/corpus_coverage.rs` が「コーパスに一度も出ない構文」を検出して落ちる。
 
 環境構築(mise・system パッケージ・gh認証・`/code-review`プラグイン)は **docs/setup.md** が一次情報源。
 

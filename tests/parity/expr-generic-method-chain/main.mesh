@@ -1,0 +1,37 @@
+struct Box {
+	v: int
+}
+
+fn (b: Box) doubled() Box {
+	return Box{v: b.v * 2}
+}
+
+fn fail() int | error {
+	return error("x")
+}
+
+fn ident<T>(x: T) T {
+	return x
+}
+
+fn main() {
+	print((ident(Box{v: 1})).nope)
+}
+
+struct A {
+	kind: "a"
+}
+
+struct B {
+	kind: "b"
+}
+
+type U = A | B
+
+fn maybeU() U {
+	return A{kind: "a"}
+}
+
+fn need(s: string) int {
+	return len(s)
+}

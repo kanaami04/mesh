@@ -1,0 +1,18 @@
+fn take(n: int) int {
+	return n
+}
+
+struct Box {
+	v: int
+}
+
+fn maybe() int | none {
+	return 1
+}
+
+fn main() {
+	x := map<string, int>{"a": 1}["a"]
+	if 1 == 1 && x is int {
+		print(take(x))
+	}
+}

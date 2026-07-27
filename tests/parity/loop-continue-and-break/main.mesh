@@ -1,0 +1,22 @@
+fn main() {
+	total := 0
+	mut sum := 0
+	for i := 0; i < 5; i = i + 1 {
+		if i == 2 {
+			continue
+		}
+		if i == 4 {
+			break
+		}
+		sum = sum + i
+	}
+	print(sum + total)
+	mut seen := 0
+	for _, v := range [1, 2, 3] {
+		if v == 2 {
+			continue
+		}
+		seen = seen + v
+	}
+	print(seen)
+}

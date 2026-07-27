@@ -1,0 +1,6 @@
+main.mesh:17:9: error[impossible-pattern]: int | closed can never be none
+  	if !(x is none && 1 == 2) {
+  	       ^
+main.mesh:18:11: error[invalid-operation]: invalid operation: int | closed + int
+  		print(x + 1)
+  		        ^

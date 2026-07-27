@@ -1,0 +1,6 @@
+main.mesh:4:15: error[type-mismatch]: argument 1: cannot use int as string
+  		int => need(1)
+  		            ^
+main.mesh:3:2: error[mixed-void-arms]: match arms mix values and void — all arms must return a value, or none
+  	match u {
+  	^
