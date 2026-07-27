@@ -53,10 +53,12 @@ TS版を消すと**この2つが動かなくなる**——回帰を検出する�
 `tests/parity/*/expected.txt` のスナップショットは既にRust単独で回せる
 (`rust/tests/parity.rs`)ので、**スナップショットを撤去時点の正解として凍結する**のが素直。
 
-### C. playgroundがブラウザで `src/compiler.ts` を直接importしている
+### C. ~~playgroundがブラウザで `src/compiler.ts` を直接importしている~~ ✅ 段階4で解消
 
-`playground/main.ts` が `import { compile } from "../src/compiler"`。
-Rust版でこれをやるにはwasmビルドが要る(現状 `rust/` にwasm対応は無い)。
+`playground/main.ts` が `import { compile } from "../src/compiler"` していた。
+**段階4でRust版のwasmへ切り替え済み**——`rust/src/wasm.rs` が手書きABIを公開し、
+`playground/mesh-wasm.ts` がそれを呼ぶ。**`wasm-bindgen`は使っていない**
+(依存クレート0を保つため。必要なのは「文字列を渡して文字列を受け取る」だけ)。
 
 なお `editors/vscode` は **TextMate文法とエディタ設定だけ**でTS実装に依存していない
 ——移行対象として挙がっていたが、実際にはブロッカーではない(実測で確認)。
@@ -107,10 +109,22 @@ kanayamaの判断で**選択肢2(Rustへ複製)**を採った——TS版を完�
   個別の整形規則のテストは13件あったが、実プログラムを通す性質テストが無かった。
   意味保存は整形前後を実行して標準出力を比べる(AST比較より信頼できる)
 
-### 段階4: playgroundのwasm化(条件4)— **一番重い**
+### 段階4: playgroundのwasm化(条件4)— ✅ 完了
 
-`rust/` に `wasm32-unknown-unknown` ターゲットと `wasm-bindgen` を足し、
-`playground/main.ts` の import を差し替える。ここだけ独立して先行できる。
+**`wasm-bindgen`は入れなかった**。この移植は依存クレート0で来ており、playgroundのために
+依存とビルドツール(`wasm-bindgen-cli`)を増やす釣り合いが取れない。必要なのは
+「文字列を渡して文字列を受け取る」だけなので、手書きABIで足りた:
+
+- `rust/src/wasm.rs` — `mesh_alloc` / `mesh_compile` / `mesh_last_len` / `mesh_free` を公開。
+  結果は**1行目が `ok`/`error`、2行目以降が本体**という単純な形式(JSONにしないのは
+  シリアライザを持ち込まないため)
+- `playground/mesh-wasm.ts` — 上の作法に合わせるだけのglue。**`memory.buffer`は毎回取り直す**
+  ——allocでメモリが拡張されると以前のArrayBufferがdetachされるため
+- `Cargo.toml` に `crate-type = ["cdylib", "rlib"]`。CIでもwasmをビルドする
+  (**壊れてもCLIのテストは通る**ので、明示しないとplaygroundだけ静かに動かなくなる)
+
+`mise run playground` は起動前に必ずwasmをビルドし直す(古いwasmで起動すると
+直したはずの挙動が反映されず混乱するため)。
 
 ### 段階5: 撤去の実行
 

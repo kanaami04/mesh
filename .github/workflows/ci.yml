@@ -56,6 +56,13 @@ jobs:
       - name: Test
         run: cargo test
 
+      # playgroundが読むwasm(TS撤去 段階4)。**ビルドが壊れてもCLIのテストは通る**ので、
+      # ここで明示的にビルドしないとplaygroundだけ静かに動かなくなる
+      - name: Build wasm (playground)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --target wasm32-unknown-unknown --lib --release
+
   # **TS版(オラクル)とRust版を突き合わせる**(撤去条件(5)=両実装の並走確認)。
   # bunとcargoの両方が要るので独立したjobにしてある。
   #

@@ -1,8 +1,10 @@
 // Mesh Playground の配線。
-// コンパイラ (src/compiler.ts) をそのまま import してブラウザで動かす。
+// **コンパイラはRust版をwasmとして読み込む**(TS撤去 段階4)。以前は
+// `import { compile } from "../src/compiler"` でTS実装を直接読んでいたが、
+// TS版を撤去するとplaygroundが動かなくなるため切り替えた。
 // 実行は Web Worker 内で行い、無限ループでも画面が固まらないようにする。
 
-import { compile, formatDiagnostics } from "../src/compiler";
+import { initCompiler } from "./mesh-wasm";
 
 // ---- サンプル(examples/ と同内容) ----
 
@@ -255,15 +257,22 @@ let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
 // ---- コンパイル(入力のたびに実行) ----
 
+// wasmのロードが終わるまではnull。**それまでのupdate()呼び出しは黙って無視する**
+// ——初期化前に入力されても壊れないように(ロード完了時に必ず一度update()する)
+let compileSource: ((source: string) => { code: string | null; diagnostics: string }) | null = null;
+
 function update() {
-  const result = compile(editor.value, "playground.mesh");
+  if (compileSource === null) {
+    return;
+  }
+  const result = compileSource(editor.value);
   if (result.code !== null) {
     jsEl.textContent = result.code;
     jsEl.classList.remove("error");
     currentCode = result.code;
     runBtn.disabled = false;
   } else {
-    jsEl.textContent = formatDiagnostics("playground.mesh", result.diagnostics);
+    jsEl.textContent = result.diagnostics;
     jsEl.classList.add("error");
     currentCode = null;
     runBtn.disabled = true;
@@ -387,4 +396,14 @@ newFileBtn.addEventListener("click", () => {
 // ---- 初期化 ----
 
 editor.value = EXAMPLES.channels.source;
-update();
+jsEl.textContent = "コンパイラ(wasm)を読み込み中…";
+runBtn.disabled = true;
+initCompiler()
+  .then((fn) => {
+    compileSource = fn;
+    update();
+  })
+  .catch((e) => {
+    jsEl.textContent = `コンパイラ(wasm)の読み込みに失敗した: ${e}\n` + "`mise run playground` は起動時にwasmをビルドする。単体でindex.htmlを開いた場合は /mesh.wasm が配信されていない";
+    jsEl.classList.add("error");
+  });

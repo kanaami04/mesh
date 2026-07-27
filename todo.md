@@ -4034,8 +4034,12 @@
               - `rust/tests/fmt_corpus.rs` — `mesh fmt`がexamples全体でべき等かつ意味を変えないか。
                 意味保存は整形前後を実行して標準出力を比べる
               `card-completeness`は段階2で移植済み(Rust実装のリストを見る形にしたので撤去後も残る)
-        - [ ] (4) `playground/`(ブラウザで`main.ts`をその場でバンドル)と`editors/vscode`の移行。
-              **ここが一番重い**——playgroundはwasmビルドが要る。`bench/`・`demo/todo-api`も対象
+        - [x] (4) `playground/`と`editors/vscode`の移行
+              → 2026-07-27(撤去 段階4)。**`editors/vscode`はそもそもTS実装に依存していなかった**
+              (TextMate文法とエディタ設定だけ。段階1の調査で判明)。playgroundは
+              `rust/src/wasm.rs`(手書きABI)+`playground/mesh-wasm.ts`でRust版wasmへ切り替えた。
+              **`wasm-bindgen`は入れていない**——依存クレート0を保つため。
+              `bench/`・`demo/todo-api`はREADMEの手順にTS版が出てくるだけなので段階5で差し替える
         - [x] (5) 一定期間CIで**両実装を並走**させ、examples/テスト全体で差分ゼロを確認してから撤去
               → 2026-07-27に`parity`ジョブを追加(`scripts/parity.sh`+`scripts/sweep.sh`+
               Rust版CLIでのexamples実行)。**それまでCIは`bun test`と`cargo test`を別々に

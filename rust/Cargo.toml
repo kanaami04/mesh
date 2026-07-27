@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 name = "mesh"
 path = "src/lib.rs"
+# cdylib は playground 用のwasmを出すために要る(rlib はCLI/テストが使う)。
+# **wasm-bindgen は使わない**——依存クレート0を保つため、`src/wasm.rs` で
+# 手書きのABI(alloc/compile/last_len/free)を公開している
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "mesh"
