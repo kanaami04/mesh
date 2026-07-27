@@ -1,0 +1,9 @@
+import "mesh/json"
+
+json struct J {
+	c: chan<int>
+}
+
+fn main() {
+	print(1)
+}

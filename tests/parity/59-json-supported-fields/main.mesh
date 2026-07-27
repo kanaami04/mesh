@@ -1,0 +1,12 @@
+import "mesh/json"
+
+json struct J {
+	n: int
+	s: string
+	arr: int[]
+	opt: string | none
+}
+
+fn main() {
+	print(1)
+}

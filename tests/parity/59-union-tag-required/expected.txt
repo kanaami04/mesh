@@ -1,0 +1,3 @@
+main.mesh:1:1: error[discriminated-union-tag-required]: discriminated union 'T' needs a tag field — every struct member must share one field with a distinct string-literal value (e.g. kind: "...") so a member can be identified from its tag alone, without comparing against the other members (F-7)
+  type T = { kind: "a" } | { kind2: "b" }
+  ^

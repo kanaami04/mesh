@@ -204,8 +204,13 @@ fn parse_modules(sources: Vec<mesh::modules::ModuleSource>) -> Result<ParsedModu
         source_map.insert(name.clone(), m.source.clone());
         match parse(&m.source) {
             Ok(mut program) => {
+                // **milestone 59**: json structの合成エラーは`CompileError`になったので、
+                // パースエラーと同じ経路(位置・診断コード・ソース行つき)で報告する。
+                // それまでは`String`で`LoadFailure::Discover`へ流しており、
+                // `json-struct-missing-import`/`json-struct-unsupported-field`という
+                // TS版の診断コードも位置も付いていなかった
                 if let Err(e) = synthesize_json_decoders(&mut program) {
-                    return Err(LoadFailure::Discover(format!("{name}: {e}")));
+                    return Err(LoadFailure::Parse { file: name, source: m.source.clone(), errors: vec![*e] });
                 }
                 units.push(ModuleUnit { pkg: m.pkg.clone(), file: name, program });
             }

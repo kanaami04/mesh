@@ -67,6 +67,7 @@ diagnostic_codes! {
     NotBool => "not-bool",
     UseIsNone => "use-is-none",
     DivisionByZero => "division-by-zero",
+    IntLiteralOverflow => "int-literal-overflow",
     ArgumentCount => "argument-count",
     BuiltinArgType => "builtin-arg-type",
     BuiltinAsValue => "builtin-as-value",
@@ -88,6 +89,9 @@ diagnostic_codes! {
     MethodFieldConflict => "method-field-conflict",
     DuplicateMethod => "duplicate-method",
     VoidUsedAsValue => "void-used-as-value",
+    MissingReturnValue => "missing-return-value",
+    DiscriminatedUnionTagRequired => "discriminated-union-tag-required",
+    ReservedFieldName => "reserved-field-name",
     DiscriminatedUnionTagMissing => "discriminated-union-tag-missing",
     DiscriminatedUnionNoMatch => "discriminated-union-no-match",
     DiscriminatedUnionAmbiguous => "discriminated-union-ambiguous",
@@ -124,6 +128,11 @@ diagnostic_codes! {
     ErrorTypeAliasesExisting => "error-type-aliases-existing",
     DeferRequiresCall => "defer-requires-call",
     NotCallable => "not-callable",
+    // milestone 59: json structのデコーダ合成が出す2診断。合成は`json_decode.rs`が
+    // parse直後に行うので`CompileError`経由で報告されるが、**TS版と同じ診断コード**なので
+    // ここにも載せる(`mesh explain`で引けるようにするため)
+    JsonStructMissingImport => "json-struct-missing-import",
+    JsonStructUnsupportedField => "json-struct-unsupported-field",
     // ---- 構文・字句カテゴリ(milestone 58で統合)----
     // parser.rs/lexer.rsが`CompileError.code`として`&'static str`で直接持っていた分。
     // **これらは以前からRust版が出していた**——enumに載っていなかったので`mesh explain`から

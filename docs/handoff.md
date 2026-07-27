@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**92種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜58を消化した
+**現在地**: Rust移植の診断は**98種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜59を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,15 +20,13 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **本当に未実装なのは12種**(milestone 58で確定): `discriminated-union-tag-required` /
-   `generic-type-param-conflict` / `generic-type-param-not-inferable` / `import-cycle` /
-   `int-literal-overflow` / `invalid-package-name` / `json-struct-missing-import` /
-   `json-struct-unsupported-field` / `missing-return-value` / `package-name-reserved` /
-   `reserved-field-name` / `self-import`。**generics系3種が最大の塊**で、それ以外は
-   ほぼ単発の検査。`mise run parity`のコーパスに差が無いので、次は**新しいプローブで
-   差を見つけるところから**始まる
-2. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-3. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+1. **import系4種**(`import-cycle` / `self-import` / `invalid-package-name` /
+   `package-name-reserved`)——`modules.rs`にまとまっており性質が近いので一度に扱える。
+   milestone 59で単発6種を片付けた残り(未実装は**6種**)
+2. **generics系2種**(`generic-type-param-conflict` / `generic-type-param-not-inferable`)
+   ——ジェネリック呼び出しが今もANY登録で素通りしている根本に触る。最大の塊
+3. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+4. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1184,6 +1182,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      だが**新しい検査は1つも書いていない**——「未移植」と数えていた36種のうち**21種は
      最初からRust版が出していた**(parser/lexerが`&'static str`で持っており、enumに載って
      いなかったので`mesh explain`から静かに欠けていた)。**本当に未実装なのは12種**
+   - ✅ **milestone 59(2026-07-27)で単発の未実装検査を6種まとめて移植**。診断コードは
+     92→98種。**json系2種は「文言は完全一致しているのに位置と診断コードだけ無い」状態**
+     だった(合成エラーが`String`のまま`LoadFailure::Discover`へ流れていた)。**残る未実装は
+     import系4種とgenerics系2種**
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

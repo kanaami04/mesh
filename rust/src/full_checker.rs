@@ -497,6 +497,53 @@ fn type_node_display(node: &TypeNode) -> String {
     }
 }
 
+// `__proto__`をフィールド名に使っていないか(milestone 59。TS版`checkFieldName`)。
+// JSオブジェクトリテラルで特別扱いされる(prototypeの差し替えになる)ため予約済み。
+// **無名`{...}`にも効く**——TS版も`resolveType`が通る場所ならどこでも同じ検査をする
+fn check_reserved_field_names(ctx: &mut FullCheckerCtx, node: &TypeNode) {
+    let TypeNode::StructType { fields, .. } = node else { return };
+    for f in fields {
+        if f.name == "__proto__" {
+            ctx.error(f.pos, DiagnosticCode::ReservedFieldName, format!("'{}' can't be used as a field name — pick a different name", f.name));
+        }
+    }
+}
+
+// F-7: 無名`{...}`メンバーが2個以上のunionは、タグフィールド(全メンバーが共有し、値が
+// 互いに異なる文字列リテラル)を持たなければならない(milestone 59。TS版`resolveAlias`)。
+// **タグが無いと構築時にメンバーを特定できない**——`X{...}`はタグの値だけを見るため
+fn check_discriminant_tag_required(ctx: &mut FullCheckerCtx, decl_name: &str, members: &[TypeNode], pos: Pos) {
+    let anon: Vec<&TypeNode> = members.iter().filter(|m| matches!(m, TypeNode::StructType { .. })).collect();
+    if anon.len() < 2 {
+        return;
+    }
+    // 全メンバーが共有し、値が互いに異なる文字列リテラルのフィールドを探す
+    let TypeNode::StructType { fields: first, .. } = anon[0] else { return };
+    let has_tag = first.iter().any(|f0| {
+        let mut values = Vec::with_capacity(anon.len());
+        for m in &anon {
+            let TypeNode::StructType { fields, .. } = m else { return false };
+            match fields.iter().find(|f| f.name == f0.name).map(|f| &f.type_node) {
+                Some(TypeNode::Literal { value, .. }) => values.push(value.clone()),
+                _ => return false,
+            }
+        }
+        let uniq: std::collections::HashSet<&String> = values.iter().collect();
+        uniq.len() == values.len()
+    });
+    if !has_tag {
+        ctx.error(
+            pos,
+            DiagnosticCode::DiscriminatedUnionTagRequired,
+            format!(
+                "discriminated union '{decl_name}' needs a tag field — every struct member must share one \
+                 field with a distinct string-literal value (e.g. kind: \"...\") so a member can be \
+                 identified from its tag alone, without comparing against the other members (F-7)"
+            ),
+        );
+    }
+}
+
 fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
     if let Some(st) = ctx.alias_state.get(name) {
         return *st;
@@ -510,6 +557,7 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
         // 循環にはしない——`struct Node { next: Node | none }`が書けるのはこのため
         TypeNode::StructType { fields, .. } => {
             ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
+            check_reserved_field_names(ctx, &decl.node);
             for f in fields {
                 walk_type_ref(ctx, &f.type_node);
             }
@@ -533,6 +581,13 @@ fn resolve_alias(ctx: &mut FullCheckerCtx, name: &str, pos: Pos) -> AliasState {
             if decl.is_error {
                 check_error_type_members(ctx, name, members, pos);
             }
+            // milestone 59: 無名`{...}`メンバーのフィールド名検査(`__proto__`)と、
+            // 判別可能unionのタグ要求。どちらもchecker.rs側は`Err`でまとめて落とすので、
+            // TS版と同じコードに分けるのはこちらの仕事
+            for m in members {
+                check_reserved_field_names(ctx, m);
+            }
+            check_discriminant_tag_required(ctx, name, members, pos);
             ctx.alias_state.insert(name.to_string(), AliasState::Resolved);
             AliasState::Resolved
         }
@@ -881,7 +936,22 @@ fn infer_expr_single(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
 
 fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
     match expr {
-        Expr::Int { .. } => INT,
+        // milestone 59: リテラルそのものが安全整数の範囲外なら、実行するまでもなく
+        // 精度が落ちる(生成JSはnumber)。TS版`expressions.ts`と同じくコンパイル時に弾く。
+        // **判定はJSの`Number.isSafeInteger`と同じ**——`i64`ではなく±(2^53-1)で見る
+        Expr::Int { value, pos } => {
+            const MAX_SAFE: i128 = 9_007_199_254_740_991;
+            // パースできない(=桁が多すぎる)場合も範囲外として扱う
+            let out_of_range = value.parse::<i128>().map(|n| !(-MAX_SAFE..=MAX_SAFE).contains(&n)).unwrap_or(true);
+            if out_of_range {
+                ctx.error(
+                    *pos,
+                    DiagnosticCode::IntLiteralOverflow,
+                    format!("integer literal {value} exceeds the safe integer range (±{MAX_SAFE}) and would silently lose precision"),
+                );
+            }
+            INT
+        }
         Expr::Float { .. } => FLOAT,
         // 文字列リテラルは(STRINGではなく)リテラル型。TS版`checkExprSingle`・
         // codegen側checker.rsの`infer_expr`と同じ——`1 < "a"`の診断で相手の型が
@@ -2242,12 +2312,11 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // 式文はvoid呼び出しそのもの(`print(x)`)が主用途——voidを許す位置
             infer_expr(ctx, expr);
         }
-        Stmt::Return { value, .. } => {
-            // 戻り値なしのreturn(値が要る関数で足りない場合はmissing-return-value)は
-            // この一歩で実装した7種に含めていないので診断しない——値がある場合の
-            // type-mismatchだけ、7種の同じ診断コードとしてここでも検査する。
+        Stmt::Return { value, pos } => {
             // milestone 31でTS版`statements.ts:178-187`と細部まで揃えた(位置は`return`
-            // ではなく**値の式**・文言・戻り値なし関数でのreturn値はvoid-used-as-value)
+            // ではなく**値の式**・文言・戻り値なし関数でのreturn値はvoid-used-as-value)。
+            // **milestone 59で戻り値なしのreturnも見るようにした**——値が要る関数で
+            // `return`だけ書くと`missing-return-value`(位置は`return`文そのもの)
             if let Some(v) = value {
                 let value_ty = infer_expr_single(ctx, v);
                 let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
@@ -2259,6 +2328,12 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                         DiagnosticCode::TypeMismatch,
                         format!("cannot return {} as {}", types::type_to_string(&value_ty), types::type_to_string(&expected)),
                     );
+                }
+            } else {
+                let expected = ctx.ret_stack.last().cloned().unwrap_or(VOID);
+                // **表示できない型では黙る**(`type_to_string`が未解決unionで`.expect()`する)
+                if !types::type_equals(&expected, &VOID) && safe_to_compare(&expected) {
+                    ctx.error(*pos, DiagnosticCode::MissingReturnValue, format!("this function must return {}", types::type_to_string(&expected)));
                 }
             }
         }
@@ -5306,6 +5381,30 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn milestone59の単発検査() {
+        for (src, code) in [
+            // `__proto__`はJSでprototype差し替えになるので予約(struct宣言・無名`{...}`の両方)
+            ("struct P {\n    __proto__: string\n}\n\nfn main() {\n    print(1)\n}\n", DiagnosticCode::ReservedFieldName),
+            // 安全整数の範囲外(生成JSはnumberなので実行するまでもなく精度が落ちる)
+            ("fn main() {\n    x := 99999999999999999999\n    print(x)\n}\n", DiagnosticCode::IntLiteralOverflow),
+            // F-7: 無名メンバー2個以上なら共有タグが要る
+            ("type T = { kind: \"a\" } | { kind2: \"b\" }\n\nfn main() {\n    print(1)\n}\n", DiagnosticCode::DiscriminatedUnionTagRequired),
+            // 値が要る関数で`return`だけ
+            ("fn f() int {\n    return\n}\n\nfn main() {\n    print(f())\n}\n", DiagnosticCode::MissingReturnValue),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, code, "{src} -> {diags:?}");
+        }
+        // **境界値は通す**(±(2^53-1)ちょうど)。`float`リテラルもこの検査の対象外
+        assert!(check("fn main() {\n    print(9007199254740991)\n    print(-9007199254740991)\n    print(1.5)\n}\n").is_empty());
+        // 戻り値なし関数の`return`は正当
+        assert!(check("fn f() void {\n    return\n}\n\nfn main() {\n    f()\n}\n").is_empty());
+        // タグの値が互いに異なれば通る(同じ値だと判別できないのでタグにならない)
+        assert!(check("type T = { kind: \"a\" } | { kind: \"b\" }\n\nfn main() {\n    print(1)\n}\n").is_empty());
     }
 
     #[test]

@@ -1,0 +1,3 @@
+main.mesh:4:2: error[json-struct-unsupported-field]: 'json struct J' can't auto-decode field 'c': only int/float/string/bool, a nested 'json struct', an array of those, or 'T | none' of those are supported — write a hand-written decoder (using json.field/json.asString/etc.) for this field instead
+  	c: chan<int>
+  	^

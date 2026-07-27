@@ -1,0 +1,5 @@
+type T = { kind: "a" } | { kind2: "b" }
+
+fn main() {
+	print(1)
+}
