@@ -5,8 +5,8 @@
 
 ## 次のセッションでやること(2026-07-26時点)
 
-**現在地**: Rust移植の診断は**71種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
-**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜57を消化した
+**現在地**: Rust移植の診断は**92種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜58を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
 **milestone 46で「素の型aliasがレジストリで解決されない」穴は根治済み**(`type Count = int`
@@ -20,8 +20,15 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-2. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+1. **本当に未実装なのは12種**(milestone 58で確定): `discriminated-union-tag-required` /
+   `generic-type-param-conflict` / `generic-type-param-not-inferable` / `import-cycle` /
+   `int-literal-overflow` / `invalid-package-name` / `json-struct-missing-import` /
+   `json-struct-unsupported-field` / `missing-return-value` / `package-name-reserved` /
+   `reserved-field-name` / `self-import`。**generics系3種が最大の塊**で、それ以外は
+   ほぼ単発の検査。`mise run parity`のコーパスに差が無いので、次は**新しいプローブで
+   差を見つけるところから**始まる
+2. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+3. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1173,6 +1180,10 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      差が0件になった**(102ファイルで検出漏れも誤検知も無い)。既存の名前付き型にタグを
      付けるのを拒否するのが本質で、**判定はソースのTypeNodeを見る**(構文にしか現れない)。
      診断コードは69→71種
+   - ✅ **milestone 58(2026-07-27)でparser/lexerの診断コードを統合**。診断コードは71→92種
+     だが**新しい検査は1つも書いていない**——「未移植」と数えていた36種のうち**21種は
+     最初からRust版が出していた**(parser/lexerが`&'static str`で持っており、enumに載って
+     いなかったので`mesh explain`から静かに欠けていた)。**本当に未実装なのは12種**
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

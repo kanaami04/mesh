@@ -1,0 +1,3 @@
+main.mesh:1:10: error[bare-struct-shape]: use 'struct T { ... }' to define a data shape ('{...}' alone is only allowed inside a union)
+  type T = { n: int }
+           ^

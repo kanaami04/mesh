@@ -9,10 +9,15 @@
 // 「対応する検査があるはず」という誤解を招く(実際に検査を書くまで存在しない
 // ことにしておいた方が正確)ため、という設計判断として選んでいる。
 //
-// 同じ理由で、既存のparser.rs/lexer.rsが`CompileError.code: &'static str`として
-// 直接持っている診断コード群(構文・字句カテゴリ、token.rsのコメント参照)も、
-// この列挙型へはまだ統合していない——統合は、そちら側のコードを実際にこの型へ
-// 移行するタイミングで行う。
+// **milestone 58で、parser.rs/lexer.rsが`CompileError.code: &'static str`として直接持って
+// いた構文・字句カテゴリのコードもこの列挙型へ載せた**(21種)。それらは以前からRust版が
+// 出していたのに、enumに載っていないせいで`mesh explain`から静かに欠け、「未移植の診断」と
+// 誤って数えられていた——`CompileError.code`自体は`&'static str`のままで、こちらは
+// 「Rust版が出せるコードの一覧」を正しく表すことだけを担う。
+//
+// **この列挙型はTS版の診断コードの部分集合**という不変条件がある(`explain.rs`が説明文を
+// TS版の定義から引くため)。TS版に無いRust固有のコード——`interpolation-too-deep`
+// (parser.rsの`MAX_INTERP_DEPTH`、Rustだけの安全弁)——は載せない。
 //
 // `DIAGNOSTIC_EXPLANATIONS`(`mesh explain`用の説明文マップ、TS版後半)はmilestone 38で
 // `explain.rs`が扱うようになった——本文はRust側へ複製せず、TS版の定義から取り出している
@@ -119,6 +124,36 @@ diagnostic_codes! {
     ErrorTypeAliasesExisting => "error-type-aliases-existing",
     DeferRequiresCall => "defer-requires-call",
     NotCallable => "not-callable",
+    // ---- 構文・字句カテゴリ(milestone 58で統合)----
+    // parser.rs/lexer.rsが`CompileError.code`として`&'static str`で直接持っていた分。
+    // **これらは以前からRust版が出していた**——enumに載っていなかったので`mesh explain`から
+    // 静かに欠けており、「未移植の診断」と誤って数えられていた(milestone 58の調査で発覚)。
+    //
+    // **`interpolation-too-deep`だけは載せない**。TS版に無いRust固有の安全弁
+    // (文字列補間のネスト上限。parser.rsの`MAX_INTERP_DEPTH`参照)で、`explain`の説明文は
+    // TS版の定義から引く仕組みなので載せると`すべての診断コードに説明文がある`テストが落ちる
+    // ——「このenumはTS版の診断コードの部分集合」という不変条件を保つ
+    BareStructShape => "bare-struct-shape",
+    ChanCapacityRequired => "chan-capacity-required",
+    EmptyInterpolation => "empty-interpolation",
+    EmptyTypedArrayLiteralRemoved => "empty-typed-array-literal-removed",
+    FnTypeWithParamNames => "fn-type-with-param-names",
+    ImportOrder => "import-order",
+    InterpolationInType => "interpolation-in-type",
+    InvalidAssignmentTarget => "invalid-assignment-target",
+    InvalidImportPath => "invalid-import-path",
+    InvalidSpawnTarget => "invalid-spawn-target",
+    InvalidTopLevelDeclaration => "invalid-top-level-declaration",
+    JsonTypeNotSupported => "json-type-not-supported",
+    MethodExportRedundant => "method-export-redundant",
+    MisplacedMut => "misplaced-mut",
+    MultipleSelectDefaults => "multiple-select-defaults",
+    PostfixBangRenamed => "postfix-bang-renamed",
+    SyntaxError => "syntax-error",
+    UnexpectedCharacter => "unexpected-character",
+    UnknownEscape => "unknown-escape",
+    UnterminatedInterpolation => "unterminated-interpolation",
+    UnterminatedString => "unterminated-string",
 }
 
 impl std::fmt::Display for DiagnosticCode {
