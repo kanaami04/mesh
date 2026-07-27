@@ -164,6 +164,47 @@ fn importしたパッケージの中身も検査される() {
 }
 
 #[test]
+fn importグラフの異常は段階順に報告される() {
+    // milestone 60。TS版`checker/modules.ts`は(1)予約名 →(2)不正名・自己import →(3)循環の
+    // **段階順にearly-returnする**。ここでは(1)と(2)を同時に持つ入力で「(1)だけが出る」ことを
+    // 固定する——先の段が壊れたまま次の段を走らせると依存グラフが信用できず誤診断になる
+    let dir = std::env::temp_dir().join("mesh-cli-test-import-graph");
+    let _ = std::fs::remove_dir_all(&dir);
+    let pkg = dir.join("io");
+    std::fs::create_dir_all(&pkg).expect("一時パッケージを作れること");
+    std::fs::write(dir.join("main.mesh"), "import \"io\"\n\nfn main() {\n    print(io.f())\n}\n").unwrap();
+    // io/x.mesh は自分自身をimportしている(=段階(2)のself-import)が、
+    // 段階(1)のpackage-name-reservedで打ち切られるので報告されない
+    std::fs::write(pkg.join("x.mesh"), "import \"io\"\nexport fn f() int {\n    return 1\n}\n").unwrap();
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["check", &entry]);
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("error[package-name-reserved]"), "stderr: {}", out.stderr);
+    assert!(!out.stderr.contains("error[self-import]"), "後段の診断は出ないこと: {}", out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn 循環importは循環の経路つきで報告される() {
+    // milestone 60。TS版と同じ「循環に入った地点から」の経路(`b -> c -> b`)を出す。
+    // エントリを含まない循環でも検出できることを固定する
+    let dir = std::env::temp_dir().join("mesh-cli-test-import-cycle");
+    let _ = std::fs::remove_dir_all(&dir);
+    for p in ["a", "b", "c"] {
+        std::fs::create_dir_all(dir.join(p)).expect("一時パッケージを作れること");
+    }
+    std::fs::write(dir.join("main.mesh"), "import \"a\"\n\nfn main() {\n    print(a.f())\n}\n").unwrap();
+    std::fs::write(dir.join("a/x.mesh"), "import \"b\"\n\nexport fn f() int {\n    return 1\n}\n").unwrap();
+    std::fs::write(dir.join("b/x.mesh"), "import \"c\"\n\nexport fn f() int {\n    return 1\n}\n").unwrap();
+    std::fs::write(dir.join("c/x.mesh"), "import \"b\"\n\nexport fn f() int {\n    return 1\n}\n").unwrap();
+    let entry = dir.join("main.mesh").display().to_string();
+    let out = mesh(&["check", &entry]);
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("error[import-cycle]: import cycle: b -> c -> b"), "stderr: {}", out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn json出力は構文エラーでもjsonのまま() {
     // 回帰(code reviewで発覚): 構文エラーのときだけ素のテキストを出しており、
     // `--json`をパースするエージェントがそこでJSONパースに失敗していた

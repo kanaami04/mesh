@@ -3,9 +3,9 @@
 > 別セッションに切り替える際の入口ドキュメント。ここを読めば、他のdocsのどこに何が
 > 書いてあるかが分かる状態を目指す。詳細を重複させず、一次情報源への案内に徹する。
 
-## 次のセッションでやること(2026-07-26時点)
+## 次のセッションでやること(2026-07-27時点)
 
-**現在地**: Rust移植の診断は**98種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
+**現在地**: Rust移植の診断は**102種 / TS版107種**。CLIは完成済み(撤去条件(1)達成)、いまは
 **撤去条件(2)=診断カバレッジ**を進めている。直近はmilestone 38〜59を消化した
 (詳細はtodo.mdの各項目)。作業ツリー・PRともにクリーンな状態で引き継いでいる。
 
@@ -20,9 +20,9 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **import系4種**(`import-cycle` / `self-import` / `invalid-package-name` /
-   `package-name-reserved`)——`modules.rs`にまとまっており性質が近いので一度に扱える。
-   milestone 59で単発6種を片付けた残り(未実装は**6種**)
+1. ~~**import系4種**~~ ✅ **milestone 60(2026-07-27)で移植済み**
+   (`package-name-reserved` / `invalid-package-name` / `self-import` / `import-cycle`)。
+   未実装は**2種**まで減った
 2. **generics系2種**(`generic-type-param-conflict` / `generic-type-param-not-inferable`)
    ——ジェネリック呼び出しが今もANY登録で素通りしている根本に触る。最大の塊
 3. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)

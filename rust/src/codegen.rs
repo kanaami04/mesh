@@ -1757,9 +1757,11 @@ fn gen_type_test(ref_js: &str, target: &TypeNode) -> String {
 }
 
 // パッケージ間のimport依存グラフを依存順(importされる側が先)にソートする(TS版
-// checkModulesの依存順ソート+循環検出に相当)。診断ではなく明確なErr——循環があると
+// checkModulesの依存順ソート+循環検出に相当)。ここは診断ではなく明確なErr——循環があると
 // 依存先のexportedシンボルがまだregistryに無い状態で参照してしまい、静かに未解決
-// (ANY)へフォールバックする壊れたJSを生成してしまうため、先に弾く
+// (ANY)へフォールバックする壊れたJSを生成してしまうため、先に弾く。なおcheck経路では
+// milestone 60で`check_import_graph`(main.rs)が先にimport-cycle診断として報告するので、
+// こちらへ到達するのはcheckを経ずにbuild/runした場合の保険
 fn topo_sort_packages(packages: &[(String, Vec<&ModuleUnit>)]) -> CodegenResult<Vec<String>> {
     let names: HashSet<&str> = packages.iter().map(|(p, _)| p.as_str()).collect();
     let mut deps: HashMap<String, HashSet<String>> = HashMap::new();

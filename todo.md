@@ -3804,6 +3804,27 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 60: importグラフの4診断**
+              ✅ 2026-07-27実装。診断コード98→102種。TS版`src/checker/modules.ts`前半の
+              `package-name-reserved` / `invalid-package-name` / `self-import` /
+              `import-cycle` を`main.rs`の`check_import_graph`として移植。
+              - **TS版と同じく段階順にearly-returnする**のが設計の要点(予約名 →
+                名前の形・自己import → 循環)。先の段が壊れたまま次の段を走らせると
+                依存グラフが信用できず二次的な誤診断になるため、TS版も各段で
+                `if (diagnostics.length > 0) return`している。
+              - `unknown-package`はここでは出さない——Rust版は`load_modules`が
+                ファイル発見の時点で未解決importを弾くので、ここへ到達する時点で
+                全部解決済み(TS版はこの関数で出す。経路が違うだけで挙動は同じ)。
+              - **循環の報告場所が変わったのでコメントを3箇所直した**
+                (`main.rs`の`dependency_order` / `modules.rs`の`load_dependencies` /
+                `codegen.rs`の`topo_sort_packages`が揃って「循環検出はcodegen側の仕事」と
+                言っていた)。check経路は`check_import_graph`、build/run経路は
+                `topo_sort_packages`のErrという分担になった。
+              - 検証: 8種の実入力でTS版と位置・件数・順序・文言まで一致(エントリを
+                含まない循環`b -> c -> b`、不正名が複数ある場合の順序、予約名と
+                自己importが同時にある場合の段階打ち切りを含む)。`mise run parity`
+                117ファイルで差0件(コーパスに4ケース追加、90→94)。テスト614件、
+                clippyクリーン。
         - [x] **milestone 59: 単発の未実装検査を6種まとめて移植**
               ✅ 2026-07-27実装。診断コード92→98種。milestone 58で「本当に未実装」と確定した
               12種のうち、**単発で片付くもの6種**をまとめた回。

@@ -1,0 +1,5 @@
+import "my-lib"
+
+fn main() {
+	print(1)
+}
