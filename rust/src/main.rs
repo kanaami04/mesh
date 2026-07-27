@@ -21,16 +21,16 @@
 use mesh::ast::Program;
 use mesh::card;
 use mesh::codegen::{self, ModuleUnit};
-use mesh::diagnostic_codes::Diagnostic;
+use mesh::diagnostic_codes::{Diagnostic, DiagnosticCode};
 use mesh::explain;
 use mesh::formatter;
 use mesh::full_checker;
 use mesh::json_decode::synthesize_json_decoders;
-use mesh::modules::{load_modules, load_modules_for_test};
+use mesh::modules::{load_modules, load_modules_for_test, BUILTIN_PACKAGE_PATHS};
 use mesh::parser::parse;
 use mesh::test_discovery;
 use mesh::test_report::{self, TestReport};
-use mesh::token::CompileError;
+use mesh::token::{CompileError, Pos};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -251,6 +251,13 @@ fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<D
         }
         by_pkg.entry(u.pkg.clone()).or_default().push((u.file.clone(), &u.program));
     }
+    // milestone 60: **importグラフの検証**(TS版`checkModules`の前半)。
+    // 予約名 → 名前の形/自己import → 循環、の**段階順に early-return する**——TS版も
+    // 各段で`if (diagnostics.length > 0) return`する。先の段が壊れている状態で次の段を
+    // 走らせると、依存グラフが信用できず二次的な誤診断が出るため
+    if let Some(diags) = check_import_graph(&discovered, &by_pkg) {
+        return diags;
+    }
     // milestone 49: **全パッケージのシンボル表を先に組み立てる**(pkg修飾参照の診断用)。
     // 宣言を見るだけで作れるので検査順に依存せず、循環importがあっても素直に作れる。
     // 組み込みパッケージ(mesh/json等)を先に入れ、ユーザーパッケージで上書きする
@@ -273,6 +280,115 @@ fn check_all_opts(parsed: &ParsedModules, test_mode: bool) -> Vec<(String, Vec<D
         out.extend(diags);
     }
     out
+}
+
+// importグラフの検証(milestone 60。TS版`checker/modules.ts`の`checkModules`前半)。
+// 診断があれば`Some`を返し、呼び出し元はそこで検査を打ち切る。
+//
+// **段階順に early-return する**のがTS版の設計: (1)組み込みと衝突するパッケージ名 →
+// (2)識別子にならない名前・自己import → (3)循環。先の段が壊れている状態で次の段を
+// 走らせると依存グラフが信用できず、二次的な誤診断が出る。
+//
+// なお`unknown-package`はここでは出さない——Rust版は`load_modules`(modules.rs)が
+// ファイル発見の時点で解決できないimportを弾くので、ここへ到達する時点で全部解決済み
+fn check_import_graph(discovered: &[String], by_pkg: &HashMap<String, Vec<(String, &Program)>>) -> Option<Vec<(String, Vec<Diagnostic>)>> {
+    let mut out: Vec<(String, Vec<Diagnostic>)> = Vec::new();
+    fn push(out: &mut Vec<(String, Vec<Diagnostic>)>, file: &str, pos: Pos, code: DiagnosticCode, message: String) {
+        let d = Diagnostic { pos, code, message };
+        match out.iter_mut().find(|(f, _)| f == file) {
+            Some((_, ds)) => ds.push(d),
+            None => out.push((file.to_string(), vec![d])),
+        }
+    }
+
+    // (1) 組み込みパッケージのエイリアス名と同じ名前のユーザーパッケージ。
+    // レジストリはエイリアス名だけをキーにするので、検出しないと検査が素通りしたまま
+    // 生成JSが同名関数の二重宣言で壊れる(検査が通ったのにcrashする=P4違反)
+    for pkg in discovered {
+        if let Some(path) = BUILTIN_PACKAGE_PATHS.iter().find(|p| p.rsplit('/').next() == Some(pkg.as_str())) {
+            let file = by_pkg.get(pkg).and_then(|fs| fs.first()).map(|(f, _)| f.clone()).unwrap_or_default();
+            push(
+                &mut out,
+                &file,
+                Pos { line: 1, col: 1 },
+                DiagnosticCode::PackageNameReserved,
+                format!("package name '{pkg}' collides with the built-in package '{path}' — rename the '{pkg}/' directory (built-in package names are reserved)"),
+            );
+        }
+    }
+    if !out.is_empty() {
+        return Some(out);
+    }
+
+    // (2) 識別子にならないパッケージ名・自己import
+    for pkg in discovered {
+        for (file, program) in by_pkg.get(pkg).into_iter().flatten() {
+            for imp in &program.imports {
+                if !is_identifier(&imp.alias) {
+                    push(&mut out, file, imp.pos, DiagnosticCode::InvalidPackageName, format!("package name '{}' cannot be used as an identifier — rename the directory", imp.alias));
+                } else if &imp.alias == pkg {
+                    push(&mut out, file, imp.pos, DiagnosticCode::SelfImport, format!("package '{pkg}' cannot import itself"));
+                }
+            }
+        }
+    }
+    if !out.is_empty() {
+        return Some(out);
+    }
+
+    // (3) 循環。組み込みパッケージは`.mesh`ソースを持たないので依存グラフに含めない
+    let mut deps: HashMap<&str, Vec<String>> = HashMap::new();
+    for pkg in discovered {
+        let set: Vec<String> = by_pkg
+            .get(pkg)
+            .into_iter()
+            .flatten()
+            .flat_map(|(_, p)| p.imports.iter().map(|i| i.alias.clone()))
+            .filter(|a| by_pkg.contains_key(a))
+            .collect();
+        deps.insert(pkg.as_str(), set);
+    }
+    let mut state: HashMap<&str, u8> = HashMap::new(); // 1=visiting, 2=done
+    let mut cycle: Option<Vec<String>> = None;
+    fn visit<'a>(pkg: &'a str, deps: &HashMap<&'a str, Vec<String>>, state: &mut HashMap<&'a str, u8>, chain: &mut Vec<String>, found: &mut Option<Vec<String>>) {
+        if found.is_some() || state.get(pkg) == Some(&2) {
+            return;
+        }
+        if state.get(pkg) == Some(&1) {
+            let at = chain.iter().position(|p| p == pkg).unwrap_or(0);
+            let mut c: Vec<String> = chain[at..].to_vec();
+            c.push(pkg.to_string());
+            *found = Some(c);
+            return;
+        }
+        state.insert(pkg, 1);
+        chain.push(pkg.to_string());
+        for d in deps.get(pkg).into_iter().flatten() {
+            if let Some((k, _)) = deps.get_key_value(d.as_str()) {
+                visit(k, deps, state, chain, found);
+            }
+        }
+        chain.pop();
+        state.insert(pkg, 2);
+    }
+    for pkg in discovered {
+        if let Some((k, _)) = deps.get_key_value(pkg.as_str()) {
+            visit(k, &deps, &mut state, &mut Vec::new(), &mut cycle);
+        }
+        if let Some(c) = &cycle {
+            let head = c.first().cloned().unwrap_or_default();
+            let file = by_pkg.get(&head).and_then(|fs| fs.first()).map(|(f, _)| f.clone()).unwrap_or_default();
+            push(&mut out, &file, Pos { line: 1, col: 1 }, DiagnosticCode::ImportCycle, format!("import cycle: {}", c.join(" -> ")));
+            return Some(out);
+        }
+    }
+    None
+}
+
+// パッケージ名が識別子として使えるか(TS版の`/^[A-Za-z_][A-Za-z0-9_]*$/`)
+fn is_identifier(s: &str) -> bool {
+    let mut cs = s.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_') && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // 依存されている側が先に来る順(TS版`checkModules`のDFS後順)。

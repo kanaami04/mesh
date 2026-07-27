@@ -1,0 +1,5 @@
+import "a"
+
+export fn fb() int {
+	return 2
+}

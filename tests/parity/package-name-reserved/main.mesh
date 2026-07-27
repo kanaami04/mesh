@@ -1,0 +1,5 @@
+import "json"
+
+fn main() {
+	print(json.f())
+}
