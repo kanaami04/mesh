@@ -51,6 +51,24 @@ hook_augment_path() {
 # 外部コマンドを使わず bash の文字列置換だけで行う（sed/awk 等への依存を増やさない）。
 # 既知の限界: クォート・ヒアドキュメント・`${...}` のようなパラメータ展開の中身も
 # 区切り文字として解釈してしまう（シェルの構文解析はしていないため）。
+# クォートで囲まれた中身を落とす。`gh pr comment --body "... git stash list ..."` のように
+# **引数の文字列として**コマンド名が現れる形で誤発火するのを防ぐ(2026-07-27に
+# block-git-stash.sh が実際にこれで誤発火し、レビューコメントの投稿が止まった)。
+# シェルの正確なパースはしない——「クォートの中はコマンドではない」という近似で十分で、
+# 近似を外す方向(=拾いすぎ)より落とす方向に倒す方が、フックとしては安全側になる。
+# エスケープされたクォートは扱わない(その形でコマンドを隠すのは現実的でない)。
+# **ヒアドキュメント(`<<'EOF' ... EOF`)の中身も落とせない**——フックはコマンド文字列しか
+# 見えず、範囲を正しく解釈するにはシェルのパーサが要る。実害は「長文をヒアドキュメントで
+# 渡すと止まる」ことで、`--body-file` にすれば回避できるため近似のまま残す(2026-07-27に
+# このPR自身のレビューコメント投稿で踏んだ)。
+# **`hook_is_pr_merge` には適用しない**——あちらは断片からPR番号を取り出すのに引数
+# (`gh pr view -q "..."` のクエリ等)を保ったまま扱う必要があり、落とすとテストが壊れた
+# (実際に踏んだ)。マージ判定は文字列引数の中にコマンド名が現れる形の被害が無いので
+# 適用しなくてよい
+hook_strip_quoted() {
+  printf '%s' "$1" | sed -e "s/'[^']*'/ /g" -e 's/"[^"]*"/ /g'
+}
+
 hook_split_segments() {
   local s=$1
   s=${s//&&/$'\n'}
@@ -117,7 +135,24 @@ hook_is_worktree_add() {
   local seg
   while IFS= read -r seg; do
     hook_segment_is_worktree_add "$seg" && return 0
-  done <<< "$(hook_split_segments "$1")"
+  done <<< "$(hook_split_segments "$(hook_strip_quoted "$1")")"
+  return 1
+}
+
+hook_segment_is_stash() {
+  # `git stash` 全般（save/push/pop/apply、引数なしの `git stash` も）。
+  # 比較目的の退避が事故を起こすので、読み取り専用の `git stash list` / `show` だけは通す。
+  printf '%s' "$1" | grep -Eq \
+    '^[[:space:]]*((then|else|elif|do)[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-][^[:space:]]*)?)*[[:space:]]+stash\b' \
+    && ! printf '%s' "$1" | grep -Eq '[[:space:]]+stash[[:space:]]+(list|show)\b'
+}
+
+# コマンド文字列に `git stash`（読み取り専用の list/show を除く）の呼び出しが含まれるか
+hook_is_stash() {
+  local seg
+  while IFS= read -r seg; do
+    hook_segment_is_stash "$seg" && return 0
+  done <<< "$(hook_split_segments "$(hook_strip_quoted "$1")")"
   return 1
 }
 
