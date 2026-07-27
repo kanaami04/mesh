@@ -1,0 +1,7 @@
+struct P {
+	__proto__: string
+}
+
+fn main() {
+	print(1)
+}

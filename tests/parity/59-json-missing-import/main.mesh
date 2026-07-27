@@ -1,0 +1,7 @@
+json struct J {
+	n: int
+}
+
+fn main() {
+	print(1)
+}

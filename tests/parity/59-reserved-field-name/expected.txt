@@ -1,0 +1,3 @@
+main.mesh:2:2: error[reserved-field-name]: '__proto__' can't be used as a field name — pick a different name
+  	__proto__: string
+  	^

@@ -1,0 +1,3 @@
+main.mesh:2:7: error[int-literal-overflow]: integer literal 99999999999999999999 exceeds the safe integer range (±9007199254740991) and would silently lose precision
+  	x := 99999999999999999999
+  	     ^

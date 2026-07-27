@@ -1,0 +1,3 @@
+main.mesh:2:2: error[missing-return-value]: this function must return int
+  	return
+  	^

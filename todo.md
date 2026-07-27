@@ -3804,15 +3804,40 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 59: 単発の未実装検査を6種まとめて移植**
+              ✅ 2026-07-27実装。診断コード92→98種。milestone 58で「本当に未実装」と確定した
+              12種のうち、**単発で片付くもの6種**をまとめた回。
+              - `reserved-field-name`(`__proto__`)・`int-literal-overflow`・
+                `discriminated-union-tag-required`・`missing-return-value`・
+                `json-struct-missing-import`・`json-struct-unsupported-field`。
+              - **json系2種は「文言は完全一致しているのに位置と診断コードだけ無い」状態だった**。
+                `synthesize_json_decoders`が`Result<_, String>`を返しており、
+                `LoadFailure::Discover`へ素の文字列で流れていたのが原因。`CompileError`へ
+                変えてパースエラーと同じ経路(位置・コード・ソース行つき)に載せた。
+                **TS版に対応コードが無いRust固有のガード2件**(json型宣言・decoder名の衝突)は
+                `syntax-error`として扱う。
+              - `int-literal-overflow`の判定は**JSの`Number.isSafeInteger`と同じ**±(2^53-1)。
+                `i64`ではない——生成JSがnumberなので、そこが精度の境界になる。
+              - `missing-return-value`はTS版と同じく**位置が`return`文そのもの**
+                (値がある場合のtype-mismatchは値の式を指す。両方を実測して確認)。
+              - **検証**: プローブ13本(6診断の発火4種+json系2種、境界値±(2^53-1)・
+                float・戻り値なし関数の`return`・`T | none`のreturn・同じ値のタグ・
+                json structの対応フィールド全種・非structレシーバ)。
+                `mise run parity` **113ファイルで差0件**、コーパスに8ケース追加(82→90)。
+                テスト611→612件、clippyクリーン。
+              - **残る未実装は6種**: generics系3種(`generic-inference-failed`は既出だが
+                `generic-type-param-conflict`/`generic-type-param-not-inferable`が未実装)・
+                import系4種のうち`import-cycle`/`self-import`/`invalid-package-name`/
+                `package-name-reserved`。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-27時点、milestone 58まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-27時点、milestone 59まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 92種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 98種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

@@ -11,12 +11,12 @@
 // 対応するフィールド型(TS版と同じv1スコープ): int/float/string/bool、他のjson struct
 // (同一ファイル内)への参照、それらの配列、それらの'T | none'。それ以外(素のstruct・map・
 // 一般unionなど)は合成時にErrにし、手書きデコーダ(json.field等を直接使う)を書くよう誘導する。
-// TS版の`MultiCompileError`(複数エラー蓄積)は、このリゾルバの「Result<_, String>単一
+// TS版の`MultiCompileError`(複数エラー蓄積)は、このリゾルバの「Result<_, CompileError>単一
 // エラー」設計と馴染まないため移植しない——最初に見つかったエラーだけを返す(診断を
 // 出さない設計なので実害は無い)。
 
 use crate::ast::{Block, Expr, FnDecl, IfStmt, Param, Program, Stmt, StructLitField, TypeDecl, TypeNode};
-use crate::token::{Pos, TokenType};
+use crate::token::{CompileError, Pos, TokenType};
 use std::collections::HashSet;
 
 fn primitive_helper(name: &str) -> Option<&'static str> {
@@ -92,8 +92,16 @@ fn union_type(members: Vec<TypeNode>, pos: Pos) -> TypeNode {
     TypeNode::Union { members, pos, multiline: false }
 }
 
-fn unsupported_field_error(struct_name: &str, field_name: &str, reason: &str) -> String {
-    format!("json struct: 'json struct {struct_name}' can't auto-decode field '{field_name}': {reason}")
+// **milestone 59でCompileErrorへ変えた**。それまでは`String`だったので位置も診断コードも
+// 持てず、TS版の`json-struct-unsupported-field`と突き合わせられなかった(文言だけは一致
+// していた)。位置はそのフィールドの型注釈——TS版も同じ場所を指す(実測で確認)
+fn unsupported_field_error(struct_name: &str, field_name: &str, reason: &str, pos: Pos) -> Box<CompileError> {
+    Box::new(CompileError {
+        message: format!("'json struct {struct_name}' can't auto-decode field '{field_name}': {reason}"),
+        pos,
+        code: "json-struct-unsupported-field",
+        fix: None,
+    })
 }
 
 fn is_primitive(t: &TypeNode) -> bool {
@@ -165,7 +173,7 @@ fn gen_field_stmts(
     t: &TypeNode,
     json_struct_names: &HashSet<String>,
     pos: Pos,
-) -> Result<(Vec<Stmt>, String), String> {
+) -> Result<(Vec<Stmt>, String), Box<CompileError>> {
     let result_var = format!("__f_{field_name}");
 
     if is_simple(t, json_struct_names) {
@@ -180,6 +188,7 @@ fn gen_field_stmts(
                 struct_name,
                 field_name,
                 "array element type isn't supported for automatic decoding (only int/float/string/bool or a nested 'json struct')",
+                pos,
             ));
         }
         let raw_expr = prop_expr(json_call("asArray", vec![prop_expr(json_call("field", vec![v_expr, string_lit(field_name, pos)], pos), pos)], pos), pos);
@@ -189,7 +198,12 @@ fn gen_field_stmts(
 
     if let Some(inner) = optional_inner(t) {
         if !is_simple(inner, json_struct_names) && !matches!(inner, TypeNode::Array { .. }) {
-            return Err(unsupported_field_error(struct_name, field_name, "the non-'none' side of this optional field isn't supported for automatic decoding"));
+            return Err(unsupported_field_error(
+                struct_name,
+                field_name,
+                "the non-'none' side of this optional field isn't supported for automatic decoding",
+                pos,
+            ));
         }
         if let TypeNode::Array { elem, .. } = inner
             && !is_simple(elem, json_struct_names)
@@ -198,6 +212,7 @@ fn gen_field_stmts(
                 struct_name,
                 field_name,
                 "array element type isn't supported for automatic decoding (only int/float/string/bool or a nested 'json struct')",
+                pos,
             ));
         }
         let raw_var = format!("__raw_{field_name}");
@@ -219,14 +234,22 @@ fn gen_field_stmts(
         field_name,
         "only int/float/string/bool, a nested 'json struct', an array of those, or 'T | none' of those are \
          supported — write a hand-written decoder (using json.field/json.asString/etc.) for this field instead",
+        pos,
     ))
 }
 
 // 1つのjson struct宣言から decode<Name> のFnDeclを合成する
-fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> Result<FnDecl, String> {
+fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> Result<FnDecl, Box<CompileError>> {
     let TypeNode::StructType { fields, .. } = &td.node else {
         // parserが"json type"を弾いているので通常は到達しない
-        return Err(format!("json struct: 'json' can only mark a 'struct' declaration, not this type shape (found via '{}')", td.name));
+        // **TS版に対応する診断コードが無いRust固有のガード**なので`syntax-error`を使う
+        // (parserが"json type"を弾いているので通常は到達しない)
+        return Err(Box::new(CompileError {
+            message: format!("'json' can only mark a 'struct' declaration, not this type shape (found via '{}')", td.name),
+            pos: td.pos,
+            code: "syntax-error",
+            fix: None,
+        }));
     };
     let pos = td.pos;
     let v_param = "v";
@@ -253,16 +276,20 @@ fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
 // program中の全 json struct から decode<Name> 関数群を合成し、program.fnsへ追加する。
 // ネスト参照(struct内の別structフィールド)は同一ファイル内のjson structだけを対象にする
 // (TS版と同じv1制約 — 他ファイル/他パッケージをまたぐ場合は手書きデコーダで対応する)
-pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), String> {
+pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), Box<CompileError>> {
     let json_struct_decls: Vec<TypeDecl> = program.types.iter().filter(|t| t.is_json).cloned().collect();
     if json_struct_decls.is_empty() {
         return Ok(());
     }
     let has_json_import = program.imports.iter().any(|i| i.path == "mesh/json");
     if !has_json_import {
-        return Err(
-            "json struct: 'json struct' needs 'import \"mesh/json\"' (the generated decoder calls json.field/json.asString/etc.)".to_string(),
-        );
+        // 位置は最初のjson struct宣言(TS版も同じ。実測で確認)
+        return Err(Box::new(CompileError {
+            message: "'json struct' needs 'import \"mesh/json\"' (the generated decoder calls json.field/json.asString/etc.)".to_string(),
+            pos: json_struct_decls[0].pos,
+            code: "json-struct-missing-import",
+            fix: None,
+        }));
     }
     let json_struct_names: HashSet<String> = json_struct_decls.iter().map(|t| t.name.clone()).collect();
     // code review発覚・実行確認済み: 合成するdecode<Name>という名前は利用者からは見えない
@@ -275,10 +302,16 @@ pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), String> {
     for td in &json_struct_decls {
         let decoder_name = format!("decode{}", td.name);
         if existing_fn_names.contains(decoder_name.as_str()) {
-            return Err(format!(
-                "json struct: the auto-generated decoder function '{decoder_name}' collides with an existing function of the same name — rename one (found via 'json struct {}')",
-                td.name
-            ));
+            // これもTS版に対応コードが無いRust固有のガード(milestone 9のcode reviewで追加)
+            return Err(Box::new(CompileError {
+                message: format!(
+                    "the auto-generated decoder function '{decoder_name}' collides with an existing function of the same name — rename one (found via 'json struct {}')",
+                    td.name
+                ),
+                pos: td.pos,
+                code: "syntax-error",
+                fix: None,
+            }));
         }
         program.fns.push(synthesize_decoder_fn(td, &json_struct_names)?);
     }
@@ -325,7 +358,7 @@ mod tests {
     fn import_mesh_json_が無ければerrになる() {
         let mut program = program_with(false, vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])]);
         let err = synthesize_json_decoders(&mut program).unwrap_err();
-        assert!(err.contains("needs 'import \"mesh/json\"'"), "got: {err}");
+        assert!(err.message.contains("needs 'import \"mesh/json\"'"), "got: {}", err.message);
     }
 
     #[test]
@@ -384,7 +417,7 @@ mod tests {
             )],
         );
         let err = synthesize_json_decoders(&mut program).unwrap_err();
-        assert!(err.contains("can't auto-decode field 'm'"), "got: {err}");
+        assert!(err.message.contains("can't auto-decode field 'm'"), "got: {}", err.message);
     }
 
     #[test]
@@ -395,7 +428,7 @@ mod tests {
         let mut program = parse(src).unwrap();
         program.types = vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])];
         let err = synthesize_json_decoders(&mut program).unwrap_err();
-        assert!(err.contains("'decodeUser' collides with an existing function"), "got: {err}");
+        assert!(err.message.contains("'decodeUser' collides with an existing function"), "got: {}", err.message);
     }
 
     #[test]
@@ -408,6 +441,6 @@ mod tests {
             )],
         );
         let err = synthesize_json_decoders(&mut program).unwrap_err();
-        assert!(err.contains("array element type isn't supported"), "got: {err}");
+        assert!(err.message.contains("array element type isn't supported"), "got: {}", err.message);
     }
 }
