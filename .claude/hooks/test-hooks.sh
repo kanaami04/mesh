@@ -343,6 +343,36 @@ check_wt nomatch 'worktree prune'        'git worktree prune'
 check_wt nomatch '文中の言及'            'echo "git worktree add をこれから使う"'
 check_wt nomatch '別コマンドのadd'       'git add -A'
 check_wt nomatch 'オプション値の中の言及' 'git commit -m "worktree add をやめた"'
+
+# ---------------------------------------------------------------------------
+# 6. git stash の拒否フック（block-git-stash.sh、issue #83）
+# ---------------------------------------------------------------------------
+
+# $1 = 期待（match / nomatch）, $2 = 説明, $3 = コマンド文字列
+check_stash() {
+  local want=$1 desc=$2 cmd=$3 got
+  if hook_is_stash "$cmd"; then got=match; else got=nomatch; fi
+  [ "$got" = "$want" ] && ok || ng "$(printf '%s\n  期待=%s 実際=%s\n  入力: %s' "$desc" "$want" "$got" "$cmd")"
+}
+
+check_stash match   '素のstash'            'git stash'
+check_stash match   'stash push'           'git stash push -m wip'
+check_stash match   'stash pop'            'git stash pop'
+check_stash match   'stash apply'          'git stash apply'
+check_stash match   'stash save'           'git stash save wip'
+check_stash match   'stash drop'           'git stash drop'
+check_stash match   '先行するcd'           'cd /repo && git stash'
+check_stash match   'セミコロン区切り'     'git stash; git checkout main'
+check_stash match   'サブシェル'           '(git stash && git checkout main)'
+check_stash match   '余分な空白'           'git   stash   pop'
+check_stash match   'gitのグローバルオプション' 'git -C /repo stash'
+check_stash match   'env 経由'             'env git stash'
+# 発火してはいけない形（状態確認は通す・別コマンドを止めない）
+check_stash nomatch 'stash list'           'git stash list'
+check_stash nomatch 'stash show'           'git stash show -p'
+check_stash nomatch '文中の言及'           'echo "git stash は禁止"'
+check_stash nomatch '別コマンド'           'git status'
+check_stash nomatch 'コミットメッセージ'   'git commit -m "git stash をやめた"'
 check_wt match   'gitの-cオプション'     'git -c core.pager=cat worktree add /tmp/base'
 check_wt nomatch '無関係なコマンド'      'cargo build'
 

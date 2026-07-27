@@ -51,6 +51,9 @@ driftは候補を出すだけなので、出た行と**変更した関数のdoc�
 feature branch → PR → CI green + `/code-review --comment` → **squash mergeのみ**。
 `.claude/hooks/enforce-code-review.sh` が `### Code review` 見出しのコメント無しでの
 `gh pr merge` を機械的に拒否する(確認できないときは常にdenyする設計)。
+**`git stash` も `.claude/hooks/block-git-stash.sh` が拒否する**——別の状態を見たいときは
+`git worktree` を使う(経緯は `.claude/skills/git-worktree`。読み取り専用の
+`git stash list`/`show` は通る)。
 
 レビューが不要だと判断した場合(docsのみの変更など)は、黙って飛ばさず
 `### Code review skipped: <理由>` という見出しのコメントを残す(**理由の記載は必須**。

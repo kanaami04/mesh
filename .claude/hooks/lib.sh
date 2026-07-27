@@ -121,6 +121,23 @@ hook_is_worktree_add() {
   return 1
 }
 
+hook_segment_is_stash() {
+  # `git stash` 全般（save/push/pop/apply、引数なしの `git stash` も）。
+  # 比較目的の退避が事故を起こすので、読み取り専用の `git stash list` / `show` だけは通す。
+  printf '%s' "$1" | grep -Eq \
+    '^[[:space:]]*((then|else|elif|do)[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-][^[:space:]]*)?)*[[:space:]]+stash\b' \
+    && ! printf '%s' "$1" | grep -Eq '[[:space:]]+stash[[:space:]]+(list|show)\b'
+}
+
+# コマンド文字列に `git stash`（読み取り専用の list/show を除く）の呼び出しが含まれるか
+hook_is_stash() {
+  local seg
+  while IFS= read -r seg; do
+    hook_segment_is_stash "$seg" && return 0
+  done <<< "$(hook_split_segments "$1")"
+  return 1
+}
+
 # 文字列を JSON の値として安全な形にエスケープする（\ " タブ 改行 復帰）。
 # jq に依存せず bash 組み込みのパラメータ展開だけで行う — enforce-code-review.sh の
 # bail() は lib.sh を読み込む前に使われることがあるため、jq はもちろん sed/awk のような
