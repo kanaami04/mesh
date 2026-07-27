@@ -1,1 +1,6 @@
-main.mesh: no errors
+main.mesh:4:17: error[type-mismatch]: argument 1: cannot use int as T
+  	print(lib.pick(1, 2))
+  	               ^
+main.mesh:4:20: error[type-mismatch]: argument 2: cannot use int as T
+  	print(lib.pick(1, 2))
+  	                  ^

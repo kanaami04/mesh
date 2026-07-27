@@ -840,7 +840,13 @@ fn try_package_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: 
         // 表に型が無い(依存を検査していない経路)場合と同じくANYへ倒す=検出漏れ側
         Some(true) => {
             let t = syms.type_of_value.get(name).cloned().unwrap_or(ANY);
-            return Some(if safe_to_compare(&t) && is_fully_modeled(&t) { t } else { ANY });
+            // milestone 65: **型パラメータだけは通す**(`is_fully_modeled`はTypeParamを弾く)。
+            // TS版はpkg修飾のジェネリック呼び出しを`inferGenericCall`へ回さない設計なので、
+            // 型パラメータが残ったまま照合され`argument 1: cannot use int as T`になる
+            // ——`lib.pick(1, 2)`のような呼び出しがTS版では通らない、という制限の再現。
+            // ANYと違い`Type::TypeParam`は「解決に失敗した」印ではなく**抽象型そのもの**なので、
+            // 突き合わせても縮退由来の誤検知にはならない(それがこの例外を置ける理由)
+            return Some(if safe_to_compare(&t) && modeled_allowing_type_params(&t) { t } else { ANY });
         }
     }
     Some(ANY)
@@ -1306,6 +1312,22 @@ fn union_has_no_hollow_struct(t: &Type, seen: &mut Vec<*const ()>) -> bool {
         Type::Any => false,
         Type::TypeParam(_) => false,
         _ => true,
+    }
+}
+
+// `is_fully_modeled`の「型パラメータは許す」版(milestone 65)。
+// `is_fully_modeled`がTypeParamを弾くのは、full_checkerが型パラメータを扱えなかった頃の
+// 「モデル化できていない=突き合わせてはいけない」という判断だった。milestone 62〜64で
+// 推論が入り、TypeParamは**抽象型として正しく比較できる**ようになったので、
+// pkg修飾のシンボル解決だけこちらを使う。
+// **ANYは引き続き弾く**——あちらは「解決に失敗した」印で、突き合わせると縮退由来の誤検知になる
+fn modeled_allowing_type_params(t: &Type) -> bool {
+    match t {
+        Type::TypeParam(_) => true,
+        Type::Fn { params, ret } => params.iter().all(modeled_allowing_type_params) && modeled_allowing_type_params(ret),
+        Type::Array(elem) | Type::Chan(elem) => modeled_allowing_type_params(elem),
+        Type::Map { key, value } => modeled_allowing_type_params(key) && modeled_allowing_type_params(value),
+        _ => is_fully_modeled(t),
     }
 }
 
