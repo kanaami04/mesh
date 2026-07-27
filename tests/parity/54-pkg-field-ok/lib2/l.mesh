@@ -1,0 +1,9 @@
+import "lib"
+
+export struct Container {
+	item: lib.Item
+}
+
+export fn mk() Container {
+	return Container{item: lib.Item{n: 1}}
+}

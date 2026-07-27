@@ -314,16 +314,37 @@ fn is_undeclared_shell_struct(ctx: &FullCheckerCtx, t: &Type) -> bool {
         if name != types::ANONYMOUS_STRUCT_NAME && !name.contains('.') && !ctx.declared_types.contains(name))
 }
 
-// 型の中に「レジストリに存在しないstruct名」が含まれるか。checker.rsのリゾルバは
-// 未知の型名・pkg修飾型を殻struct(フィールド0個)へフォールバックさせるので、その型を
-// full_checker側の値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)は
-// レジストリに載らないので除外する。**入れ子まで再帰的に見る**のが上の
-// `is_undeclared_shell_struct`との違い(そちらは型そのものだけを見る)
+// そのstruct名がレジストリで解決できるか。**pkg修飾名(`lib.Item`)も引ける**のが要点
+// (milestone 54)——`lookup_struct`はパッケージ内の素の名前しか持たないので、他パッケージの
+// structをフィールド型に持つと`has_unregistered_struct`が必ずtrueになり、そのフィールドの
+// 値の型検査が**丸ごと免除**されていた(`lib2.Container{item: 5}`をTS版は弾くのに素通り。
+// milestone 51のcode reviewで実測)。milestone 51でpkg修飾型がレジストリに載るように
+// なったので、ここで引けるようになった
+fn struct_is_registered(ctx: &crate::checker::CheckerCtx, name: &str) -> bool {
+    match name.split_once('.') {
+        // pkg修飾名はパッケージのレジストリから引く。**`is_package_alias`は確認しない**——
+        // この名前は「型注釈に書かれた参照」ではなく**既に解決済みの型が持っている名前**で、
+        // 他パッケージの宣言に由来する(`lib2.Container.item`の型が`lib.Item`)。
+        // 現在のパッケージが`lib`をimportしているかとは無関係なので、そこを条件にすると
+        // `import "lib2"`だけしている側で検査が丸ごと免除される(実測で発覚)。
+        // import宣言を経由しない**参照**を弾く不変条件(milestone 6)は、型注釈を解決する
+        // `resolve_type_ann`/`check_package_type_ref`の側で担保されている
+        Some((pkg, bare)) => ctx.lookup_package_type(pkg, bare).is_some(),
+        None => ctx.lookup_struct(name).is_some(),
+    }
+}
+
+// 型の中に「レジストリで解決できないstruct名」が含まれるか。checker.rsのリゾルバは
+// 未知の型名を殻struct(フィールド0個)へフォールバックさせるので、その型をfull_checker側の
+// 値の型と突き合わせると誤検知になる。無名struct(判別可能unionのメンバー)はレジストリに
+// 載らないので除外する。**入れ子まで再帰的に見る**のが`is_undeclared_shell_struct`との違い
+// (そちらは型そのものだけを見る)。**milestone 54からpkg修飾名も解決できる**ので、
+// 他パッケージのstructをフィールド型に持っても検査が免除されなくなった
 fn has_unregistered_struct(ctx: &crate::checker::CheckerCtx, t: &Type) -> bool {
     fn go(ctx: &crate::checker::CheckerCtx, t: &Type, seen: &mut Vec<*const OnceCell<Vec<types::StructField>>>) -> bool {
         match t {
             Type::Struct { name, fields, .. } => {
-                if name != types::ANONYMOUS_STRUCT_NAME && ctx.lookup_struct(name).is_none() {
+                if name != types::ANONYMOUS_STRUCT_NAME && !struct_is_registered(ctx, name) {
                     return true;
                 }
                 let ptr = Rc::as_ptr(fields);
@@ -5096,6 +5117,26 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn pkg跨ぎのstructをフィールド型に持っても値の型検査が効く() {
+        // milestone 54: `has_unregistered_struct`が`lookup_struct`(パッケージ内の素の名前)
+        // しか引かず、他パッケージのstructをフィールド型に持つと検査が**丸ごと免除**されていた
+        let lib = parse("export struct Item {\n    n: int\n}\n").unwrap();
+        let (_, lib_exports) = check_package_in(&[("l.mesh".to_string(), &lib)], false, &builtin_package_exports(), "lib");
+        let mut registry = builtin_package_exports();
+        registry.insert("lib".to_string(), lib_exports);
+        let run = |src: &str| -> Vec<Diagnostic> {
+            let program = parse(src).expect("test source must parse");
+            check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect()
+        };
+        let bad = run("import \"lib\"\n\nstruct Box {\n    item: lib.Item\n}\n\nfn main() {\n    print(Box{item: 5})\n}\n");
+        assert_eq!(bad.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::TypeMismatch], "{bad:?}");
+        assert_eq!(bad[0].message, "field 'item': cannot use int as lib.Item");
+        // 正しい形は素通り(コレクション越しも含む)
+        let ok = "import \"lib\"\n\nstruct Box {\n    item: lib.Item\n    items: lib.Item[]\n}\n\nfn main() {\n    print(Box{item: lib.Item{n: 1}, items: []})\n}\n";
+        assert!(run(ok).is_empty(), "{:?}", run(ok));
     }
 
     #[test]

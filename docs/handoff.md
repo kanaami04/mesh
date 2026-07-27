@@ -20,13 +20,10 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 
 ### 次の一歩の候補(おおよその優先順)
 
-1. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側):
-   (a)`has_unregistered_struct`が**ローカルの`struct_types`しか見ない**ため、
-   フィールドの宣言型が他パッケージのstructだと値の型検査が丸ごと免除される
-   (`lib2.Container{item: 5}`をTS版は弾くがRust版は素通り)——ここが一番効く。
-   (b)pkg修飾**union**のstructリテラル(`lib.Shape{...}`)は未モデル化で
-   `discriminated-union-*`が出ない。(c)`http.listen`のように**戻り値がunionの関数型**は
-   `is_fully_modeled`でシグネチャ全体がANYへ落ち、コールバックの形が検査されない
+1. **pkg修飾の残りの検出漏れ**(milestone 51のcode reviewで実測。いずれも検出漏れ側。
+   (a)は**milestone 54で解消済み**): (b)pkg修飾**union**のstructリテラル(`lib.Shape{...}`)は
+   未モデル化で`discriminated-union-*`が出ない。(c)`http.listen`のように**戻り値がunionの
+   関数型**は`is_fully_modeled`でシグネチャ全体がANYへ落ち、コールバックの形が検査されない
 2. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
    `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
    `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
@@ -1169,6 +1166,11 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      呼び出し形は`infer_call`が先にinterceptするので誤検知にならない。診断コードは68→69種
    - ✅ **milestone 53(2026-07-27)で`builtin-as-value`**。TS版と同じ位置に1分岐。
      呼び出し形は`infer_call`が先にinterceptするので誤検知にならない。診断コードは68→69種
+   - ✅ **milestone 54(2026-07-27)でpkg跨ぎのstructをフィールド型に持つ値の型検査**。
+     `has_unregistered_struct`が素の名前の表しか引かず、他パッケージのstructがフィールド型
+     だと検査が丸ごと免除されていた。**`is_package_alias`を条件に入れてはいけない**のが要点
+     ——この名前は型注釈の参照ではなく解決済みの型が持つ名前で、現在のパッケージのimportとは
+     無関係(実測で1回踏んだ)。新しい診断コードは足していない
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

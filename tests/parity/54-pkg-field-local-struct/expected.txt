@@ -1,0 +1,3 @@
+main.mesh:8:18: error[type-mismatch]: field 'item': cannot use int as lib.Item
+  	print(Box{item: 5})
+  	                ^
