@@ -3641,13 +3641,15 @@ pub fn check_package_shared(
     // 定数を検査+登録し、最後に関数本体を検査する。
     // milestone 26以降、非ジェネリックの自由関数は`fn_signature`でシグネチャ付き
     // (`Type::Fn`)で登録し、呼び出し側の個数・型照合(argument-count/type-mismatch)を
-    // 効かせる。**ジェネリック関数(`type_params`有り)だけは`scopes[0]`へANYで登録する**——
-    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で扱うので、
-    // ここで`Type::Fn`(型パラメータ入り)を配ると呼び出し側の照合がTS版と食い違う。
-    // milestone 62でその別経路を`generic_fns`+`infer_generic_call`として移植した:
-    // 直接呼び出し(`name(args)`)は推論を通り、引数不足なら`generic-inference-failed`、
-    // 引数過多なら`argument-count`になる(TS版と同じ)。**値として渡された場合
-    // (`f := identity`)だけはANYのまま**で、TS版が出す代入不可エラーは出ない(検出漏れ側)。
+    // 効かせる。ジェネリック関数(`type_params`有り)も**型パラメータ入りのシグネチャ**
+    // (`generic_fn_signature`)で登録する——TS版`checkPackage`の`declareBinding(fn.name, t)`と同じ。
+    // ジェネリック呼び出しの推論は別経路(`generic_fns`+`infer_generic_call`、milestone 62)が
+    // 担い、`name(args)`の直接呼び出しを`scopes[0]`より先にinterceptする。
+    // **この二段構えがTS版の設計そのもの**で、直接呼び出しは推論が効き、値として渡した場合
+    // (`f := identity`)は型パラメータが残ったまま代入不可になる(TS版`calls.ts`が
+    // 「変数へ代入してから呼ぶ・コールバックとして渡す等は非対応」と明記している意図的な制限)。
+    // milestone 62では誤検知を恐れてANY登録に留めていたが、直接呼び出しがinterceptされる以上
+    // 危険は無く、milestone 63で揃えた(parity 136ファイルで誤検知0を確認)。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
@@ -5007,7 +5009,7 @@ mod tests {
     }
 
     #[test]
-    fn ジェネリック関数を値として渡すとTS版と同じく代入不可になる() {
+    fn ジェネリック関数を値として渡すとts版と同じく代入不可になる() {
         // milestone 63。TS版は`name(args)`の直接呼び出しだけ推論する設計で、変数へ入れたり
         // コールバックとして渡したりすると**型パラメータが残ったまま代入不可になる**
         // (TS版`calls.ts`のコメントが明記している意図的な制限)。milestone 62までは
@@ -5019,7 +5021,7 @@ mod tests {
     }
 
     #[test]
-    fn toIntはint_errorを返す() {
+    fn 組み込みtointはint_errorを返す() {
         // milestone 63。milestone 27ではunionが未モデル化でANYへ潰していた。
         // ANYのままだと`or`で取り出した後の検査が丸ごと素通りする
         let d = check("fn main() {\n    n := toInt(\"42\") or _ => -1\n    print(n + \"x\")\n}\n");
