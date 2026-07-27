@@ -1,0 +1,7 @@
+fn take(f: fn(int) int) int {
+	return f(1)
+}
+
+fn main() {
+	print(take(str))
+}

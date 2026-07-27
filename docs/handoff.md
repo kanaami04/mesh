@@ -30,15 +30,15 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    (b)pkg修飾**union**のstructリテラル(`lib.Shape{...}`)は未モデル化で
    `discriminated-union-*`が出ない。(c)`http.listen`のように**戻り値がunionの関数型**は
    `is_fully_modeled`でシグネチャ全体がANYへ落ち、コールバックの形が検査されない
-3. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
+2. **unionを持つstructフィールドのモデル化** — `struct Node { next: Node | none }`の
    `n.next.next`にmilestone 47の`narrow-required`が効かない。`widen_field_type`が
    `is_fully_modeled`経由でunionをANYへ潰しているのが理由で、ここを変えると全比較経路に
    波及するため独立したマイルストーンにするのが妥当
-4. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
+3. **`error type`の形の検査**(`error-type-must-be-struct` / `error-type-aliases-existing`)
    — milestone 46で未移植だと実測。Rust版はcodegenが明確なErrで止めるが、`mesh check`は
    無診断のまま通してしまう(検査とビルドで結論が食い違う数少ない箇所)
-5. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
-6. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
+4. **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+5. **generics推論**(`generic-inference-failed` / `generic-type-param-conflict` /
    `generic-type-param-not-inferable`)— ジェネリック呼び出しは今もANY登録で素通り
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
@@ -1168,6 +1168,8 @@ todo.mdの本エントリ(milestone 22の項)参照。以下は方針合意時�
      `Bogus{n: undefinedThing}`の発行順が変わる。**新しい`mise run parity`/`drift`の
      初実戦**で、driftが古いコメントを1件検出し、出力の指示に従ってdocコメントを
      読み直したらgrepでは拾えないdriftをもう1件見つけた。詳細はtodo.mdの当該項目
+   - ✅ **milestone 53(2026-07-27)で`builtin-as-value`**。TS版と同じ位置に1分岐。
+     呼び出し形は`infer_call`が先にinterceptするので誤検知にならない。診断コードは68→69種
    - 残る候補: **診断の続き**——
      structリテラルの未宣言名(`unknown-type`)・`builtin-as-value`・
      unionフィールドのモデル化。

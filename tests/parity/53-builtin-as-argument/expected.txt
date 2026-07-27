@@ -1,0 +1,3 @@
+main.mesh:6:13: error[builtin-as-value]: 'str' is a builtin function — call it like str(...)
+  	print(take(str))
+  	           ^

@@ -1,0 +1,3 @@
+main.mesh:2:7: error[builtin-as-value]: 'len' is a builtin function — call it like len(...)
+  	f := len
+  	     ^

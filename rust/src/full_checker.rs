@@ -797,6 +797,10 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 // 通常のローカル変数/トップレベル名を区別せず同じ経路で解決できる
                 b.ty.clone()
             } else if crate::checker::is_builtin(name) {
+                // milestone 53: 組み込み関数を**値として**参照した(`print(print)` / `f := len`)。
+                // TS版`expressions.ts`もこの位置(束縛が見つからなかった後)で判定する
+                // ——呼び出し形(`print(1)`)は`infer_call`が先にinterceptするのでここへ来ない
+                ctx.error(*pos, DiagnosticCode::BuiltinAsValue, format!("'{name}' is a builtin function — call it like {name}(...)"));
                 ANY
             } else if ctx.import_aliases.contains(name) {
                 // milestone 50: パッケージ名を値として使った(`print(lib)`)。TS版
@@ -5092,6 +5096,21 @@ mod tests {
             check_package_with_registry(&[("main.mesh".to_string(), &program)], true, &registry).0.into_iter().flat_map(|(_, d)| d).collect();
         let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec![DiagnosticCode::NotExported], "{codes:?}");
+    }
+
+    #[test]
+    fn 組み込み関数を値として参照するとbuiltin_as_value() {
+        for (src, name) in [
+            ("fn main() {\n    print(print)\n}\n", "print"),
+            ("fn main() {\n    f := len\n    print(f)\n}\n", "len"),
+        ] {
+            let diags = check(src);
+            assert_eq!(diags.len(), 1, "{src} -> {diags:?}");
+            assert_eq!(diags[0].code, DiagnosticCode::BuiltinAsValue, "{src} -> {diags:?}");
+            assert_eq!(diags[0].message, format!("'{name}' is a builtin function — call it like {name}(...)"));
+        }
+        // **呼び出し形は`infer_call`が先にinterceptする**のでここへ来ない(誤検知にならない)
+        assert!(check("fn main() {\n    print(len(\"hi\"))\n}\n").is_empty());
     }
 
     #[test]
