@@ -38,6 +38,9 @@ mise run rust-test      # cd rust && cargo test(Rust移植版)
 mise run rust-check     # cd rust && cargo clippy --all-targets
 mise run parity         # TS版(オラクル)とRust版のcheck出力を突き合わせる
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
+
+scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
+                                                 # (run_in_background で起動する)
 ```
 
 **Rust移植のマイルストーンを出荷する前に `mise run parity` と `mise run drift` を回す。**
@@ -59,7 +62,10 @@ feature branch → PR → CI green + `/code-review --comment` → **squash merge
 `### Code review skipped: <理由>` という見出しのコメントを残す(**理由の記載は必須**。
 経緯と根拠は docs/handoff.md「開発の進め方」節)。
 
-**レビュー用サブエージェントには調べる範囲を必ず指定し、止まったら`TaskStop`で止める。**
+**レビュー用サブエージェントを起動したら、同時に目覚ましを仕掛ける**
+(`Bash(run_in_background: true)` で `scripts/agent-timeout.sh 10 <エージェントID...>`)。
+`TaskList`にエージェントは出ず経過時間も見えないので、**これが無いと放置に気づけない**。
+**調べる範囲も必ず指定し、止まったら`TaskStop`で止める。**
 1セッションで3回、範囲を絞らなかったエージェントが1時間以上ハングして手が止まった
 (対象PRを列挙しない / 件数検証にworktree+フルビルド / 確認観点を7項目も列挙)。
 **`TaskList`には出ないので起動時のエージェントIDを渡す。** 1観点落ちても他が実機検証して
