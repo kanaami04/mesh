@@ -3804,6 +3804,27 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 66: json structのエンコーダ合成を移植(生成JSが全例で一致)**
+              ✅ 2026-07-27実装。TS版`json-decode.ts`後半の`synthesizeJsonEncoders`
+              (`encode<X>(x: X) json.Value`)を移植。**examples全24本で生成JSがTS版と
+              バイト一致**するようになった。
+              - decode側と対の構造だが、**失敗しうる箇所が無い**のが違い——`?`伝播も
+                `TargetMode`の分岐も要らず素直に組み立てるだけ。
+              - **codegen側のnarrowingにも`!`の穴があった**。合成コードが
+                `if !(__efv_x is none) { ... }`を生成するので、`cannot use string | none as string`で
+                落ちた。milestone 65でfull_checker側だけ直しており、codegen側は
+                「複合条件のnarrowingは実際のexampleに存在しない」というコメントのまま残っていた
+                ——**合成コードが「実際のexample」になった**形。
+              - **Rust固有の名前衝突ガードを2つ削除した**(decode/encode)。milestone 9当時は
+                「トップレベル関数名の重複を検出しない」という前提で置いたガードだが、
+                milestone 48で`already-declared`が入って前提が消えていた。残っていると
+                TS版と違う診断コード(`syntax-error`)になる——実測で発覚。
+              - **`mise run parity`が生成JSも突き合わせるようになった**。診断が一致した
+                (=両方buildできる)ケースだけを対象にする。現在46件・差0件。
+                このギャップが長く残った原因そのものへの対処。
+              - 検証: エンコーダのエラー経路4種(import不足・未対応フィールド・入れ子配列・
+                名前衝突)と optional 3種を実測。`mise run parity` 151ファイル・
+                検出漏れ0・誤検知0・生成JS差0。テスト627件、clippyクリーン。
         - [x] **milestone 65: 残っていた検出漏れを全部埋める(parity 完全一致)**
               ✅ 2026-07-27実装。`mise run parity` が **146ファイルで検出漏れ0・誤検知0**に
               なった。撤去条件(2)をコード数(107/107)と検出範囲の両方で満たした。

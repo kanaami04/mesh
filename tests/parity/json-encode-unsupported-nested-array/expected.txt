@@ -1,0 +1,3 @@
+main.mesh:4:2: error[json-struct-unsupported-field]: 'json struct Nested' can't auto-decode field 'xs': array element type isn't supported for automatic decoding (only int/float/string/bool or a nested 'json struct')
+  	xs: string[][]
+  	^

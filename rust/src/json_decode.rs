@@ -1,5 +1,7 @@
 // H-2(milestone 9): `json struct X { ... }` は decode<X>(v: json.Value) X | error を
 // 自動生成する。TS版`src/json-decode.ts`の移植。
+// **milestone 66で逆方向の`encode<X>(x: X) json.Value`も移植した**(このファイル後半。
+// design-agenda.md J節)——それまでRust版はデコード方向だけで、生成JSがTS版と食い違っていた。
 //
 // アプローチ(TS版と同じ): 生JSを手組みするのではなく、Meshの構文レベルのAST(Stmt/Expr)を
 // 合成し、通常のFnDeclとしてprogram.fnsへ追加する。こうすることで、以降のcheck/codegenの
@@ -15,7 +17,7 @@
 // エラー」設計と馴染まないため移植しない——最初に見つかったエラーだけを返す(診断を
 // 出さない設計なので実害は無い)。
 
-use crate::ast::{Block, Expr, FnDecl, IfStmt, Param, Program, Stmt, StructLitField, TypeDecl, TypeNode};
+use crate::ast::{Block, Expr, FnDecl, IfStmt, MapLitEntry, Param, Program, Stmt, StructLitField, TypeDecl, TypeNode};
 use crate::token::{CompileError, Pos, TokenType};
 use std::collections::HashSet;
 
@@ -273,6 +275,231 @@ fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
     })
 }
 
+// ---- エンコード方向(milestone 66。TS版`json-decode.ts`の後半)-----------------------
+// `json struct`宣言から、逆方向の `encode<X>(x: X) json.Value` も自動生成する。
+// **decode側と対になっていて、失敗しうる箇所が無い**のが構造上の違い——`?`伝播も
+// `TargetMode`の分岐も要らず、常に素直に組み立てるだけでよい。
+
+// `json.Value{kind: "...", <extra>}` を組み立てる
+fn json_value_struct_lit(kind_value: &str, extra_fields: Vec<StructLitField>, pos: Pos) -> Expr {
+    let mut fields = vec![StructLitField { name: "kind".to_string(), value: string_lit(kind_value, pos), pos }];
+    fields.extend(extra_fields);
+    Expr::StructLit { multiline: false, name: "Value".to_string(), pkg: Some("json".to_string()), fields, pos }
+}
+
+fn json_value_type_node(pos: Pos) -> TypeNode {
+    TypeNode::Name { name: "Value".to_string(), pkg: Some("json".to_string()), pos }
+}
+
+fn unsupported_encode_field_error(struct_name: &str, field_name: &str, reason: &str, pos: Pos) -> Box<CompileError> {
+    Box::new(CompileError {
+        message: format!("'json struct {struct_name}' can't auto-encode field '{field_name}': {reason}"),
+        pos,
+        code: "json-struct-unsupported-field",
+        fix: None,
+    })
+}
+
+// primitive/nestedな型の値をjson.Value式1つに変換する(`gen_simple_decode_expr`の裏返し)
+fn gen_simple_encode_expr(value_expr: Expr, t: &TypeNode, pos: Pos) -> Expr {
+    let TypeNode::Name { name, .. } = t else { unreachable!("gen_simple_encode_expr requires is_simple(t)") };
+    match name.as_str() {
+        "int" | "float" => json_value_struct_lit("num", vec![StructLitField { name: "n".to_string(), value: value_expr, pos }], pos),
+        "string" => json_value_struct_lit("str", vec![StructLitField { name: "s".to_string(), value: value_expr, pos }], pos),
+        "bool" => json_value_struct_lit("bool", vec![StructLitField { name: "b".to_string(), value: value_expr, pos }], pos),
+        // ネストしたjson struct
+        _ => call_expr(ident_expr(&format!("encode{name}"), pos), vec![value_expr], pos),
+    }
+}
+
+// 配列を`acc_name`という名前の`json.Value[]`変数へループで組み立てる文一式
+// (`gen_array_decode_stmts`の裏返し)
+fn gen_array_encode_stmts(arr_expr: Expr, elem: &TypeNode, acc_name: &str, pos: Pos) -> Vec<Stmt> {
+    let item_var = format!("__eitem_{}", acc_name.trim_start_matches("__earr_"));
+    let mut stmts = Vec::new();
+    stmts.push(typed_var_decl(
+        acc_name,
+        array_type(json_value_type_node(pos), pos),
+        Expr::ArrayLit { multiline: false, elems: vec![], elem_type: None, pos },
+        true,
+        pos,
+    ));
+    let loop_body = block(vec![expr_stmt(
+        call_expr(
+            ident_expr("push", pos),
+            vec![ident_expr(acc_name, pos), gen_simple_encode_expr(ident_expr(&item_var, pos), elem, pos)],
+            pos,
+        ),
+        pos,
+    )]);
+    stmts.push(range_for_stmt(vec!["_".to_string(), item_var], arr_expr, loop_body, pos));
+    stmts
+}
+
+// 1フィールド分の「値の取り出し+エンコード」文一式(`gen_field_stmts`の裏返し)。
+// 戻り値のresult_exprは、呼び出し元がmapリテラルのentryへそのまま埋め込める式
+fn gen_field_encode_stmts(
+    struct_name: &str,
+    x_expr: Expr,
+    field_name: &str,
+    t: &TypeNode,
+    json_struct_names: &HashSet<String>,
+    pos: Pos,
+) -> Result<(Vec<Stmt>, Expr), Box<CompileError>> {
+    let field_access = member_expr(x_expr, field_name, pos);
+
+    if is_simple(t, json_struct_names) {
+        return Ok((Vec::new(), gen_simple_encode_expr(field_access, t, pos)));
+    }
+
+    if let TypeNode::Array { elem, .. } = t {
+        if !is_simple(elem, json_struct_names) {
+            return Err(unsupported_encode_field_error(
+                struct_name,
+                field_name,
+                "array element type isn't supported for automatic encoding (only int/float/string/bool or a nested 'json struct')",
+                pos,
+            ));
+        }
+        let acc_name = format!("__earr_{field_name}");
+        let stmts = gen_array_encode_stmts(field_access, elem, &acc_name, pos);
+        let result = json_value_struct_lit("arr", vec![StructLitField { name: "items".to_string(), value: ident_expr(&acc_name, pos), pos }], pos);
+        return Ok((stmts, result));
+    }
+
+    if let Some(inner) = optional_inner(t) {
+        let inner_array_elem = match inner {
+            TypeNode::Array { elem, .. } => Some(&**elem),
+            _ => None,
+        };
+        if !is_simple(inner, json_struct_names) && inner_array_elem.is_none() {
+            return Err(unsupported_encode_field_error(
+                struct_name,
+                field_name,
+                "the non-'none' side of this optional field isn't supported for automatic encoding",
+                pos,
+            ));
+        }
+        if let Some(elem) = inner_array_elem
+            && !is_simple(elem, json_struct_names)
+        {
+            return Err(unsupported_encode_field_error(
+                struct_name,
+                field_name,
+                "array element type isn't supported for automatic encoding (only int/float/string/bool or a nested 'json struct')",
+                pos,
+            ));
+        }
+        let field_val_var = format!("__efv_{field_name}");
+        let result_var = format!("__ef_{field_name}");
+        let mut stmts = Vec::new();
+        stmts.push(short_var_decl(&field_val_var, field_access, pos));
+        stmts.push(typed_var_decl(&result_var, json_value_type_node(pos), json_value_struct_lit("null", vec![], pos), true, pos));
+        let inner_stmts = match inner_array_elem {
+            Some(elem) => {
+                let acc_name = format!("__earr_{field_name}");
+                let mut v = gen_array_encode_stmts(ident_expr(&field_val_var, pos), elem, &acc_name, pos);
+                v.push(assign_stmt(
+                    &result_var,
+                    json_value_struct_lit("arr", vec![StructLitField { name: "items".to_string(), value: ident_expr(&acc_name, pos), pos }], pos),
+                    pos,
+                ));
+                v
+            }
+            None => vec![assign_stmt(&result_var, gen_simple_encode_expr(ident_expr(&field_val_var, pos), inner, pos), pos)],
+        };
+        stmts.push(if_stmt(
+            not_expr(is_expr(ident_expr(&field_val_var, pos), name_type("none", pos), pos), pos),
+            block(inner_stmts),
+            pos,
+        ));
+        return Ok((stmts, ident_expr(&result_var, pos)));
+    }
+
+    Err(unsupported_encode_field_error(
+        struct_name,
+        field_name,
+        "only int/float/string/bool, a nested 'json struct', an array of those, or 'T | none' of those are \
+supported — write a hand-written encoder (building json.Value{...} directly) for this field instead",
+        pos,
+    ))
+}
+
+// 1つのjson struct宣言から encode<Name> のFnDeclを合成する
+fn synthesize_encoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> Result<FnDecl, Box<CompileError>> {
+    let TypeNode::StructType { fields, .. } = &td.node else {
+        // parserが"json type"を弾いているので通常は到達しない(synthesize_decoder_fnと同じ防御)
+        return Err(Box::new(CompileError {
+            message: format!("'json' can only mark a 'struct' declaration, not this type shape (found via '{}')", td.name),
+            pos: td.pos,
+            code: "syntax-error",
+            fix: None,
+        }));
+    };
+    let pos = td.pos;
+    let x_param = "x";
+    let mut stmts = Vec::new();
+    let mut entries = Vec::new();
+    for f in fields {
+        let (field_stmts, result_expr) =
+            gen_field_encode_stmts(&td.name, ident_expr(x_param, f.pos), &f.name, &f.type_node, json_struct_names, f.pos)?;
+        stmts.extend(field_stmts);
+        entries.push(MapLitEntry { key: string_lit(&f.name, f.pos), value: result_expr, pos: f.pos });
+    }
+    let entries_expr = Expr::MapLit {
+        multiline: false,
+        key: name_type("string", pos),
+        value: json_value_type_node(pos),
+        entries,
+        pos,
+    };
+    stmts.push(return_stmt(
+        Some(json_value_struct_lit("obj", vec![StructLitField { name: "entries".to_string(), value: entries_expr, pos }], pos)),
+        pos,
+    ));
+    Ok(FnDecl {
+        name: format!("encode{}", td.name),
+        receiver: None,
+        type_params: vec![],
+        params: vec![Param { name: x_param.to_string(), type_node: name_type(&td.name, pos), pos }],
+        ret: Some(json_value_type_node(pos)),
+        body: block(stmts),
+        exported: td.exported,
+        pos,
+    })
+}
+
+// program中の全 json struct から encode<Name> 関数群を合成し、program.fnsへ追加する。
+// `synthesize_json_decoders`と対の関数(呼び出し元で両方呼ぶ)。デコード成功に必要な制約
+// (import・対応フィールド型)はエンコードでも同じだが、**decode側の実装都合に依存しない
+// よう同じ検査をここでも行う**(TS版と同じ方針)
+pub fn synthesize_json_encoders(program: &mut Program) -> Result<(), Box<CompileError>> {
+    let json_struct_decls: Vec<TypeDecl> = program.types.iter().filter(|t| t.is_json).cloned().collect();
+    if json_struct_decls.is_empty() {
+        return Ok(());
+    }
+    let has_json_import = program.imports.iter().any(|i| i.path == "mesh/json");
+    if !has_json_import {
+        return Err(Box::new(CompileError {
+            message: "'json struct' needs 'import \"mesh/json\"' (the generated encoder builds json.Value{...})".to_string(),
+            pos: json_struct_decls[0].pos,
+            code: "json-struct-missing-import",
+            fix: None,
+        }));
+    }
+    let json_struct_names: HashSet<String> = json_struct_decls.iter().map(|t| t.name.clone()).collect();
+    // **手書き関数との名前衝突はここでは弾かない**——合成した`encode<Name>`をそのまま
+    // program.fnsへ積めば、checkerが通常の`already-declared`として報告する(TS版と同じ)。
+    // milestone 9当時はRust版がトップレベル関数名の重複を検出できなかったため専用の
+    // ガードを置いていたが、milestone 48で`already-declared`が入って不要になった
+    // (残しておくとTS版と違う診断コードになる。実測で発覚——milestone 66)
+    for td in &json_struct_decls {
+        let f = synthesize_encoder_fn(td, &json_struct_names)?;
+        program.fns.push(f);
+    }
+    Ok(())
+}
+
 // program中の全 json struct から decode<Name> 関数群を合成し、program.fnsへ追加する。
 // ネスト参照(struct内の別structフィールド)は同一ファイル内のjson structだけを対象にする
 // (TS版と同じv1制約 — 他ファイル/他パッケージをまたぐ場合は手書きデコーダで対応する)
@@ -292,27 +519,13 @@ pub fn synthesize_json_decoders(program: &mut Program) -> Result<(), Box<Compile
         }));
     }
     let json_struct_names: HashSet<String> = json_struct_decls.iter().map(|t| t.name.clone()).collect();
-    // code review発覚・実行確認済み: 合成するdecode<Name>という名前は利用者からは見えない
-    // 「隠れた予約名」になる——同名の関数を(json struct宣言に気づかず、または偶然)手書き
-    // していると、同じファイルにdecode<Name>が2つ定義された壊れたJS(SyntaxError:
-    // 既に宣言済み)を静かに出力してしまう。この移植は「トップレベル関数名の重複」全般は
-    // まだ検出しない(既存の別スコープのギャップ)が、このシンセシス自身が新たに作る
-    // 名前が既存の手書き関数と衝突する場合だけは、ここで明確なErrにする
-    let existing_fn_names: HashSet<String> = program.fns.iter().map(|f| f.name.clone()).collect();
+    // **手書き関数との名前衝突はここでは弾かない**——合成した`decode<Name>`をそのまま
+    // program.fnsへ積めば、checkerが通常の`already-declared`として報告する(TS版と同じ)。
+    // milestone 9のcode reviewでは「同じファイルにdecode<Name>が2つ定義された壊れたJSを
+    // 静かに出力してしまう」ことを避けるため専用のガードを置いていたが、当時の前提だった
+    // 「トップレベル関数名の重複を検出しない」はmilestone 48で解消済み。
+    // 残しておくとTS版と違う診断コードになる(実測で発覚——milestone 66)
     for td in &json_struct_decls {
-        let decoder_name = format!("decode{}", td.name);
-        if existing_fn_names.contains(decoder_name.as_str()) {
-            // これもTS版に対応コードが無いRust固有のガード(milestone 9のcode reviewで追加)
-            return Err(Box::new(CompileError {
-                message: format!(
-                    "the auto-generated decoder function '{decoder_name}' collides with an existing function of the same name — rename one (found via 'json struct {}')",
-                    td.name
-                ),
-                pos: td.pos,
-                code: "syntax-error",
-                fix: None,
-            }));
-        }
         program.fns.push(synthesize_decoder_fn(td, &json_struct_names)?);
     }
     Ok(())
@@ -421,14 +634,46 @@ mod tests {
     }
 
     #[test]
-    fn 合成する関数名が既存の手書き関数と衝突するとerrになる() {
-        // code review発覚・実行確認済みの回帰: 検出しないと同名の関数が2つ定義された
-        // 壊れたJS(SyntaxError)を静かに出力してしまっていた
+    fn 合成する関数名が既存の手書き関数と衝突しても合成自体は成功する() {
+        // milestone 9のcode reviewでは、検出しないと同名の関数が2つ定義された壊れたJS
+        // (SyntaxError)を静かに出力してしまうため専用のガードを置いていた。
+        // **milestone 66でガードを外した**——当時の前提「トップレベル関数名の重複を
+        // 検出しない」はmilestone 48で解消しており、そのまま積めばcheckerが通常の
+        // `already-declared`として報告する(TS版と同じ。専用ガードを残すと診断コードが
+        // TS版と食い違う、と実測で分かった)。
+        // ここでは「合成が成功し、同名の関数が2つ並ぶ状態がcheckerへ渡る」ことを固定する
         let src = "import \"mesh/json\"\nfn decodeUser(v: json.Value) User | error {\n  return error(\"hand-written\")\n}\nfn main() {}\n";
         let mut program = parse(src).unwrap();
         program.types = vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])];
-        let err = synthesize_json_decoders(&mut program).unwrap_err();
-        assert!(err.message.contains("'decodeUser' collides with an existing function"), "got: {}", err.message);
+        synthesize_json_decoders(&mut program).unwrap();
+        assert_eq!(program.fns.iter().filter(|f| f.name == "decodeUser").count(), 2, "手書きと合成の2つが並ぶ");
+    }
+
+    #[test]
+    fn エンコーダも合成される() {
+        // milestone 66。decodeの裏返しで`encode<Name>(x: X) json.Value`を作る
+        let mut program = program_with(true, vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])]);
+        synthesize_json_encoders(&mut program).unwrap();
+        let f = program.fns.iter().find(|f| f.name == "encodeUser").expect("encodeUserが合成されること");
+        assert_eq!(f.params.len(), 1);
+        assert!(matches!(&f.ret, Some(TypeNode::Name { name, pkg: Some(p), .. }) if name == "Value" && p == "json"));
+    }
+
+    #[test]
+    fn エンコーダもimport不足と未対応フィールドを弾く() {
+        // decode側と同じ検査をencode側でも独立して行う(TS版と同じ方針——decode側の
+        // 実装都合に依存させない)
+        let mut program = program_with(false, vec![json_struct_decl("User", vec![field("name", name_type("string", pos()))])]);
+        let err = synthesize_json_encoders(&mut program).unwrap_err();
+        assert_eq!(err.code, "json-struct-missing-import");
+
+        let mut program = program_with(
+            true,
+            vec![json_struct_decl("Bad", vec![field("m", TypeNode::MapType { key: Box::new(name_type("string", pos())), value: Box::new(name_type("int", pos())), pos: pos() })])],
+        );
+        let err = synthesize_json_encoders(&mut program).unwrap_err();
+        assert_eq!(err.code, "json-struct-unsupported-field");
+        assert!(err.message.contains("can't auto-encode field 'm'"), "got: {}", err.message);
     }
 
     #[test]

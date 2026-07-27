@@ -1,0 +1,11 @@
+import "mesh/json"
+
+json struct User {
+	name: string
+	age: int
+}
+
+fn main() {
+	u := User{name: "a", age: 1}
+	print(json.stringify(encodeUser(u)))
+}

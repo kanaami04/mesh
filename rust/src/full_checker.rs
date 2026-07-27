@@ -3809,6 +3809,7 @@ mod tests {
     fn check_with_json(src: &str) -> Vec<Diagnostic> {
         let mut program = parse(src).expect("test source must parse");
         crate::json_decode::synthesize_json_decoders(&mut program).expect("synthesis must succeed");
+        crate::json_decode::synthesize_json_encoders(&mut program).expect("synthesis must succeed");
         check_program(&program)
     }
 

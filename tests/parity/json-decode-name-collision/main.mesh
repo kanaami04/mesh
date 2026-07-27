@@ -1,0 +1,13 @@
+import "mesh/json"
+
+json struct User {
+	name: string
+}
+
+fn decodeUser(v: json.Value) User | error {
+	return User{name: "x"}
+}
+
+fn main() {
+	print(1)
+}
