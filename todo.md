@@ -4005,7 +4005,8 @@
                 `generic-type-param-conflict`/`generic-type-param-not-inferable`が未実装)・
                 import系4種のうち`import-cycle`/`self-import`/`invalid-package-name`/
                 `package-name-reserved`。
-  - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
+  - [x] **TS実装(`src/`)の撤去** ✅ **2026-07-27完了**(条件(1)〜(5)をすべて満たして実施。段取りと記録は `docs/ts-removal-plan.md`)
+        以下は当時の条件リスト:(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで

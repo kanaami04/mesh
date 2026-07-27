@@ -1,4 +1,7 @@
-# TS実装(`src/`)の撤去計画
+# TS実装(`src/`)の撤去 — ✅ 完了(2026-07-27)
+
+**すべての段階が完了し、`src/` と `tests/*.test.ts` は削除済み。**
+このファイルは「何をどの順でやったか」「なぜその順序だったか」の記録として残す。
 
 2026-07-27 に整理。**撤去条件(1)(2)を満たした時点**で作った、ここから先の段取り。
 条件そのものの定義と経緯は `todo.md`「TS実装(`src/`)の撤去条件」が一次情報源で、
@@ -126,7 +129,7 @@ kanayamaの判断で**選択肢2(Rustへ複製)**を採った——TS版を完�
 `mise run playground` は起動前に必ずwasmをビルドし直す(古いwasmで起動すると
 直したはずの挙動が反映されず混乱するため)。
 
-### 段階5: 撤去の実行
+### 段階5: 撤去の実行 — ✅ 完了
 
 1. `bench/README.md`・`demo/todo-api/README.md` の手順をRust版へ差し替え
 2. `tests/parity/*/expected.txt` を「撤去時点の正解」として凍結し、
@@ -138,6 +141,25 @@ kanayamaの判断で**選択肢2(Rustへ複製)**を採った——TS版を完�
 5. `rust/tests/embedded_sync.rs` を削除(原本が無くなり何も守らなくなるため)
 
 **この順序は動かさない**。特に2を先にやらないと、撤去した瞬間に回帰検出手段が消える。
+
+実際にやったこと(順序どおり):
+
+1. 撤去直前の状態で parity(156ファイル)・sweep(120件)・examples(24本)が全一致することを確認
+2. **回帰検出手段を先に作った**:
+   - `tests/parity-examples/` — examplesの診断出力(それまでTS版と比べていた分)
+   - `tests/codegen-snapshots/` — examplesの**生成JS**(同上)。`rust/tests/codegen_snapshot.rs`が見る。
+     ランタイムのpreludeは保存しない(`rust/embedded/runtime.ts`そのもので、
+     `embedded_sync`が別途守っていた)ので104KBに収まる
+   - `tests/sweep-expected.txt` — 組み合わせスイープの出力
+   - **スナップショットが実際に退行を捕まえること**を、生成JSをわざと変えて確認した(24本全部が落ちた)
+3. `scripts/parity.sh` / `scripts/sweep.sh` / `scripts/run-examples.sh` からTS呼び出しを落とす
+4. `package.json` の `mesh` を `scripts/mesh.sh`(Rust CLIを呼ぶ。無ければビルドする)へ
+5. `src/` と `tests/*.test.ts` を削除。`rust/tests/embedded_sync.rs` も削除
+   (原本が無くなり何も守らなくなったため——そう書いてあったとおりに)
+6. CIを組み替え: `test`ジョブ(bun test / tsc / TS版CLIでのexamples)を廃し、
+   `playground-typecheck`(TSはplaygroundだけ残るため)と`regression`へ
+7. `tsconfig.json` の `include` を `["src","tests"]` → `["playground"]`、`lib`に`DOM`を追加
+8. README/bench/demo/CLAUDE.md/mise.toml の記述をRust版へ差し替え
 
 ## 判断の原則
 

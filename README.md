@@ -317,20 +317,23 @@ for { ... }                       // 無限ループ(break で脱出)
 
 ## コンパイラの仕組み
 
+コンパイラは Rust で書かれています(`rust/`)。ブラウザの playground へは
+同じコードを wasm としてビルドして載せているので、**どこで動かしても同じ結果**になります。
+
 ```
 ソースコード (.mesh)
    │
-   ▼  src/lexer.ts    ── 文字列をトークン列に分解(Go式セミコロン自動挿入もここ)
+   ▼  rust/src/lexer.rs        ── 文字列をトークン列に分解(Go式セミコロン自動挿入もここ)
 トークン列
    │
-   ▼  src/parser.ts   ── 再帰下降構文解析で AST(構文木)を構築
+   ▼  rust/src/parser.rs       ── 再帰下降構文解析で AST(構文木)を構築
 AST
    │
-   ▼  src/checker.ts  ── 型推論・型検査。式に型を書き込み codegen へ引き継ぐ
+   ▼  rust/src/full_checker.rs ── 型推論・型検査(診断はここ)
 検査済み AST
    │
-   ▼  src/codegen.ts  ── JavaScript を出力(+ src/runtime.ts のランタイムを同梱)
-JavaScript (.mjs)
+   ▼  rust/src/codegen.rs      ── JavaScript を出力
+JavaScript (.mjs)              (+ rust/embedded/runtime.ts のランタイムを同梱)
 ```
 
 ### goroutine → Promise 変換の仕掛け

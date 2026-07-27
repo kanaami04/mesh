@@ -1,0 +1,120 @@
+arm_match_badadd	error[invalid-operation] error[mixed-void-arms] 
+arm_match_badcall	error[mixed-void-arms] error[type-mismatch] 
+arm_match_ok	error[mixed-void-arms] 
+arm_match_undef	error[mixed-void-arms] error[undefined-name] 
+arm_matchval_badadd	error[invalid-operation] 
+arm_matchval_badcall	error[type-mismatch] 
+arm_matchval_ok	
+arm_matchval_undef	error[undefined-name] 
+arm_orelse_badadd	error[invalid-operation] 
+arm_orelse_badcall	error[type-mismatch] 
+arm_orelse_ok	
+arm_orelse_undef	error[undefined-name] 
+arm_select_badadd	error[invalid-operation] error[mixed-void-arms] 
+arm_select_badcall	error[mixed-void-arms] error[type-mismatch] 
+arm_select_ok	error[mixed-void-arms] 
+arm_select_undef	error[mixed-void-arms] error[undefined-name] 
+expr_fnexpr_bad_add	error[invalid-operation] 
+expr_fnexpr_bad_arg	error[type-mismatch] 
+expr_fnexpr_bad_field	error[not-a-struct] 
+expr_fnexpr_ok	
+expr_generic_bad_add	error[invalid-operation] 
+expr_generic_bad_arg	error[type-mismatch] 
+expr_generic_bad_field	error[unknown-field] 
+expr_generic_ok	
+expr_index_bad_add	error[invalid-operation] 
+expr_index_bad_arg	error[type-mismatch] 
+expr_index_bad_field	error[unknown-field] 
+expr_index_ok	
+expr_method_bad_add	error[invalid-operation] 
+expr_method_bad_arg	error[type-mismatch] 
+expr_method_bad_field	error[unknown-field] 
+expr_method_ok	
+expr_orelse_bad_add	error[invalid-operation] 
+expr_orelse_bad_arg	error[type-mismatch] 
+expr_orelse_bad_field	error[not-a-struct] 
+expr_orelse_ok	
+expr_structlit_bad_add	error[invalid-operation] 
+expr_structlit_bad_arg	error[type-mismatch] 
+expr_structlit_bad_field	error[unknown-field] 
+expr_structlit_ok	
+narrow_ann_and_arith	
+narrow_ann_and_call	
+narrow_ann_and_rev_arith	
+narrow_ann_and_rev_call	
+narrow_ann_is_arith	
+narrow_ann_is_call	
+narrow_ann_not_and_arith	error[invalid-operation] 
+narrow_ann_not_and_call	error[type-mismatch] 
+narrow_ann_not_none_arith	
+narrow_ann_not_none_call	
+narrow_ann_notnot_arith	
+narrow_ann_notnot_call	
+narrow_call_and_arith	
+narrow_call_and_call	
+narrow_call_and_rev_arith	
+narrow_call_and_rev_call	
+narrow_call_is_arith	
+narrow_call_is_call	
+narrow_call_not_and_arith	error[invalid-operation] 
+narrow_call_not_and_call	error[type-mismatch] 
+narrow_call_not_none_arith	
+narrow_call_not_none_call	
+narrow_call_notnot_arith	
+narrow_call_notnot_call	
+narrow_map_and_arith	
+narrow_map_and_call	
+narrow_map_and_rev_arith	
+narrow_map_and_rev_call	
+narrow_map_is_arith	
+narrow_map_is_call	
+narrow_map_not_and_arith	error[invalid-operation] 
+narrow_map_not_and_call	error[type-mismatch] 
+narrow_map_not_none_arith	
+narrow_map_not_none_call	
+narrow_map_notnot_arith	
+narrow_map_notnot_call	
+narrow_recv_and_arith	
+narrow_recv_and_call	
+narrow_recv_and_rev_arith	
+narrow_recv_and_rev_call	
+narrow_recv_is_arith	
+narrow_recv_is_call	
+narrow_recv_not_and_arith	error[impossible-pattern] error[invalid-operation] 
+narrow_recv_not_and_call	error[impossible-pattern] error[type-mismatch] 
+narrow_recv_not_none_arith	error[impossible-pattern] error[invalid-operation] 
+narrow_recv_not_none_call	error[impossible-pattern] error[type-mismatch] 
+narrow_recv_notnot_arith	
+narrow_recv_notnot_call	
+stmt_defer_badadd	error[invalid-operation] 
+stmt_defer_badcall	error[type-mismatch] 
+stmt_defer_ok	
+stmt_defer_undef	error[undefined-name] 
+stmt_else_badadd	error[invalid-operation] 
+stmt_else_badcall	error[type-mismatch] 
+stmt_else_ok	
+stmt_else_undef	error[undefined-name] 
+stmt_fnexpr_badadd	error[invalid-operation] 
+stmt_fnexpr_badcall	error[type-mismatch] 
+stmt_fnexpr_ok	
+stmt_fnexpr_undef	error[undefined-name] 
+stmt_for_badadd	error[invalid-operation] 
+stmt_for_badcall	error[type-mismatch] 
+stmt_for_ok	
+stmt_for_undef	error[undefined-name] 
+stmt_forever_badadd	error[invalid-operation] 
+stmt_forever_badcall	error[type-mismatch] 
+stmt_forever_ok	
+stmt_forever_undef	error[undefined-name] 
+stmt_if_badadd	error[invalid-operation] 
+stmt_if_badcall	error[type-mismatch] 
+stmt_if_ok	
+stmt_if_undef	error[undefined-name] 
+stmt_rangefor_badadd	error[invalid-operation] 
+stmt_rangefor_badcall	error[type-mismatch] 
+stmt_rangefor_ok	
+stmt_rangefor_undef	error[undefined-name] 
+stmt_spawn_badadd	error[invalid-operation] 
+stmt_spawn_badcall	error[type-mismatch] 
+stmt_spawn_ok	
+stmt_spawn_undef	error[undefined-name] 

@@ -13,7 +13,7 @@
 bun run mesh run demo/todo-api/main.mesh
 
 # Rust移植版コンパイラで実行(JSを生成してnodeで動かす)
-cd rust && cargo run -- ../demo/todo-api/main.mesh --emit-js > /tmp/todo-api.mjs && cd ..
+bun run mesh build demo/todo-api/main.mesh -o /tmp/todo-api.mjs
 node /tmp/todo-api.mjs
 ```
 
