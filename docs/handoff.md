@@ -48,6 +48,13 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 - **ジェネリック関数を値として渡した場合**(`f := identity` / `apply(identity, 1)`)——
   `scopes[0]`にはANYで載せているので照合されない。TS版は型パラメータが残ったまま代入不可になる
 - **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+- **パッケージ修飾のジェネリック呼び出し**(`lib.pick(1, 2)`)——TS版は型パラメータが
+  残ったまま`type-mismatch`を出すが、Rust版は無診断
+
+**なお診断とは別に、`rust/`の codegen はジェネリック関数を実装していない**
+(`codegen.rs`が`generic functions are not yet supported`で明確なErrにする)。
+milestone 62で入ったのは**検査だけ**で、`mesh run`/`build`は通らない——
+撤去条件の観点ではこちらの方が重い。元々の意図的なスコープ縮小の1つとしてtodo.mdに記録済み。
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
 
