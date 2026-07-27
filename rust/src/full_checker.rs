@@ -209,6 +209,22 @@ impl FullCheckerCtx {
 // **残る縮退はunion/関数型/型パラメータ**。
 // 縮退させた型はレジストリ側の完全解決された型と突き合わせてはいけない(`is_fully_modeled`
 // 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
+// `resolve_type_ann`の**ジェネリック関数の中用**の入口(milestone 63)。
+// `ctx.type_params`が空でなければ、その名前を`Type::TypeParam`として解決する。
+//
+// これが無いと、ジェネリック関数の本体で`T`が未知の型名としてANYへ落ち、TS版が出す
+// `cannot return int as T` / `invalid operation: T + int` / `T has no fields`が
+// まるごと検出漏れになる(milestone 62時点の既知の穴)。
+// **`ctx.type_params`は関数の検査に入るときだけ立ち、抜けるときにclearされる**ので、
+// ジェネリックでない関数では`resolve_type_ann`と完全に同じ経路を通る
+fn resolve_ann(ctx: &FullCheckerCtx, node: &TypeNode) -> Type {
+    if ctx.type_params.is_empty() {
+        return resolve_type_ann(&ctx.type_ctx, node);
+    }
+    let names: Vec<&str> = ctx.type_params.iter().map(String::as_str).filter(|n| !BUILTIN_TYPE_NAMES.contains(n)).collect();
+    resolve_with_type_params(&ctx.type_ctx, node, &names)
+}
+
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     match node {
         // milestone 51: pkg修飾型(`lib.Point`)。レジストリに解決済みの型があればそれを使う
@@ -1090,7 +1106,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             if let Some(node) = elem_type {
                 check_type_ann(ctx, node);
             }
-            let declared = elem_type.as_ref().map(|node| resolve_type_ann(&ctx.type_ctx, node));
+            let declared = elem_type.as_ref().map(|node| resolve_ann(ctx, node));
             let elem = match &declared {
                 Some(t) => t.clone(),
                 None => match elems.first() {
@@ -1120,8 +1136,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         Expr::MapLit { key, value, entries, .. } => {
             check_type_ann(ctx, key);
             check_type_ann(ctx, value);
-            let key_ty = resolve_type_ann(&ctx.type_ctx, key);
-            let value_ty = resolve_type_ann(&ctx.type_ctx, value);
+            let key_ty = resolve_ann(ctx, key);
+            let value_ty = resolve_ann(ctx, value);
             for e in entries {
                 let kt = infer_expr_single(ctx, &e.key);
                 let vt = infer_expr_single(ctx, &e.value);
@@ -1144,7 +1160,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 }
             }
             check_type_ann(ctx, elem);
-            Type::Chan(Box::new(resolve_type_ann(&ctx.type_ctx, elem)))
+            Type::Chan(Box::new(resolve_ann(ctx, elem)))
         }
         // milestone 34: 受信(`<-ch`)は常に`T | closed`(mapの`V | none`と同じ理由——
         // closeされうることを型で強制する)
@@ -1217,8 +1233,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             if let Some(r) = ret {
                 check_type_ann(ctx, r);
             }
-            let param_tys: Vec<Type> = params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)).collect();
-            let ret_ty = ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+            let param_tys: Vec<Type> = params.iter().map(|p| resolve_ann(ctx, &p.type_node)).collect();
+            let ret_ty = ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID);
             // パラメータ用スコープ+本体スコープ(check_blockが自分でpushする)の2段構成は
             // `check_fn`と同じ理由(本体でのパラメータ名の再宣言をshadowingとして扱うため)
             ctx.push_scope();
@@ -2133,7 +2149,12 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("toInt() requires a string, got {}", ts(&at[0])));
             }
-            ANY // 本来 int | error
+            // milestone 63: `int | error`。**milestone 27ではANYへ潰していた**——当時は
+            // unionがモデル化されておらず、`int | error`を配ると比較のたびに誤検知が出たため。
+            // milestone 39でunionを解決するようになって前提が変わり、TS版と同じ型を返せる
+            // (ANYのままだと`n := toInt(s) or _ => -1`のnがANYになり、その後の
+            // `n + "x"`をTS版が出す`invalid-operation`で弾けない=検出漏れ)
+            types::union_of(vec![INT, ERROR])
         }
         "toFloat" => {
             if expect_arity(ctx, name, n, 1, pos) && !types::type_equals(&at[0], &INT) && !matches!(at[0], Type::Any) {
@@ -2287,7 +2308,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::TypedVarDecl { name, type_node, value, mutable, pos } => {
             check_type_ann(ctx, type_node);
-            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
+            let declared = resolve_ann(ctx, type_node);
             let value_ty = infer_expr_single(ctx, value);
             if !assignable_checked(&value_ty, &declared) {
                 // **位置は値の式、文言はTS版`statements.ts`のtypedVarDeclと同じ**。
@@ -3344,9 +3365,9 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
         check_type_ann(ctx, r);
     }
     ctx.type_params.clear();
-    let mut params = vec![resolve_type_ann(&ctx.type_ctx, &recv.type_node)];
-    params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
-    let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+    let mut params = vec![resolve_ann(ctx, &recv.type_node)];
+    params.extend(f.params.iter().map(|p| resolve_ann(ctx, &p.type_node)));
+    let ret = f.ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID);
     // `sname`は**解決済みstructの名前**なので既にpkg修飾済み(`mathutil.Point`)。
     // 参照側(`member_field_type`)も同じ名前で引くのでキーが揃う。ここで更に
     // `qualify_struct_name`を掛けると二重修飾になり、他パッケージからのメソッド呼び出しが
@@ -3369,18 +3390,18 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // メソッド本体の`u`がundefined-nameになるため、メソッド本体の検査とセットで入れた
     if let Some(recv) = &f.receiver {
         check_type_ann(ctx, &recv.type_node);
-        let rt = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
+        let rt = resolve_ann(ctx, &recv.type_node);
         ctx.declare(&recv.name, rt, recv.pos, false);
     }
     for p in &f.params {
         check_type_ann(ctx, &p.type_node);
-        let pt = resolve_type_ann(&ctx.type_ctx, &p.type_node);
+        let pt = resolve_ann(ctx, &p.type_node);
         ctx.declare(&p.name, pt, p.pos, false);
     }
     if let Some(r) = &f.ret {
         check_type_ann(ctx, r);
     }
-    ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID));
+    ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID));
     check_block(ctx, &f.body);
     ctx.ret_stack.pop();
     ctx.pop_scope();
@@ -3400,7 +3421,7 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
     // pkg修飾に対して無反応だったため、この順序差は表に出ていなかった(code reviewで発覚)
     let annotated = c.type_node.as_ref().map(|type_node| {
         check_type_ann(ctx, type_node);
-        resolve_type_ann(&ctx.type_ctx, type_node)
+        resolve_ann(ctx, type_node)
     });
     let value_ty = infer_expr_single(ctx, &c.value);
     let final_ty = match annotated {
