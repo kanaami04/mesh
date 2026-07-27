@@ -31,9 +31,7 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
    (`validate_type_params`)はシグネチャを見るだけで済むので、呼び出し時の推論とは
    独立に移植できた。同じ回で、parserが以前から出していたのに列挙型へ載っていなかった
    `top-level-mut-not-allowed` / `multiple-return-values-removed` も追加(milestone 58と同じ状況)。
-   **残る未移植は`generic-inference-failed`の1種だけ**——これはジェネリック呼び出しの
-   ANY登録をやめて`unifyTypeParam`相当の推論を入れる回になる。ANY登録をやめると
-   `argument-count`の誤検知が出る危険があるので、推論とセットでないと着手できない
+   この時点で残っていた`generic-inference-failed`は下記3で片付いた
 3. ~~**generics推論**~~ ✅ **milestone 62(2026-07-27)で移植済み**
    (`generic-inference-failed`)。**これで107/107**。`scopes[0]`側のANY登録は据え置き、
    `generic_fns`という別表を直接呼び出し経路だけが引く形にして誤検知の面を広げなかった

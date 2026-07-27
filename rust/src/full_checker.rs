@@ -1617,7 +1617,8 @@ fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fie
             // milestone 47: struct/unionのどちらでもない名前での構築(`type S = string`に
             // 対する`S{...}`)はTS版が`not-a-struct`で弾く。**素のaliasとして登録されている
             // 名前だけ**を対象にする——未宣言の名前(`Bogus{...}`)はTS版では`unknown-type`
-            // という別の診断になり(実測で確認)、そちらは未移植なので黙って諦める
+            // という別の診断になるので、ここで`not-a-struct`を出すと診断コードが食い違う
+            // (`unknown-type`自体は別経路が出す。milestone 62の点検で両者の一致を実測済み)
             None => {
                 // **ANYへ解決したaliasは免除する**——TS版`expressions.ts`も
                 // `if (t.kind === "any") return ANY;`で同じ免除を先に置いている
@@ -1650,7 +1651,8 @@ fn resolve_union_lit_member(ctx: &mut FullCheckerCtx, union_ty: &Type, name: &st
     // つまりタグ不足(`compute_discriminant_tag`のErr)等で解決に失敗したunionは
     // **レジストリには居るがbodyだけ空**という状態で残る——ここで拾えるのはそのケース。
     // TS版も宣言時に`discriminated-union-tag-required`で報告済みなので二重報告しない
-    // (full_checkerは型宣言側の診断が未移植なので、実際には無診断=検出漏れになる。
+    // (full_checker側も宣言時に同じ診断を出す——milestone 62の点検で実測。
+    // `tests/parity/59-union-tag-required/`が記録している)。
     // なおresolve_type_declsは最初のErrで走査全体を打ち切るため、それ以降に宣言された型も
     // 巻き添えで未登録になる——check_program冒頭のコメントに記した既存の限界)
     let ub = body.get()?;
@@ -3272,10 +3274,10 @@ fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
 // 揃えないと引数照合(milestone 31)が誤検知する(milestone 29/30と同じ配慮)。
 // **フィールドが勝つ**のは参照時のlookup順(infer_member/Callアームがフィールドを先に見る)
 // だが、そもそも同名のフィールドとメソッドはここでmethod-field-conflictとして弾かれる。
-// **既知の限界**: 未知の型名のレシーバ(`fn (y: Bogus) f()`)は`resolve_type_node`が
-// 「空フィールドの殻struct」へフォールバックするため、TS版が出す`unknown-type`+
-// `invalid-receiver-type`のどちらも出ない(full_checkerは型注釈のunknown-type検査自体が
-// 未移植——誤検知ではなく検出漏れ側に倒す既定方針どおり。下記のlookup_structガード参照)
+// 未知の型名のレシーバ(`fn (y: Bogus) f()`)については、milestone 42で型注釈の
+// `unknown-type`検査が入って以降**TS版と完全に一致する**(`unknown-type`が2回 +
+// `invalid-receiver-type`が1回、順序まで同じ。milestone 62の点検で実測)。
+// 下記のlookup_structガードはその上で「殻structをレシーバとして通さない」ためにある
 fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     let Some(recv) = &f.receiver else { return };
     // TS版`declareMethod`と同じ順序: レシーバ型の解決(=ここで`unknown-type`が出る)→
@@ -6200,8 +6202,11 @@ mod tests {
 
     #[test]
     fn structメンバーを持たないunionは素通りする() {
-        // `type Status = "active" | "banned"`のようなリテラルunionはTS版も無診断で
-        // ANYへフォールバックする(cannot-infer-typeは未移植の別診断)
+        // `type Status = "active" | "banned"`のようなリテラルunionに対する`Status{foo: 1}`は
+        // ANYへフォールバックし、ここでは無診断になる。
+        // **TS版はこの入力に`cannot-infer-type`を出す**——Rust版の`cannot-infer-type`は
+        // 空配列リテラル限定(milestone 33)なので、これは既知の検出漏れ
+        // (docs/handoff.md「残っている検出漏れ」節に記載)
         assert_eq!(check("type Status = \"active\" | \"banned\"\nfn main() {\n    s := Status{foo: 1}\n    print(s)\n}\n"), vec![]);
     }
 }
