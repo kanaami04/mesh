@@ -1,0 +1,5 @@
+mut x := 1
+
+fn main() {
+	print(1)
+}

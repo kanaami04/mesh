@@ -3780,15 +3780,39 @@
                 未宣言名・pkg修飾メンバー・`?`/`or`伝播2種)。
                 `mise run parity` **102ファイルで差0件**、コーパスに6ケース追加(73→79)。
                 テスト610→611件、clippyクリーン。
+        - [x] **milestone 58: parser/lexerの診断コードをDiagnosticCodeへ統合**
+              ✅ 2026-07-27実装。診断コード71→92種。**新しい検査は1つも書いていない**——
+              「未移植」と数えていた36種のうち**21種は最初からRust版が出していた**と判明した回。
+              - **発覚の経緯**: parityの差が0件になったので「次に何を移植すべきか」を測ろうと
+                未移植リストを出したところ、`syntax-error`・`unterminated-string`・
+                `top-level-mut-not-allowed`等が並んでいた。実際に入力を通すと**両実装とも
+                同じコードで診断が出る**。原因は、parser.rs/lexer.rsが`CompileError.code`として
+                `&'static str`で直接コードを持っており、`DiagnosticCode` enumに載っていな
+                かったこと(milestone 22の設計判断で、統合は「そちら側を実際にこの型へ移行する
+                タイミングで」と先送りされていた)。**`mesh explain`から静かに欠けていた**だけ。
+              - **`interpolation-too-deep`だけはenumに載せない**。TS版に無いRust固有の安全弁
+                (文字列補間のネスト上限、milestone 9で本物のスタックオーバーフロー回帰を
+                踏んで入れたもの)で、`explain`の説明文はTS版の定義から引くため載せると
+                既存テスト`すべての診断コードに説明文がある`が落ちる。
+                **「このenumはTS版の診断コードの部分集合」という不変条件**をコメントに明記した。
+              - **本当に未実装なのは12種**だと分かった: `discriminated-union-tag-required` /
+                `generic-type-param-conflict` / `generic-type-param-not-inferable` /
+                `import-cycle` / `int-literal-overflow` / `invalid-package-name` /
+                `json-struct-missing-import` / `json-struct-unsupported-field` /
+                `missing-return-value` / `package-name-reserved` / `reserved-field-name` /
+                `self-import`。撤去条件(2)の残作業はここまで絞れた。
+              - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
+                105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
+                テスト611件維持、clippyクリーン。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-27時点、milestone 57まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-27時点、milestone 58まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
-        107種 vs 71種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
+        107種 vs 92種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
         `include_str!`で参照しているので、**その2ファイルは撤去時に移送先を決める必要がある**
         (本文をRustへ複製すると`tests/card-completeness.test.ts`の検証から外れる点に注意)。

@@ -1,0 +1,3 @@
+main.mesh:2:9: error[syntax-error]: expected ',' between arguments, but got ';'
+  	print(1
+  	       ^
