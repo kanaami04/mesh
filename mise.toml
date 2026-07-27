@@ -16,7 +16,13 @@ run = "bunx tsc --noEmit"
 
 [tasks.playground]
 description = "ブラウザプレイグラウンドを起動 (http://localhost:8765)"
-run = "bun playground/serve.ts"
+# コンパイラはRust版のwasm(TS撤去 段階4)。起動前に必ずビルドし直す
+# ——古いwasmのまま起動すると、直したはずのコンパイラの挙動が反映されず混乱するため
+run = """
+rustup target add wasm32-unknown-unknown 2>/dev/null || true
+cargo build --manifest-path rust/Cargo.toml --target wasm32-unknown-unknown --lib --release
+bun playground/serve.ts
+"""
 
 [tasks."run-examples"]
 description = "サンプルを全部実行して動作確認(--rust でRust版CLI)"

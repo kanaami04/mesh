@@ -14,3 +14,5 @@ pub mod test_discovery;
 pub mod test_report;
 pub mod token;
 pub mod types;
+// ブラウザ向けwasmエントリポイント(TS撤去 段階4)。playgroundがTS実装への依存を切るために要る
+pub mod wasm;
