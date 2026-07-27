@@ -19,27 +19,8 @@ description = "ブラウザプレイグラウンドを起動 (http://localhost:8
 run = "bun playground/serve.ts"
 
 [tasks."run-examples"]
-description = "サンプルを全部実行して動作確認"
-# **1本落ちても止めない**——`set -e`で打ち切られていたため、意図的にpanicする
-# defer_panic.mesh(7本目)以降の17本が長らく一度も実行されていなかった(milestone 64で発覚)。
-# 期待どおり落ちる例はEXPECT_FAILへ列挙し、それ以外の失敗があるときだけ非ゼロで終わる。
-run = """
-expect_fail="examples/defer_panic.mesh"   # deferの動作確認のため意図的にpanicする
-failed=""
-for f in examples/*.mesh; do
-  echo "=== $f ==="
-  if bun src/cli.ts run "$f"; then
-    case " $expect_fail " in *" $f "*) failed="$failed $f(落ちるはずが成功)";; esac
-  else
-    case " $expect_fail " in *" $f "*) ;; *) failed="$failed $f";; esac
-  fi
-done
-if [ -n "$failed" ]; then
-  echo "[run-examples] 失敗:$failed"
-  exit 1
-fi
-echo "[run-examples] $(ls examples/*.mesh | wc -l) 本すべて期待どおり"
-"""
+description = "サンプルを全部実行して動作確認(--rust でRust版CLI)"
+run = "scripts/run-examples.sh"
 
 [tasks.sweep]
 description = "組み合わせを機械的に作ってTS版と突き合わせる(parityが測れない「形の組み合わせ」用)"
