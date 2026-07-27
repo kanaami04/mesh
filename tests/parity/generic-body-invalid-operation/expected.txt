@@ -1,0 +1,3 @@
+main.mesh:2:11: error[invalid-operation]: invalid operation: T + int
+  	return x + 1
+  	         ^

@@ -1,0 +1,3 @@
+main.mesh:13:12: error[type-mismatch]: argument 1: cannot use T | closed as T
+  	return cb(<-c)
+  	          ^

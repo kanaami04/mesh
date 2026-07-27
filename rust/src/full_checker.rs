@@ -209,6 +209,22 @@ impl FullCheckerCtx {
 // **残る縮退はunion/関数型/型パラメータ**。
 // 縮退させた型はレジストリ側の完全解決された型と突き合わせてはいけない(`is_fully_modeled`
 // 参照)。ANYフォールバックは診断を出さない(未対応構文を誤りとして報告しないため)。
+// `resolve_type_ann`の**ジェネリック関数の中用**の入口(milestone 63)。
+// `ctx.type_params`が空でなければ、その名前を`Type::TypeParam`として解決する。
+//
+// これが無いと、ジェネリック関数の本体で`T`が未知の型名としてANYへ落ち、TS版が出す
+// `cannot return int as T` / `invalid operation: T + int` / `T has no fields`が
+// まるごと検出漏れになる(milestone 62時点の既知の穴)。
+// **`ctx.type_params`は関数の検査に入るときだけ立ち、抜けるときにclearされる**ので、
+// ジェネリックでない関数では`resolve_type_ann`と完全に同じ経路を通る
+fn resolve_ann(ctx: &FullCheckerCtx, node: &TypeNode) -> Type {
+    if ctx.type_params.is_empty() {
+        return resolve_type_ann(&ctx.type_ctx, node);
+    }
+    let names: Vec<&str> = ctx.type_params.iter().map(String::as_str).filter(|n| !BUILTIN_TYPE_NAMES.contains(n)).collect();
+    resolve_with_type_params(&ctx.type_ctx, node, &names)
+}
+
 fn resolve_type_ann(tc: &crate::checker::CheckerCtx, node: &TypeNode) -> Type {
     match node {
         // milestone 51: pkg修飾型(`lib.Point`)。レジストリに解決済みの型があればそれを使う
@@ -1090,7 +1106,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             if let Some(node) = elem_type {
                 check_type_ann(ctx, node);
             }
-            let declared = elem_type.as_ref().map(|node| resolve_type_ann(&ctx.type_ctx, node));
+            let declared = elem_type.as_ref().map(|node| resolve_ann(ctx, node));
             let elem = match &declared {
                 Some(t) => t.clone(),
                 None => match elems.first() {
@@ -1120,8 +1136,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
         Expr::MapLit { key, value, entries, .. } => {
             check_type_ann(ctx, key);
             check_type_ann(ctx, value);
-            let key_ty = resolve_type_ann(&ctx.type_ctx, key);
-            let value_ty = resolve_type_ann(&ctx.type_ctx, value);
+            let key_ty = resolve_ann(ctx, key);
+            let value_ty = resolve_ann(ctx, value);
             for e in entries {
                 let kt = infer_expr_single(ctx, &e.key);
                 let vt = infer_expr_single(ctx, &e.value);
@@ -1144,7 +1160,7 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
                 }
             }
             check_type_ann(ctx, elem);
-            Type::Chan(Box::new(resolve_type_ann(&ctx.type_ctx, elem)))
+            Type::Chan(Box::new(resolve_ann(ctx, elem)))
         }
         // milestone 34: 受信(`<-ch`)は常に`T | closed`(mapの`V | none`と同じ理由——
         // closeされうることを型で強制する)
@@ -1217,8 +1233,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             if let Some(r) = ret {
                 check_type_ann(ctx, r);
             }
-            let param_tys: Vec<Type> = params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)).collect();
-            let ret_ty = ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+            let param_tys: Vec<Type> = params.iter().map(|p| resolve_ann(ctx, &p.type_node)).collect();
+            let ret_ty = ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID);
             // パラメータ用スコープ+本体スコープ(check_blockが自分でpushする)の2段構成は
             // `check_fn`と同じ理由(本体でのパラメータ名の再宣言をshadowingとして扱うため)
             ctx.push_scope();
@@ -2133,7 +2149,12 @@ fn infer_builtin_call(ctx: &mut FullCheckerCtx, name: &str, args: &[Expr], pos: 
             if expect_arity(ctx, name, n, 1, pos) && !types::is_stringy(&at[0]) && !matches!(at[0], Type::Any) {
                 ctx.error(args[0].pos(), DiagnosticCode::BuiltinArgType, format!("toInt() requires a string, got {}", ts(&at[0])));
             }
-            ANY // 本来 int | error
+            // milestone 63: `int | error`。**milestone 27ではANYへ潰していた**——当時は
+            // unionがモデル化されておらず、`int | error`を配ると比較のたびに誤検知が出たため。
+            // milestone 39でunionを解決するようになって前提が変わり、TS版と同じ型を返せる
+            // (ANYのままだと`n := toInt(s) or _ => -1`のnがANYになり、その後の
+            // `n + "x"`をTS版が出す`invalid-operation`で弾けない=検出漏れ)
+            types::union_of(vec![INT, ERROR])
         }
         "toFloat" => {
             if expect_arity(ctx, name, n, 1, pos) && !types::type_equals(&at[0], &INT) && !matches!(at[0], Type::Any) {
@@ -2287,7 +2308,7 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
         }
         Stmt::TypedVarDecl { name, type_node, value, mutable, pos } => {
             check_type_ann(ctx, type_node);
-            let declared = resolve_type_ann(&ctx.type_ctx, type_node);
+            let declared = resolve_ann(ctx, type_node);
             let value_ty = infer_expr_single(ctx, value);
             if !assignable_checked(&value_ty, &declared) {
                 // **位置は値の式、文言はTS版`statements.ts`のtypedVarDeclと同じ**。
@@ -3344,9 +3365,9 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
         check_type_ann(ctx, r);
     }
     ctx.type_params.clear();
-    let mut params = vec![resolve_type_ann(&ctx.type_ctx, &recv.type_node)];
-    params.extend(f.params.iter().map(|p| resolve_type_ann(&ctx.type_ctx, &p.type_node)));
-    let ret = f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID);
+    let mut params = vec![resolve_ann(ctx, &recv.type_node)];
+    params.extend(f.params.iter().map(|p| resolve_ann(ctx, &p.type_node)));
+    let ret = f.ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID);
     // `sname`は**解決済みstructの名前**なので既にpkg修飾済み(`mathutil.Point`)。
     // 参照側(`member_field_type`)も同じ名前で引くのでキーが揃う。ここで更に
     // `qualify_struct_name`を掛けると二重修飾になり、他パッケージからのメソッド呼び出しが
@@ -3369,18 +3390,18 @@ fn check_fn(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // メソッド本体の`u`がundefined-nameになるため、メソッド本体の検査とセットで入れた
     if let Some(recv) = &f.receiver {
         check_type_ann(ctx, &recv.type_node);
-        let rt = resolve_type_ann(&ctx.type_ctx, &recv.type_node);
+        let rt = resolve_ann(ctx, &recv.type_node);
         ctx.declare(&recv.name, rt, recv.pos, false);
     }
     for p in &f.params {
         check_type_ann(ctx, &p.type_node);
-        let pt = resolve_type_ann(&ctx.type_ctx, &p.type_node);
+        let pt = resolve_ann(ctx, &p.type_node);
         ctx.declare(&p.name, pt, p.pos, false);
     }
     if let Some(r) = &f.ret {
         check_type_ann(ctx, r);
     }
-    ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_type_ann(&ctx.type_ctx, r)).unwrap_or(VOID));
+    ctx.ret_stack.push(f.ret.as_ref().map(|r| resolve_ann(ctx, r)).unwrap_or(VOID));
     check_block(ctx, &f.body);
     ctx.ret_stack.pop();
     ctx.pop_scope();
@@ -3400,7 +3421,7 @@ fn check_top_level_const(ctx: &mut FullCheckerCtx, c: &ConstDecl) {
     // pkg修飾に対して無反応だったため、この順序差は表に出ていなかった(code reviewで発覚)
     let annotated = c.type_node.as_ref().map(|type_node| {
         check_type_ann(ctx, type_node);
-        resolve_type_ann(&ctx.type_ctx, type_node)
+        resolve_ann(ctx, type_node)
     });
     let value_ty = infer_expr_single(ctx, &c.value);
     let final_ty = match annotated {
@@ -3620,13 +3641,15 @@ pub fn check_package_shared(
     // 定数を検査+登録し、最後に関数本体を検査する。
     // milestone 26以降、非ジェネリックの自由関数は`fn_signature`でシグネチャ付き
     // (`Type::Fn`)で登録し、呼び出し側の個数・型照合(argument-count/type-mismatch)を
-    // 効かせる。**ジェネリック関数(`type_params`有り)だけは`scopes[0]`へANYで登録する**——
-    // TS版はジェネリック呼び出しを別経路(`inferGenericCall`、型パラメータ推論つき)で扱うので、
-    // ここで`Type::Fn`(型パラメータ入り)を配ると呼び出し側の照合がTS版と食い違う。
-    // milestone 62でその別経路を`generic_fns`+`infer_generic_call`として移植した:
-    // 直接呼び出し(`name(args)`)は推論を通り、引数不足なら`generic-inference-failed`、
-    // 引数過多なら`argument-count`になる(TS版と同じ)。**値として渡された場合
-    // (`f := identity`)だけはANYのまま**で、TS版が出す代入不可エラーは出ない(検出漏れ側)。
+    // 効かせる。ジェネリック関数(`type_params`有り)も**型パラメータ入りのシグネチャ**
+    // (`generic_fn_signature`)で登録する——TS版`checkPackage`の`declareBinding(fn.name, t)`と同じ。
+    // ジェネリック呼び出しの推論は別経路(`generic_fns`+`infer_generic_call`、milestone 62)が
+    // 担い、`name(args)`の直接呼び出しを`scopes[0]`より先にinterceptする。
+    // **この二段構えがTS版の設計そのもの**で、直接呼び出しは推論が効き、値として渡した場合
+    // (`f := identity`)は型パラメータが残ったまま代入不可になる(TS版`calls.ts`が
+    // 「変数へ代入してから呼ぶ・コールバックとして渡す等は非対応」と明記している意図的な制限)。
+    // milestone 62では誤検知を恐れてANY登録に留めていたが、直接呼び出しがinterceptされる以上
+    // 危険は無く、milestone 63で揃えた(parity 136ファイルで誤検知0を確認)。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
@@ -3666,7 +3689,7 @@ pub fn check_package_shared(
                     let sig = generic_fn_signature(&ctx.type_ctx, f);
                     ctx.generic_fns.insert(f.name.clone(), (f.type_params.clone(), sig));
                 }
-                let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
+                let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { generic_fn_signature(&ctx.type_ctx, f) };
                 ctx.declare(&f.name, ty, f.pos, false);
             }
         }
@@ -4964,6 +4987,46 @@ mod tests {
                 "戻り値 {ret} だけでは推論できないはず: {d:?}"
             );
         }
+    }
+
+    #[test]
+    fn ジェネリック関数の本体では型パラメータが型として検査される() {
+        // milestone 63。それまで本体の`T`は未知の型名としてANYへ落ちており、
+        // TS版が出す診断がまるごと検出漏れになっていた
+        let d = check("fn f<T>(x: T) T {\n    return 1\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(d[0].message, "cannot return int as T");
+
+        let d = check("fn f<T>(x: T) int {\n    return x + 1\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert!(d.iter().any(|e| e.code == DiagnosticCode::InvalidOperation), "{d:?}");
+
+        let d = check("fn f<T>(x: T) T {\n    print(x.field)\n    return x\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert!(d.iter().any(|e| e.code == DiagnosticCode::NotAStruct), "{d:?}");
+
+        // 正しい本体は何も出さない(誤検知が最大のリスクなので明示的に固定する)
+        assert_eq!(check("fn f<T>(x: T) T {\n    y: T = x\n    return y\n}\nfn main() {\n    print(f(1))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn ジェネリック関数を値として渡すとts版と同じく代入不可になる() {
+        // milestone 63。TS版は`name(args)`の直接呼び出しだけ推論する設計で、変数へ入れたり
+        // コールバックとして渡したりすると**型パラメータが残ったまま代入不可になる**
+        // (TS版`calls.ts`のコメントが明記している意図的な制限)。milestone 62までは
+        // ANY登録だったので何も出なかった
+        let d = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    f := identity\n    print(f(1))\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(d[0].message, "argument 1: cannot use int as T");
+    }
+
+    #[test]
+    fn 組み込みtointはint_errorを返す() {
+        // milestone 63。milestone 27ではunionが未モデル化でANYへ潰していた。
+        // ANYのままだと`or`で取り出した後の検査が丸ごと素通りする
+        let d = check("fn main() {\n    n := toInt(\"42\") or _ => -1\n    print(n + \"x\")\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::InvalidOperation);
     }
 
     #[test]

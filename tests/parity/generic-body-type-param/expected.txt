@@ -1,0 +1,3 @@
+main.mesh:2:9: error[type-mismatch]: cannot return int as T
+  	return 1
+  	       ^

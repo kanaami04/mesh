@@ -1,0 +1,6 @@
+fn main() {
+	parsed := toInt("42") or _ => -1
+	print(parsed + "x")
+	direct := toInt("42")
+	print(direct)
+}
