@@ -405,7 +405,7 @@ fn dependency_order(discovered: &[String], units: &[ModuleUnit]) -> Vec<String> 
     let mut visiting: Vec<String> = Vec::new();
     fn visit(pkg: &str, deps: &HashMap<&str, Vec<String>>, known: &[&str], order: &mut Vec<String>, visiting: &mut Vec<String>) {
         if order.iter().any(|p| p == pkg) || visiting.iter().any(|p| p == pkg) {
-            return; // 訪問済み or 循環(循環の報告はcodegen側の仕事)
+            return; // 訪問済み or 循環(循環の報告はこの関数より前に走るcheck_import_graphの仕事)
         }
         visiting.push(pkg.to_string());
         for d in deps.get(pkg).into_iter().flatten() {

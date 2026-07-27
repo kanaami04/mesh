@@ -45,7 +45,9 @@ pub fn load_modules(entry_file: &Path) -> Result<Vec<ModuleSource>, String> {
 
 // importグラフを再帰的に(BFSキューで)辿ってパッケージのソースを集める。`loaded`で
 // 再訪問を防ぐので、パッケージ間の循環があってもここでは無限ループにならない
-// (単に両方1回ずつ読むだけ——処理順を決める依存グラフの循環検出はcodegen側の仕事)
+// (単に両方1回ずつ読むだけ——依存グラフの循環検出は、check経路では`check_import_graph`
+// (main.rs)がimport-cycle診断として、build/run経路では`topo_sort_packages`(codegen.rs)が
+// 明確なErrとして担う)
 fn load_dependencies(root: &Path, initial_queue: Vec<String>) -> Result<Vec<ModuleSource>, String> {
     let mut modules = Vec::new();
     let mut loaded: HashSet<String> = HashSet::new();
