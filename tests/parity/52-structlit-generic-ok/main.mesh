@@ -1,0 +1,14 @@
+fn first<T>(xs: T[]) T | none {
+	for _, x := range xs {
+		return x
+	}
+	return none
+}
+
+struct P {
+	x: int
+}
+
+fn main() {
+	print(str(first([P{x: 1}]) or P{x: 0}))
+}

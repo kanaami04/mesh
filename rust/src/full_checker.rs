@@ -879,8 +879,8 @@ fn infer_expr(ctx: &mut FullCheckerCtx, expr: &Expr) -> Type {
             let callee_ty = infer_expr_single(ctx, callee);
             check_call_of_value(ctx, callee_ty, args, *pos)
         }
-        // milestone 29: 名前付きstructリテラルのフィールド検証。pkg修飾・判別可能union構築は
-        // 次段階(下記infer_struct_litがANYを返す)
+        // structリテラルのフィールド検証(milestone 29)。判別可能union構築は32、
+        // pkg修飾は49〈名前〉・51〈フィールド〉、未宣言名の`unknown-type`は52で対応済み
         Expr::StructLit { name, pkg, fields, pos, .. } => infer_struct_lit(ctx, name, pkg.as_deref(), fields, *pos),
         // milestone 30: structのフィールドアクセス読み取り(`u.name`)。field→型・
         // メソッド名→method-not-called・未知→unknown-field。呼び出し形(`u.method()`)は
@@ -1285,9 +1285,19 @@ fn validate_struct_lit_fields(
 // `expressions.ts`のstructLitケースの移植——診断を積んで継続する。フィールド値の型・重複・
 // 未知・欠落を検査する。milestone 29で名前付きstruct、**milestone 32でunion名での構築**
 // (判別可能unionのタグdisambiguation・名前付きstruct同士のunionのフィールド集合解決。
-// 下記`resolve_union_lit_member`)に対応した。**milestone 49でpkg修飾structの名前解決**
-// (`lib.Point{...}`の3診断)を追加——ただしフィールド検証はまだで、型はANYを返す。
+// 下記`resolve_union_lit_member`)に対応した。pkg修飾structは**milestone 49で名前解決**
+// (`lib.Point{...}`の3診断)、**51でフィールド検証**(レジストリに型が載った)。
+// **milestone 52で未宣言名の`unknown-type`**——TS版と同じく**値の推論より先**に判定する
+// (逆にすると`Bogus{n: undefinedThing}`で発行順がずれる)。
 fn infer_struct_lit(ctx: &mut FullCheckerCtx, name: &str, pkg: Option<&str>, fields: &[StructLitField], pos: Pos) -> Type {
+    // milestone 52: **名前の解決を値の推論より先に行う**(TS版`expressions.ts`のstructLitケースが
+    // `resolveAlias(ctx, expr.name, expr.pos)`を先頭で呼ぶのと同じ順序)。逆にすると
+    // `Bogus{n: undefinedThing}`で`undefined-name`が`unknown-type`より先に出て、
+    // **発行順がTS版とずれる**(実測で確認)。
+    // pkg修飾側は`check_package_type_ref`が担当するのでここでは素の名前だけ見る
+    if pkg.is_none() && !ctx.declared_types.contains(name) && !ctx.type_params.iter().any(|t| t == name) {
+        ctx.error(pos, DiagnosticCode::UnknownType, format!("unknown type '{name}'"));
+    }
     // 値は先に全て推論する(未定義名検出のため。arityや対象外でも必ず訪れる)
     let field_types: Vec<Type> = fields.iter().map(|f| infer_expr_single(ctx, &f.value)).collect();
     // pkg修飾structリテラル(`lib.Point{...}`)。milestone 49で名前の3診断、
@@ -3539,8 +3549,11 @@ mod tests {
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].code, DiagnosticCode::NotAStruct);
         assert_eq!(diags[0].message, "'S' is not a struct");
-        // **未宣言の名前はTS版では`unknown-type`**(別診断・未移植)なので黙る
-        assert!(check("fn main() {\n    print(Bogus{n: 1})\n}\n").is_empty());
+        // **未宣言の名前は`unknown-type`**(milestone 52で移植。それまでは黙っていた——
+        // TS版へ問い合わせて位置・文言まで一致することを確認してから期待値を書き換えた)
+        let unknown = check("fn main() {\n    print(Bogus{n: 1})\n}\n");
+        assert_eq!(unknown.iter().map(|d| d.code).collect::<Vec<_>>(), vec![DiagnosticCode::UnknownType], "{unknown:?}");
+        assert_eq!(unknown[0].message, "unknown type 'Bogus'");
         // **循環aliasはANYへ解決されるので免除する**——`type-alias-cycle`に重ねて
         // not-a-structを出すとTS版に無い誤検知になる(code reviewで発覚)
         for src in ["type A = A\n\nfn main() {\n    print(A{n: 1})\n}\n", "type A = B\n\ntype B = A\n\nfn main() {\n    print(A{n: 1})\n}\n"] {
