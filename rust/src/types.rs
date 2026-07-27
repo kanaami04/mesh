@@ -351,6 +351,103 @@ pub fn widen_literal(t: Type) -> Type {
     }
 }
 
+// ---- ジェネリック関数の型パラメータ推論(TS版`checker/generics.ts`)------------------
+// **full_checker(診断)とchecker(codegen用の最小リゾルバ)の両方が使う**のでここに置く。
+// 2箇所に書くと必ずずれる、というのはこの移植で何度も踏んだ形(milestone 64で共有化)。
+
+// 型パラメータが型のどこかに現れるか(TS版`generics.ts`の`containsAnyTypeParam`)。
+// unionのどのメンバーが型パラメータ側かを仕分けるのに使う
+pub fn contains_any_type_param(t: &Type) -> bool {
+    match t {
+        Type::TypeParam(_) => true,
+        Type::Array(e) | Type::Chan(e) => contains_any_type_param(e),
+        Type::Map { key, value } => contains_any_type_param(key) || contains_any_type_param(value),
+        Type::Fn { params, ret } => params.iter().any(contains_any_type_param) || contains_any_type_param(ret),
+        Type::Union { body } => body.get().is_some_and(|b| b.members.iter().any(contains_any_type_param)),
+        _ => false,
+    }
+}
+
+// 呼び出し引数から型パラメータを推論する(TS版`generics.ts`の`unifyTypeParam`)。
+// paramType(Tを含みうる)とarg_ty(検査済みの具体型)を並行に辿り、typeParamに**初めて**
+// 出会った位置の実引数型をそのまま束縛する。2回目以降の出現は上書きしない——食い違いは
+// 後段の`check_args_against`が通常の代入不可エラーとして報告する
+pub fn unify_type_param(param: &Type, arg: &Type, bindings: &mut Vec<(String, Type)>) {
+    match (param, arg) {
+        (Type::TypeParam(n), _) => {
+            if !bindings.iter().any(|(k, _)| k == n) {
+                bindings.push((n.clone(), arg.clone()));
+            }
+        }
+        (Type::Array(pe), Type::Array(ae)) | (Type::Chan(pe), Type::Chan(ae)) => unify_type_param(pe, ae, bindings),
+        (Type::Map { key: pk, value: pv }, Type::Map { key: ak, value: av }) => {
+            unify_type_param(pk, ak, bindings);
+            unify_type_param(pv, av, bindings);
+        }
+        (Type::Fn { params: pp, ret: pr }, Type::Fn { params: ap, ret: ar }) => {
+            for (p, a) in pp.iter().zip(ap.iter()) {
+                unify_type_param(p, a, bindings);
+            }
+            unify_type_param(pr, ar, bindings);
+        }
+        (Type::Union { body: pb }, _) => {
+            // `T | error`のようなunionを実引数の型と照合する。**arg側がunionでなくても
+            // 1メンバーのunionとして扱う**——`T | none`に素の値を渡すのは正当な呼び方で、
+            // union同士のときだけ推論できるのでは足りない(TS版のコメントどおり)。
+            // param側の「型パラメータを含まないメンバー」はarg側の対応するメンバーを
+            // 消費するだけ(値自体の食い違いは後段のcheck_args_againstに任せる)
+            let Some(pms) = pb.get().map(|b| &b.members) else { return };
+            let empty = Vec::new();
+            let arg_members: Vec<&Type> = match arg {
+                Type::Union { body } => body.get().map(|b| &b.members).unwrap_or(&empty).iter().collect(),
+                other => vec![other],
+            };
+            let mut used = vec![false; arg_members.len()];
+            for cm in pms.iter().filter(|m| !contains_any_type_param(m)) {
+                if let Some(i) = arg_members.iter().enumerate().position(|(i, am)| !used[i] && type_equals(cm, am)) {
+                    used[i] = true;
+                }
+            }
+            let remaining: Vec<Type> = arg_members.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, m)| (*m).clone()).collect();
+            let var_members: Vec<&Type> = pms.iter().filter(|m| contains_any_type_param(m)).collect();
+            if var_members.len() == 1 && !remaining.is_empty() {
+                let bound = if remaining.len() == 1 { remaining[0].clone() } else { union_of(remaining) };
+                unify_type_param(var_members[0], &bound, bindings);
+            } else if var_members.len() > 1 {
+                // 型パラメータを含むメンバーが複数ある稀なケース: 順番に対応させるベストエフォート
+                for (vm, r) in var_members.iter().zip(remaining.iter()) {
+                    unify_type_param(vm, r, bindings);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// 集めた束縛を型に適用してtypeParamを具体型へ置き換える(TS版`substituteTypeParams`)。
+// 束縛が無い型パラメータはANYになる——`infer_generic_call`が先に
+// `generic-inference-failed`を出して降りるので、通常はここへ来ない
+pub fn substitute_type_params(t: &Type, bindings: &[(String, Type)]) -> Type {
+    match t {
+        Type::TypeParam(n) => bindings.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap_or(ANY),
+        Type::Array(e) => Type::Array(Box::new(substitute_type_params(e, bindings))),
+        Type::Chan(e) => Type::Chan(Box::new(substitute_type_params(e, bindings))),
+        Type::Map { key, value } => Type::Map {
+            key: Box::new(substitute_type_params(key, bindings)),
+            value: Box::new(substitute_type_params(value, bindings)),
+        },
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.iter().map(|p| substitute_type_params(p, bindings)).collect(),
+            ret: Box::new(substitute_type_params(ret, bindings)),
+        },
+        Type::Union { body } => match body.get() {
+            Some(b) => union_of(b.members.iter().map(|m| substitute_type_params(m, bindings)).collect()),
+            None => t.clone(),
+        },
+        _ => t.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3804,6 +3804,27 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 64: ジェネリック関数のcodegen(mesh run/build が通る)**
+              ✅ 2026-07-27実装。`codegen.rs`が`generic functions are not yet supported`で
+              明確なErrにしていた制限を解消。**生成JSはTS版とバイト一致**する
+              (JSは型消去なので、型パラメータを外した普通の関数になるだけ)。
+              - **codegen側のリゾルバ(`checker.rs`)にも推論が要る**。最初はパラメータ/戻り値を
+                ANYで登録して済ませようとしたが、`identity(Box{v: 7}).v`が
+                `package/member access is not yet supported`で落ちた——codegenは
+                メンバー参照とメソッド解決に型を使うため。`resolve_type_node_with_params`で
+                `Type::TypeParam`を配り、`infer_call`が実引数から束縛して具体化する形にした。
+              - `unify_type_param`/`substitute_type_params`/`contains_any_type_param`を
+                `types.rs`へ移して**full_checkerとcheckerで共有**した(2箇所に書くと必ずずれる)。
+              - `examples/generics.mesh`を追加(推論が配列・union・関数型・structメソッド連鎖の
+                どこでも効くことを示す実例)。
+              - **`mise run run-examples`が24本中7本しか実行していないことが発覚**。`set -e`で
+                意図的にpanicする`defer_panic.mesh`(7本目)で打ち切られていた。1本落ちても
+                止めない形に直し、24本すべてがTS版/Rust版で**実行結果一致**することを確認した。
+              - 検証: ジェネリックの実入力15種で実行結果・生成JSともに一致(structメソッド連鎖・
+                discriminated unionのmatch・文字列補間・spawn・chan・入れ子のジェネリック呼び出しを含む)。
+                `mise run parity` 140ファイル・誤検知0(コーパス113→117)。テスト622件、clippyクリーン。
+              - examples全24本の生成JS比較では`json_decode`/`json_models_demo`の2本に差が残るが、
+                **mainにも存在する既存差**(json structのエンコーダ合成が未移植。実行結果は一致)。
         - [x] **milestone 63: 残っていた検出漏れを3件埋める**
               ✅ 2026-07-27実装。milestone 62で洗い出した検出漏れのうち3件を解消し、
               `mise run parity`の検出漏れが1件→0件(その後pkg修飾のケースをコーパスへ

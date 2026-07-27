@@ -1,0 +1,14 @@
+struct Box {
+	v: int
+}
+
+fn listOf<T>(a: T, b: T) T[] {
+	return [a, b]
+}
+
+fn main() {
+	xs := listOf(Box{v: 1}, Box{v: 2})
+	for _, b := range xs {
+		print(b.v)
+	}
+}

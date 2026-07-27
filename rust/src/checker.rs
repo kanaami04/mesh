@@ -1479,6 +1479,48 @@ pub fn check_inc_dec(op: TokenType, target: &Type, pos: Pos) -> Result<(), Strin
 // argsはmilestone 4で追加——get/sort/keys/values等、引数依存の組み込みの戻り値型を
 // 解決するために必要(例えばsort(nums)の戻り値がint[]と分からないと、後続の算術が
 // __iarith経由にならずTS版とbyte単位で食い違う出力になる)
+// `resolve_type_node`の**ジェネリック関数のシグネチャ用**の入口(milestone 64)。
+// `type_params`に載っている名前だけ`Type::TypeParam`として解決し、それ以外は通常どおり。
+// これが無いと型パラメータが「名前がTの殻struct」になり、呼び出し結果のメンバー参照が
+// codegenで落ちる(`T has no field 'v'`)
+pub fn resolve_type_node_with_params(ctx: &CheckerCtx, node: &TypeNode, type_params: &[&str]) -> Type {
+    match node {
+        TypeNode::Name { name, pkg: None, .. } if type_params.contains(&name.as_str()) => Type::TypeParam(name.clone()),
+        TypeNode::Array { elem, .. } => Type::Array(Box::new(resolve_type_node_with_params(ctx, elem, type_params))),
+        TypeNode::Chan { elem, .. } => Type::Chan(Box::new(resolve_type_node_with_params(ctx, elem, type_params))),
+        TypeNode::MapType { key, value, .. } => Type::Map {
+            key: Box::new(resolve_type_node_with_params(ctx, key, type_params)),
+            value: Box::new(resolve_type_node_with_params(ctx, value, type_params)),
+        },
+        TypeNode::FnType { params, ret, .. } => Type::Fn {
+            params: params.iter().map(|p| resolve_type_node_with_params(ctx, p, type_params)).collect(),
+            ret: Box::new(match ret {
+                Some(r) => resolve_type_node_with_params(ctx, r, type_params),
+                None => types::VOID,
+            }),
+        },
+        TypeNode::Union { members, .. } => {
+            types::union_of(members.iter().map(|m| resolve_type_node_with_params(ctx, m, type_params)).collect())
+        }
+        _ => resolve_type_node(ctx, node),
+    }
+}
+
+// ジェネリック関数の戻り値を実引数から具体化する(milestone 64)。型パラメータを含まない
+// シグネチャはそのまま返すので、非ジェネリックの呼び出しに影響しない。
+// **診断は出さない**——ここはcodegen用のリゾルバで、推論できなければANYへ落とすだけ
+// (推論失敗の報告はfull_checkerの`generic-inference-failed`の仕事)
+fn substitute_generic_ret(ctx: &CheckerCtx, params: &[Type], ret: &Type, args: &[Expr]) -> Type {
+    if !types::contains_any_type_param(ret) && !params.iter().any(types::contains_any_type_param) {
+        return ret.clone();
+    }
+    let mut bindings: Vec<(String, Type)> = Vec::new();
+    for (p, a) in params.iter().zip(args.iter()) {
+        types::unify_type_param(p, &infer_expr(ctx, a), &mut bindings);
+    }
+    types::substitute_type_params(ret, &bindings)
+}
+
 fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     if let Expr::Ident { name, .. } = callee {
         // ローカル変数がfn値(無名関数式、milestone 10)を保持している場合を先に確認する
@@ -1488,11 +1530,11 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
         // 別テーブルで、ローカルスコープに保持されたfn値までは見ないため)。ローカルが
         // トップレベル関数名を覆う場合もこの優先順位で正しく扱われる(TS版の実際の
         // スコープ規則と同じ)
-        if let Some(Type::Fn { ret, .. }) = ctx.lookup(name) {
-            return (**ret).clone();
+        if let Some(Type::Fn { params, ret }) = ctx.lookup(name) {
+            return substitute_generic_ret(ctx, params, ret, args);
         }
-        if let Some(Type::Fn { ret, .. }) = ctx.lookup_fn(name) {
-            return (**ret).clone();
+        if let Some(Type::Fn { params, ret }) = ctx.lookup_fn(name) {
+            return substitute_generic_ret(ctx, params, ret, args);
         }
         if let Some(t) = infer_builtin_call(ctx, name, args) {
             return t;
@@ -1504,9 +1546,9 @@ fn infer_call(ctx: &CheckerCtx, callee: &Expr, args: &[Expr]) -> Type {
     if let Expr::Member { target, name, .. } = callee
         && let Expr::Ident { name: alias, .. } = &**target
         && ctx.is_package_alias(alias)
-        && let Some(Type::Fn { ret, .. }) = ctx.lookup_package_fn(alias, name)
+        && let Some(Type::Fn { params, ret }) = ctx.lookup_package_fn(alias, name)
     {
-        return (**ret).clone();
+        return substitute_generic_ret(ctx, params, ret, args);
     }
     // メソッド呼び出し: recv.method(args)。TS版calls.tsと同じ「フィールドが勝つ」順序——
     // targetがstruct型でnameが宣言済みフィールドでなければメソッドとして解決する
