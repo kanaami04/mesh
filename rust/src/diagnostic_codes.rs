@@ -64,6 +64,7 @@ diagnostic_codes! {
     DivisionByZero => "division-by-zero",
     ArgumentCount => "argument-count",
     BuiltinArgType => "builtin-arg-type",
+    BuiltinAsValue => "builtin-as-value",
     UnknownPackage => "unknown-package",
     UnknownPackageType => "unknown-package-type",
     UnknownPackageFunction => "unknown-package-function",
