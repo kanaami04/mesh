@@ -1,0 +1,14 @@
+struct Inner {
+	v: int | none
+}
+
+struct Outer {
+	inner: Inner
+}
+
+fn main() {
+	o := Outer{inner: Inner{v: 1}}
+	if o.inner.v is int {
+		print(o.inner.v + 1)
+	}
+}

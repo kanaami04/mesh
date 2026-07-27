@@ -1,0 +1,6 @@
+type Tree = { kind: "leaf" } | { kind: "node", left: Tree, right: Tree }
+
+fn main() {
+	t := Tree{kind: "leaf"}
+	print(t)
+}
