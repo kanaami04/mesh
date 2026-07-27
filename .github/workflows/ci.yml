@@ -6,7 +6,9 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # **2026-07-27にTS実装を撤去した**ので、以前あった `test` ジョブ(bun test / tsc --noEmit /
+  # TS版CLIでのexamples実行)は無くなった。playgroundはTSのまま残るので型検査だけは続ける。
+  playground-typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,18 +23,10 @@ jobs:
       - name: Type check
         run: bunx tsc --noEmit
 
-      - name: Tests
-        run: bun test
-
       # 開発フローを守るフック（.claude/hooks/）のテスト。ネットワーク・gh認証に
       # 依存しない。走らせておかないと、フックが無言で効かなくなっても気づけない
       - name: Hook tests
         run: .claude/hooks/test-hooks.sh
-
-      # 「どの例が意図的に落ちるか」の判定は scripts/run-examples.sh に集約してある
-      # (以前は mise.toml とこのワークフローに同じ判定が二重に書かれていた)
-      - name: Run examples
-        run: scripts/run-examples.sh
 
   rust-test:
     runs-on: ubuntu-latest
@@ -69,34 +63,26 @@ jobs:
   # これを入れるまで、CIは`bun test`と`cargo test`を別々に走らせるだけで
   # **両実装の出力を一度も比べていなかった**——parity/sweepは手元でしか回っておらず、
   # 「並走で差分ゼロ」を機械的に保証できていなかった(docs/ts-removal-plan.md 段階1)。
-  parity:
+  # 診断・生成JSの退行検出(撤去条件(5)の名残)。
+  # **撤去前はTS版(オラクル)との突き合わせだった**が、いまは撤去時点の出力を凍結した
+  # 記録との突き合わせ。役割(生成物の退行検出)は同じ
+  regression:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.9 # mise.toml と揃える
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1" # mise.toml と揃える
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       - name: Build Rust CLI
         run: cargo build --manifest-path rust/Cargo.toml
 
-      # 診断・生成JSともTS版と一致するか(Rust側だけに出る診断があれば失敗)
-      - name: Parity (diagnostics + generated JS)
+      - name: Parity (diagnostics snapshots)
         run: scripts/parity.sh
 
-      # parityが測れない「形の組み合わせ」(milestone 65の誤検知5種はこれだった)
       - name: Sweep (combination probes)
         run: scripts/sweep.sh
 
-      # examplesを**Rust版CLIでも**実行する(testジョブはTS版で走らせている)。
-      # parityはcheckと生成JSまでで、実行時の挙動までは見ないため
-      - name: Run examples (Rust CLI)
-        run: scripts/run-examples.sh --rust
+      - name: Run examples
+        run: scripts/run-examples.sh

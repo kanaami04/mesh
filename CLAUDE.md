@@ -24,19 +24,18 @@ docs/handoff.md「検証の進め方」の2''が一次情報源。
 追随できず古い記述が残ることがある。現在地を確認したいときは以下を優先する:
 
 1. `docs/features.md` — 「できる・できない表」。現在地の一次情報源
-2. ソースコード(`src/types.ts` の `typeEquals` 等)
+2. ソースコード(`rust/src/types.rs` の `type_equals` 等)
 3. `todo.md` — 次にやること
 
 ## 開発コマンド
 
 ```sh
-mise run test           # bun test(TS実装)
-mise run check          # bunx tsc --noEmit
+mise run check          # bunx tsc --noEmit(playgroundのTSだけ)
 mise run playground     # ブラウザプレイグラウンド
 mise run run-examples   # examples/*.mesh を全部実行
-mise run rust-test      # cd rust && cargo test(Rust移植版)
+mise run rust-test      # cd rust && cargo test(コンパイラ本体)
 mise run rust-check     # cd rust && cargo clippy --all-targets
-mise run parity         # TS版(オラクル)とRust版のcheck出力を突き合わせる
+mise run parity         # 診断の出力が記録どおりか(旧: TS版との突き合わせ)
 mise run sweep          # 「形の組み合わせ」を機械生成してTS版と突き合わせる(parityの死角)
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
 
@@ -44,8 +43,8 @@ scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エー�
                                                  # (run_in_background で起動する)
 ```
 
-**Rust移植のマイルストーンを出荷する前に `mise run parity` と `mise run drift` を回す。**
-parityは「Rust側だけに出る診断」(この移植で最悪の不具合)と**生成JSの差**があれば失敗する。
+**出荷する前に `mise run parity` と `mise run drift` を回す。**
+parityは診断の出力が記録と違えば失敗する(生成JSの方は`rust/tests/codegen_snapshot.rs`が見る)。
 driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
 
 **parityは「コーパスに載っている形」しか測れない。** milestone 65で見つけた誤検知5種は
@@ -84,17 +83,20 @@ squash mergeで付いたPR番号(`(#41)`等)が文字列として残っている
 PRとは無関係**で、現リポジトリのPR番号は移管後に1から振り直されている(このPR自体が#36)。
 移管前の作業を指すときはPR番号ではなくコミットSHAを使う。
 
-## Rust移植について
+## 実装は `rust/` だけ(2026-07-27にTS実装を撤去した)
 
-`rust/` はTS実装(`src/`)の書き換えではなく、並行してゼロから育てている移植版。
-TS実装が引き続き本番として動き続けている。進捗はコミット単位のマイルストーンで、
-詳細はtodo.mdの各マイルストーン項目・docs/handoff.mdの「Rust移植の現状」節が一次情報源。
+**`rust/` が本番のコンパイラ**。元はTS実装(`src/`)からの移植で、TS版が
+「正しさの基準(オラクル)」を務めていたが、撤去条件(1)〜(5)を満たして
+2026-07-27に撤去した。経緯は `docs/ts-removal-plan.md`。
 
-**TS実装がオラクル**。正しさの基準は「TS版と一致するか」で、優劣は
-**誤検知(Rust側だけに出る診断)＞違う診断コード＞検出漏れ** の順に悪い。
-迷ったら検出漏れ側に倒す。**実装前にTS版を実測する**(位置・件数・順序まで)。
-milestone 46〜48は3回連続で誤検知を出荷しかけ、いずれも実装者の検証をすり抜けて
-code reviewが見つけた——検証手順は docs/handoff.md「検証の進め方」が一次情報源。
+**オラクルが無くなったので、正しさの基準は「記録との一致」になった**:
+`tests/parity/*/expected.txt`・`tests/parity-examples/`・`tests/codegen-snapshots/`・
+`tests/sweep-expected.txt` が撤去時点の出力を凍結している。
+**これらを `--update` で更新したら、差分を必ず読むこと**——説明できない変化は退行。
+
+移植期に効いた原則は撤去後も有効: 診断の優劣は
+**誤検知＞違う診断コード＞検出漏れ** の順に悪く、迷ったら検出漏れ側に倒す。
+検証手順は docs/handoff.md「検証の進め方」が一次情報源。
 
 ## メモリとdocsの使い分け
 

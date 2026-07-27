@@ -14,7 +14,7 @@
    - 被験体はコンパイラ・処理系を**実行できない**(書くだけ)。往復数を正確に数えるため
    - 被験体はリポジトリ内のファイルを読めない(Meshの場合、カードファイル1つだけ例外)
 2. オーケストレータ(親エージェント)がコンパイル検査を実行:
-   - Mesh: `bun src/cli.ts check <file>`
+   - Mesh: `bun run mesh check <file>`
    - TS: `bunx tsc --noEmit --strict --ignoreConfig <file>`(`--ignoreConfig`はパイロットで
      判明したハーネス側の必須フラグ — リポジトリの`tsconfig.json`と競合するため)
    - Go: `go build -o /dev/null <file>`
@@ -22,7 +22,7 @@
    整形・ヒント追加はしない — 「エラーメッセージが修正方法を含む」というMeshの主張自体が
    計測対象のため
 4. コンパイルが通ったら実行し、期待stdout(バイト一致)と照合:
-   - Mesh: `bun src/cli.ts run <file>` / TS: `bun <file>` / Go: `go run <file>`
+   - Mesh: `bun run mesh run <file>` / TS: `bun <file>` / Go: `go run <file>`
 5. 出力が違う場合は expected / got の差分を返して修正させる(これも1往復)
 6. **上限6往復**で打ち切り(カード実験第1回の実測最大値に合わせる)
 
