@@ -61,10 +61,19 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
   潰した箇所)を緩める必要がある。妥当な呼び出しをRust版が拒否するようになる変更でもあり、
   **TS版側を直す方が筋が良いかもしれない**。`tests/parity/generic-pkg-qualified-call/`が記録している
 
-**なお診断とは別に、`rust/`の codegen はジェネリック関数を実装していない**
-(`codegen.rs`が`generic functions are not yet supported`で明確なErrにする)。
-milestone 62で入ったのは**検査だけ**で、`mesh run`/`build`は通らない——
-撤去条件の観点ではこちらの方が重い。元々の意図的なスコープ縮小の1つとしてtodo.mdに記録済み。
+~~**なお診断とは別に、`rust/`の codegen はジェネリック関数を実装していない**~~
+✅ **milestone 64(2026-07-27)で解消**。`mesh run`/`build`が通り、
+**生成JSはTS版とバイト一致**する(JSは型消去なので型パラメータを外すだけ)。
+codegen側のリゾルバ(`checker.rs`)にも推論を通してある——通さないと
+`identity(Box{v: 7}).doubled()`のメンバー参照・メソッド解決が
+「名前がTの殻struct」で落ちる。`types.rs`の`unify_type_param`/`substitute_type_params`を
+full_checkerと**共有**している(2箇所に書くとずれるため)。
+`examples/generics.mesh`が動く実例。
+
+**`mise run run-examples`は24本中7本しか実行していなかった**(milestone 64で発覚)。
+`set -e`のため、意図的にpanicする`defer_panic.mesh`(7本目)で打ち切られていた。
+1本落ちても止めず、期待どおり落ちる例を除いた失敗があるときだけ非ゼロで終わる形に直した。
+**このタスクの結果を「examplesは全部動く」の根拠に使うときは、修正前の記録を信用しないこと。**
 
 ### 検証の進め方(このセッションで固まった手順。守ると事故が減る)
 

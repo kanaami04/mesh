@@ -231,11 +231,18 @@ impl Codegen {
         // (このパッケージの全ファイルぶん)登録してから本体を出力する
         for f in files {
             for fn_decl in &f.program.fns {
-                if !fn_decl.type_params.is_empty() {
-                    return Err(format!("codegen: generic functions are not yet supported (fn '{}' at {}:{})", fn_decl.name, fn_decl.pos.line, fn_decl.pos.col));
-                }
-                let params = fn_decl.params.iter().map(|p| checker::resolve_type_node(&self.ctx, &p.type_node)).collect();
-                let ret = Box::new(checker::resolve_return_type(&self.ctx, &fn_decl.ret));
+                // milestone 64: **ジェネリック関数は型パラメータ入りのシグネチャで登録する**。
+                // `T`をそのまま`resolve_type_node`に通すと「名前がTの殻struct」になり、
+                // `b := identity(Box{v: 7})`の`b.v`が`T has no field 'v'`で落ちる。
+                // `Type::TypeParam`として登録しておけば、呼び出し側(checker.rsの`infer_call`)が
+                // 実引数から束縛して戻り値を具体化できる——full_checkerと同じ`types::unify_type_param`
+                // /`substitute_type_params`を共有している
+                let tp: Vec<&str> = fn_decl.type_params.iter().map(String::as_str).collect();
+                let params = fn_decl.params.iter().map(|p| checker::resolve_type_node_with_params(&self.ctx, &p.type_node, &tp)).collect();
+                let ret = Box::new(match &fn_decl.ret {
+                    Some(r) => checker::resolve_type_node_with_params(&self.ctx, r, &tp),
+                    None => checker::resolve_return_type(&self.ctx, &fn_decl.ret),
+                });
                 match &fn_decl.receiver {
                     Some(recv) => {
                         let bare_name = receiver_struct_name(recv)?;
@@ -2770,6 +2777,26 @@ mod tests {
         // 通常のフィールドアクセス扱いとなり明確なエラーになる(クラッシュしない)
         let err = gen_js("fn main() {\n  x := mathutil.add(1, 2)\n  print(x)\n}").unwrap_err();
         assert!(!err.is_empty(), "got: {err}");
+    }
+
+    #[test]
+    fn ジェネリック関数は型を消してそのまま出力される() {
+        // milestone 64。それまでは`generic functions are not yet supported`で明確なErrにしていた。
+        // JSは型消去なので、生成コードは型パラメータを外した普通の関数になる(TS版と同じ)
+        let js = gen_js("fn identity<T>(x: T) T {\n  return x\n}\nfn main() {\n  print(identity(1))\n}").unwrap();
+        assert!(js.contains("async function identity(x)"), "{js}");
+        assert!(!js.contains("<T>"), "型パラメータが漏れている: {js}");
+    }
+
+    #[test]
+    fn ジェネリック呼び出しの戻り値はcodegen側でも具体化される() {
+        // milestone 64。codegen用のリゾルバ(checker.rs)にも推論を通していないと、
+        // `identity(Box{...})`の戻り値が「名前がTの殻struct」になり、続くメンバー参照が
+        // `T has no field 'v'`で落ちる。**メソッド解決も型に依存する**ので両方を固定する
+        let src = "struct Box {\n  v: int\n}\n\nfn (b: Box) doubled() Box {\n  return Box{v: b.v * 2}\n}\n\nfn identity<T>(x: T) T {\n  return x\n}\n\nfn main() {\n  print(identity(Box{v: 3}).doubled().v)\n}";
+        let js = gen_js(src).unwrap();
+        // メソッドが静的に解決されている(動的ディスパッチへ落ちていない)
+        assert!(js.contains("__m_Box_doubled"), "{js}");
     }
 
     #[test]

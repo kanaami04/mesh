@@ -1,0 +1,47 @@
+// ジェネリック関数(F-1後半)。型パラメータは呼び出し側の引数から推論される
+// ——戻り値型にしか現れない型パラメータは推論しようがないので宣言時に拒否される。
+// JSは型消去なので、生成されるコードは型パラメータを外した普通の関数になる。
+
+struct Box {
+	v: int
+}
+
+fn (b: Box) doubled() Box {
+	return Box{v: b.v * 2}
+}
+
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn firstOf<T>(xs: T[]) T | none {
+	if len(xs) == 0 {
+		return none
+	}
+	return xs[0]
+}
+
+fn pairUp<A, B>(a: A, b: B) string {
+	return "${a}/${b}"
+}
+
+fn twice<T>(cb: fn(T) T, v: T) T {
+	return cb(cb(v))
+}
+
+fn main() {
+	// 素の値・文字列・structのどれでも同じ関数が使える
+	print(identity(1))
+	print(identity("hello"))
+
+	// 推論の結果は具体型なので、続けてメソッドを呼べる
+	print(identity(Box{v: 3}).doubled().v)
+
+	// 型パラメータは配列・union・関数型の中からも推論される
+	found := firstOf([10, 20, 30])
+	if found is int {
+		print(found)
+	}
+	print(pairUp(7, "seven"))
+	print(twice(fn(s: string) string { return s + "!" }, "hi"))
+}

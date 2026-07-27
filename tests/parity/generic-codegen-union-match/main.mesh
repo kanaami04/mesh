@@ -1,0 +1,24 @@
+struct Ok {
+	kind: "ok"
+	n: int
+}
+
+struct Bad {
+	kind: "bad"
+	msg: string
+}
+
+type Res = Ok | Bad
+
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn main() {
+	r: Res = Ok{kind: "ok", n: 5}
+	v := identity(r)
+	print(match v {
+		{ kind: "ok" } => "n=${v.n}"
+		{ kind: "bad" } => "msg"
+	})
+}

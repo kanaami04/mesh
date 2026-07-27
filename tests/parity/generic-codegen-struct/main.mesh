@@ -1,0 +1,12 @@
+struct Box {
+	v: int
+}
+
+fn identity<T>(x: T) T {
+	return x
+}
+
+fn main() {
+	b := identity(Box{v: 7})
+	print(b.v)
+}
