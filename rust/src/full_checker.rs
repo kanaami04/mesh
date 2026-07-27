@@ -3687,7 +3687,7 @@ pub fn check_package_shared(
                     let sig = generic_fn_signature(&ctx.type_ctx, f);
                     ctx.generic_fns.insert(f.name.clone(), (f.type_params.clone(), sig));
                 }
-                let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
+                let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { generic_fn_signature(&ctx.type_ctx, f) };
                 ctx.declare(&f.name, ty, f.pos, false);
             }
         }
@@ -4985,6 +4985,46 @@ mod tests {
                 "戻り値 {ret} だけでは推論できないはず: {d:?}"
             );
         }
+    }
+
+    #[test]
+    fn ジェネリック関数の本体では型パラメータが型として検査される() {
+        // milestone 63。それまで本体の`T`は未知の型名としてANYへ落ちており、
+        // TS版が出す診断がまるごと検出漏れになっていた
+        let d = check("fn f<T>(x: T) T {\n    return 1\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(d[0].message, "cannot return int as T");
+
+        let d = check("fn f<T>(x: T) int {\n    return x + 1\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert!(d.iter().any(|e| e.code == DiagnosticCode::InvalidOperation), "{d:?}");
+
+        let d = check("fn f<T>(x: T) T {\n    print(x.field)\n    return x\n}\nfn main() {\n    print(f(1))\n}\n");
+        assert!(d.iter().any(|e| e.code == DiagnosticCode::NotAStruct), "{d:?}");
+
+        // 正しい本体は何も出さない(誤検知が最大のリスクなので明示的に固定する)
+        assert_eq!(check("fn f<T>(x: T) T {\n    y: T = x\n    return y\n}\nfn main() {\n    print(f(1))\n}\n"), vec![]);
+    }
+
+    #[test]
+    fn ジェネリック関数を値として渡すとTS版と同じく代入不可になる() {
+        // milestone 63。TS版は`name(args)`の直接呼び出しだけ推論する設計で、変数へ入れたり
+        // コールバックとして渡したりすると**型パラメータが残ったまま代入不可になる**
+        // (TS版`calls.ts`のコメントが明記している意図的な制限)。milestone 62までは
+        // ANY登録だったので何も出なかった
+        let d = check("fn identity<T>(x: T) T {\n    return x\n}\nfn main() {\n    f := identity\n    print(f(1))\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::TypeMismatch);
+        assert_eq!(d[0].message, "argument 1: cannot use int as T");
+    }
+
+    #[test]
+    fn toIntはint_errorを返す() {
+        // milestone 63。milestone 27ではunionが未モデル化でANYへ潰していた。
+        // ANYのままだと`or`で取り出した後の検査が丸ごと素通りする
+        let d = check("fn main() {\n    n := toInt(\"42\") or _ => -1\n    print(n + \"x\")\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::InvalidOperation);
     }
 
     #[test]

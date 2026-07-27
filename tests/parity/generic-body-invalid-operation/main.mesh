@@ -1,0 +1,7 @@
+fn f<T>(x: T) int {
+	return x + 1
+}
+
+fn main() {
+	print(f(1))
+}

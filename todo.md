@@ -3804,6 +3804,30 @@
               - 検証: 実入力8種でTS版と同じコードが出ることを確認。`mise run parity`
                 105ファイルで差0件(コーパスに構文エラー系3ケース追加、79→82)。
                 テスト611件維持、clippyクリーン。
+        - [x] **milestone 63: 残っていた検出漏れを3件埋める**
+              ✅ 2026-07-27実装。milestone 62で洗い出した検出漏れのうち3件を解消し、
+              `mise run parity`の検出漏れが1件→0件(その後pkg修飾のケースをコーパスへ
+              足したので1件)になった。
+              - **ジェネリック関数の本体で型パラメータが検査されていなかった**。`resolve_ann`を
+                新設し、`ctx.type_params`が立っている間だけ`Type::TypeParam`として解決する。
+                TS版の`cannot return int as T` / `invalid operation: T + int` /
+                `T has no fields`が出るようになった。narrowing・match・`?`・structフィールドの
+                各検査まで正しく流れることを実測(`union-required`や
+                `prop-return-type-mismatch`の文言もTS版と一致)。
+              - **ジェネリック関数を値として渡した場合**。`scopes[0]`へANYではなく型パラメータ
+                入りシグネチャを登録するようにした。milestone 62で「誤検知が怖い」として
+                据え置いた判断だが、**直接呼び出しは`infer_generic_call`が先にintercept
+                する**ので推論は効いたまま、値経由だけTS版と同じ代入不可になる。
+                parityで誤検知0を確認済み。
+              - **組み込み`toInt`が「本来 int | error」というコメントを残したままANYを
+                返していた**。milestone 27当時はunionが未モデル化だったため。
+              - **`cannot-infer-type`の実験**: TS版の規則(`containsAny`)をそのまま入れると
+                誤検知は5ファイル・8件で、**全部`json.Value`由来**だった(実験前は6ファイル・
+                9件で、残り1件は上記`toInt`が原因だった)。`json.parse`等がANYを返すのは
+                milestone 51で誤検知を潰すための意図的な縮退なので、**残る障壁は
+                `json.Value`のモデル化だけ**と特定できた。
+              - 検証: 実入力20種+手順2'のスイープ。`mise run parity` 136ファイル・誤検知0
+                (コーパス107→113)。テスト620件、clippyクリーン。
         - [x] **milestone 62: ジェネリック呼び出しの型パラメータ推論(診断107/107達成)**
               ✅ 2026-07-27実装。TS版`checker/generics.ts`の`unifyTypeParam`/
               `substituteTypeParams`/`inferGenericCall`を移植し、最後の未移植診断

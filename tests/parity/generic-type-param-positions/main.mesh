@@ -1,0 +1,18 @@
+struct Box {
+	v: int
+}
+
+fn f<T>(x: T) T {
+	xs: T[] = [x]
+	m: map<string, T> = map<string, T>{"k": x}
+	c: chan<T> = chan<T>(1)
+	cb: fn(T) T = fn(y: T) T { return y }
+	u: T | none = x
+	print(len(xs) + len(m))
+	c <- x
+	return cb(<-c)
+}
+
+fn main() {
+	print(f(1))
+}

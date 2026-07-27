@@ -1,0 +1,3 @@
+main.mesh:7:10: error[type-mismatch]: argument 1: cannot use int as T
+  	print(f(1))
+  	        ^

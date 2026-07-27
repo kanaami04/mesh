@@ -39,17 +39,27 @@ TS版`memberFieldType`→`checkCallOfValue`という**1本の共通経路**の�
 ### 残っている検出漏れ(診断コードは揃ったが検出範囲に穴がある箇所)
 
 `mise run parity`が「TS版だけに出る」と報告する分。**誤検知ではないので出荷は止めないが、
-撤去条件(2)を本当に満たすにはここを埋める必要がある**。
+撤去条件(2)を本当に満たすにはここを埋める必要がある**。**milestone 63で3件埋めて残り2件**。
 
-- **ジェネリック関数の本体で型パラメータを型として検査していない**——`fn f<T>(x: int) T`の
-  本体で`return x`しても`cannot return int as T`が出ない。full_checkerの`resolve_type_ann`は
-  型パラメータ名をANYへ落とすため(`Type::TypeParam`を作るのは`generic_fn_signature`だけ)。
-  コーパスの`tests/parity/generic-type-param-not-inferable/`が記録している
-- **ジェネリック関数を値として渡した場合**(`f := identity` / `apply(identity, 1)`)——
-  `scopes[0]`にはANYで載せているので照合されない。TS版は型パラメータが残ったまま代入不可になる
-- **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)
+- ~~ジェネリック関数の本体で型パラメータを型として検査していない~~ ✅ milestone 63で解消
+  (`resolve_ann`が`ctx.type_params`の間だけ`Type::TypeParam`を配る)
+- ~~ジェネリック関数を値として渡した場合~~ ✅ milestone 63で解消
+  (`scopes[0]`へ型パラメータ入りシグネチャを登録するようにした。直接呼び出しは
+  `infer_generic_call`が先にinterceptするので推論は効いたまま)
+- ~~組み込み`toInt`の戻り値がANY~~ ✅ milestone 63で解消(`int | error`を返す)
+- **`cannot-infer-type` の適用範囲**(現在は空配列リテラル限定。milestone 33の限定)。
+  **milestone 63でTS版の規則(`containsAny`)をそのまま入れる実験をしたところ、
+  誤検知は5ファイル・8件まで減り、しかも全部`json.Value`由来だった**——
+  `json.parse`等がANYを返すのはmilestone 51で誤検知を潰すために入れた意図的な縮退なので、
+  ここを直さない限りTS版の規則は入れられない。逆に言えば**残る障壁は`json.Value`のモデル化だけ**。
+  なおTS版のテストを見る限り、この診断の実入力は全部「文脈の無い空配列リテラル」なので、
+  実害のある検出漏れかどうかは疑わしい
 - **パッケージ修飾のジェネリック呼び出し**(`lib.pick(1, 2)`)——TS版は型パラメータが
-  残ったまま`type-mismatch`を出すが、Rust版は無診断
+  残ったまま`type-mismatch`を出すが、Rust版は無診断。
+  **これはTS版が「pkg修飾のジェネリック呼び出しを丸ごと拒否する」という制限の再現**で、
+  埋めるには`try_package_member`の`is_fully_modeled`ゲート(milestone 51で誤検知を
+  潰した箇所)を緩める必要がある。妥当な呼び出しをRust版が拒否するようになる変更でもあり、
+  **TS版側を直す方が筋が良いかもしれない**。`tests/parity/generic-pkg-qualified-call/`が記録している
 
 **なお診断とは別に、`rust/`の codegen はジェネリック関数を実装していない**
 (`codegen.rs`が`generic functions are not yet supported`で明確なErrにする)。
