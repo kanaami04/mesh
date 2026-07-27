@@ -1,0 +1,6 @@
+main.mesh:2:8: error[unknown-type]: unknown type 'Bogus'
+  	print(Bogus{n: undefinedThing})
+  	      ^
+main.mesh:2:17: error[undefined-name]: undefined: 'undefinedThing'
+  	print(Bogus{n: undefinedThing})
+  	               ^

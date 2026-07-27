@@ -1,0 +1,3 @@
+main.mesh:2:8: error[unknown-type]: unknown type 'Bogus'
+  	print(Bogus{n: 1})
+  	      ^

@@ -3674,14 +3674,35 @@
               - **検証**: 上記8ケース + 全`.mesh`計171ファイルで差は7件のみ(いずれも
                 未移植診断による検出漏れ)、**偽陽性0件**。examples全23本の実行も回帰なし。
                 テスト604→606件(+2)、clippyクリーン。
-  - Rust学習を兼ねる(所有権とASTの付き合い方が最初の山)
+        - [x] **milestone 52: structリテラルの未宣言名に`unknown-type`**
+              ✅ 2026-07-27実装。**新しい診断コードは足していない**(68種のまま)——
+              型注釈側の`unknown-type`(milestone 42)を式側へ広げただけ。typoで一番
+              踏みやすい形(`Bogus{n: 1}`・`Poin{x: 1}`)で費用対効果が高い、として
+              候補リスト先頭にあったもの。
+              - **実測しないと外す点**: TS版`expressions.ts`のstructLitケースは
+                `resolveAlias(expr.name, expr.pos)`を**先頭で**呼ぶ。Rust版は値の推論を
+                先にしていたので、`Bogus{n: undefinedThing}`で`undefined-name`が
+                `unknown-type`より先に出て**発行順がずれていた**。名前の解決を値より前へ移した。
+              - 既存テスト1件の期待値を更新(milestone 47の「未宣言の名前は黙る」)。
+                TS版へ問い合わせて位置・文言まで一致を確認してから書き換えた。
+              - **新しいツールの初実戦**: `mise run parity`(誤検知0件)と`mise run drift`で
+                検証した。driftは**古いコメントを1件検出**し(「pkg修飾・判別可能union構築は
+                次段階」——どちらも対応済み)、さらに出力の指示に従って
+                `infer_struct_lit`のdocコメントを読み直したら**grepでは拾えないdriftを
+                もう1件**発見した(milestone 51が偽にした「フィールド検証はまだ」)。
+                手順どおり回して実際に両方拾えている。
+              - parityコーパスに5ケース追加(48→53)。`52-structlit-diag-order`は
+                **発行順そのもの**をスナップショットに記録している。
+              - **検証**: プローブ12本(未宣言名3種・typo・型alias名・診断順序・
+                正当な名前5種〈struct/判別可能union/error struct/json struct/generic〉・
+                循環alias・重複宣言)。テスト606件維持、clippyクリーン。
   - [ ] **TS実装(`src/`)の撤去条件**(2026-07-25にkanayamaと整理)。「TS版はいつ消せるか」を
         判断するための条件リスト。**現時点では消せない**——最大の理由は、TS版が単なる旧実装では
         なく**移植の検証装置(オラクル)**だから。milestone 31〜34はすべて「TS版と`mesh check`/
         生成JSを突き合わせてコード・メッセージ・位置まで一致」で検証しており、code reviewで
         見つかった実バグの大半もTS版との差分で確定させている。残り約66種の診断を移植する間、
         答え合わせの手段として必要。
-        現状の差(2026-07-26時点、milestone 51まで): CLIのサブコマンドは揃った
+        現状の差(2026-07-27時点、milestone 52まで): CLIのサブコマンドは揃った
         (`run`/`build`/`check`/`fmt`/`test`/`explain`/`card`)。残る差は**診断コードが
         107種 vs 68種**——ここが(2)であり、オラクルとしてのTS版が要る最大の理由。
         なお`card.rs`/`explain.rs`はTS版のソース(`src/card.ts`・`src/diagnostic-codes.ts`)を
