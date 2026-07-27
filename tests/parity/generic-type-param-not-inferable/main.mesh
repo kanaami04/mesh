@@ -1,0 +1,9 @@
+struct Box { v: int }
+
+fn f<T>(b: Box) T {
+	return b
+}
+
+fn main() {
+	print(1)
+}

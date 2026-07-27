@@ -1,0 +1,6 @@
+main.mesh:1:1: error[generic-type-param-conflict]: type parameter 'int' shadows a builtin type name
+  fn f<int>(x: int) int {
+  ^
+main.mesh:1:1: error[generic-type-param-not-inferable]: type parameter 'int' must appear in a parameter type — it can't be inferred from the call site otherwise (e.g. 'T[]', not just as the return type)
+  fn f<int>(x: int) int {
+  ^

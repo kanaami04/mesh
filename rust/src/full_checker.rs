@@ -3009,6 +3009,77 @@ fn block_always_terminates(block: &Block) -> bool {
 // ANYへ潰れる。structはmilestone 29、配列/map/channelは33/34、**pkg修飾型は51**から
 // 解決される——個数照合は常に効き、型照合は解決できた型で効く)。
 // TS版`checkPackage`もトップレベル関数を通常のdeclareBindingでFn型として登録する
+// ジェネリック関数の**宣言時**検査(milestone 61。TS版`checker/generics.ts`の
+// `validateTypeParams`)。2種類を見る:
+//
+// 1. `generic-type-param-conflict` — 型パラメータ名が組み込み型名/既存の型宣言と衝突する、
+//    または同じ名前を2回宣言している
+// 2. `generic-type-param-not-inferable` — 型パラメータが**パラメータ型のどこにも現れない**。
+//    戻り値型にしか出てこないと呼び出し側から推論しようがないので、宣言の時点で拒否する
+//    (毎回の呼び出しで謎エラーになるのを防ぐ)
+//
+// TS版と同じく**2周に分ける**(先に全部の衝突を見てから、全部の推論可能性を見る)。
+// 位置はどちらも`fn`宣言の位置。
+//
+// **呼び出し時の推論(`generic-inference-failed`)はまだ移植していない**——ジェネリック関数は
+// 引き続きANYで登録され、呼び出しは個数・型照合の対象外のまま(登録箇所のコメント参照)
+fn validate_type_params(ctx: &mut FullCheckerCtx, f: &FnDecl) {
+    let mut seen: Vec<&str> = Vec::new();
+    for name in &f.type_params {
+        if BUILTIN_TYPE_NAMES.contains(&name.as_str()) {
+            ctx.error(f.pos, DiagnosticCode::GenericTypeParamConflict, format!("type parameter '{name}' shadows a builtin type name"));
+        } else if ctx.declared_types.contains(name) {
+            ctx.error(f.pos, DiagnosticCode::GenericTypeParamConflict, format!("type parameter '{name}' conflicts with an existing type '{name}'"));
+        } else if seen.contains(&name.as_str()) {
+            ctx.error(f.pos, DiagnosticCode::GenericTypeParamConflict, format!("type parameter '{name}' is declared more than once"));
+        }
+        seen.push(name);
+    }
+    for name in &f.type_params {
+        // 組み込み型名を型パラメータにした場合(`fn f<int>(x: int) int`)、TS版は解決済みの型を
+        // 辿るので`x: int`は**組み込みのintのまま**(型パラメータで上書きされない)——結果として
+        // 「パラメータ型に現れない」と判定され、衝突と推論不可の**両方**が出る。一方
+        // ユーザー宣言の型を隠す場合(`fn f<Box>(x: Box)`)は型パラメータ側が勝ち、
+        // 衝突だけが出る。どちらも実測済み
+        let shadows_builtin = BUILTIN_TYPE_NAMES.contains(&name.as_str());
+        if shadows_builtin || !f.params.iter().any(|p| type_node_contains_param(&p.type_node, name)) {
+            ctx.error(
+                f.pos,
+                DiagnosticCode::GenericTypeParamNotInferable,
+                format!(
+                    "type parameter '{name}' must appear in a parameter type — it can't be inferred from \
+the call site otherwise (e.g. 'T[]', not just as the return type)"
+                ),
+            );
+        }
+    }
+}
+
+// 型パラメータ`name`がこの型注釈の中に(推論可能な位置で)現れるか。TS版
+// `generics.ts`の`typeContainsParam`に対応する。
+//
+// **TS版は解決済みの`Type`を辿るが、こちらは`TypeNode`(構文木)を辿る**——full_checkerの
+// `resolve_type_ann`は`Type::TypeParam`を作らないため(型パラメータは`ctx.type_params`という
+// 名前の集合でだけ扱っている)。**辿る形はTS版と完全に揃える**: 配列・chan・map・fn
+// (パラメータと戻り値の両方)・unionだけで、structのフィールドの中までは辿らない。
+// 実測でも`map<string, T>` / `chan<T>` / `fn(T) int` / `fn() T`(パラメータ位置)/ `T | error`
+// はすべて「推論可能」、`fn() T`(戻り値位置)は「推論不可」でTS版と一致している
+fn type_node_contains_param(node: &TypeNode, name: &str) -> bool {
+    match node {
+        TypeNode::Name { name: n, pkg: None, .. } => n == name,
+        TypeNode::Name { .. } => false,
+        TypeNode::Array { elem, .. } => type_node_contains_param(elem, name),
+        TypeNode::Chan { elem, .. } => type_node_contains_param(elem, name),
+        TypeNode::MapType { key, value, .. } => type_node_contains_param(key, name) || type_node_contains_param(value, name),
+        TypeNode::FnType { params, ret, .. } => {
+            params.iter().any(|p| type_node_contains_param(p, name))
+                || ret.as_ref().is_some_and(|r| type_node_contains_param(r, name))
+        }
+        TypeNode::Union { members, .. } => members.iter().any(|m| type_node_contains_param(m, name)),
+        _ => false,
+    }
+}
+
 fn fn_signature(tc: &crate::checker::CheckerCtx, f: &FnDecl) -> Type {
     let params = f.params.iter().map(|p| resolve_type_ann(tc, &p.type_node)).collect();
     let ret = f.ret.as_ref().map(|r| resolve_type_ann(tc, r)).unwrap_or(VOID);
@@ -3378,14 +3449,18 @@ pub fn check_package_shared(
     // 扱い、引数不足なら`generic-inference-failed`を出す。full_checkerはこの推論を
     // 未実装なので、`Type::Fn`で登録するとTS版と違って`argument-count`を出してしまう
     // (診断コードのTS非互換)。ANY登録で呼び出しを丸ごと対象外にしておく。
+    // **milestone 61で宣言時の検査だけは入った**(`validate_type_params`)——型パラメータ名の
+    // 衝突と推論可能性はシグネチャを見るだけで判定できるので、呼び出し時の推論とは独立に移植できる。
+    // 未移植なのは呼び出し側の`generic-inference-failed`のみ。
     // `program.fns`にはstructのメソッド(`f.receiver.is_some()`)も自由関数と同じ配列で
     // 混在している——TS版`checkPackage`はレシーバ付きなら`declareMethod`で別の
     // `methodTable`へ登録し、`scopes[0]`(自由関数と同じ名前空間)には絶対に入れない
     // (`src/checker/functions.ts`のコメント「グローバルscopeには置かない」参照。
     // メソッドの名前空間は自由関数と完全分離——異なるstructが同名メソッドを持てる)。
-    // structはmilestone 22/23とも対象外なので、メソッドは名前登録・本体検査どちらも
-    // 単純にスキップする(誤って自由関数と同じ扱いにすると、別々のstructの同名メソッドが
-    // already-declaredの誤検知になる)
+    // メソッドを自由関数と同じ`scopes[0]`へ入れてはいけない理由は上記のとおりで、
+    // 誤って同じ扱いにすると別々のstructの同名メソッドが`already-declared`の誤検知になる
+    // (`declare_method`自体は名前登録に加えてmilestone 31の宣言時4検査も行う——
+    // 「メソッドは丸ごと対象外」だったのはmilestone 22/23時点の話)
     // **1ファイルにつき1回のループ**でメソッド表と自由関数シグネチャの両方を登録する
     // (TS版`checkPackage`も`for (const fn of program.fns)`の中で`declareMethod`と
     // `declareBinding`へ振り分ける)。メソッドと自由関数で2周に分けると、同じファイルに
@@ -3407,6 +3482,11 @@ pub fn check_package_shared(
                     check_type_ann(&mut ctx, r);
                 }
                 ctx.type_params.clear();
+                // milestone 61: 型パラメータの宣言時検査(TS版`generics.ts`の`validateTypeParams`)。
+                // TS版も型注釈の解決(`fnType`)の直後・`declareBinding`の前に呼ぶ
+                if !f.type_params.is_empty() {
+                    validate_type_params(&mut ctx, f);
+                }
                 let ty = if f.type_params.is_empty() { fn_signature(&ctx.type_ctx, f) } else { ANY };
                 ctx.declare(&f.name, ty, f.pos, false);
             }
@@ -4666,6 +4746,45 @@ mod tests {
         // が理由だったが、milestone 27でinfer_builtin_callがprintをVOIDとして素通しする形に変わった)
         let diags = check("fn main() {\n    print(1, 2, 3)\n}\n");
         assert_eq!(diags, vec![]);
+    }
+
+    #[test]
+    fn 型パラメータ名の衝突は3種類とも宣言位置で報告される() {
+        // milestone 61。TS版`validateTypeParams`の3分岐(組み込み型名/既存の型/重複宣言)。
+        // 位置はどれも`fn`宣言の位置で、TS版と一致することを実測済み
+        let d = check("fn f<int>(x: int) int {\n    return x\n}\nfn main() {\n    print(1)\n}\n");
+        // 組み込み型名は型パラメータで上書きされないので**推論不可も同時に出る**(TS版と同じ)
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert_eq!(d[0].code, DiagnosticCode::GenericTypeParamConflict);
+        assert!(d[0].message.contains("shadows a builtin type name"), "{d:?}");
+        assert_eq!(d[1].code, DiagnosticCode::GenericTypeParamNotInferable);
+
+        let d = check("struct Box {\n    v: int\n}\nfn f<Box>(x: Box) Box {\n    return x\n}\nfn main() {\n    print(1)\n}\n");
+        // ユーザー宣言の型は型パラメータ側が勝つので、衝突だけ(推論不可は出ない)
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].message.contains("conflicts with an existing type 'Box'"), "{d:?}");
+
+        let d = check("fn f<T, T>(x: T) T {\n    return x\n}\nfn main() {\n    print(1)\n}\n");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].message.contains("is declared more than once"), "{d:?}");
+    }
+
+    #[test]
+    fn 型パラメータが推論可能な位置に現れるかを型注釈の形で判定する() {
+        // milestone 61。TS版`typeContainsParam`と**同じ形だけ**辿る:
+        // 配列・chan・map・fn(パラメータと戻り値の両方)・union
+        for ann in ["x: T", "x: T[]", "x: chan<T>", "x: map<string, T>", "x: fn(T) int", "x: fn() T", "x: T | error"] {
+            let d = check(&format!("fn f<T>({ann}) int {{\n    return 1\n}}\nfn main() {{\n    print(1)\n}}\n"));
+            assert!(d.is_empty(), "{ann} は推論可能なはず: {d:?}");
+        }
+        // 戻り値型にしか現れない場合だけ拒否する(呼び出し側から推論しようがないため)
+        for ret in ["T", "fn() T", "T[]"] {
+            let d = check(&format!("fn f<T>(x: int) {ret} {{\n    return x\n}}\nfn main() {{\n    print(1)\n}}\n"));
+            assert!(
+                d.iter().any(|e| e.code == DiagnosticCode::GenericTypeParamNotInferable),
+                "戻り値 {ret} だけでは推論できないはず: {d:?}"
+            );
+        }
     }
 
     #[test]

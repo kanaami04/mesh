@@ -1,0 +1,9 @@
+struct Box { n: int }
+
+fn f<Box>(x: Box) Box {
+	return x
+}
+
+fn main() {
+	print(1)
+}

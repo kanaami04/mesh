@@ -10,7 +10,7 @@
 // ことにしておいた方が正確)ため、という設計判断として選んでいる。
 //
 // **milestone 58で、parser.rs/lexer.rsが`CompileError.code: &'static str`として直接持って
-// いた構文・字句カテゴリのコードもこの列挙型へ載せた**(21種)。それらは以前からRust版が
+// いた構文・字句カテゴリのコードもこの列挙型へ載せた**(milestone 61で2種足して23種)。それらは以前からRust版が
 // 出していたのに、enumに載っていないせいで`mesh explain`から静かに欠け、「未移植の診断」と
 // 誤って数えられていた——`CompileError.code`自体は`&'static str`のままで、こちらは
 // 「Rust版が出せるコードの一覧」を正しく表すことだけを担う。
@@ -105,6 +105,8 @@ diagnostic_codes! {
     RangeArity => "range-arity",
     CallbackSignatureMismatch => "callback-signature-mismatch",
     CannotInferType => "cannot-infer-type",
+    GenericTypeParamConflict => "generic-type-param-conflict",
+    GenericTypeParamNotInferable => "generic-type-param-not-inferable",
     NotAChannel => "not-a-channel",
     CompoundAssignOnMap => "compound-assign-on-map",
     InvalidTestSignature => "invalid-test-signature",
@@ -160,9 +162,11 @@ diagnostic_codes! {
     JsonTypeNotSupported => "json-type-not-supported",
     MethodExportRedundant => "method-export-redundant",
     MisplacedMut => "misplaced-mut",
+    MultipleReturnValuesRemoved => "multiple-return-values-removed",
     MultipleSelectDefaults => "multiple-select-defaults",
     PostfixBangRenamed => "postfix-bang-renamed",
     SyntaxError => "syntax-error",
+    TopLevelMutNotAllowed => "top-level-mut-not-allowed",
     UnexpectedCharacter => "unexpected-character",
     UnknownEscape => "unknown-escape",
     UnterminatedInterpolation => "unterminated-interpolation",
