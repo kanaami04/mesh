@@ -1,0 +1,9 @@
+import "lib"
+
+struct Box {
+	item: lib.Item
+}
+
+fn main() {
+	print(Box{item: 5})
+}

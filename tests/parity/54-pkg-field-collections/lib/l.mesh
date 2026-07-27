@@ -1,0 +1,9 @@
+export struct Item {
+	n: int
+}
+
+export type Status = "on" | "off"
+
+struct Hidden {
+	y: int
+}

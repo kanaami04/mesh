@@ -1,0 +1,12 @@
+import "lib"
+
+struct Box {
+	item: lib.Item
+	items: lib.Item[]
+	m: map<string, lib.Item>
+}
+
+fn main() {
+	b := Box{item: lib.Item{n: 1}, items: [], m: map<string, lib.Item>{}}
+	print(b.item.n)
+}

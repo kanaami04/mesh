@@ -1,0 +1,6 @@
+import "lib"
+import "lib2"
+
+fn main() {
+	print(lib2.Container{item: lib.Item{n: 1}})
+}
