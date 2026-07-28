@@ -1,0 +1,29 @@
+// 絞り込んだフィールドパスへ**代入したあと**も、古い絞り込みが残っている。
+//
+// TS版は `invalidatePath`(narrowing.ts / statements.ts の assign ケース)で
+// 絞り込み事実を捨てていたが、**Rust版の full_checker.rs はこれを移植していない**。
+// docs/features.md の「フィールドへの代入は古い絞り込みを無効化してから型検査するので
+// 健全性は保つ」は、いまのところ実装されていない安全性を主張している。
+//
+// 現状は診断ゼロ(=検出漏れ)。codegen 側が `checker.rs` でフィールドパスを絞り込まない
+// おかげで `mesh build` は安全に失敗するので、実害は「検出漏れ」に留まっている。
+// **codegen 側だけ先に一般化すると、check も build も通って実行時に静かに誤った値を出す**
+// (`null + 1 === 1` が __iarith の safe-integer ガードをすり抜ける)。順番が逆になる。
+//
+// invalidatePath を移植すれば、ここに invalid-operation が出るようになる。
+// そのとき parity の差分に現れるのが、修正できた証拠になる。
+struct Inner {
+	v: int | none
+}
+
+struct Outer {
+	inner: Inner
+}
+
+fn main() {
+	o := Outer{inner: Inner{v: 1}}
+	if o.inner.v is int {
+		o.inner.v = none
+		print(o.inner.v + 1)
+	}
+}

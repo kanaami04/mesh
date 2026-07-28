@@ -56,14 +56,34 @@ fn builds(path: &Path) -> bool {
 // 増やすときは理由を必ず書くこと。**このリストは両方向に効く**——載せたケースが
 // 通るようになったらテストが落ちるので、直したのに消し忘れることはできない。
 //
-// 残っているのはcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)だけ。
+// 2件はcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)。
 //
-// **導入時は4件だった**。うち2件(`56-path-narrow-ok` / `56-path-narrow-nested`)は
-// この性質検査が見つけた`checker.rs`のフィールドパス絞り込みの移植漏れで、同じ回で修正した
-// ——検査を入れて即座に1件返した形。詳細は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
+// **残り2件(`56-path-narrow-*`)は「直そうとしたら直せなかった」もので、経緯に価値がある。**
+// codegen側の`checker.rs`が裸の識別子しか絞り込まないのが原因なので、キーを
+// `stable_path`(`a` / `a.b` / `a.b.c`)へ一般化すれば埋まる——**実際に埋まったが、
+// 同時にもっと悪いものを作った**。`full_checker.rs`はTS版の`invalidatePath`
+// (絞り込んだパスへ代入したら事実を捨てる)を移植し忘れており、codegenがその判定を
+// そのまま真似た結果、`if o.inner.v is int { o.inner.v = none; print(o.inner.v + 1) }`が
+// **checkもbuildも通って実行時に静かに`1`を出す**ようになった(`null + 1 === 1`が
+// `__iarith`のsafe-integerガードをすり抜ける)。一般化前はcodegenが
+// `invalid operation: int | none + int`で**安全に失敗**していた形。
+//
+// **「うるさい失敗」を「静かに誤った出力」に変えるのは退行**なので一般化は取り下げた。
+// 順番が逆で、先に`full_checker`へ`invalidatePath`を移植する必要がある。
+// 詳細は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     ("tests/parity/49-pkg-receiver-exported-ok/main.mesh", "codegen: パッケージ修飾レシーバが未対応"),
     ("tests/parity/50-pkg-usage-ok/main.mesh", "codegen: パッケージ修飾の値参照(呼び出しを伴わない)が未対応"),
+    // ↓ 2件とも「codegen側の`checker.rs`がフィールドパスを絞り込まない」ことによる。
+    // 直し方は分かっているが、`full_checker`の`invalidatePath`移植漏れが先(上記参照)
+    ("tests/parity/56-path-narrow-ok/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
+    ("tests/parity/56-path-narrow-nested/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
+    // ↓ **これは直してはいけない側の破れ**。`full_checker`が`invalidatePath`を持たないため
+    // checkが黙るが、codegenが絞り込まないおかげでbuildが**安全に失敗**している。
+    // ここを「buildも通る」側へ揃えると、実行時に静かに誤った値を出すようになる(上記参照)。
+    // 正しい直し方は`full_checker`側に診断を出させること——そうなればcheckが黙らなくなり、
+    // このケースは性質の前提(診断ゼロ)から外れて自然にリストから消える
+    ("tests/parity/narrow-then-assign-field/main.mesh", "full_checkerのinvalidatePath移植漏れ(checkが黙る)。buildが落ちるのは安全側"),
 ];
 
 fn corpus() -> Vec<PathBuf> {

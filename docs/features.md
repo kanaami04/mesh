@@ -59,14 +59,19 @@
       `if n.next is none { ... }` はローカル変数へコピーせず直接絞り込める(rootが不変変数な
       ら任意の深さ)。`a is Foo && a.value > 0` は左の`is`が右辺の式とthen節の両方に効く。
       `!(a is none)` / `a is none \|\| b is none { return }` はド・モルガンで絞り込まれる
-      (else側=両方不成立の積)。フィールドへの代入は古い絞り込みを無効化してから型検査する
-      ので健全性は保つ。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した。
-      **2026-07-28**: コード生成が使う`rust/src/checker.rs`(最小リゾルバ)にフィールドパスの
-      絞り込みが無く、`mesh check`は通るのに`mesh run`/`build`が失敗する穴があった
-      ——性質検査(`rust/tests/check_implies_build.rs`)で発見し同日修正。絞り込みのキーを
-      識別子名から`stable_path`(`a` / `a.b` / `a.b.c`)へ一般化して`full_checker`と揃えた。
-      **既知の誤検知(2026-07-28に実測で発覚、未修正)**: 上の行が書いている
-      「`a is Foo && a.value > 0` は左の`is`が**右辺の式**に効く」は、**Rust版では効かない**。
+      (else側=両方不成立の積)。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した。
+      **既知の移植漏れ①(2026-07-28に実測で発覚、未修正)**: 「フィールドへの代入は古い絞り込みを
+      無効化してから型検査するので健全性は保つ」は**Rust版では実装されていない**。TS版は
+      `invalidatePath`(`narrowing.ts`/`statements.ts`のassignケース)で事実を捨てていたが、
+      `full_checker.rs`に相当する処理が無い。現状は**検出漏れ**に留まっている
+      ——`if o.inner.v is int { o.inner.v = none; print(o.inner.v + 1) }` は診断ゼロだが、
+      codegen側の`checker.rs`がフィールドパスを絞り込まないおかげで`mesh build`が安全に失敗する。
+      **codegen側だけ先に一般化すると、checkもbuildも通って実行時に静かに誤った値を出す**
+      (`null + 1 === 1`が`__iarith`のsafe-integerガードをすり抜ける)——実際に試して確認し、
+      取り下げた。**順番はinvalidatePathの移植が先**。
+      プローブは`tests/parity/narrow-then-assign-field/`。
+      **既知の移植漏れ②(同日発覚、未修正)**: 上の行が書いている
+      「`a is Foo && a.value > 0` は左の`is`が**右辺の式**に効く」も、**Rust版では効かない**。
       `full_checker::infer_binary`が`&&`/`||`の右辺を絞り込み前のスコープで検査するため、
       `narrow-required`という**誤検知**になる(then節側の絞り込みは正しく効く)。
       直前のコメントが「unionはANYに潰れるので絞り込みの有無で結果が変わらない」と

@@ -953,25 +953,10 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // フィールドアクセス。targetがstruct型でnameが宣言済みフィールドならその型を返す。
         // メソッド名(フィールドではない名前)はここでは解決しない——裸のメンバー値として
         // メソッドを参照する式はcodegen側でも対象外(TS版と同じくcall式側だけで判別する)
-        Expr::Member { target, name, .. } => {
-            // **フィールドパスの絞り込みを先に見る**(`if o.inner.v is int { o.inner.v + 1 }`)。
-            // `full_checker.rs`の`infer_member`と同じで、`a.b.c`という安定した綴りを
-            // スコープのキーにしてある。**これが無いと、full_checkerが通したプログラムを
-            // codegenだけが `invalid operation: int | none + int` で弾く**——
-            // 「checkが黙ったのにビルドできない」という食い違いになる
-            // (`rust/tests/check_implies_build.rs`の性質検査で発見)
-            if let Some(path) = stable_path(expr)
-                && let Some(t) = ctx.lookup(&path)
-            {
-                return t.clone();
-            }
-            match infer_expr(ctx, target) {
-                Type::Struct { fields, .. } => {
-                    fields.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| f.type_.clone()).unwrap_or(ANY)
-                }
-                _ => ANY,
-            }
-        }
+        Expr::Member { target, name, .. } => match infer_expr(ctx, target) {
+            Type::Struct { fields, .. } => fields.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| f.type_.clone()).unwrap_or(ANY),
+            _ => ANY,
+        },
         // `?`/`or`はどちらも「失敗メンバーを取り除いた残り」が結果の型になる(TS版と同じ式。
         // contextやright/bindingの中身は結果型に影響しない)
         Expr::Prop { operand, .. } => types::union_without(infer_expr(ctx, operand), is_failure_type),
@@ -1203,23 +1188,6 @@ pub fn narrow_for_match_patterns(ctx: &CheckerCtx, subject_ty: &Type, patterns: 
 
 // `is`式・`if x is T`文用: 単一パターンでの絞り込み。戻り値は(then節での絞り込み型,
 // else節での絞り込み型)。subject_tyがUnionでなければ絞り込めないのでどちらもそのまま
-// 式の「安定した綴り」(`a` / `a.b` / `a.b.c`)。**絞り込みのスコープキー**に使う。
-// `full_checker.rs`の同名関数と同じ規則(TS版`narrowing.ts`の`stablePath`)——識別子と
-// フィールドアクセスの連なりだけが対象で、呼び出しや添字が挟まると同じ綴りでも
-// 別の値になりうるのでNone。
-//
-// **根の可変性は見ない**——`full_checker`は`mut`な束縛を根とするパスを絞り込まないが、
-// こちらの最小リゾルバはスコープに可変性を持っていない。`gen_if`の識別子narrowingが
-// milestone 7以来同じ扱い(可変性を見ない)で、`run`/`build`は必ず`full_checker`の
-// ゲートを通ってから来る——絞り込みが不健全になる形は手前で診断として弾かれている
-pub fn stable_path(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Ident { name, .. } => Some(name.clone()),
-        Expr::Member { target, name, .. } => stable_path(target).map(|p| format!("{p}.{name}")),
-        _ => None,
-    }
-}
-
 pub fn narrow_for_is(ctx: &CheckerCtx, subject_ty: &Type, target: &TypeNode) -> (Type, Type) {
     let Type::Union { body } = subject_ty else { return (subject_ty.clone(), subject_ty.clone()) };
     let members = &body.get().expect("union body resolved before is-narrowing").members;
@@ -1343,9 +1311,8 @@ pub fn infer_binary(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr, 
 // このmilestoneで右辺を実際に検査するようになった結果、この種の正当なコードが
 // 誤って`incomparable-types`等でErrになる新しい回帰を生んでいた。Expr::Select/
 // Expr::Matchのアーム推論と同じ「使い捨てのスクラッチctx」技法で、右辺の検査だけ
-// narrowing後の事実を使う(**単純なidentオペランドのみ対応**——多段フィールドパスは
-// 対象外のまま。2026-07-28に`gen_if`側だけ`stable_path`へ一般化したので、
-// **もう「gen_ifと同じ範囲」ではない**)
+// narrowing後の事実を使う(単純なidentオペランドのみ対応——gen_ifのnarrowingと
+// 同じ範囲、多段フィールドパス等は対象外のまま)
 fn check_logical_op(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr) -> Result<BinaryInfo, String> {
     let lt = infer_expr(ctx, left);
     if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {

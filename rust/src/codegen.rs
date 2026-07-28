@@ -644,25 +644,19 @@ impl Codegen {
         Ok(())
     }
 
-    // `if x is T { ... }`という単純形(condが**安定した綴り**に対する`is`)ならnarrowing
-    // (milestone 7)を適用する——TS版のnarrowing.ts/statements.tsと同じ目的で、codegen側の型依存判断
+    // `if x is T { ... }`という単純形(condが裸Identに対する`is`)ならnarrowing(milestone 7)
+    // を適用する——TS版のnarrowing.ts/statements.tsと同じ目的で、codegen側の型依存判断
     // (`__iarith`等)を正しくするためだけに必要(生成JSの「形」自体は変えない、
     // milestone 5のselect/orElseの束縛パターンと同じ設計)。
     // **`!`(否定)も見る**(milestone 66)——json structのエンコーダ合成が
     // `if !(__efv_x is none) { ... }`という形を生成するので、ここを見ないと合成コードの
     // 型検査が`cannot use string | none as string`で落ちる。`&&`/`||`との複合条件は
     // 対象外のまま(full_checker側はmilestone 65で対応済み。codegenは型依存判断のためだけに
-    // narrowingを使うので、落ちる形が出てから広げる)。
-    // **2026-07-28: フィールドパス(`o.inner.v is int`)にも効くようにした**——絞り込みのキーを
-    // 識別子名から`checker::stable_path`(`a` / `a.b` / `a.b.c`)へ一般化しただけで、識別子の
-    // ときの挙動は変わらない(`stable_path`は識別子に対して名前そのものを返す)。
-    // full_checkerは対応済み(F-6)なのにこちらだけ未対応で、**checkは通るのにビルドが失敗する**
-    // プログラムがあった(`rust/tests/check_implies_build.rs`の性質検査で発見)
+    // narrowingを使うので、落ちる形が出てから広げる)
     fn gen_if(&mut self, if_stmt: &IfStmt) -> CodegenResult<()> {
         if let Some((operand, target, negated)) = unwrap_is_cond(&if_stmt.cond)
-            && let Some(name) = checker::stable_path(operand)
+            && let Expr::Ident { name, .. } = operand
         {
-            let name = &name;
             let subject_ty = checker::infer_expr(&self.ctx, operand);
             let (t, e) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
             // `!`はド・モルガンでthen/elseを入れ替えるだけ(TS版`narrowing.ts`と同じ)
@@ -981,10 +975,7 @@ impl Codegen {
             // (Errを飲み込むため無害)、ここではcodegenが右辺を実際に生成する際に
             // self.ctxそのものを一時的に絞り込む——gen_ifの単純な`if x is T {...}`と
             // 同じnarrowing技法(push_scope/declare/pop_scope)をここでも使う。
-            // **こちらは単純なidentオペランドのみ対応**——多段フィールドパスは対象外のまま。
-            // 2026-07-28に`gen_if`だけ`stable_path`へ一般化した(checkは通るのにビルドが
-            // 失敗するプログラムがあったため)ので、**もう「gen_ifと同じ範囲」ではない**。
-            // ここも広げる価値はあるが、`&&`/`||`+フィールドパスで落ちる形はまだ出ていない
+            // 単純なidentオペランドのみ対応(gen_ifと同じ範囲、多段フィールドパス等は対象外)
             Expr::Binary { op, left, right, pos } if matches!(op, TokenType::AndAnd | TokenType::OrOr) => {
                 let l = self.gen_expr(left)?;
                 let popped = if let Expr::Is { operand, target, .. } = left.as_ref()
@@ -3033,30 +3024,6 @@ mod tests {
             "fn g(x: int | error) int {\n  if x is error {\n    return 0\n  } else {\n    return x + 1\n  }\n}\nfn main() {\n  print(1)\n}",
         );
         assert!(js_else.contains("__iarith(x, \"+\", 1,"), "got: {js_else}");
-    }
-
-    #[test]
-    fn フィールドパスのnarrowingがiarithを選ぶ() {
-        // **`rust/tests/check_implies_build.rs`の性質検査で見つかった移植漏れの回帰テスト。**
-        // `full_checker`はF-6でフィールドパスの絞り込みに対応済みだったのに、codegen側の
-        // 最小リゾルバは裸の識別子しか絞り込まず、**`mesh check`は通るのにビルドが失敗する**
-        // プログラムがあった(`invalid operation: int | none + int`)
-        let js = gen_body(
-            "struct Inner {\n  v: int | none\n}\nstruct Outer {\n  inner: Inner\n}\nfn main() {\n  o := Outer{inner: Inner{v: 1}}\n  if o.inner.v is int {\n    print(o.inner.v + 1)\n  }\n}",
-        );
-        assert!(js.contains("__iarith(o.inner.v, \"+\", 1,"), "got: {js}");
-    }
-
-    #[test]
-    fn フィールドパスのnarrowingでstructフィールドへ辿れる() {
-        // 同じ移植漏れの別の現れ方。`b.next`が絞り込まれないと`Node | none`のままなので、
-        // フィールド読みのガード(structだと分からない=パッケージ参照だろう)に引っかかり
-        // 「package/member access is not yet supported」という**根本原因と無関係な**
-        // エラーになっていた
-        let js = gen_body(
-            "struct Node {\n  next: Node | none\n  n: int\n}\nfn main() {\n  a := Node{next: none, n: 1}\n  b := Node{next: a, n: 2}\n  if b.next is Node {\n    print(b.next.n)\n  }\n}",
-        );
-        assert!(js.contains("b.next.n"), "got: {js}");
     }
 
     #[test]
