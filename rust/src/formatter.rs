@@ -20,10 +20,57 @@
 use crate::ast::{
     Block, ElseClause, Expr, FnDecl, IfStmt, InterpSegment, MatchPattern, Program, Stmt, StructFieldNode, TypeDecl, TypeNode,
 };
-use crate::parser::parse;
-use crate::token::{CommentInfo, CompileError};
+use crate::parser::{PREC_ATOM, PREC_UNARY, parse, precedence};
+use crate::token::{CommentInfo, CompileError, TokenType};
 
 const INDENT: &str = "\t";
+
+// 式の結合の強さ。`parser::precedence` と対になっている。
+//
+// **なぜ必要か**: ASTには`Expr::Paren`が無く、パーサは括弧を捨てる。だから印字側は
+// 「この子は親より弱く結合するか」を見て括弧を**再導出**しなければならない。これを
+// しないと `!(x is none)` が `!x is none`、`(a + b) * c` が `a + b * c` になり、
+// **整形がプログラムの意味を変える**(`mesh fmt -w`はソースを書き戻すので実害が残る)。
+//
+// 網羅的にmatchしているのは意図的。新しいExpr変種を足したときに「括弧が要る側か」を
+// 必ず判断させるため(`_ => PREC_ATOM`にすると、弱く結合する変種を足した瞬間に
+// 同じ種類のバグが静かに戻る)。
+fn prec_of(expr: &Expr) -> u8 {
+    match expr {
+        Expr::OrElse { .. } => precedence(TokenType::Or).expect("orは優先順位表にある"),
+        Expr::Binary { op, .. } => precedence(*op).unwrap_or(PREC_ATOM),
+        Expr::Is { .. } => precedence(TokenType::Is).expect("isは優先順位表にある"),
+        Expr::Unary { .. } | Expr::Recv { .. } => PREC_UNARY,
+        // 後置・一次式。区切り文字で閉じているか、それ自体が最も強く結合する
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::String { .. }
+        | Expr::Interp { .. }
+        | Expr::Bool { .. }
+        | Expr::None { .. }
+        | Expr::Ident { .. }
+        | Expr::Call { .. }
+        | Expr::Member { .. }
+        | Expr::Index { .. }
+        | Expr::Prop { .. }
+        | Expr::StructLit { .. }
+        | Expr::ArrayLit { .. }
+        | Expr::MapLit { .. }
+        | Expr::Chan { .. }
+        | Expr::Spawn { .. }
+        | Expr::Match { .. }
+        | Expr::Select { .. }
+        | Expr::FnExpr { .. } => PREC_ATOM,
+    }
+}
+
+// 子の式を印字する。`min`(その位置で最低限必要な結合の強さ)に届かなければ括弧で包む。
+// 左結合の二項演算子なら、左は`min = 演算子の優先順位`、右は`+ 1`で呼ぶ
+// (`parse_binary`が右辺を`parse_binary(prec + 1)`で読むのと対になっている)。
+fn print_operand(expr: &Expr, indent: usize, min: u8) -> String {
+    let s = print_expr(expr, indent);
+    if prec_of(expr) < min { format!("({s})") } else { s }
+}
 
 fn indent_of(level: usize) -> String {
     INDENT.repeat(level)
@@ -380,15 +427,27 @@ fn print_expr(expr: &Expr, indent: usize) -> String {
             let items: Vec<String> = elems.iter().map(|e| print_expr(e, indent + 1)).collect();
             format!("{prefix}{}", print_braced_list(&items, "[", "]", *multiline, indent, false))
         }
-        Expr::Binary { op, left, right, .. } => format!("{} {op} {}", print_expr(left, indent), print_expr(right, indent)),
-        Expr::Unary { op, operand, .. } => format!("{op}{}", print_expr(operand, indent)),
-        Expr::Recv { channel, .. } => format!("<-{}", print_expr(channel, indent)),
+        Expr::Binary { op, left, right, .. } => {
+            let p = precedence(*op).unwrap_or(PREC_ATOM);
+            format!("{} {op} {}", print_operand(left, indent, p), print_operand(right, indent, p + 1))
+        }
+        Expr::Unary { op, operand, .. } => {
+            let inner = print_operand(operand, indent, PREC_UNARY);
+            // `- -x` を `--x` と印字すると `--`(デクリメント)として字句解析され、
+            // 再パースで別のプログラムになる。この一点だけは優先順位では防げないので括弧で切る
+            if *op == TokenType::Minus && inner.starts_with('-') {
+                format!("{op}({inner})")
+            } else {
+                format!("{op}{inner}")
+            }
+        }
+        Expr::Recv { channel, .. } => format!("<-{}", print_operand(channel, indent, PREC_UNARY)),
         Expr::Call { callee, args, multiline, .. } => {
             let items: Vec<String> = args.iter().map(|a| print_expr(a, indent + 1)).collect();
-            format!("{}{}", print_expr(callee, indent), print_braced_list(&items, "(", ")", *multiline, indent, true))
+            format!("{}{}", print_operand(callee, indent, PREC_ATOM), print_braced_list(&items, "(", ")", *multiline, indent, true))
         }
-        Expr::Index { target, index, .. } => format!("{}[{}]", print_expr(target, indent), print_expr(index, indent)),
-        Expr::Member { target, name, .. } => format!("{}.{name}", print_expr(target, indent)),
+        Expr::Index { target, index, .. } => format!("{}[{}]", print_operand(target, indent, PREC_ATOM), print_expr(index, indent)),
+        Expr::Member { target, name, .. } => format!("{}.{name}", print_operand(target, indent, PREC_ATOM)),
         Expr::FnExpr { params, ret, body, .. } => {
             let ps: Vec<String> = params.iter().map(|param| format!("{}: {}", param.name, print_type_node(&param.type_node, indent))).collect();
             let r = ret.as_ref().map(|r| format!(" {}", print_type_node(r, indent))).unwrap_or_default();
@@ -408,17 +467,21 @@ fn print_expr(expr: &Expr, indent: usize) -> String {
             format!("fn({}){r} {{\n{inner}\n{}}}", ps.join(", "), indent_of(indent))
         }
         Expr::Chan { elem, capacity, .. } => format!("chan<{}>({})", print_type_node(elem, indent), print_expr(capacity, indent)),
-        Expr::Is { operand, target, .. } => format!("{} is {}", print_expr(operand, indent), print_type_node(target, indent)),
+        Expr::Is { operand, target, .. } => {
+            let p = precedence(TokenType::Is).expect("isは優先順位表にある");
+            format!("{} is {}", print_operand(operand, indent, p), print_type_node(target, indent))
+        }
         Expr::Prop { operand, context, .. } => {
             let ctx = context.as_ref().map(|c| format!(" {}", print_expr(c, indent))).unwrap_or_default();
-            format!("{}?{ctx}", print_expr(operand, indent))
+            format!("{}?{ctx}", print_operand(operand, indent, PREC_ATOM))
         }
         Expr::OrElse { left, right, binding, .. } => {
+            let p = precedence(TokenType::Or).expect("orは優先順位表にある");
             let rhs = match binding {
-                Some(name) => format!("{name} => {}", print_expr(right, indent)),
-                None => print_expr(right, indent),
+                Some(name) => format!("{name} => {}", print_operand(right, indent, p + 1)),
+                None => print_operand(right, indent, p + 1),
             };
-            format!("{} or {rhs}", print_expr(left, indent))
+            format!("{} or {rhs}", print_operand(left, indent, p))
         }
         Expr::Match { subject, arms, .. } => {
             let mut printer = Printer::new(&[]);
@@ -625,6 +688,46 @@ mod tests {
         let src = "fn cleanup() {\n}\n\nfn main() {\n\tf := fn() { defer cleanup() }\n\tf()\n}\n";
         let expected = "fn cleanup() {\n}\n\nfn main() {\n\tf := fn() {\n\t\tdefer cleanup()\n\t}\n\tf()\n}\n";
         assert_eq!(fmt(src), expected);
+    }
+
+    #[test]
+    fn 意味に効く括弧は優先順位から復元する() {
+        // ASTは`Expr::Paren`を持たない(パーサが括弧を捨てる)ので、印字側が優先順位から
+        // 括弧を再導出しないと**整形がプログラムの意味を変える**。実際に出荷されていた不具合で、
+        // `mesh fmt -w`はソースを書き戻すため実害が残る形だった
+        for src in [
+            "fn main() {\n\ta := 2\n\tprint((a + 1) * 3)\n}\n",
+            "fn main() {\n\ta := 2\n\tprint(3 * (a + 1))\n}\n",
+            "fn main() {\n\ta := 2\n\tprint(-(a + 1))\n}\n",
+            "fn main() {\n\tt := true\n\tu := false\n\tprint(!(t && u))\n}\n",
+            "fn main() {\n\tt := true\n\tu := false\n\tprint((t || u) && t)\n}\n",
+            // 元の誤り: `!(x is none)` が `!x is none` になり、`!`がintに掛かって別の意味になっていた
+            "fn main() {\n\tx: int | none = 1\n\tif !(x is none) {\n\t\tprint(x + 1)\n\t}\n}\n",
+        ] {
+            assert_eq!(fmt(src), src, "括弧が落ちた");
+        }
+    }
+
+    #[test]
+    fn 不要な括弧は足さない() {
+        // 逆方向の歯止め。優先順位どおりに読める形へ括弧を撒くと、gofmt方式の正規形でなくなる
+        for src in [
+            "fn main() {\n\ta := 2\n\tprint(a + 1 * 3)\n}\n",
+            "fn main() {\n\ta := 2\n\tprint(a + 1 + 3)\n}\n",
+            "fn main() {\n\tt := true\n\tu := false\n\tprint(!t && u)\n}\n",
+            "fn main() {\n\tx: int | none = 1\n\tif x is none {\n\t\tprint(0)\n\t}\n}\n",
+        ] {
+            assert_eq!(fmt(src), src, "余計な括弧が付いた");
+        }
+    }
+
+    #[test]
+    fn 二重の負号は括弧で切る() {
+        // `- -x` を `--x` と印字すると `--`(デクリメント)として字句解析され、
+        // 再パースで別のプログラムになる。優先順位だけでは防げない唯一の形
+        let out = fmt("fn main() {\n\ta := 2\n\tprint(- -a)\n}\n");
+        assert!(out.contains("-(-a)"), "out: {out}");
+        assert_eq!(fmt(&out), out, "再整形でべき等でない");
     }
 
     #[test]

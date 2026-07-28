@@ -83,6 +83,30 @@ struct Parser {
     interp_depth: usize,
 }
 
+// 二項演算子の優先順位(大きいほど強く結合する)。
+//
+// **パーサだけの都合ではない**——`Expr::Paren` を持たない設計(括弧はパース時に捨てる)なので、
+// `formatter.rs` は印字時にこの表から括弧を**再導出**する。両者がずれると整形が意味を変える
+// (実際に `!(x is none)` が `!x is none` になる誤りを出荷していた)ので、表は1つに保つこと。
+pub(crate) fn precedence(kind: TokenType) -> Option<u8> {
+    use TokenType::*;
+    Some(match kind {
+        Or => 1, // f() or fallback は最も弱く結合する
+        OrOr => 2,
+        AndAnd => 3,
+        EqEq | NotEq | Is => 4, // x is none
+        Lt | Le | Gt | Ge => 5,
+        Plus | Minus => 6,
+        Star | Slash | Percent => 7,
+        _ => return None,
+    })
+}
+
+// 前置演算子(`!` / `-` / `<-`)は全ての二項演算子より強く結合する(`parse_unary`)。
+pub(crate) const PREC_UNARY: u8 = 8;
+// 後置(呼び出し・添字・メンバー・`?`)と一次式。括弧を必要としない最も強い結合。
+pub(crate) const PREC_ATOM: u8 = 9;
+
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
         Parser { tokens, pos: 0, errors: Vec::new(), allow_struct_lit: true, interp_depth: 0 }
@@ -907,26 +931,11 @@ impl Parser {
         Ok(expr)
     }
 
-    // 二項演算子の優先順位(大きいほど強く結合する)
-    fn precedence(kind: TokenType) -> Option<u8> {
-        use TokenType::*;
-        Some(match kind {
-            Or => 1, // f() or fallback は最も弱く結合する
-            OrOr => 2,
-            AndAnd => 3,
-            EqEq | NotEq | Is => 4, // x is none
-            Lt | Le | Gt | Ge => 5,
-            Plus | Minus => 6,
-            Star | Slash | Percent => 7,
-            _ => return None,
-        })
-    }
-
     fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, Box<CompileError>> {
         let mut left = self.parse_unary()?;
         loop {
             let op = self.peek().kind;
-            let Some(prec) = Self::precedence(op) else { return Ok(left) };
+            let Some(prec) = precedence(op) else { return Ok(left) };
             if prec < min_prec {
                 return Ok(left);
             }
