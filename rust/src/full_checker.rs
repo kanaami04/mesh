@@ -203,6 +203,23 @@ impl FullCheckerCtx {
         let mutable = self.lookup(name).map(|b| b.mutable).unwrap_or(false);
         self.scopes.last_mut().expect("scopes is never empty").insert(name.to_string(), Binding { ty, mutable });
     }
+
+    // 代入で古くなった絞り込み事実を捨てる(TS版`narrowing.ts`の`invalidatePath`の移植)。
+    //
+    // **消すのは代入先そのものとその子パスだけ**——`x`へ代入したら`x.f`も無効になるが、
+    // `x.f.g`へ代入したときの祖先`x.f`は残す(中間パスの型自体は変わらないため)。
+    //
+    // **`.`を含むキーだけを消す**のが要点。スコープには通常の変数束縛(`x`)と絞り込み事実
+    // (`x.f`)が同じ表に同居しているので、このガードが無いと変数の宣言ごと消してしまう。
+    //
+    // 全スコープを走査するのは、絞り込み事実が外側のスコープに置かれることがあるため
+    // (then節が必ず終端する`if`の後、残りの型を現在のスコープへ反映する経路)。
+    fn invalidate_path(&mut self, path: &str) {
+        let child_prefix = format!("{path}.");
+        for scope in self.scopes.iter_mut() {
+            scope.retain(|key, _| !(key.contains('.') && (key == path || key.starts_with(&child_prefix))));
+        }
+    }
 }
 
 // 型注釈を解決する。スカラー(int/float/...)+ milestone 29から**名前付きstruct**
@@ -1508,14 +1525,30 @@ fn member_field_type(ctx: &mut FullCheckerCtx, tgt: &Type, name: &str, pos: Pos)
 }
 
 // 式の「安定した綴り」(`a` / `a.b` / `a.b.c`)。TS版`narrowing.ts`の`stablePath`の移植で、
-// **絞り込みのスコープキー**に使う。識別子とフィールドアクセスの連なりだけが対象——
-// 呼び出しや添字が挟まると同じ綴りでも別の値になりうるのでNone
+// **絞り込みのスコープキー**に使う(事実を作る側=`collect_facts`と、事実を捨てる側=
+// `narrowing_target_path`→`invalidate_path`の両方)。識別子とフィールドアクセスの連なりだけが
+// 対象——呼び出しや添字が挟まると同じ綴りでも別の値になりうるのでNone。
+// **可変性は見ない**——根が`mut`かどうかの判定は呼び出し側が行う(TS版の`stablePath`は
+// ctxを取って`mut`ならNoneを返すが、こちらは判定を分けてある)
 fn stable_path(e: &Expr) -> Option<String> {
     match e {
         Expr::Ident { name, .. } => Some(name.clone()),
         Expr::Member { target, name, .. } => stable_path(target).map(|p| format!("{p}.{name}")),
         _ => None,
     }
+}
+
+// 代入先として見たときの「絞り込みを捨てるべきパス」。TS版`stablePath(ctx, expr)`と同じで、
+// **根が`mut`な束縛なら`None`**——`mut`はいつでも再代入されうるのでそもそも絞り込み事実を
+// 作らない(`collect_facts`側も同じ判定)。事実が無ければ捨てるものも無いので挙動は変わらないが、
+// オラクルと同じ判定にしておく
+fn narrowing_target_path(ctx: &FullCheckerCtx, e: &Expr) -> Option<String> {
+    let path = stable_path(e)?;
+    let root = path.split('.').next().unwrap_or(path.as_str());
+    if ctx.lookup(root).is_none_or(|b| b.mutable) {
+        return None;
+    }
+    Some(path)
 }
 
 fn infer_member(ctx: &mut FullCheckerCtx, target: &Expr, name: &str, pos: Pos) -> Type {
@@ -2348,8 +2381,23 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             ctx.declare(name, declared, *pos, *mutable);
         }
         Stmt::Assign { targets, values, compound_op, pos } => {
-            for (target, value) in targets.iter().zip(values.iter()) {
-                let value_ty = infer_expr_single(ctx, value);
+            // **右辺を先に全部推論する**(TS版`statements.ts`の`checkExprList`と同じ順序)。
+            // 右辺は代入が起きる前の状態で評価されるので、絞り込み事実もまだ古いままでよい
+            let value_tys: Vec<Type> = values.iter().map(|v| infer_expr_single(ctx, v)).collect();
+            for (i, target) in targets.iter().enumerate() {
+                // `_ = f()`は代入ではないので事実を捨てない(TS版も`continue`で飛ばす)
+                if matches!(target, Expr::Ident { name, .. } if name == "_") {
+                    continue;
+                }
+                // **代入先の型を見る前に古い絞り込みを捨てる**(TS版と同じ順序)。順序が逆だと
+                // 代入先の型が絞り込み後の型になり、**宣言型には代入できるはずの値が弾かれる**
+                // ——`if o.v is int { o.v = none }`の`none`が`int`へ代入できないと言われる。
+                // 複合代入(`o.v += 1`)は無効化後の宣言型で算術検査を通るので、
+                // `int | none += int`はTS版と同じく`invalid-operation`になる
+                if let Some(path) = narrowing_target_path(ctx, target) {
+                    ctx.invalidate_path(&path);
+                }
+                let value_ty = value_tys.get(i).cloned().unwrap_or(ANY);
                 check_assign_target(ctx, target, &value_ty, *pos, compound_op.as_ref());
             }
         }
