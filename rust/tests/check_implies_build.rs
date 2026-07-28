@@ -78,12 +78,11 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // 直し方は分かっているが、`full_checker`の`invalidatePath`移植漏れが先(上記参照)
     ("tests/parity/56-path-narrow-ok/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
     ("tests/parity/56-path-narrow-nested/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
-    // ↓ **これは直してはいけない側の破れ**。`full_checker`が`invalidatePath`を持たないため
-    // checkが黙るが、codegenが絞り込まないおかげでbuildが**安全に失敗**している。
-    // ここを「buildも通る」側へ揃えると、実行時に静かに誤った値を出すようになる(上記参照)。
-    // 正しい直し方は`full_checker`側に診断を出させること——そうなればcheckが黙らなくなり、
-    // このケースは性質の前提(診断ゼロ)から外れて自然にリストから消える
-    ("tests/parity/narrow-then-assign-field/main.mesh", "full_checkerのinvalidatePath移植漏れ(checkが黙る)。buildが落ちるのは安全側"),
+    // ↓ **これは診断を足して直す側**。`check_assign_target`の`Expr::Member`分岐が
+    // 値の型を一切見ないため、`t.n = "s"` / `t.n += "s"` が診断ゼロで通り、codegenだけが
+    // 落ちる。TS版は`assignable`と`checkArithOp`をターゲットの種類を問わず通していた。
+    // 直せば`check`が診断を出すようになり、このケースは性質の前提から外れて自然に消える
+    ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
 ];
 
 fn corpus() -> Vec<PathBuf> {
@@ -145,11 +144,19 @@ fn checkが黙ったならコード生成も成功する() {
 }
 
 #[test]
-fn 既知の破れリストが実在のファイルを指している() {
-    // パスのtypoや、ケースの改名でリストが空振りするのを防ぐ
+fn 既知の破れリストが腐っていない() {
+    // パスのtypoや、ケースの改名でリストが空振りするのを防ぐ。
+    //
+    // **`checks_clean`も要求するのが要点**——上のテストは「診断が出るケース」を性質の前提外
+    // として飛ばすので、登録済みのケースが**診断を出すようになると黙って対象外へ落ち**、
+    // リストに残ったまま誰も気づけない。実際に踏んだ: `narrow-then-assign-field` は
+    // `full_checker`へ`invalidatePath`を移植した回に診断を出すようになり、リストから
+    // 外す必要があった(外し忘れてもどのテストも落ちない状態だった)
     let root = repo_root();
     for (p, reason) in KNOWN_VIOLATIONS {
-        assert!(root.join(p).is_file(), "KNOWN_VIOLATIONS のパスが存在しない: {p}");
+        let path = root.join(p);
+        assert!(path.is_file(), "KNOWN_VIOLATIONS のパスが存在しない: {p}");
         assert!(!reason.is_empty(), "{p} に理由が書かれていない");
+        assert!(checks_clean(&path), "{p} は診断を出すので性質の対象外。KNOWN_VIOLATIONS から外すこと(理由: {reason})");
     }
 }

@@ -1,1 +1,3 @@
-main.mesh: no errors
+main.mesh:27:19: error[invalid-operation]: invalid operation: int | none + int
+  		print(o.inner.v + 1)
+  		                ^

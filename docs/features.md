@@ -60,17 +60,13 @@
       ら任意の深さ)。`a is Foo && a.value > 0` は左の`is`が右辺の式とthen節の両方に効く。
       `!(a is none)` / `a is none \|\| b is none { return }` はド・モルガンで絞り込まれる
       (else側=両方不成立の積)。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した。
-      **既知の移植漏れ①(2026-07-28に実測で発覚、未修正)**: 「フィールドへの代入は古い絞り込みを
-      無効化してから型検査するので健全性は保つ」は**Rust版では実装されていない**。TS版は
-      `invalidatePath`(`narrowing.ts`/`statements.ts`のassignケース)で事実を捨てていたが、
-      `full_checker.rs`に相当する処理が無い。現状は**検出漏れ**に留まっている
-      ——`if o.inner.v is int { o.inner.v = none; print(o.inner.v + 1) }` は診断ゼロだが、
-      codegen側の`checker.rs`がフィールドパスを絞り込まないおかげで`mesh build`が安全に失敗する。
-      **codegen側だけ先に一般化すると、checkもbuildも通って実行時に静かに誤った値を出す**
-      (`null + 1 === 1`が`__iarith`のsafe-integerガードをすり抜ける)——実際に試して確認し、
-      取り下げた。**順番はinvalidatePathの移植が先**。
-      プローブは`tests/parity/narrow-then-assign-field/`。
-      **既知の移植漏れ②(同日発覚、未修正)**: 上の行が書いている
+      フィールドへの代入は古い絞り込みを無効化してから型検査するので健全性は保つ
+      (**2026-07-28にRust版へ移植**——TS版`narrowing.ts`の`invalidatePath`が未移植で、
+      `if o.inner.v is int { o.inner.v = none; print(o.inner.v + 1) }` が診断ゼロになる
+      検出漏れだった。消すのは代入先とその子パスだけで祖先は残す/無効化は代入先の型を見る**前**
+      (順序が逆だと宣言型には代入できるはずの値が弾かれる)。
+      プローブは`tests/parity/narrow-then-assign-field/`)。
+      **既知の移植漏れ(2026-07-28発覚、未修正)**: 上の行が書いている
       「`a is Foo && a.value > 0` は左の`is`が**右辺の式**に効く」も、**Rust版では効かない**。
       `full_checker::infer_binary`が`&&`/`||`の右辺を絞り込み前のスコープで検査するため、
       `narrow-required`という**誤検知**になる(then節側の絞り込みは正しく効く)。

@@ -1,0 +1,29 @@
+// structフィールドへの代入は**値の型が検査されない**(検出漏れ・このPRとは無関係な既存の穴)。
+//
+// TS版 `statements.ts` の assign ケースは `assignable(valueType, expected)` と
+// 複合代入の `checkArithOp` を**ターゲットの種類を問わず**通すので、下の2行はどちらも
+// 診断される。Rust版の `check_assign_target` は `Expr::Member` 分岐で `infer_expr` を
+// 呼ぶだけなので診断ゼロになる。
+//
+// **`mesh check` は黙るが `mesh build` は落ちる**——`rust/tests/check_implies_build.rs`
+// が守ろうとしている不変条件の破れそのもの。narrowing とは無関係で、素の `int`
+// フィールドでも同じ(`s.v += "boom"` → build だけが `invalid operation` で落ちる)。
+//
+// **TS版オラクルを復元して問い合わせた結果**(手順は docs/handoff.md「TS版のソースは
+// git 履歴に残っている」節)。直したときの目標がこれ:
+//
+//   20:2: error[type-mismatch]: cannot assign "not an int" to int
+//   21:2: error[invalid-operation]: invalid operation: int + "also not"
+//
+// 位置が**代入文の先頭**(桁2)なのに注意——ターゲットや値の位置ではない。
+// 直せば parity の差分にこの2件が現れ、それが修正できた証拠になる。
+struct T {
+	n: int
+}
+
+fn main() {
+	t := T{n: 1}
+	t.n = "not an int"
+	t.n += "also not"
+	print(t.n)
+}
