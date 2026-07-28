@@ -166,6 +166,23 @@ impl CheckerCtx {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
 
+    // 代入で古くなった絞り込み事実を捨てる(`full_checker.rs`の`invalidate_path`と同じ規則。
+    // 元はTS版`narrowing.ts`の`invalidatePath`)。
+    //
+    // **絞り込みを入れるなら無効化も同時に入れる**——片方だけだと、絞り込んだパスへ代入した
+    // あとも古い型が残り、`__iarith`等の型依存判断が誤った選択をする。実際にPR #109で
+    // 「絞り込みだけ入れて無効化が無い」状態を作り、`if o.v is int { o.v = none; print(o.v + 1) }`が
+    // **checkもbuildも通って実行時に静かに`1`を出す**ミスコンパイルになった(取り下げ済み)。
+    //
+    // 消すのは代入先そのものとその子パスだけ(祖先は残す)。`.`を含むキーだけを消すのは、
+    // 通常の変数束縛(`x`)と絞り込み事実(`x.f`)が同じ表に同居しているため
+    pub fn invalidate_path(&mut self, path: &str) {
+        let child_prefix = format!("{path}.");
+        for scope in self.scopes.iter_mut() {
+            scope.retain(|key, _| !(key.contains('.') && (key == path || key.starts_with(&child_prefix))));
+        }
+    }
+
     pub fn declare_fn(&mut self, name: &str, ty: Type) {
         self.fn_decls.insert(name.to_string(), ty);
     }
@@ -953,10 +970,23 @@ pub fn infer_expr(ctx: &CheckerCtx, expr: &Expr) -> Type {
         // フィールドアクセス。targetがstruct型でnameが宣言済みフィールドならその型を返す。
         // メソッド名(フィールドではない名前)はここでは解決しない——裸のメンバー値として
         // メソッドを参照する式はcodegen側でも対象外(TS版と同じくcall式側だけで判別する)
-        Expr::Member { target, name, .. } => match infer_expr(ctx, target) {
-            Type::Struct { fields, .. } => fields.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| f.type_.clone()).unwrap_or(ANY),
-            _ => ANY,
-        },
+        Expr::Member { target, name, .. } => {
+            // **フィールドパスの絞り込みを先に見る**(`if o.inner.v is int { o.inner.v + 1 }`)。
+            // `full_checker.rs`の`infer_member`と同じで、`a.b.c`という安定した綴りを
+            // スコープのキーにしてある。これが無いと、full_checkerが通したプログラムを
+            // codegenだけが弾く(「checkが黙ったのにビルドできない」食い違い)
+            if let Some(path) = stable_path(expr)
+                && let Some(t) = ctx.lookup(&path)
+            {
+                return t.clone();
+            }
+            match infer_expr(ctx, target) {
+                Type::Struct { fields, .. } => {
+                    fields.get().and_then(|fs| fs.iter().find(|f| &f.name == name)).map(|f| f.type_.clone()).unwrap_or(ANY)
+                }
+                _ => ANY,
+            }
+        }
         // `?`/`or`はどちらも「失敗メンバーを取り除いた残り」が結果の型になる(TS版と同じ式。
         // contextやright/bindingの中身は結果型に影響しない)
         Expr::Prop { operand, .. } => types::union_without(infer_expr(ctx, operand), is_failure_type),
@@ -1197,6 +1227,86 @@ pub fn narrow_for_is(ctx: &CheckerCtx, subject_ty: &Type, target: &TypeNode) -> 
     (then_ty, else_ty)
 }
 
+// 式の「安定した綴り」(`a` / `a.b` / `a.b.c`)。絞り込みのスコープキーに使う。
+// `full_checker.rs`の同名関数と同じ規則(TS版`narrowing.ts`の`stablePath`)——識別子と
+// フィールドアクセスの連なりだけが対象で、呼び出しや添字が挟まると同じ綴りでも
+// 別の値になりうるのでNone。
+//
+// **根の可変性は見ない**。`full_checker`は`mut`な束縛を根とするパスを絞り込まないが、
+// この最小リゾルバはスコープに可変性を持っていない。`gen_if`の識別子narrowingが
+// milestone 7以来同じ扱いで、`run`/`build`は必ず`full_checker`のゲートを通ってから
+// 来る——絞り込みが不健全になる形は手前で診断として弾かれている
+pub fn stable_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::Member { target, name, .. } => stable_path(target).map(|p| format!("{p}.{name}")),
+        _ => None,
+    }
+}
+
+// 「このパスはこの型」という絞り込みの事実。`full_checker.rs`の`NarrowFacts`と同じ形
+pub type NarrowFacts = Vec<(String, Type)>;
+
+// `narrow_for_is`へ渡してよい型か。**未解決のunion bodyを渡すと`.expect()`でパニックする**
+// ので、解決済みであることを確認してから使う(`full_checker`の`safe_to_compare`と同じ役割。
+// 絞り込まない=生成コードが安全側の判断に倒れるだけなので、迷ったら渡さない)
+fn narrowable(ty: &Type) -> bool {
+    match ty {
+        Type::Union { body } => body.get().is_some(),
+        _ => true,
+    }
+}
+
+// 条件式から絞り込みの事実を集める(`full_checker.rs`の`collect_facts`と同じ規則を、
+// 診断を出さないこちら側へ移植したもの)。then側/else側それぞれの「パス→型」を返す。
+//
+// **これが無かった頃はcodegen側が`if x is T`という素の形しか絞り込めず**、`&&`/`||`で
+// 包んだ条件・フィールドパスのsubjectでは`mesh check`が通るのに`mesh build`だけが落ちていた
+// (`rust/tests/check_implies_build.rs`の性質検査が検出)。
+pub fn collect_facts(ctx: &CheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
+    match expr {
+        Expr::Is { operand, target, .. } => {
+            let found = stable_path(operand).and_then(|path| {
+                let ty = infer_expr(ctx, operand);
+                if !narrowable(&ty) {
+                    return None;
+                }
+                let (then_ty, else_ty) = narrow_for_is(ctx, &ty, target);
+                Some((path, then_ty, else_ty))
+            });
+            match found {
+                Some((path, then_ty, else_ty)) => (vec![(path.clone(), then_ty)], vec![(path, else_ty)]),
+                None => (Vec::new(), Vec::new()),
+            }
+        }
+        // `!`はド・モルガン: 内側のthen/elseをそのまま入れ替える
+        Expr::Unary { op: TokenType::Bang, operand, .. } => {
+            let (then_f, else_f) = collect_facts(ctx, operand);
+            (else_f, then_f)
+        }
+        // `&&`のthen側 = 両方成り立つ(積) / `||`のelse側 = 両方不成立(積、ド・モルガン)。
+        // 逆側は一般に単一パスの型へ畳めない(OR)ので事実を作らない
+        Expr::Binary { op, left, right, .. } if matches!(op, TokenType::AndAnd | TokenType::OrOr) => {
+            let (lt, le) = collect_facts(ctx, left);
+            let (rt, re) = collect_facts(ctx, right);
+            if matches!(op, TokenType::AndAnd) { (and_facts(lt, rt), Vec::new()) } else { (Vec::new(), and_facts(le, re)) }
+        }
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+// 両側の事実を重ねる。同じパスが両側にあれば**右を勝たせる**(後の条件の方が狭い)
+fn and_facts(left: NarrowFacts, right: NarrowFacts) -> NarrowFacts {
+    let mut out = left;
+    for (path, ty) in right {
+        match out.iter_mut().find(|(p, _)| *p == path) {
+            Some(slot) => slot.1 = ty,
+            None => out.push((path, ty)),
+        }
+    }
+    out
+}
+
 // TS版`match-not-exhaustive`診断と同じロジックだが、診断は出さない設計なので
 // エラーメッセージは一切出さず、codegenが「最後のアームを無条件elseとして信用してよいか」を
 // 内部判断するためだけに使う(milestone 2〜6と同じ「TS本体は診断で到達不能だが、診断を
@@ -1311,8 +1421,12 @@ pub fn infer_binary(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr, 
 // このmilestoneで右辺を実際に検査するようになった結果、この種の正当なコードが
 // 誤って`incomparable-types`等でErrになる新しい回帰を生んでいた。Expr::Select/
 // Expr::Matchのアーム推論と同じ「使い捨てのスクラッチctx」技法で、右辺の検査だけ
-// narrowing後の事実を使う(単純なidentオペランドのみ対応——gen_ifのnarrowingと
-// 同じ範囲、多段フィールドパス等は対象外のまま)
+// narrowing後の事実を使う。
+//
+// **2026-07-28に`collect_facts`ベースへ一般化した**。それまで「`Expr::Is`が**裸の
+// `Expr::Ident`**を包む形」しか見ておらず、subjectがフィールドパス(`h.v is int && h.v > 0`)や
+// `!`で包んだ形(`!(x is int) || x > 0`)では絞り込みが効かなかった——`mesh check`は通るのに
+// `mesh build`だけが落ちる食い違いになっていた(`check_implies_build`の性質検査が検出)
 fn check_logical_op(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr) -> Result<BinaryInfo, String> {
     let lt = infer_expr(ctx, left);
     if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
@@ -1320,17 +1434,17 @@ fn check_logical_op(ctx: &CheckerCtx, op: TokenType, left: &Expr, right: &Expr) 
         return Err(format!("checker: '{op}' requires bool operands, got {} ({}:{})", types::type_to_string(&lt), p.line, p.col));
     }
     let scratch;
-    let right_ctx: &CheckerCtx = if let Expr::Is { operand, target, .. } = left
-        && let Expr::Ident { name, .. } = &**operand
-    {
-        let subject_ty = infer_expr(ctx, operand);
-        let (then_ty, else_ty) = narrow_for_is(ctx, &subject_ty, target);
+    let (then_facts, else_facts) = collect_facts(ctx, left);
+    let facts = if op == TokenType::AndAnd { then_facts } else { else_facts };
+    let right_ctx: &CheckerCtx = if facts.is_empty() {
+        ctx
+    } else {
         let mut c = ctx.clone();
-        c.declare(name, if op == TokenType::AndAnd { then_ty } else { else_ty });
+        for (path, ty) in facts {
+            c.declare(&path, ty);
+        }
         scratch = c;
         &scratch
-    } else {
-        ctx
     };
     let rt = infer_expr(right_ctx, right);
     if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {

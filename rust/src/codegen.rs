@@ -491,6 +491,13 @@ impl Codegen {
                 let value =
                     if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], &lvalue, &values[0], &rhs, *pos)? } else { rhs };
                 self.emit(format!("{lvalue} = {value};"));
+                // **代入したら古い絞り込みを捨てる**(`full_checker`の`invalidatePath`と同じ)。
+                // 絞り込みだけ入れて無効化を入れないと、代入後も古い型が残って`__iarith`等が
+                // 誤った選択をする——PR #109 で実際にミスコンパイルを作った(取り下げ済み)。
+                // **右辺の生成が終わってから**捨てる(右辺は代入前の値を読むため)
+                if let Some(path) = checker::stable_path(&targets[0]) {
+                    self.ctx.invalidate_path(&path);
+                }
                 Ok(())
             }
             Stmt::ExprStmt { expr, .. } => {
@@ -644,63 +651,66 @@ impl Codegen {
         Ok(())
     }
 
-    // `if x is T { ... }`という単純形(condが裸Identに対する`is`)ならnarrowing(milestone 7)
-    // を適用する——TS版のnarrowing.ts/statements.tsと同じ目的で、codegen側の型依存判断
-    // (`__iarith`等)を正しくするためだけに必要(生成JSの「形」自体は変えない、
-    // milestone 5のselect/orElseの束縛パターンと同じ設計)。
-    // **`!`(否定)も見る**(milestone 66)——json structのエンコーダ合成が
-    // `if !(__efv_x is none) { ... }`という形を生成するので、ここを見ないと合成コードの
-    // 型検査が`cannot use string | none as string`で落ちる。`&&`/`||`との複合条件は
-    // 対象外のまま(full_checker側はmilestone 65で対応済み。codegenは型依存判断のためだけに
-    // narrowingを使うので、落ちる形が出てから広げる)
+    // 条件式から絞り込みの事実を集めて then/else 節へ適用する——TS版の
+    // narrowing.ts/statements.ts と同じ目的で、codegen側の型依存判断(`__iarith`等)を
+    // 正しくするためだけに必要(生成JSの「形」自体は変えない、milestone 5の
+    // select/orElseの束縛パターンと同じ設計)。
+    //
+    // **2026-07-28に`checker::collect_facts`ベースへ一般化した**。それまでは
+    // `unwrap_is_cond`で「裸の識別子に対する`is`(と`!`で包んだ形)」しか見ておらず、
+    // `&&`/`||`を含む条件やフィールドパスのsubjectでは絞り込みが効かなかった
+    // ——full_checker側が対応済みなので**`mesh check`は通るのに`mesh build`だけが落ちる**
+    // 食い違いになっていた(`rust/tests/check_implies_build.rs`の性質検査が検出)。
+    // `!`のド・モルガンも`collect_facts`側が扱うので、ここでの入れ替えは不要になった。
     fn gen_if(&mut self, if_stmt: &IfStmt) -> CodegenResult<()> {
-        if let Some((operand, target, negated)) = unwrap_is_cond(&if_stmt.cond)
-            && let Expr::Ident { name, .. } = operand
-        {
-            let subject_ty = checker::infer_expr(&self.ctx, operand);
-            let (t, e) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
-            // `!`はド・モルガンでthen/elseを入れ替えるだけ(TS版`narrowing.ts`と同じ)
-            let (then_ty, else_ty) = if negated { (e, t) } else { (t, e) };
+        let (then_facts, else_facts) = checker::collect_facts(&self.ctx, &if_stmt.cond);
+        if then_facts.is_empty() && else_facts.is_empty() {
             let cond = self.gen_expr(&if_stmt.cond)?;
             self.emit(format!("if ({cond}) {{"));
-            self.ctx.push_scope();
-            self.ctx.declare(name, then_ty);
             self.gen_block(&if_stmt.then)?;
-            self.ctx.pop_scope();
-            match if_stmt.else_.as_deref() {
-                None => {
-                    self.emit("}");
-                    // then節が必ず終端する(return/break/continue)なら、else側の絞り込みを
-                    // 現在のスコープへ反映し、後続の同ブロック内の文が引き継げるようにする
-                    // (`if v is closed { break } total = total + v`でvが正しくintと
-                    // narrowされ__iarithを使うために必須)
-                    if block_always_terminates(&if_stmt.then) {
-                        self.ctx.declare(name, else_ty);
-                    }
-                }
-                Some(ElseClause::Block(block)) => {
-                    self.emit("} else {");
-                    self.ctx.push_scope();
-                    self.ctx.declare(name, else_ty.clone());
-                    self.gen_block(block)?;
-                    self.ctx.pop_scope();
-                    self.emit("}");
-                    // then節が必ず終端するなら、if/elseの後に到達できるのはelse経由だけ
-                    // なので、else側の絞り込みをここでも現在のスコープへ反映する
-                    // (else節が無い場合の直上の分岐と同じ理由)
-                    if block_always_terminates(&if_stmt.then) {
-                        self.ctx.declare(name, else_ty);
-                    }
-                }
-                // else ifチェーンはnarrowing対象外のまま(実際のexampleに存在しない組み合わせ)
-                Some(other) => self.gen_else(Some(other))?,
-            }
-            return Ok(());
+            return self.gen_else(if_stmt.else_.as_deref());
         }
         let cond = self.gen_expr(&if_stmt.cond)?;
         self.emit(format!("if ({cond}) {{"));
+        self.ctx.push_scope();
+        for (path, ty) in &then_facts {
+            self.ctx.declare(path, ty.clone());
+        }
         self.gen_block(&if_stmt.then)?;
-        self.gen_else(if_stmt.else_.as_deref())
+        self.ctx.pop_scope();
+        // then節が必ず終端する(return/break/continue)なら、if/elseの後に到達できるのは
+        // else経由だけなので、else側の絞り込みを現在のスコープへ反映して後続の文へ引き継ぐ
+        // (`if v is closed { break } total = total + v`でvが正しくintとnarrowされ
+        // __iarithを使うために必須)
+        let carry_else = block_always_terminates(&if_stmt.then);
+        match if_stmt.else_.as_deref() {
+            None => {
+                self.emit("}");
+                if carry_else {
+                    for (path, ty) in else_facts {
+                        self.ctx.declare(&path, ty);
+                    }
+                }
+            }
+            Some(ElseClause::Block(block)) => {
+                self.emit("} else {");
+                self.ctx.push_scope();
+                for (path, ty) in &else_facts {
+                    self.ctx.declare(path, ty.clone());
+                }
+                self.gen_block(block)?;
+                self.ctx.pop_scope();
+                self.emit("}");
+                if carry_else {
+                    for (path, ty) in else_facts {
+                        self.ctx.declare(&path, ty);
+                    }
+                }
+            }
+            // else ifチェーンはnarrowing対象外のまま(実際のexampleに存在しない組み合わせ)
+            Some(other) => self.gen_else(Some(other))?,
+        }
+        Ok(())
     }
 
     fn gen_else(&mut self, else_: Option<&ElseClause>) -> CodegenResult<()> {
@@ -973,21 +983,23 @@ impl Codegen {
             // (F-6: `&&`は左のisが右辺に効く、De Morganで`||`はelse側)が誤ってErrになる。
             // check_logical_op自身の内部スクラッチctxはinfer_expr経由の推論だけを守り
             // (Errを飲み込むため無害)、ここではcodegenが右辺を実際に生成する際に
-            // self.ctxそのものを一時的に絞り込む——gen_ifの単純な`if x is T {...}`と
-            // 同じnarrowing技法(push_scope/declare/pop_scope)をここでも使う。
-            // 単純なidentオペランドのみ対応(gen_ifと同じ範囲、多段フィールドパス等は対象外)
+            // self.ctxそのものを一時的に絞り込む——gen_ifと同じnarrowing技法
+            // (push_scope/declare/pop_scope)をここでも使う。
+            // **2026-07-28に`collect_facts`ベースへ一般化した**(gen_ifと同時)。それまでは
+            // 「`Expr::Is`が裸の`Expr::Ident`を包む形」しか見ておらず、subjectがフィールドパスや
+            // `!`で包んだ形だと絞り込みが効かなかった
             Expr::Binary { op, left, right, pos } if matches!(op, TokenType::AndAnd | TokenType::OrOr) => {
                 let l = self.gen_expr(left)?;
-                let popped = if let Expr::Is { operand, target, .. } = left.as_ref()
-                    && let Expr::Ident { name, .. } = operand.as_ref()
-                {
-                    let subject_ty = checker::infer_expr(&self.ctx, operand);
-                    let (then_ty, else_ty) = checker::narrow_for_is(&self.ctx, &subject_ty, target);
-                    self.ctx.push_scope();
-                    self.ctx.declare(name, if *op == TokenType::AndAnd { then_ty } else { else_ty });
-                    true
-                } else {
+                let (then_facts, else_facts) = checker::collect_facts(&self.ctx, left);
+                let facts = if *op == TokenType::AndAnd { then_facts } else { else_facts };
+                let popped = if facts.is_empty() {
                     false
+                } else {
+                    self.ctx.push_scope();
+                    for (path, ty) in facts {
+                        self.ctx.declare(&path, ty);
+                    }
+                    true
                 };
                 checker::infer_binary(&self.ctx, *op, left, right, *pos)?;
                 let r = self.gen_expr(right)?;
@@ -1814,20 +1826,6 @@ fn visit_package(pkg: &str, deps: &HashMap<String, HashSet<String>>, state: &mut
     state.insert(pkg.to_string(), 2);
     order.push(pkg.to_string());
     Ok(())
-}
-
-// 条件式が`x is T`か`!(x is T)`(`!`は何重でもよい)なら、operand・target・否定の有無を返す
-// (milestone 66)。`&&`/`||`は対象外——codegen側のnarrowingは型依存判断のためだけに使うので、
-// 実際に落ちる形が出てから広げる方針(full_checkerは診断のためmilestone 65で全部対応済み)
-fn unwrap_is_cond(cond: &Expr) -> Option<(&Expr, &TypeNode, bool)> {
-    match cond {
-        Expr::Is { operand, target, .. } => Some((&**operand, target, false)),
-        Expr::Unary { op: TokenType::Bang, operand, .. } => {
-            let (inner, target, negated) = unwrap_is_cond(operand)?;
-            Some((inner, target, !negated))
-        }
-        _ => None,
-    }
 }
 
 // ブロックが必ず終端する(return/break/continueで終わる)かどうかの単純な判定
@@ -3024,6 +3022,48 @@ mod tests {
             "fn g(x: int | error) int {\n  if x is error {\n    return 0\n  } else {\n    return x + 1\n  }\n}\nfn main() {\n  print(1)\n}",
         );
         assert!(js_else.contains("__iarith(x, \"+\", 1,"), "got: {js_else}");
+    }
+
+    #[test]
+    fn フィールドパスのnarrowingがiarithを選ぶ() {
+        // `full_checker`はF-6でフィールドパスの絞り込みに対応済みだったのに、codegen側の
+        // 最小リゾルバは裸の識別子しか絞り込まず、**`mesh check`は通るのにビルドが失敗する**
+        // プログラムがあった(`rust/tests/check_implies_build.rs`の性質検査で発見)
+        let js = gen_body(
+            "struct Inner {\n  v: int | none\n}\nstruct Outer {\n  inner: Inner\n}\nfn main() {\n  o := Outer{inner: Inner{v: 1}}\n  if o.inner.v is int {\n    print(o.inner.v + 1)\n  }\n}",
+        );
+        assert!(js.contains("__iarith(o.inner.v, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn 論理演算子の右辺とthen節がフィールドパスでも絞り込まれる() {
+        // `&&`の右辺(`h.v > 0`)とthen節(`h.v + 1`)の両方で絞り込みが要る。
+        // `collect_facts`へ一般化するまでは、subjectがフィールドパスだと効かなかった
+        let js = gen_body(
+            "struct Holder {\n  v: int | none\n}\nfn main() {\n  h := Holder{v: 1}\n  if h.v is int && h.v > 0 {\n    print(h.v + 1)\n  }\n}",
+        );
+        assert!(js.contains("__iarith(h.v, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn 否定を含む論理演算子でもドモルガンで絞り込まれる() {
+        // `!(x is int) || x > 0` は左が偽のとき(=xがint)だけ右を評価するので、
+        // 右辺では`x`がintへ絞り込まれる。`collect_facts`が`!`のthen/else入れ替えを扱う
+        let js = gen_body("fn main() {\n  x: int | none = 1\n  if !(x is int) || x + 1 > 0 {\n    print(1)\n  }\n}");
+        assert!(js.contains("__iarith(x, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn 絞り込んだパスへ代入したら事実を捨てる() {
+        // **PR #109 のミスコンパイルの回帰テスト**。codegen単体テストは`full_checker`の
+        // ゲートを通らないので、無効化が無いと古い絞り込みが残って`__iarith`を選び、
+        // `null + 1 === 1`が safe-integer ガードをすり抜けて**静かに誤った値**を出す。
+        // 無効化が効いていれば、ここは型の食い違いとして明確に失敗する
+        let err = gen_js(
+            "struct Inner {\n  v: int | none\n}\nstruct Outer {\n  inner: Inner\n}\nfn main() {\n  o := Outer{inner: Inner{v: 1}}\n  if o.inner.v is int {\n    o.inner.v = none\n    print(o.inner.v + 1)\n  }\n}",
+        )
+        .expect_err("代入後は絞り込みが消えているので int | none + int で失敗するはず");
+        assert!(err.contains("invalid operation"), "got: {err}");
     }
 
     #[test]

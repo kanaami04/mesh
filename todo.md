@@ -3844,6 +3844,31 @@
                 どんな壊れた入力でもコンパイラがpanicしない。試作した「等価な条件の書き換え」
                 (性質A)も`scripts/`へ昇格させる候補だが、等価集合の吟味が要る
                 (`x is int || 1 == 2`が絞り込まないのは仕様の可能性が高い)
+        - [x] **codegen側にも `collect_facts` を移植する(絞り込みと無効化をセットで)**
+              ✅ 2026-07-28実装。`codegen.rs::gen_if` と `checker.rs::check_logical_op` を
+              `checker::collect_facts` ベースへ一般化し、**フィールドパスのsubject・`&&`/`||`・
+              `!` のド・モルガンがすべて効く**ようになった。旧実装の `unwrap_is_cond`
+              (素の `is` と `!` しか見なかった)は不要になったので削除。
+              - **`KNOWN_VIOLATIONS` は8件→3件**。`56-path-narrow-*` 2件(PR #109で
+                取り下げたもの)と `cond-*` / `logical-and-narrow-right-operand` 3件が消えた。
+                残りは codegen の明示的な「未対応」2件と `check_assign_target` の検出漏れ1件。
+              - **要点は絞り込みと無効化を同時に入れたこと**。PR #109 で「絞り込みだけ入れて
+                無効化が無い」状態を作りミスコンパイルになった前例があるので、
+                `CheckerCtx::invalidate_path` を同じ回で入れた。**codegen単体テストは
+                `full_checker` のゲートを通らない**ので、無効化が無ければ即座に `__iarith` を
+                選んでしまう——そこを突く回帰テスト(`絞り込んだパスへ代入したら事実を捨てる`)を
+                置いた。#109 の再現コードが `check` の段階で止まることも実測で確認。
+              - **生成JSは1バイトも変わらなかった**(`tests/codegen-snapshots/` 無変更、
+                parity 163件差0、sweep 126件差0、run-examples 24本)。絞り込みは型依存判断
+                (`__iarith` 等)のためだけに使う設計なので、既存プログラムの出力は変わらない。
+              - `narrow_for_is` は未解決の union body で `.expect()` するので、移植側にも
+                門番(`narrowable`)を付けた(`full_checker` の `safe_to_compare` と同じ役割)。
+              - **性質検査の働き方が見えた回でもある**: `full_checker` 側の誤検知を直した回に
+                `KNOWN_VIOLATIONS` は5件→8件へ**増えた**(checkが黙るようになった結果
+                codegen側の遅れが露出した)。この回で3件へ減った。**片方を直すと
+                もう片方の遅れが見える**——2つの実装を持つ設計で効く性質だと分かった。
+              - 検証: テスト683件、clippyクリーン、parity 163件差0、sweep 126件差0、
+                run-examples 24本、生成JS無変更。
         - [x] **`&&`/`||` の右辺に左辺の絞り込みを適用する(誤検知7形の解消)**
               ✅ 2026-07-28実装。`docs/features.md` が F-6 で「左の `is` が**右辺の式**と
               then節の両方に効く」と書いている形が Rust版では効かず、
