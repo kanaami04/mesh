@@ -2392,8 +2392,15 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 // **代入先の型を見る前に古い絞り込みを捨てる**(TS版と同じ順序)。順序が逆だと
                 // 代入先の型が絞り込み後の型になり、**宣言型には代入できるはずの値が弾かれる**
                 // ——`if o.v is int { o.v = none }`の`none`が`int`へ代入できないと言われる。
-                // 複合代入(`o.v += 1`)は無効化後の宣言型で算術検査を通るので、
-                // `int | none += int`はTS版と同じく`invalid-operation`になる
+                //
+                // **注意: フィールドへの代入は値の型が検査されない**(`check_assign_target`の
+                // `Expr::Member`分岐は`infer_expr`を呼ぶだけ)。TS版は`assignable(valueType,
+                // expected)`と複合代入の`checkArithOp`をターゲットの種類を問わず通すので、
+                // `t.n = "s"`も`t.n += "s"`も診断される。**Rust版は診断ゼロ**——このPRとは
+                // 無関係な既存の検出漏れで、`mesh build`だけが落ちる(=`check`が黙ったのに
+                // ビルドできないという食い違い)。プローブは
+                // `tests/parity/member-assign-unchecked/`、追跡は
+                // `rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS`
                 if let Some(path) = narrowing_target_path(ctx, target) {
                     ctx.invalidate_path(&path);
                 }

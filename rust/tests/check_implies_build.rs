@@ -78,6 +78,11 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // 直し方は分かっているが、`full_checker`の`invalidatePath`移植漏れが先(上記参照)
     ("tests/parity/56-path-narrow-ok/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
     ("tests/parity/56-path-narrow-nested/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
+    // ↓ **これは診断を足して直す側**。`check_assign_target`の`Expr::Member`分岐が
+    // 値の型を一切見ないため、`t.n = "s"` / `t.n += "s"` が診断ゼロで通り、codegenだけが
+    // 落ちる。TS版は`assignable`と`checkArithOp`をターゲットの種類を問わず通していた。
+    // 直せば`check`が診断を出すようになり、このケースは性質の前提から外れて自然に消える
+    ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
 ];
 
 fn corpus() -> Vec<PathBuf> {
