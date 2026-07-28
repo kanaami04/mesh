@@ -60,7 +60,13 @@
       ら任意の深さ)。`a is Foo && a.value > 0` は左の`is`が右辺の式とthen節の両方に効く。
       `!(a is none)` / `a is none \|\| b is none { return }` はド・モルガンで絞り込まれる
       (else側=両方不成立の積)。フィールドへの代入は古い絞り込みを無効化してから型検査する
-      ので健全性は保つ。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した |
+      ので健全性は保つ。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した。
+      **既知の穴(2026-07-28、性質検査で発見)**: **入れ子のフィールドパス**
+      (`o.inner.v is int`)は`mesh check`は通るが`mesh run`/`build`が失敗する
+      ——コード生成が使う`rust/src/checker.rs`(最小リゾルバ)がフィールドパスの絞り込みを
+      持たないため。診断を出す`full_checker.rs`とは別実装で、そちらだけが対応している。
+      再現は`tests/parity/56-path-narrow-nested/`、追跡は
+      `rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS` |
 | 汎用の空値(null / nil) | ❌ | 2026-07-17決定(union路線)。「どこにでも入り得る空値」は存在しない。
       不在は `T \| none` と書いた場所にだけ、型として現れる |
 | `any` 型 | ❌ | 2026-07-21実装(H-1、討議のうえkanayama承認)。critique-2026-07.md(B-5-2)の指摘を受け撤去 —
