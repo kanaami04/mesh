@@ -22,16 +22,46 @@ cd "$(dirname "$0")/.."
 COUNT="${1:-200}"
 SEED="${2:-$(date +%s)}"
 
+# **引数を検証する**。`set -e`を使っていないので、生成器が落ちても素通りして
+# 「対象1件・差0件・OK」という**偽の成功**になる(code reviewで発覚。
+# `scripts/oracle-hunt.sh abc 123`で再現していた)
+case "$COUNT" in '' | *[!0-9]*) echo "error: 件数は正の整数で指定すること(渡された値: '$COUNT')" >&2 && exit 2 ;; esac
+case "$SEED" in '' | *[!0-9]*) echo "error: シードは正の整数で指定すること(渡された値: '$SEED')" >&2 && exit 2 ;; esac
+[ "$COUNT" -gt 0 ] || {
+	echo "error: 件数は1以上で指定すること" >&2
+	exit 2
+}
+
+# **リポジトリルートから走っていることを確かめる**(`sweep.sh`/`parity.sh`と同じ門番。
+# あちらは「実際にセッション中2回踏んだ」と記録している)
+if [ ! -d "rust/src" ]; then
+	echo "error: リポジトリルートが見つからない(このスクリプトは scripts/ に置いたまま実行すること)" >&2
+	exit 2
+fi
+
 RUST_BIN=rust/target/debug/mesh
 if [ ! -x "$RUST_BIN" ]; then
 	echo "error: $RUST_BIN が無い。先に 'cargo build --manifest-path rust/Cargo.toml' を実行すること" >&2
 	exit 2
 fi
 
+# **bunはキャッシュの有無に関わらず要る**。キャッシュがある場合に確認を飛ばすと、
+# `bun: command not found`が全件で空出力になり**本物の差分と見分けがつかない**
+# (code reviewで発覚: 差1件・FAILという、コンパイラの退行そっくりの出方をしていた)
+command -v bun >/dev/null 2>&1 || {
+	echo "error: bun が要る(TS版オラクルの実行に使う)。docs/setup.md 参照" >&2
+	exit 2
+}
+
 # オラクルは固定コミット(`cd7273a^`)に紐づくので**キャッシュして使い回してよい**
-# (worktreeと違って古くなることがない)。無ければ復元する
+# (worktreeと違って古くなることがない)。無ければ復元する。
+#
+# **完了印(.ready)で判定する**。`src/cli.ts`の存在だけを見ると、`git archive`は成功したが
+# `bun install`が失敗した**中途半端なキャッシュ**を再利用してしまう——その状態では
+# オラクル側が全件空を返し、**13件の偽DIFF**(実際に再現)や、標本が小さいと**偽のOK**になる。
+# どちらも「オラクルが壊れている」ではなく「コンパイラが壊れている」ように見えるのが厄介
 ORACLE=/tmp/mesh-ts-oracle
-if [ ! -f "$ORACLE/src/cli.ts" ]; then
+if [ ! -f "$ORACLE/.ready" ]; then
 	echo "TS版オラクルを復元中(cd7273a^)..."
 	rm -rf "$ORACLE"
 	mkdir -p "$ORACLE"
@@ -40,15 +70,42 @@ if [ ! -f "$ORACLE/src/cli.ts" ]; then
 		exit 2
 	}
 	(cd "$ORACLE" && bun install --frozen-lockfile >/dev/null 2>&1) || {
-		echo "error: オラクルの依存を入れられない(bunが要る)" >&2
+		echo "error: オラクルの依存を入れられない" >&2
 		exit 2
 	}
+	touch "$ORACLE/.ready"
 fi
+
+# **オラクルが本当に動くかを毎回確かめる**(スモークテスト)。
+# 壊れたオラクルは「差分」に化けるので、**比較を始める前に**弾く。
+# 既知の入力に対して既知の診断が返ることまで見る——起動しただけでは足りない
+SMOKE=$(mktemp -d)
+printf 'fn main() {\n\ty: Nope = 1\n\tprint(1)\n}\n' >"$SMOKE/smoke.mesh"
+smoke_out=$(cd "$ORACLE" && bun src/cli.ts check "$SMOKE/smoke.mesh" 2>&1)
+rm -rf "$SMOKE"
+case "$smoke_out" in *unknown-type*) ;; *)
+	echo "error: TS版オラクルが期待どおり動かない(スモークテスト失敗)。キャッシュを消して再実行すること: rm -rf $ORACLE" >&2
+	echo "  オラクルの出力: $smoke_out" >&2
+	exit 2
+	;;
+esac
 
 # 差が出た形は**捨てずに残す**。調査もコーパスへの昇格もここから始める
 FINDS=$(mktemp -d /tmp/mesh-oracle-finds.XXXXXX)
 OUT=$(mktemp -d)
-python3 scripts/oracle_hunt_gen.py "$OUT" "$SEED" "$COUNT"
+python3 scripts/oracle_hunt_gen.py "$OUT" "$SEED" "$COUNT" || {
+	echo "error: 生成器が失敗した" >&2
+	rm -rf "$OUT" "$FINDS"
+	exit 2
+}
+# **生成物が本当にあるかを確かめる**。空だとglobが展開されず、ループが
+# 「リテラルのglob文字列」1件を検査して両方とも空 → **偽の一致**になる
+generated=$(find "$OUT" -name '*.mesh' | wc -l)
+if [ "$generated" -ne "$COUNT" ]; then
+	echo "error: $COUNT 件を頼んだのに $generated 件しか生成されていない" >&2
+	rm -rf "$OUT" "$FINDS"
+	exit 2
+fi
 
 # **位置(行:桁)まで含めて比べる**。診断コードの集合だけだと比較が弱く、
 # 「同じコードが違う場所に出る」ズレを見逃す(TS版には同じ注釈を2回報告する場所がある)。
@@ -61,8 +118,14 @@ n=0
 for f in "$OUT"/*.mesh; do
 	n=$((n + 1))
 	rs=$("$RUST_BIN" check "$f" 2>&1 | diags)
-	# **パースできない生成物は検証になっていない**(milestone 62で19件中3件が空振りしていた)
-	case "$rs" in *syntax-error*)
+	# **パースできない生成物は検証になっていない**(milestone 62で19件中3件が空振りしていた)。
+	# **字句/構文段階の診断コードは`syntax-error`だけではない**——`diagnostic_codes.rs`には
+	# `unexpected-character`/`unknown-escape`/`unterminated-interpolation`/
+	# `unterminated-string`もある。`syntax-error`だけ見ていると、字句レベルで壊れた生成物が
+	# SKIPに数えられずオラクル比較へ回り、**両方が同じエラーを出して「一致」に見える**
+	# (code reviewで発覚。当時の生成器は字句エラーを作らなかったので実害は無かったが、
+	# 語彙を広げると踏む)
+	case "$rs" in *syntax-error* | *unexpected-character* | *unknown-escape* | *unterminated-interpolation* | *unterminated-string*)
 		skips=$((skips + 1))
 		echo "SKIP $(basename "$f") — パースできない(生成テンプレートの誤り)"
 		continue
