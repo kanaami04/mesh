@@ -270,13 +270,16 @@ subjectが裸の識別子でもフィールドパスでも、比較(`> 0`)でも
 のが核心コンセプト(要件定義 P1〜P6)。言語カード(`src/card.ts`)を渡せば、この会話を知らない
 AIエージェントでもMeshのコードを書ける、という実証実験(`docs/card-experiments.md`)まで行った。
 
-- GitHub: https://github.com/kanaami04/mesh(公開。featureブランチ→PR→CI green確認と
-  `/code-review --comment`(順不同・並行可)→両方揃ったらsquash mergeの運用。2026-07-19から
-  PRフロー、2026-07-21から`/code-review`必須化〔`gh pr merge`実行時に
-  `.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の
-  有無を機械チェックし、欠けていればdenyする。squash統一はリポジトリ設定
+- GitHub: https://github.com/kanaami04/mesh(公開。featureブランチ→**code review→push**→PR
+  (レビュー結果をコメント)→CI green→squash mergeの運用。2026-07-19からPRフロー、
+  2026-07-21から`/code-review`必須化、**2026-07-28にレビューをmerge直前からpush直前へ移動**
+  〔`git push`実行時に`.claude/hooks/enforce-review-before-push.sh`が、送るコミットのsha に
+  対する記録(`.claude/review-log/<sha>`)の有無を機械チェックする。`gh pr merge`実行時には
+  従来どおり`.claude/hooks/enforce-code-review.sh`がレビューコメント(`### Code review`見出し)の
+  有無を見る——push前に回したレビューの結果をPRに残すためのもので、レビューを2回回す意味ではない。
+  どちらのフックも欠けていればdenyする。squash統一はリポジトリ設定
   (merge commit・rebase mergeを無効化)でサーバ側に強制(経緯は`13405bf`参照)。
-  フックが動く条件(`jq`・`gh`・`grep`・`/code-review`プラグイン本体)は各マシンで
+  フックが動く条件(`jq`・`gh`・`grep`・`git`・`/code-review`プラグイン本体)は各マシンで
   揃える必要がある——詳細は docs/setup.md〕。それ以前はmain直push)
 - **PR番号について**: 2026-07-21に`ryota-kanayama/mesh`から現リポジトリへ移管し、旧リポジトリは
   削除した。PR番号は1から振り直されているので、**#40以前の番号は旧リポジトリのもので現在は無効**
@@ -1436,7 +1439,11 @@ todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+
   `gh pr merge`(squash merge)だけは、kanayamaが明示的に「マージして」と言うまで実行しない**
   ——CI green + `/code-review` コメントが揃っても自動マージは不可。この合意はマシン横断で
   共有すべきなのでこのdocsに記す(Claudeのメモリはマシンごとに独立で別セッションから読めないため。
-  `.claude/skills/milestone-ship` スキルもこの手順を定型化している)
+  `.claude/skills/milestone-ship` スキルもこの手順を定型化している)。
+  **2026-07-28の補足**: レビューがpushの前に移ったので、「push→PR作成まで自動」の間に
+  レビューが挟まる。Claude側で回せる形(レビュー用サブエージェント/自分で検証)なら
+  自動のままでよいが、**ユーザーの `/code-review` を使いたい場合はpushの手前で一度止まる**
+  ——止まる位置が `gh pr merge` の手前から `git push` の手前に増えたということ
 - **段階的に進める**。大きな機能を一気に実装せず「説明→小さく実装→動かして確認→次へ」。
   過去に一度「一気に実装しすぎた」とフィードバックを受けている
 - **設計判断は先に討議・決定してから実装する**。特に既存構文と衝突する可能性がある場合は、
@@ -1449,11 +1456,32 @@ todo.md「次の一手」に列挙された討議項目(F節・H節・C-6コア+
   3. プレイグラウンド(`mise run playground`)で実際に動かして目視確認
   4. ドキュメント更新: `src/card.ts`(言語カード)/ `docs/features.md` / `todo.md` / `docs/design-agenda.md`
   5. featureブランチに `git add -A && git commit`(決定の経緯・却下した代替案もメッセージに書く)
-     → `git push` → `gh pr create`
-  6. 次の2つを並行して進める(順不同): `gh pr checks <番号> --watch` でCI green確認、
-     **`/code-review <番号> --comment` を実行**(PRにレビューコメントを投稿。指摘があれば
-     対応してコミットを追加し、CIとレビューをやり直す)——`.claude/hooks/enforce-code-review.sh`が
+  5'. **push の前に code review を回す**(2026-07-28にmerge直前からここへ移動)。
+     マージ直前に置いていたときは、指摘が出るのが「PRを公開してCIを回した後」になり、
+     直す前に載ってしまっていた。手順:
+     1. ローカルの差分をレビューする。**PRがまだ無いので、PR単位のプラグイン版
+        (`/code-review <番号> --comment`)はここでは使えない**。使えるのは
+        **ユーザーが実行する組み込みの `/code-review`**(作業差分を見る。
+        `disable-model-invocation`なのでClaudeからは起動できない)か、
+        **レビュー用サブエージェント**(下記6'・6''の縛りをそのまま適用する)。
+        自分で検証できる規模なら6''のとおり自分で回してよい
+     2. 指摘があれば直してコミットし直し、1からやり直す
+     3. `scripts/record-review.sh "<レビュー結果の要約>"` で記録を残す。
+        レビュー不要と判断したなら `scripts/record-review.sh --skip "<理由>"`(**理由は必須**)
+     4. `git push` → `.claude/hooks/enforce-review-before-push.sh` が、
+        **これから送るコミットのsha**に対する記録があるかを機械チェックする。
+        記録は sha に紐づくので、記録の後にコミットを積んだら再レビューが要求される
+        (直した内容は誰もレビューしていないので、これが正しい)。`--dry-run` と
+        ブランチ削除(`--delete` / `:branch`)は素通り。`--all`/`--tags`のように
+        送るコミットを特定できない形は「確認できないときはdeny」の原則どおり拒否される
+  6. `gh pr create` → 次の2つを並行して進める(順不同): `gh pr checks <番号> --watch` で
+     CI green確認、**5'で回したレビューの結果を `### Code review` 見出しのコメントとして
+     PRに投稿**(`gh pr comment`)——`.claude/hooks/enforce-code-review.sh`が
      このコメントの有無を`gh pr merge`実行時に機械チェックし、無ければ拒否する。
+     **レビューを2回回すという意味ではない**: push前のレビュー結果をPRに記録し、
+     マージ時に確認できるようにするためのもの(何十件と溜まったPR上のレビュー記録は
+     資産なので途切れさせない)。PR作成後に追加でプラグイン版を回したい場合は
+     `/code-review <番号> --comment` も使える。
      **レビュー不要と判断した場合**(docsのみの変更など)は、黙って飛ばさず
      `### Code review skipped: <理由>`という見出しのコメントを残す(2026-07-25追加)——
      `/code-review`スキルは「レビュー不要」と判断すると**何も投稿せずに終わる**ため、

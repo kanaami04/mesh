@@ -55,7 +55,7 @@ TS版でしか通らない/落ちる組み合わせがある点に注意(例: `o
 - `docs/handoff.md` の進捗リスト/候補リストを更新。
 - 言語仕様に触れる変更なら `src/card.ts` / `docs/features.md` / `docs/design-agenda.md` も。
 
-### 3. featureブランチ → commit → push → PR作成
+### 3. featureブランチ → commit → **code review** → push → PR作成
 
 デフォルトブランチ(main)にいるなら **必ず先にブランチを切る**。
 
@@ -64,9 +64,19 @@ git checkout -b <topic-branch>
 git status --short && git diff --stat   # ステージ前に確認(意図しないファイルを混ぜない)
 git add -A
 git commit -F <message-file>   # 決定の経緯・却下した代替案もメッセージに書く
+# ここで code review を回す(下の「push の前にレビュー」を参照)
+scripts/record-review.sh "<レビュー結果の要約>"   # または --skip "<理由>"
 git push -u origin <topic-branch>
 gh pr create --base main --title "..." --body "..."
 ```
+
+**push の前にレビュー**(2026-07-28にmerge直前から移動)。`.claude/hooks/enforce-review-before-push.sh`
+が、送るコミットのshaに対する記録(`.claude/review-log/<sha>`)が無ければ `git push` を拒否する。
+PRがまだ無いので**PR単位のプラグイン版はここでは使えない**——ローカルの差分を
+レビュー用サブエージェント(範囲・観点の縛りは下記「注意」と同じ)で見るか、
+自分で検証できる規模なら自分で回す。ユーザーの組み込み `/code-review` を使いたい場合は、
+Claudeからは起動できないのでpushの手前でユーザーに依頼して止まる。
+**記録はshaに紐づく**ので、記録の後にコミットを積んだら再レビューしてから記録し直す。
 
 `git add -A` は自動フローでも**必ず直前に `git status`/`git diff --stat` を目視**してから
 使う——無関係なローカル生成物・別作業の変更を巻き込まないため(CLAUDE.md「無関係な変更は
@@ -77,7 +87,7 @@ PR本文末尾には `🤖 Generated with [Claude Code]...` を付ける(ハー�
 
 **無関係な変更は同じPRに混ぜない**(例: スキル追加とマイルストーン実装は別PR)。
 
-### 4. CI と code review(mergeの前提)
+### 4. CI とレビュー結果の記録(mergeの前提)
 
 PR作成後、次の2つを **並行** で(順不同):
 
@@ -85,14 +95,17 @@ PR作成後、次の2つを **並行** で(順不同):
 gh pr checks <番号> --watch   # CI green を確認
 ```
 
-コードレビューを回す。**`code-review` プラグインが入っていて `code-review:code-review`
-スキルとしてモデルから起動できる環境なら、Claude自身がSkillツールで実行できる**
-(2026-07-24に`/plugin`で導入して確認済み)。プラグインが無い環境の組み込み `/code-review`
-スラッシュコマンドは `disable-model-invocation` でユーザーしか起動できないので、その場合は
-ユーザーに `/code-review <番号> --comment` の実行を依頼する。いずれにせよ結果は
-`### Code review` 見出しのコメントとしてPRに投稿される。
+**手順3で回したレビューの結果を `### Code review` 見出しのコメントとしてPRに投稿する**
+(`gh pr comment <番号> --body-file <file>`。見出しは**コメントの先頭行**に置く)。
 `.claude/hooks/enforce-code-review.sh` が、そのコメントが無い状態での `gh pr merge` を
-機械的に拒否する。レビュー指摘(80点以上)があれば対応コミットを足し、CIとレビューをやり直す。
+機械的に拒否する。**レビューを2回回すという意味ではない**——push前のレビュー結果を
+PRに残し、マージ時に確認できるようにするためのもの。
+レビュー不要と判断した場合は `### Code review skipped: <理由>`(**理由は必須**)。
+
+PR作成後に追加でPR単位のレビューを回したい場合は、`code-review` プラグインが入っていれば
+`code-review:code-review` スキルとしてClaude自身が起動できる(2026-07-24に`/plugin`で導入して
+確認済み)。組み込みの `/code-review` は `disable-model-invocation` でユーザーしか起動できない。
+レビュー指摘(80点以上)があれば対応コミットを足し、CIとレビューをやり直す。
 
 ### 5. merge(=ここでいったん止まる)
 
@@ -139,4 +152,6 @@ milestone N+1 が未マージの N のコードに依存する場合、開発中
 
 - **検証なしでコミットしない**(rust-test + clippy + TS版突き合わせ)。
 - **PR作成までは確認不要で自動**、**mergeは明示指示まで待つ** ([[pr-flow-autonomy]])。
-- **レビュー無しでマージしない**(フックが拒否する。回避・偽装しない)。
+- **レビュー無しで push しない・マージしない**(2つのフックが拒否する。回避・偽装しない)。
+  記録(`scripts/record-review.sh`)は「レビューを回した」という事実を残すためのもので、
+  レビューを回さずに記録だけ作るのは偽装にあたる。

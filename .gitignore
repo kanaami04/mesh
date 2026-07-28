@@ -9,3 +9,6 @@ rust/target/
 !CLAUDE.md
 !.claude/
 .claude/settings.local.json
+# push 前の code review の記録（scripts/record-review.sh が書く）。
+# HEAD の sha に紐づくローカルの作業ファイルなので共有しない
+.claude/review-log/

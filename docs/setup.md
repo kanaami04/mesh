@@ -21,7 +21,7 @@ mise で管理できないものだけを OS のパッケージマネージャ�
 | パッケージ | 必要な理由 | 無いとどうなるか |
 |---|---|---|
 | `gcc`(または clang 等の C コンパイラ) | Rust のリンカが `cc` を呼ぶ | `cargo build` が ``error: linker `cc` not found`` で失敗 |
-| `jq` / `grep` | `.claude/hooks/enforce-code-review.sh` が入力 JSON の解析・コマンド判定に使う | フックは「確認できないときは deny する」設計なので、**無いとマージが問答無用で拒否される**(無言でバイパスされるわけではない) |
+| `jq` / `grep` / `git` | `.claude/hooks/` のフックが入力 JSON の解析・コマンド判定・push 先の解決に使う | フックは「確認できないときは deny する」設計なので、**無いと push とマージが問答無用で拒否される**(無言でバイパスされるわけではない) |
 | `gh` | PR の作成・CI 確認・マージ | 開発フロー(下記)が回せない。mise でも入る(`mise use -g gh@latest`) |
 
 Ubuntu なら `sudo apt-get install -y gcc jq grep` です(`grep` は通常プリインストール済み)。
@@ -43,16 +43,18 @@ gh auth login    # 対話式。HTTPS + Git 認証も gh に任せるのが楽
 
 ## 5. `/code-review` プラグイン
 
-開発フローは PR ごとの `/code-review` を必須にしており、`.claude/hooks/enforce-code-review.sh` が
-`### Code review` 見出しのコメントが無い状態でのマージを拒否します。
+開発フローは変更ごとの code review を必須にしており、2つのフックが機械チェックします
+(`.claude/hooks/enforce-review-before-push.sh` が `git push` を、
+`.claude/hooks/enforce-code-review.sh` が `gh pr merge` を)。**レビュー自体は push の前**に
+回すので、PR がまだ無い段階ではプラグイン版(PR単位)は使えません——そこはローカルの
+差分に対するレビュー(ユーザーの `/code-review`、またはレビュー用サブエージェント)で行い、
+結果を `scripts/record-review.sh` で記録します。詳細は docs/handoff.md「開発の進め方」節。
 
+プラグインは PR 作成後のレビュー(`/code-review <番号> --comment`)に引き続き使えます。
 **注意**: `.claude/settings.json` の `enabledPlugins` は
 `code-review@claude-code-plugins` という**名前を有効化するだけ**で、プラグインの実体は
 `~/.claude/plugins/` 配下(git 管理外・マシンごと)にあります。新しいマシンでは
 Claude Code の `/plugin` から取得してください。
-
-これを忘れると「フックはマージを拒否するが、レビューを投稿する手段が無い」という
-詰みになります。
 
 ## 6. 動作確認
 

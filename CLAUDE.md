@@ -41,6 +41,8 @@ mise run drift          # 自分の変更が偽にしたコメントの候補を
 
 scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
                                                  # (run_in_background で起動する)
+scripts/record-review.sh "<要約>"                # push前に回したcode reviewの記録
+scripts/record-review.sh --skip "<理由>"         # レビュー不要と判断した記録(理由必須)
 ```
 
 **出荷する前に `mise run parity` と `mise run drift` を回す。**
@@ -57,16 +59,28 @@ parityは0件のまま通り続けていた。**検査の効き方を変えた�
 
 ## PRワークフロー
 
-feature branch → PR → CI green + `/code-review --comment` → **squash mergeのみ**。
-`.claude/hooks/enforce-code-review.sh` が `### Code review` 見出しのコメント無しでの
-`gh pr merge` を機械的に拒否する(確認できないときは常にdenyする設計)。
+feature branch → **code review → 記録 → push** → PR(レビュー結果をコメント)→ CI green
+→ **squash mergeのみ**。**レビューは push の前**に回す(2026-07-28に移動。マージ直前だと
+指摘が出るのはPRを公開してCIを回した後になり、直す前に載ってしまうため)。
+
+ゲートは2つあり、どちらも**確認できないときは常にdenyする**設計:
+
+- `.claude/hooks/enforce-review-before-push.sh` が `git push` を止める。
+  **これから送るコミットの sha** に対する記録(`.claude/review-log/<sha>`、
+  `scripts/record-review.sh` が書く)が無ければ拒否する。コミットを積み直したら
+  記録は当たらなくなる = 直した内容は再レビュー
+- `.claude/hooks/enforce-code-review.sh` が `### Code review` 見出しのコメント無しでの
+  `gh pr merge` を拒否する。push前に回したレビューの結果をPRに残すためのもので、
+  **レビューを2回回すという意味ではない**
+
 **`git stash` も `.claude/hooks/block-git-stash.sh` が拒否する**——別の状態を見たいときは
 `git worktree` を使う(経緯は `.claude/skills/git-worktree`。読み取り専用の
 `git stash list`/`show` は通る)。
 
-レビューが不要だと判断した場合(docsのみの変更など)は、黙って飛ばさず
-`### Code review skipped: <理由>` という見出しのコメントを残す(**理由の記載は必須**。
-経緯と根拠は docs/handoff.md「開発の進め方」節)。
+レビューが不要だと判断した場合(docsのみの変更など)は、黙って飛ばさず理由を残す
+(**理由の記載は必須**): push前は `scripts/record-review.sh --skip "<理由>"`、
+PRには `### Code review skipped: <理由>` という見出しのコメント。
+経緯と根拠は docs/handoff.md「開発の進め方」節。
 
 **レビュー用サブエージェントを起動したら、同時に目覚ましを仕掛ける**
 (`Bash(run_in_background: true)` で `scripts/agent-timeout.sh 10 <エージェントID...>`)。

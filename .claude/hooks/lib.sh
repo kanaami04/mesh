@@ -1,5 +1,6 @@
 #!/bin/bash
-# enforce-code-review.sh が使うヘルパー。
+# フック共通のヘルパー（enforce-code-review.sh / enforce-review-before-push.sh /
+# remind-worktree.sh / block-git-stash.sh が読む）。
 #
 # 設計方針: フックが担うのは「GitHub 側で表現できないローカルな約束」だけにする。
 # 例えば「マージは squash に統一」はリポジトリ設定（merge commit と rebase を無効化）で
@@ -137,6 +138,115 @@ hook_is_worktree_add() {
     hook_segment_is_worktree_add "$seg" && return 0
   done <<< "$(hook_split_segments "$(hook_strip_quoted "$1")")"
   return 1
+}
+
+# 断片が `git push` の呼び出しかを判定する(hook_segment_is_worktree_add と同じ考え方)。
+# `git -C <path> push` のようにグローバルオプションを挟む形も拾う。
+hook_segment_is_push() {
+  printf '%s' "$1" | grep -Eq \
+    '^[[:space:]]*((then|else|elif|do)[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(sudo|env|time|nohup|command|xargs)[[:space:]]+)*git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-][^[:space:]]*)?)*[[:space:]]+push\b'
+}
+
+# コマンド文字列に `git push` の実際の呼び出しが含まれるか
+hook_is_push() {
+  local seg
+  while IFS= read -r seg; do
+    hook_segment_is_push "$(hook_strip_quoted "$seg")" && return 0
+  done <<< "$(hook_split_segments "$1")"
+  return 1
+}
+
+# push 断片から「送られるローカル側の ref」を1行ずつ取り出す。
+#
+# **クォートを落とさない断片を渡すこと**。hook_strip_quoted は判定(is_push)にだけ使う
+# ——引数まで落とすと `git push origin "HEAD:refs/heads/x"` の refspec が消えて
+# 「引数なし = HEAD」に化け、別のコミットを無記録で通してしまう(fail-open 方向の事故)。
+#
+# 出力の約束:
+#   - 通常の push          → ローカル側の ref 名（解決前の文字列。`HEAD` を含む）
+#   - 何も送らない呼び出し → 出力なし（`--dry-run` / `--delete` / `:branch` 形式の削除）
+#   - 対象を特定できない形 → `!unresolvable` の1行（`--all` / `--mirror` / `--tags` /
+#                            別リポジトリを指す `-C` など）。呼び出し元は deny する
+hook_push_srcs() {
+  local -a words=()
+  read -r -a words <<< "$1"
+  local n=${#words[@]} i=0 w
+
+  # `git` そのものに到達するまで読み飛ばす（環境変数代入・ラッパー・シェルキーワード）
+  while [ "$i" -lt "$n" ] && [ "${words[$i]}" != git ]; do i=$((i + 1)); done
+  if [ "$i" -ge "$n" ]; then printf '!unresolvable\n'; return; fi
+  i=$((i + 1))
+
+  # `push` までのグローバルオプション。作業対象のリポジトリを差し替えるものが
+  # 混じっていたら、このリポジトリの HEAD と突き合わせる前提が崩れるので降参する
+  while [ "$i" -lt "$n" ] && [ "${words[$i]}" != push ]; do
+    case "${words[$i]}" in
+      -C|--git-dir|--git-dir=*|--work-tree|--work-tree=*) printf '!unresolvable\n'; return ;;
+    esac
+    i=$((i + 1))
+  done
+  if [ "$i" -ge "$n" ]; then printf '!unresolvable\n'; return; fi
+  i=$((i + 1))
+
+  local -a positional=()
+  local skip_next=0 dry=0 delete=0 broad=0
+  while [ "$i" -lt "$n" ]; do
+    w=${words[$i]}
+    i=$((i + 1))
+    if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
+    case "$w" in
+      --dry-run|-n) dry=1 ;;
+      --delete|-d) delete=1 ;;
+      # 送る先が広すぎて「このコミット」に還元できない形
+      --all|--mirror|--tags|--follow-tags) broad=1 ;;
+      # 値を**次の単語**として取るオプション（refspec と取り違えないよう1語読み飛ばす）。
+      # `--force-with-lease` はここに入れない——値は `=` で付ける形しか無く、
+      # 素の `git push --force-with-lease origin main` で origin を食べてしまう
+      -o|--push-option|--repo|--exec|--receive-pack) skip_next=1 ;;
+      -*) ;;
+      *)
+        # リダイレクションは引数ではない。`git push -u origin br 2>&1 | tail` の
+        # `2>&1` を refspec と取り違えて「解決できない」で止まる
+        # （**このフック自身の初回 push で踏んだ**。単独の `&` は区切り文字に
+        # していないので `2>&1` は断片に残る——hook_split_segments のコメント参照。
+        # マージ側も同じ形で一度壊れている）
+        if printf '%s' "$w" | grep -Eq '^([0-9]*|&)(>>?|<)'; then
+          # 演算子だけの語（`>` `2>` `>>` `<`）なら、次の語はファイル名なので一緒に飛ばす
+          printf '%s' "$w" | grep -Eq '^([0-9]*|&)(>>?|<)$' && skip_next=1
+        else
+          positional+=("$w")
+        fi
+        ;;
+    esac
+  done
+
+  # 何も送らない呼び出しは記録を要求しない
+  if [ "$dry" -eq 1 ] || [ "$delete" -eq 1 ]; then return; fi
+  if [ "$broad" -eq 1 ]; then printf '!unresolvable\n'; return; fi
+
+  # 最初の位置引数はリモート（`git push main` の `main` もリモート名として解釈される）。
+  # refspec が無ければ送られるのは現在のブランチ = HEAD
+  if [ "${#positional[@]}" -le 1 ]; then printf 'HEAD\n'; return; fi
+
+  local p src
+  for p in "${positional[@]:1}"; do
+    # 引数まわりのクォートを落とす。断片は**クォートを保ったまま**渡される約束なので、
+    # `git push origin "HEAD:refs/heads/x"` の refspec は `"HEAD:...` の形で届く
+    # （ref 名にクォートは使えないので、単純に取り除いてよい）
+    p=${p//\"/}
+    p=${p//\'/}
+    src=${p%%:*}
+    src=${src#+}
+    [ -z "$src" ] && continue # `:branch` 形式はリモートブランチの削除
+    printf '%s\n' "$src"
+  done
+}
+
+# code review の記録（enforce-review-before-push.sh が読み、scripts/record-review.sh が書く）を
+# 置くディレクトリ。$1 = リポジトリのルート。**両者がずれると片方だけ直る事故になる**ので
+# ここに一本化する
+hook_review_log_dir() {
+  printf '%s' "${1%/}/.claude/review-log"
 }
 
 hook_segment_is_stash() {

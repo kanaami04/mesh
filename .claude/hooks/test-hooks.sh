@@ -398,5 +398,213 @@ out=$(printf '{"tool_input":{"command":"git worktree add /tmp/base main"}}' \
 [ -z "$out" ] && ok || ng "$(printf 'jq等が無い環境では素通り(fail-open)すべき\n  出力: %s' "$out")"
 rm -rf "$emptydir"
 
+# ---------------------------------------------------------------------------
+# 7. push 前の code review 記録フック（enforce-review-before-push.sh）
+#    レビューをマージ直前ではなく push 直前に置くためのゲート。マージ側と同じく
+#    **確認できないときは deny** が守られているかを見る。
+# ---------------------------------------------------------------------------
+
+# $1 = 期待（match / nomatch）, $2 = 説明, $3 = コマンド文字列
+check_push() {
+  local want=$1 desc=$2 cmd=$3 got
+  if hook_is_push "$cmd"; then got=match; else got=nomatch; fi
+  [ "$got" = "$want" ] && ok || ng "$(printf '%s\n  期待=%s 実際=%s\n  入力: %s' "$desc" "$want" "$got" "$cmd")"
+}
+
+check_push match   '素のpush'              'git push'
+check_push match   '上流設定つき'          'git push -u origin feature'
+check_push match   '先行するcd'            'cd /repo && git push'
+check_push match   'セミコロン区切り'      'echo start; git push origin main'
+check_push match   'サブシェル'            '(git push --force-with-lease)'
+check_push match   'gitのグローバルオプション' 'git -c core.pager=cat push'
+check_push nomatch '別コマンド'            'git status'
+check_push nomatch 'pushという語の別用法'  'git log --oneline'
+# 引数の文字列としてコマンド名が現れる形（block-git-stash.sh が実際に踏んだ誤発火）
+check_push nomatch 'PRコメント本文'        'gh pr comment 1 --body "手順は git push です"'
+check_push nomatch 'シングルクォート'      "echo 'git push は最後'"
+
+# --- 送られるローカル ref の取り出し（hook_push_srcs）---
+# $1 = 期待（空白区切り）, $2 = 説明, $3 = 断片
+check_srcs() {
+  local want=$1 desc=$2 seg=$3 got
+  got=$(hook_push_srcs "$seg" | tr '\n' ' ')
+  got=${got% }
+  [ "$got" = "$want" ] && ok || ng "$(printf '%s\n  期待=[%s] 実際=[%s]\n  入力: %s' "$desc" "$want" "$got" "$seg")"
+}
+
+check_srcs 'HEAD'          '引数なしなら現在のブランチ'   'git push'
+check_srcs 'HEAD'          'リモートだけならHEAD'         'git push origin'
+check_srcs 'feature'       'ブランチ名'                   'git push -u origin feature'
+check_srcs 'HEAD'          'refspecのローカル側'          'git push origin HEAD:refs/heads/x'
+check_srcs 'old'           '強制pushの+は落とす'          'git push origin +old:refs/heads/x'
+check_srcs 'a b'           '複数refspec'                  'git push origin a b'
+# 断片はクォートを保ったまま渡される（refspecを落とさないため）。ref名にクォートは
+# 使えないので取り除いてよい——落とし忘れると正当なpushが「解決できない」で止まる
+check_srcs 'HEAD'          'クォート付きrefspec'          'git push origin "HEAD:refs/heads/x"'
+# 値を次の単語として取るオプションを refspec と取り違えない
+check_srcs 'feature'       '-o の値は refspec ではない'   'git push -o ci.skip origin feature'
+# `--force-with-lease` は値を `=` で付ける形しか無い。次の単語を食べるとリモート名が消える
+check_srcs 'feature'       'force-with-leaseは値を取らない' 'git push --force-with-lease origin feature'
+# リダイレクションを refspec と取り違えない。**このフック自身の初回 push で踏んだ**
+# （`git push -u origin br 2>&1 | tail -5` が「ref『2>&1』を解決できない」で止まった）。
+# 単独の `&` は区切り文字にしていないので `2>&1` は断片に残る——マージ側も同じ形で
+# 一度壊れており、その回帰防止テストがすぐ上の check_pr_num にある
+check_srcs 'feature'       'stderrリダイレクト'           'git push -u origin feature 2>&1'
+check_srcs 'feature'       '出力先の指定(空白あり)'       'git push origin feature > /dev/null'
+check_srcs 'feature'       '出力先の指定(空白なし)'       'git push origin feature >out.log'
+check_srcs 'feature'       '追記リダイレクト'             'git push origin feature >> log.txt'
+# 何も送らない呼び出しは記録を要求しない（出力なし）
+check_srcs ''              'dry-run'                      'git push --dry-run origin feature'
+check_srcs ''              'リモートブランチの削除'       'git push origin --delete feature'
+check_srcs ''              ':branch 形式の削除'           'git push origin :feature'
+# 対象を特定できない形は降参して呼び出し元に deny させる
+check_srcs '!unresolvable' '--all'                        'git push --all origin'
+check_srcs '!unresolvable' '--tags'                       'git push --tags origin'
+check_srcs '!unresolvable' '別リポジトリを指す -C'        'git -C /other push'
+# クォートの中を && で断片分割してしまった残骸（lib.sh の既知の近似）。
+# 本物のpushに見えるので deny 側に倒れる = fail-closed であることを固定する
+check_srcs '!unresolvable' 'クォート断片の残骸'           "git push'"
+
+# --- 実際にフックを起動する（使い捨てのリポジトリを作って確認）---
+hooks_dir=$PWD # このスクリプトは .claude/hooks へ cd 済み
+pushrepo=$(mktemp -d)
+git -C "$pushrepo" init -q .
+git -C "$pushrepo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+# 既定ブランチ名は git の版・設定で変わるので、テストが依存する名前を明示的に作る
+git -C "$pushrepo" checkout -q -B main
+pushsha=$(git -C "$pushrepo" rev-parse HEAD)
+
+# $1 = コマンド文字列
+run_push_hook() {
+  printf '{"tool_input":{"command":%s},"cwd":%s}' \
+    "$(printf '%s' "$1" | jq -Rs .)" "$(printf '%s' "$pushrepo" | jq -Rs .)" \
+    | env CLAUDE_PROJECT_DIR="$pushrepo" /bin/bash ./enforce-review-before-push.sh 2>/dev/null
+}
+
+# $1 = 説明, $2 = コマンド, $3 = 理由に含まれるべき文字列
+expect_push_deny() {
+  local desc=$1 out reason
+  out=$(run_push_hook "$2")
+  if [ -z "$out" ]; then
+    ng "$desc: 出力なし（= 無言で allow に転んでいる）"
+    return
+  fi
+  reason=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason' 2>/dev/null)
+  if [ -z "$reason" ] || [ "$reason" = null ]; then
+    ng "$desc: deny 応答が妥当な JSON でない: $out"
+  elif ! printf '%s' "$reason" | grep -q "$3"; then
+    ng "$desc: 理由に「$3」が含まれない: $reason"
+  else
+    ok
+  fi
+}
+
+# $1 = 説明, $2 = コマンド
+expect_push_allow() {
+  local out
+  out=$(run_push_hook "$2")
+  [ -z "$out" ] && ok || ng "$(printf '%s: 素通りすべき\n  出力: %s' "$1" "$out")"
+}
+
+expect_push_deny  '記録が無ければ deny'   'git push -u origin main' 'code review の記録がありません'
+expect_push_deny  '対象不明なら deny'     'git push --all origin'   '特定できませんでした'
+expect_push_deny  '解決できないref'       'git push origin nope'    '解決できませんでした'
+expect_push_allow '何も送らない dry-run'  'git push --dry-run'
+expect_push_allow 'リモートブランチ削除'  'git push origin --delete feature'
+expect_push_allow 'push以外のコマンド'    'git status'
+
+# 記録を置けば通る。**中身も見る**——空の記録で通る作りだと「レビューを回した記録」
+# として意味を成さない（マージ側でスキップの理由を必須にしているのと同じ考え方）
+pushlog=$(hook_review_log_dir "$pushrepo")
+mkdir -p "$pushlog"
+printf 'note:    \n' > "$pushlog/$pushsha"
+expect_push_deny  '中身が空の記録は deny' 'git push' 'code review の記録がありません'
+printf 'note: 指摘なし\n' > "$pushlog/$pushsha"
+expect_push_allow '記録があれば素通り'    'git push'
+
+# 記録は HEAD の sha に紐づく。コミットを積み直したら再レビューが要求される
+git -C "$pushrepo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m second
+expect_push_deny  'コミットを積んだら再レビュー' 'git push' 'code review の記録がありません'
+
+# scripts/record-review.sh が書いた記録をフックが読めること（両者の場所がずれていないか。
+# 定義は lib.sh の hook_review_log_dir に一本化してあるが、ずれると黙って全 deny になる）
+(cd "$pushrepo" && "$hooks_dir/../../scripts/record-review.sh" 'テスト用の記録' >/dev/null 2>&1)
+expect_push_allow 'record-review.sh の記録で通る' 'git push'
+# --skip も理由つきなら通る／理由が無ければ記録自体を作らない
+git -C "$pushrepo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m third
+(cd "$pushrepo" && "$hooks_dir/../../scripts/record-review.sh" --skip '' >/dev/null 2>&1)
+expect_push_deny  '理由の無いスキップは記録されない' 'git push' 'code review の記録がありません'
+(cd "$pushrepo" && "$hooks_dir/../../scripts/record-review.sh" --skip 'docsのみの変更のため' >/dev/null 2>&1)
+expect_push_allow '理由つきスキップは通る' 'git push'
+
+# worktree の中から push する場合、CLAUDE_PROJECT_DIR（=メインの作業ツリー）ではなく
+# **cwd** を基準にすること。メイン側がレビュー済みだからといって、worktree にある
+# 別のコミットを通してはいけない（fail-open の穴）
+wtbase=$(mktemp -d)
+if git -C "$pushrepo" worktree add -q --detach "$wtbase/wt" HEAD >/dev/null 2>&1; then
+  git -C "$wtbase/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'worktreeだけのコミット'
+  out=$(printf '{"tool_input":{"command":"git push"},"cwd":%s}' "$(printf '%s' "$wtbase/wt" | jq -Rs .)" \
+    | env CLAUDE_PROJECT_DIR="$pushrepo" /bin/bash ./enforce-review-before-push.sh 2>/dev/null)
+  if [ -n "$out" ] && printf '%s' "$out" | jq -re '.hookSpecificOutput.permissionDecisionReason' 2>/dev/null | grep -q '記録がありません'; then
+    ok
+  else
+    ng "$(printf 'worktree の未レビューのコミットは deny すべき（メイン側の記録で通ってはいけない）\n  出力: %s' "$out")"
+  fi
+  git -C "$pushrepo" worktree remove --force "$wtbase/wt" >/dev/null 2>&1
+else
+  : # worktree を作れない環境ではスキップ
+fi
+rm -rf "$wtbase"
+
+rm -rf "$pushrepo"
+
+# --- fail-closed（確認できないときは deny）---
+PUSH_CMD='git push -u origin main'
+
+# jq が無い → 無言 allow ではなく、見つからない旨を理由に deny
+expect_deny 'push: jq が無い場合は deny' \
+  "$(printf '{"tool_input":{"command":%s}}' "$(printf '%s' "$PUSH_CMD" | jq -Rs .)" \
+    | env PATH=/nonexistent HOME=/nonexistent-home /bin/bash ./enforce-review-before-push.sh 2>/dev/null)" 'jq'
+
+# git だけ無い状況（gh のときと同じく、hook_augment_path で解決できてしまう環境では諦める）
+tmpbin3=$(mktemp -d)
+ln -s "$(command -v jq)" "$tmpbin3/jq"
+ln -s "$(command -v grep)" "$tmpbin3/grep"
+fakehome3=$(mktemp -d)
+git_would_resolve() (
+  PATH="$tmpbin3"
+  HOME="$fakehome3"
+  hook_augment_path
+  command -v git >/dev/null 2>&1
+)
+if git_would_resolve; then
+  : # このマシンでは git が hook_augment_path 経由で見つかるためスキップ
+else
+  expect_deny 'push: git が無い場合は deny' \
+    "$(printf '{"tool_input":{"command":%s}}' "$(printf '%s' "$PUSH_CMD" | jq -Rs .)" \
+      | env PATH="$tmpbin3" HOME="$fakehome3" /bin/bash ./enforce-review-before-push.sh 2>/dev/null)" 'git'
+fi
+rm -rf "$tmpbin3" "$fakehome3"
+
+# 不正なJSON入力 → 空コマンド扱いで無言 allow するのではなく deny
+expect_deny 'push: jq解析失敗なら deny' \
+  "$(printf 'これはJSONではない' | bash ./enforce-review-before-push.sh 2>/dev/null)" 'jq'
+
+# lib.sh を読めない場所にコピーして実行 → 無言 allow ではなく deny
+tmp3=$(mktemp -d)
+cp ./enforce-review-before-push.sh "$tmp3/"
+expect_deny 'push: lib.sh が無い場合は deny' \
+  "$(printf '{"tool_input":{"command":%s}}' "$(printf '%s' "$PUSH_CMD" | jq -Rs .)" | bash "$tmp3/enforce-review-before-push.sh" 2>/dev/null)" \
+  'lib.sh'
+rm -rf "$tmp3"
+
+# git リポジトリの外で実行 → 記録の場所が分からないので deny
+outside=$(mktemp -d)
+expect_deny 'push: リポジトリ外なら deny' \
+  "$(printf '{"tool_input":{"command":%s},"cwd":%s}' "$(printf '%s' "$PUSH_CMD" | jq -Rs .)" "$(printf '%s' "$outside" | jq -Rs .)" \
+    | env -u CLAUDE_PROJECT_DIR /bin/bash ./enforce-review-before-push.sh 2>/dev/null)" \
+  'リポジトリのルート'
+rm -rf "$outside"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
