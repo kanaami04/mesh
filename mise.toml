@@ -47,3 +47,10 @@ run = "scripts/parity.sh --update"
 [tasks.drift]
 description = "自分の変更が偽にしたコメントの候補を出す(判定はしない)"
 run = "scripts/drift.sh"
+
+[tasks."oracle-hunt"]
+description = "TS版オラクル(git履歴から復元)とランダム生成の.meshを突き合わせて差分を探す"
+# sweepが「直積 × 記録」なのに対し、こちらは「ランダム × オラクル」。
+# 記録を持たないので --update に相当する抜け道が無い(判定はオラクルがする)。
+# 引数: [件数] [シード]。差が出たらシードを控えて再現する
+run = "scripts/oracle-hunt.sh"

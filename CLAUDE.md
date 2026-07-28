@@ -38,6 +38,7 @@ mise run rust-check     # cd rust && cargo clippy --all-targets
 mise run parity         # 診断の出力が記録どおりか(旧: TS版との突き合わせ)
 mise run sweep          # 「形の組み合わせ」を機械生成してTS版と突き合わせる(parityの死角)
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
+mise run oracle-hunt    # TS版オラクル(git履歴から復元)とランダム生成物を突き合わせる
 
 scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
                                                  # (run_in_background で起動する)
@@ -46,6 +47,22 @@ scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エー�
 **出荷する前に `mise run parity` と `mise run drift` を回す。**
 parityは診断の出力が記録と違えば失敗する(生成JSの方は`rust/tests/codegen_snapshot.rs`が見る)。
 driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
+
+**「オラクルを失った」は正しくない。** TS実装は`cd7273a`で削除されただけで、
+git履歴から**復元して実行できる**:
+
+```sh
+mkdir -p /tmp/ts-oracle
+git archive cd7273a^ src package.json tsconfig.json bun.lock | tar -x -C /tmp/ts-oracle
+(cd /tmp/ts-oracle && bun install --frozen-lockfile && bun src/cli.ts check <file>)
+rm -rf /tmp/ts-oracle   # 使い終わったら消す
+```
+
+失ったのは常時稼働の並走であって、問い合わせる手段ではない。移植漏れを埋めるときは
+**挙動を推測する前にまずオラクルに聞く**——2026-07-28はこの手順で3件の移植漏れを
+「本当にバグか」「どう直すか」「直って合っているか」まで実測で決めた。
+`mise run oracle-hunt`はこれを自動化したもの(キャッシュは`/tmp/mesh-ts-oracle`。
+**プロセス間で共有されるので、手で壊す実験をするときは他のセッションに注意**)。
 
 **parityは「コーパスに載っている形」しか測れない。** milestone 65で見つけた誤検知5種は
 `!`/`&&`/`||`で包んだ条件式——**単体では全部コーパスにある要素の組み合わせ**だったので
@@ -89,10 +106,14 @@ PRとは無関係**で、現リポジトリのPR番号は移管後に1から振�
 「正しさの基準(オラクル)」を務めていたが、撤去条件(1)〜(5)を満たして
 2026-07-27に撤去した。経緯は `docs/ts-removal-plan.md`。
 
-**オラクルが無くなったので、正しさの基準は「記録との一致」になった**:
+**常時稼働の並走が無くなったので、CIと日常の基準は「記録との一致」になった**:
 `tests/parity/*/expected.txt`・`tests/parity-examples/`・`tests/codegen-snapshots/`・
 `tests/sweep-expected.txt` が撤去時点の出力を凍結している。
 **これらを `--update` で更新したら、差分を必ず読むこと**——説明できない変化は退行。
+
+**ただし「オラクルに聞けなくなった」わけではない**(上記「『オラクルを失った』は正しくない」節)。
+記録は*凍結時点で既に間違っていたもの*には永遠に届かないので、**移植漏れを疑うときは
+記録ではなくオラクルに聞く**。役割分担: 記録=CI・退行検出 / オラクル=移植の正しさの判定。
 
 移植期に効いた原則は撤去後も有効: 診断の優劣は
 **誤検知＞違う診断コード＞検出漏れ** の順に悪く、迷ったら検出漏れ側に倒す。
