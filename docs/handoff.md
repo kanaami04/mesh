@@ -449,6 +449,31 @@ codegen単体テストは`full_checker`のゲートを通らないので、**無
    オラクル不要の性質(fmtのべき等性・check⇒build・診断の重複が無いこと等)を組み合わせる形
 3. カード実証実験を回し始める(`docs/card-experiments.md`の手法をそのまま流用できる)
 
+### 自走ループの置き場所: セッション内 vs クラウド常駐(2026-07-29)
+
+`/loop`(`ScheduleWakeup`)の自走はこのセッション(この端末)を閉じると止まる。無人で
+1週間動かし続けたいなら`/schedule`(`RemoteTrigger`)経由のクラウド常駐が要る——ただし
+**別物の実行環境**であり、思い込みで移行すると事故る。実測した違い:
+
+- **毎回、完全に独立した使い捨てコンテナ**(`persist_session: false`)。ビルド済みバイナリも
+  オラクルキャッシュ(`/tmp/mesh-ts-oracle`)もローカルファイルの累計ログも**一切引き継がれない**。
+  プロンプト側で毎回ゼロから `cargo build` する必要がある(oracle-hunt.sh はバイナリが
+  無ければ exit 2 で止まるだけで、勝手にはビルドしてくれない)
+- **最短間隔は1時間**。cronの`*/30 * * * *`のような分単位指定は拒否される
+- **セッション内ループ専用のツール(`PushNotification`/`CronList`/`CronDelete`)は使えない**。
+  クラウド常駐セッションが持つツールは`job_config.ccr.session_context.allowed_tools`で
+  明示的に許可したものだけ。自己停止させたいなら`RemoteTrigger`をそこに含め、
+  ルーチン自身が`{action: "list"}`で自分の名前を探して`{action: "update", enabled: false}`を
+  呼ぶ形にする(CCRセッション内から`RemoteTrigger`が実際に呼べるかは未検証。念のため
+  プロンプトに「失敗したら https://claude.ai/code/routines から手動で無効化して」という
+  フォールバック文言も入れておくこと)
+- **永続的な監査ログはローカルファイルではなく持たせ方を変える**必要がある。今回は
+  追跡用のGitHub Issueを1つ作り、毎回`gh issue comment`で1行追記する形にした
+  (Issueなら使い捨てコンテナをまたいで自然に残り、Web上でも読める)
+
+`mesh-oracle-hunt`ルーチン(1時間おき・7日で自己停止する設計・Issue #117が監査ログ)が
+この形の実例。
+
 ## このプロジェクトは何か
 
 **Mesh** — 「TypeScriptの型 × Goのシンプルさ・並行処理」を持つ、JavaScriptにトランスパイルされる
