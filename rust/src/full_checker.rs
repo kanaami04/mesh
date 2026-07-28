@@ -1884,11 +1884,16 @@ fn member_tag_value(m: &Type, tag_name: &str) -> Option<String> {
 // (src/checker/expressions.ts)の移植。codegen側のmilestone 13/14で同じロジックを既に
 // `checker.rs`へ移植済みだが、あちらは診断を出さず`Result<_, String>`で即失敗する設計
 // (最小リゾルバ)。こちらは診断(コード+メッセージ+位置)を積んで走査を続ける。
-// **narrowingは不要**: TS版は`&&`/`||`の右辺検査で左辺`x is T`の絞り込みを適用する
-// (F-6)が、絞り込みの対象になるのはunion型だけで、full_checkerのスカラースコープでは
-// union型は`resolve_scalar_type`でANYに潰れる——ANYはnot-bool/incomparable-types等の
-// 全チェックの安全弁を素通りするので、絞り込みの有無で結果が変わらない
-// (codegen milestone 14がスクラッチctxで対処した回帰は、そもそもここでは起きない)
+// **`&&`/`||`の右辺は左辺の絞り込みを適用してから検査する**(F-6)。`&&`は左が真のときだけ
+// 右を評価するのでthen側の事実、`||`は左が偽のときだけ右を評価するのでelse側の事実が使える。
+//
+// **2026-07-28に移植するまで、ここは絞り込みを一切見ていなかった**。当時のコメントは
+// 「絞り込みの対象になるのはunion型だけで、full_checkerではunionが`resolve_scalar_type`で
+// ANYへ潰れるから結果が変わらない」と説明していたが、**unionをモデル化したmilestone 39以降
+// その前提は偽**になっており、`a is Foo && a.value > 0`のような F-6 でdocs記載済みの形が
+// `narrow-required`/`incomparable-types`/`invalid-operation`という**誤検知**になっていた。
+// 前提が消えたのに結論だけが残った典型的なdrift。
+// TS版オラクルを復元して7形すべてが診断ゼロであることを確認してから直した。
 fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Expr, pos: Pos) -> Type {
     // グロブ`use TokenType::*`は`TokenType::Type`(typeキーワード)を取り込んで
     // `Type`enumを隠すため、必要なバリアントだけ明示的にインポートする
@@ -1899,7 +1904,18 @@ fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Ex
         if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
             ctx.error(left.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&lt)));
         }
+        // 左辺の事実を**使い捨てのスコープ**へ積んでから右辺を検査する(TS版と同じ順序:
+        // 左辺を検査 → collectFacts → pushScope → applyFacts → 右辺を検査 → popScope)。
+        // `collect_facts`は診断を出さない(TS版と同じ契約。Rust版は型を計算し直すので
+        // 内部で積んだ分を捨てている——`collect_facts`のコメント参照)ので、
+        // **左辺の診断は上の`infer_expr_single`が1回だけ出す**
+        let (then_facts, else_facts) = collect_facts(ctx, left);
+        ctx.push_scope();
+        for (name, ty) in if op == AndAnd { &then_facts } else { &else_facts } {
+            ctx.narrow(name, ty.clone());
+        }
         let rt = infer_expr_single(ctx, right);
+        ctx.pop_scope();
         if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {
             ctx.error(right.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&rt)));
         }
@@ -3047,6 +3063,22 @@ type NarrowFacts = Vec<(String, Type)>;
 // 5種類の形(`!(x is none)` / `x is int && ...` / 2変数の`&&` / `||`のelse側 / 二重否定)で
 // 実測して確認した(milestone 65)。
 fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
+    // **診断を出さずに事実だけを集める**。TS版`collectFacts`は「呼ぶ前に`checkExprSingle`済みで
+    // `resolvedType`が埋まっている前提(副作用のある呼び出しを一切しない——診断の重複を避けるため)」
+    // と明記している。Rust版のASTには解決済み型のキャッシュが無く、フィールドパスの分岐が
+    // `infer_expr_single`で型を計算し直すため、**そのままだと同じ診断が2度出る**。
+    // 呼び出し側は必ず先に条件式を検査しているので、ここで積まれた分は捨ててよい。
+    //
+    // これを入れるまで `if h.bogus is Foo && h.v > 0` の`unknown-field`が**3回**出ていた
+    // (TS版オラクルは1回)。`&&`/`||`の右辺への絞り込みを足した回に2→3へ悪化したのを
+    // code reviewが見つけ、既存分(check_ifの2回)ごと解消した
+    let before = ctx.diagnostics.len();
+    let facts = collect_facts_inner(ctx, expr);
+    ctx.diagnostics.truncate(before);
+    facts
+}
+
+fn collect_facts_inner(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
     match expr {
         Expr::Is { operand, target, .. } => {
             let found = match &**operand {
@@ -3074,8 +3106,16 @@ fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowF
                     if ctx.lookup(root).is_none_or(|b| b.mutable) {
                         return None;
                     }
+                    // **推論そのものが診断を出したなら絞り込まない**。`w.inner is Foo`で
+                    // `w`が未絞り込みだと`w.inner`はエラーのままANYへ縮退する。そこから
+                    // 作った事実をスコープへ入れると、右辺の`w.inner.value`が
+                    // 「絞り込み済み」と見なされて**本来出るべき診断が消える**
+                    // (TS版は同じ入力で`narrow-required`を2箇所に出す。実測で確認)。
+                    // 呼び出し側は先に条件式を検査しているので、ここで出た分は
+                    // どのみち`collect_facts`のラッパが捨てる——数だけ見て判断する
+                    let before = ctx.diagnostics.len();
                     let ty = infer_expr_single(ctx, m);
-                    if !safe_to_compare(&ty) {
+                    if ctx.diagnostics.len() != before || !safe_to_compare(&ty) {
                         return None;
                     }
                     let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &ty, target);

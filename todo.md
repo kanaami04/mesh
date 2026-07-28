@@ -3844,6 +3844,57 @@
                 どんな壊れた入力でもコンパイラがpanicしない。試作した「等価な条件の書き換え」
                 (性質A)も`scripts/`へ昇格させる候補だが、等価集合の吟味が要る
                 (`x is int || 1 == 2`が絞り込まないのは仕様の可能性が高い)
+        - [x] **`&&`/`||` の右辺に左辺の絞り込みを適用する(誤検知7形の解消)**
+              ✅ 2026-07-28実装。`docs/features.md` が F-6 で「左の `is` が**右辺の式**と
+              then節の両方に効く」と書いている形が Rust版では効かず、
+              `narrow-required` / `incomparable-types` / `invalid-operation` の
+              **誤検知**になっていた(誤検知はこのプロジェクトで最悪の分類)。
+              - **推測を一切しなかったのがこの回の型**。まず**TS版オラクルを復元して**
+                7形すべてが診断ゼロであることを確認し(=本当に誤検知だと確定させ)、
+                そのうえで `expressions.ts` の `inferBinary` をそのまま移植した
+                (左辺を検査 → `collectFacts` → `pushScope` → `applyFacts` → 右辺を検査 →
+                `popScope`)。修正後も7形すべてオラクルと一致することを再確認。
+                手順は `docs/handoff.md`「TS版のソースは git 履歴に残っている」節。
+              - 原因は典型的なdrift。`infer_binary` 直前のコメントが「unionはANYに潰れるので
+                絞り込みの有無で結果が変わらない」と説明していたが、unionをモデル化した
+                milestone 39以降その前提は偽だった。**前提が消えたのに結論だけが残った形**。
+              - **記録の差分**: parity 1件(誤検知が消えた)+ sweep 6件(`cond_*` から診断が
+                消えた)。他の記録は無変更。**軸を足した回に穴が見つかり、次の回で埋まった**
+                という経緯が `sweep_gen.py` の軸を残す理由になっている。
+              - **残っているのはcodegen側**: `mesh check` は通るようになったが
+                `mesh build` はまだ落ちる形がある。**`cond_*` 6形のうち4形**
+                (識別子×`&&` の2形だけ通る)。原因は3つで、`codegen.rs::gen_if` の
+                `unwrap_is_cond` が素の `is` と `!` しか見ない(then節)/
+                `checker.rs::check_logical_op` が `is` の裸の識別子しか特別扱いしない
+                (subjectがフィールドパス)/ 同じく `!` で包まれた `is` を見ない(`||` の
+                De Morgan)。原因ごとの代表例3件を `KNOWN_VIOLATIONS` へ登録済み。
+                codegen側に `collect_facts` 相当を移植すれば全部消える(次の候補)。
+              - **正直に書くと、この4形は移植前は `check` の段階で診断が出ていた**
+                (誤検知だったが整形された表示だった)。いまは `check` を通って
+                **codegenの整形されないエラー**になる。誤検知の解消は正しいが
+                **体験としては未完**——codegen側を片付けるまでが1セット。
+              - **レビューで学んだこと**: 当初「1件の既知の限界」と書いていたが実際は4形だった。
+                `check_implies_build` の `corpus()` は `examples/` と `tests/parity/` しか
+                見ないので、**sweepが生成する一時ファイルは性質検査の対象外**——だから
+                自動では捕まらなかった。**性質検査に守らせたい形は、コーパスに置くまでが仕事**。
+              - **レビューが見つけた検出漏れを修正**。`w: Wrap | none` のとき
+                `if w.inner is Foo && w.inner.value > 0` で、TS版オラクルは
+                `narrow-required` を**2箇所**(条件の先頭と右辺のアクセス位置)に出すのに、
+                Rust版は1箇所に減っていた。**推論そのものがエラーだった式から絞り込み事実を
+                作っていた**のが原因——`w.inner` はエラーのままANYへ縮退し、そこから作った
+                事実をスコープへ入れると右辺が「絞り込み済み」と見なされる。
+                `collect_facts` で「診断が出たら事実を作らない」ようにして解消し、
+                オラクルと完全一致することを確認。プローブは
+                `tests/parity/narrow-fact-from-errored-operand/`。
+              - **副産物: 診断の重複を解消**(レビュー指摘)。`collect_facts` はTS版の契約では
+                「副作用を持たない」が、Rust版のASTには解決済み型のキャッシュが無く
+                フィールドパスの分岐が `infer_expr_single` を呼び直すため、同じ診断が
+                複数回出ていた。`if h.bogus is Foo && h.v > 0` の `unknown-field` は
+                **3回**(TS版オラクルは1回)。内部で積んだ診断を捨てる形にして、
+                **このPRが持ち込んだ分と既存分の両方**を解消。プローブは
+                `tests/parity/collect-facts-no-duplicate/`。
+              - 検証: テスト679件、clippyクリーン、parity 163件差0、sweep 126件差0、
+                run-examples 24本、TS版オラクルと7形一致。
         - [x] **`invalidatePath` の移植(絞り込んだパスへ代入したら事実を捨てる)**
               ✅ 2026-07-28実装。PR #109 のコードレビューが見つけた移植漏れ。TS版
               `narrowing.ts` の `invalidatePath` と `statements.ts` の assign ケースが

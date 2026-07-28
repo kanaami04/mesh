@@ -1,0 +1,23 @@
+// **推論そのものがエラーだった式から絞り込み事実を作らない**。
+//
+// `w` は `Wrap | none` なので `w.inner` は絞り込み前アクセスでエラー(ANYへ縮退)。
+// そこから作った事実をスコープへ入れると、`&&` の右辺の `w.inner.value` が
+// 「絞り込み済み」と見なされ、**本来出るべき2件目の診断が消える**。
+//
+// TS版オラクルは narrow-required を**2箇所**(条件の先頭と右辺のアクセス位置)に出す。
+// `&&`/`||` の右辺への絞り込みを移植した回に1箇所へ減る検出漏れを作り、code review が
+// 見つけたので `collect_facts` 側で「診断が出たら事実を作らない」ようにして解消した。
+struct Foo {
+	value: int
+}
+
+struct Wrap {
+	inner: Foo | none
+}
+
+fn main() {
+	w: Wrap | none = Wrap{inner: none}
+	if w.inner is Foo && w.inner.value > 0 {
+		print("ok")
+	}
+}

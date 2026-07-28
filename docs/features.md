@@ -66,14 +66,20 @@
       検出漏れだった。消すのは代入先とその子パスだけで祖先は残す/無効化は代入先の型を見る**前**
       (順序が逆だと宣言型には代入できるはずの値が弾かれる)。
       プローブは`tests/parity/narrow-then-assign-field/`)。
-      **既知の移植漏れ(2026-07-28発覚、未修正)**: 上の行が書いている
-      「`a is Foo && a.value > 0` は左の`is`が**右辺の式**に効く」も、**Rust版では効かない**。
-      `full_checker::infer_binary`が`&&`/`||`の右辺を絞り込み前のスコープで検査するため、
-      `narrow-required`という**誤検知**になる(then節側の絞り込みは正しく効く)。
-      直前のコメントが「unionはANYに潰れるので絞り込みの有無で結果が変わらない」と
-      説明しているが、それはunionをモデル化したmilestone 39以降**偽**になっている。
-      codegen側の`checker.rs`には`check_logical_op`のスクラッチctxという対処が既にある
-      (ただし裸の識別子のみ)ので、同じ技法をfull_checkerへ持ち込むのが修正方針 |
+      `&&`/`||`の右辺への絞り込みも**2026-07-28にRust版へ移植**(それまで
+      `full_checker::infer_binary`が右辺を絞り込み前のスコープで検査しており、
+      `narrow-required`/`incomparable-types`/`invalid-operation`の**誤検知**になっていた。
+      「unionはANYに潰れるので絞り込みの有無で結果が変わらない」というコメントが残っていたが、
+      unionをモデル化したmilestone 39以降その前提は偽だった)。
+      **既知の限界**: `mesh check`は通るが**`mesh build`はまだ落ちる形がある**
+      ——コード生成側が追いついていない。原因は3つで、`codegen.rs::gen_if`の`unwrap_is_cond`が
+      素の`is`と`!`しか見ない(then節で絞り込まれない)/ `checker.rs::check_logical_op`が
+      `is`の**裸の識別子**しか特別扱いしない(subjectがフィールドパスだと`&&`の右辺で効かない)/
+      同じく`!`で包まれた`is`を見ない(`||`のDe Morganで効かない)。
+      **`mise run sweep`の`cond_*`6形のうち4形が落ちる**(識別子×`&&`の2形だけ通る)。
+      追跡は`rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS`(原因ごとの代表例3件)。
+      なおこの4形は移植前は`check`の段階で診断が出ていた(誤検知だったが)ので、
+      誤検知の解消は正しい一方、**体験としては未完**(いまはcodegenの整形されないエラーになる) |
 | 汎用の空値(null / nil) | ❌ | 2026-07-17決定(union路線)。「どこにでも入り得る空値」は存在しない。
       不在は `T \| none` と書いた場所にだけ、型として現れる |
 | `any` 型 | ❌ | 2026-07-21実装(H-1、討議のうえkanayama承認)。critique-2026-07.md(B-5-2)の指摘を受け撤去 —

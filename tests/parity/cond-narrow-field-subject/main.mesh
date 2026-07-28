@@ -1,0 +1,19 @@
+// `&&` の右辺への絞り込み。**subject がフィールドパス**の形。
+//
+// `mesh check` は通る(2026-07-28に full_checker::infer_binary へ移植した)が、
+// **`mesh build` は落ちる**——codegen が使う `checker.rs::check_logical_op` は
+// `Expr::Is` が**裸の `Expr::Ident`** を包む形しか特別扱いしないため、
+// `h.v`(Expr::Member)では絞り込みが効かない。
+//
+// 追跡は `rust/tests/check_implies_build.rs` の `KNOWN_VIOLATIONS`。
+// codegen 側に `collect_facts` 相当を移植すれば消える。
+struct Holder {
+	v: int | none
+}
+
+fn main() {
+	h := Holder{v: 1}
+	if h.v is int && h.v > 0 {
+		print(1)
+	}
+}
