@@ -1247,16 +1247,6 @@ pub fn stable_path(e: &Expr) -> Option<String> {
 // 「このパスはこの型」という絞り込みの事実。`full_checker.rs`の`NarrowFacts`と同じ形
 pub type NarrowFacts = Vec<(String, Type)>;
 
-// `narrow_for_is`へ渡してよい型か。**未解決のunion bodyを渡すと`.expect()`でパニックする**
-// ので、解決済みであることを確認してから使う(`full_checker`の`safe_to_compare`と同じ役割。
-// 絞り込まない=生成コードが安全側の判断に倒れるだけなので、迷ったら渡さない)
-fn narrowable(ty: &Type) -> bool {
-    match ty {
-        Type::Union { body } => body.get().is_some(),
-        _ => true,
-    }
-}
-
 // 条件式から絞り込みの事実を集める(`full_checker.rs`の`collect_facts`と同じ規則を、
 // 診断を出さないこちら側へ移植したもの)。then側/else側それぞれの「パス→型」を返す。
 //
@@ -1268,7 +1258,11 @@ pub fn collect_facts(ctx: &CheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts
         Expr::Is { operand, target, .. } => {
             let found = stable_path(operand).and_then(|path| {
                 let ty = infer_expr(ctx, operand);
-                if !narrowable(&ty) {
+                // **`narrow_for_is`は未解決のunion body/struct fieldsで`.expect()`する**ので、
+                // 渡す前に門番を通す。`full_checker`と**同じ関数**(`types::safe_to_compare`)を
+                // 使う——ここに浅い自前版を置いていたら「守っている範囲が違う」と
+                // code reviewで指摘されたため統合した(2026-07-28)
+                if !types::safe_to_compare(&ty) {
                     return None;
                 }
                 let (then_ty, else_ty) = narrow_for_is(ctx, &ty, target);

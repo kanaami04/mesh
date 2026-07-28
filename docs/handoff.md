@@ -285,10 +285,17 @@ Rust版では効いていなかった。`full_checker::infer_binary`が`&&`/`||`
 `applyFacts` → 右辺を検査 → `popScope`)をそのまま移植した。**「本当に誤検知か」も
 「どう直すか」も推測しなかった**。
 
-**codegen側も片付いた(2026-07-28)**。`codegen.rs::gen_if` と `checker.rs::check_logical_op` を
-`checker::collect_facts`(`full_checker`側と同じ規則を診断を出さない側へ移植したもの)へ
-一般化し、フィールドパスのsubject・`&&`/`||`・`!`のド・モルガンがすべて効くようになった。
+**codegen側も片付いた(2026-07-28)**。`codegen.rs::gen_if`/`gen_else` と
+`checker.rs::check_logical_op` を `checker::collect_facts`(`full_checker`側と同じ規則を
+診断を出さない側へ移植したもの)へ一般化し、フィールドパスのsubject・`&&`/`||`・
+`!`のド・モルガン・**`else if`チェーン**がすべて効くようになった。
 `unwrap_is_cond`(素の`is`と`!`しか見なかった旧実装)は不要になったので削除。
+
+**同じ処理の「別経路」を取りこぼしやすい**のが実地の教訓。codegenには
+(1) `gen_if` と `gen_else`(else ifは**インラインで生成する**ので`gen_if`を通らない)、
+(2) `gen_stmt` と `gen_simple_stmt`(forのinit/post専用)、という重複した経路があり、
+**片方だけ直して2回ともcode reviewに指摘された**。`grep -n "Stmt::Assign" rust/src/codegen.rs`
+のように**同じ構文を扱う箇所を数えてから**着手するとよい。
 
 **絞り込みと同時に無効化(`CheckerCtx::invalidate_path`)も入れた**——これが今回の要点。
 PR #109 で「絞り込みだけ入れて無効化が無い」状態を作り、ミスコンパイルになった前例がある。

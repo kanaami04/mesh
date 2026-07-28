@@ -535,6 +535,10 @@ impl Codegen {
                 checker::check_inc_dec(*op, &target_ty, *pos)?;
                 let lvalue = self.gen_lvalue(target)?;
                 self.emit(format!("{lvalue}{op};"));
+                // 代入と同じく古い絞り込みを捨てる(`++`/`--`も値を書き換えるため)
+                if let Some(path) = checker::stable_path(target) {
+                    self.ctx.invalidate_path(&path);
+                }
                 Ok(())
             }
             Stmt::Break { .. } => {
@@ -707,8 +711,18 @@ impl Codegen {
                     }
                 }
             }
-            // else ifチェーンはnarrowing対象外のまま(実際のexampleに存在しない組み合わせ)
-            Some(other) => self.gen_else(Some(other))?,
+            // **else ifチェーンも絞り込む**(`full_checker::check_if`の同じ分岐と揃えた)。
+            // ここだけ対象外にしていると`if u is string {...} else if x is int { x + 1 }`が
+            // `mesh check`は通るのに`mesh build`だけ落ちる(code reviewで発覚)
+            Some(other) => {
+                self.ctx.push_scope();
+                for (path, ty) in &else_facts {
+                    self.ctx.declare(path, ty.clone());
+                }
+                let r = self.gen_else(Some(other));
+                self.ctx.pop_scope();
+                r?;
+            }
         }
         Ok(())
     }
@@ -719,11 +733,28 @@ impl Codegen {
                 self.emit("}");
                 Ok(())
             }
+            // **else ifは`gen_if`を通らず、ここでインラインに生成する**(`} else if (...) {`という
+            // 1つの連鎖にするため)。したがって絞り込みもここで自前に適用する必要がある
+            // ——`gen_if`だけ直しても`if u is string {...} else if x is int { x + 1 }`は
+            // `mesh check`が通るのに`mesh build`だけ落ちたままになる(code reviewで発覚)
             Some(ElseClause::If(if_stmt)) => {
+                let (then_facts, else_facts) = checker::collect_facts(&self.ctx, &if_stmt.cond);
                 let cond = self.gen_expr(&if_stmt.cond)?;
                 self.emit(format!("}} else if ({cond}) {{"));
+                self.ctx.push_scope();
+                for (path, ty) in &then_facts {
+                    self.ctx.declare(path, ty.clone());
+                }
                 self.gen_block(&if_stmt.then)?;
-                self.gen_else(if_stmt.else_.as_deref())
+                self.ctx.pop_scope();
+                // 連鎖の続き(さらなる else if / else)は、この条件が偽だった側の事実で見る
+                self.ctx.push_scope();
+                for (path, ty) in &else_facts {
+                    self.ctx.declare(path, ty.clone());
+                }
+                let r = self.gen_else(if_stmt.else_.as_deref());
+                self.ctx.pop_scope();
+                r
             }
             Some(ElseClause::Block(block)) => {
                 self.emit("} else {");
@@ -802,12 +833,22 @@ impl Codegen {
                 let rhs = self.gen_expr(&values[0])?;
                 let value =
                     if let Some(op) = compound_op { self.gen_compound_value(*op, &targets[0], &lvalue, &values[0], &rhs, *pos)? } else { rhs };
+                // **`gen_stmt`側の`Stmt::Assign`と同じく古い絞り込みを捨てる**。ここは
+                // forヘッダ(init/post)専用の**別経路**なので、片方だけ直すと
+                // `for i := 0; i < 3; o.v = f() { o.v + 1 }`のように**次の反復で古い型が残る**
+                // ——PR #109 と同じミスコンパイルの形(code reviewで発覚)
+                if let Some(path) = checker::stable_path(&targets[0]) {
+                    self.ctx.invalidate_path(&path);
+                }
                 Ok(format!("{lvalue} = {value}"))
             }
             Stmt::IncDec { target, op, pos } => {
                 let target_ty = checker::infer_expr(&self.ctx, target);
                 checker::check_inc_dec(*op, &target_ty, *pos)?;
                 let lvalue = self.gen_lvalue(target)?;
+                if let Some(path) = checker::stable_path(target) {
+                    self.ctx.invalidate_path(&path);
+                }
                 Ok(format!("{lvalue}{op}"))
             }
             Stmt::ExprStmt { expr, .. } => self.gen_expr(expr),
@@ -3051,6 +3092,28 @@ mod tests {
         // 右辺では`x`がintへ絞り込まれる。`collect_facts`が`!`のthen/else入れ替えを扱う
         let js = gen_body("fn main() {\n  x: int | none = 1\n  if !(x is int) || x + 1 > 0 {\n    print(1)\n  }\n}");
         assert!(js.contains("__iarith(x, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn else_ifチェーンでも絞り込まれる() {
+        // `gen_else`はelse ifを**インラインで生成する**ので`gen_if`を通らない。
+        // `gen_if`だけ`collect_facts`へ一般化しても、ここが取り残されると
+        // `mesh check`は通るのに`mesh build`だけ落ちる(code reviewで発覚)
+        let js = gen_body(
+            "fn main() {\n  x: int | none = 1\n  u: int | string = 1\n  if u is string {\n    print(u)\n  } else if x is int {\n    print(x + 1)\n  }\n}",
+        );
+        assert!(js.contains("__iarith(x, \"+\", 1,"), "got: {js}");
+    }
+
+    #[test]
+    fn forヘッダの代入も絞り込みを捨てる() {
+        // forのinit/postは`gen_simple_stmt`という**別経路**を通る。`gen_stmt`側だけ
+        // 無効化を入れると、`post`の代入が次の反復へ古い型を持ち越す(code reviewで発覚)
+        let err = gen_js(
+            "struct S {\n  v: int | none\n}\nfn f() int | none {\n  return none\n}\nfn main() {\n  s := S{v: 1}\n  if s.v is int {\n    for i := 0; i < 3; s.v = f() {\n      print(s.v + 1)\n    }\n  }\n}",
+        )
+        .expect_err("postの代入で絞り込みが消えるので int | none + int で失敗するはず");
+        assert!(err.contains("invalid operation"), "got: {err}");
     }
 
     #[test]

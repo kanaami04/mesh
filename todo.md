@@ -3861,13 +3861,23 @@
               - **生成JSは1バイトも変わらなかった**(`tests/codegen-snapshots/` 無変更、
                 parity 163件差0、sweep 126件差0、run-examples 24本)。絞り込みは型依存判断
                 (`__iarith` 等)のためだけに使う設計なので、既存プログラムの出力は変わらない。
-              - `narrow_for_is` は未解決の union body で `.expect()` するので、移植側にも
-                門番(`narrowable`)を付けた(`full_checker` の `safe_to_compare` と同じ役割)。
+              - `narrow_for_is` は未解決の union body / struct fields で `.expect()` するので
+                門番が要る。当初 `checker.rs` 側に `narrowable` という**浅い自前版**を
+                置いたが、code review で「`safe_to_compare` と守っている範囲が違う」と
+                指摘され(あちらは配列・map・関数型・struct フィールドまで再帰し、
+                自己参照ガードも持つ)、**`types.rs` へ移して1つに統合**した。
+                CLAUDE.md が繰り返し警告している「2箇所に書かれた定義がずれる」の予防。
+              - **同じ処理の「別経路」を2回取りこぼした**(どちらも code review で発覚)。
+                codegen には (1) `gen_if` と `gen_else`(else if は**インラインで生成**するので
+                `gen_if` を通らない)、(2) `gen_stmt` と `gen_simple_stmt`(for の init/post 専用)
+                という重複経路がある。**`grep -n "Stmt::Assign" rust/src/codegen.rs` のように
+                同じ構文を扱う箇所を数えてから着手する**のが教訓。`else if` の絞り込みと
+                for ヘッダの無効化を追加し、回帰テストも置いた。
               - **性質検査の働き方が見えた回でもある**: `full_checker` 側の誤検知を直した回に
                 `KNOWN_VIOLATIONS` は5件→8件へ**増えた**(checkが黙るようになった結果
                 codegen側の遅れが露出した)。この回で3件へ減った。**片方を直すと
                 もう片方の遅れが見える**——2つの実装を持つ設計で効く性質だと分かった。
-              - 検証: テスト683件、clippyクリーン、parity 163件差0、sweep 126件差0、
+              - 検証: テスト685件、clippyクリーン、parity 164件差0、sweep 126件差0、
                 run-examples 24本、生成JS無変更。
         - [x] **`&&`/`||` の右辺に左辺の絞り込みを適用する(誤検知7形の解消)**
               ✅ 2026-07-28実装。`docs/features.md` が F-6 で「左の `is` が**右辺の式**と

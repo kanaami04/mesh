@@ -71,9 +71,10 @@
       `narrow-required`/`incomparable-types`/`invalid-operation`の**誤検知**になっていた。
       「unionはANYに潰れるので絞り込みの有無で結果が変わらない」というコメントが残っていたが、
       unionをモデル化したmilestone 39以降その前提は偽だった)。
-      **コード生成側も2026-07-28に追いついた**——`codegen.rs::gen_if`と
+      **コード生成側も2026-07-28に追いついた**——`codegen.rs`の`gen_if`/`gen_else`と
       `checker.rs::check_logical_op`が`checker::collect_facts`で条件式から事実を集める形に
-      なり、フィールドパスのsubject・`&&`/`||`・`!`のド・モルガンがすべて効く。
+      なり、フィールドパスのsubject・`&&`/`||`・`!`のド・モルガン・`else if`チェーンが
+      すべて効く。
       `mise run sweep`の`cond_*`6形は**全部`mesh build`まで通る**。
       **絞り込みと同時に無効化も入れてある**(`CheckerCtx::invalidate_path`)——片方だけだと
       代入後も古い型が残り、`__iarith`が`none`を整数として扱うミスコンパイルになる |

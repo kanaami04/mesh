@@ -448,6 +448,56 @@ pub fn substitute_type_params(t: &Type, bindings: &[(String, Type)]) -> Type {
     }
 }
 
+// **この関数は `full_checker.rs`(診断側)と `checker.rs`(codegen用の最小リゾルバ)の
+// 両方が使う**。同じ規則を2箇所に持つとずれるので、下層の types.rs に1つだけ置いてある
+// ——codegen側に `narrowable` という**浅い自前版**を置いていたのを、
+// code review で「守っている範囲が違う」と指摘されて統合した(2026-07-28)。
+// `types::type_equals`/`types::union_of`へ渡しても**パニックしない**かの判定。
+// どちらも「unionのbody・structのfieldsは解決済み」を前提に`.expect()`するが、
+// `resolve_type_decls`は裸のunion循環などで解決に失敗すると中身が空のまま登録を残す
+// (milestone 37で`mesh test`がこれでクラッシュした)。判定できないときは診断を
+// 出さない=検出漏れ側に倒す、という既定方針のための門番。
+// 再帰structで無限に潜らないよう、訪問済みのfieldsセルを持ち回る(`type_equals`が
+// 同じ問題を`seen`で解いているのと同じ手)
+pub fn safe_to_compare(t: &Type) -> bool {
+    // 再帰ガードは**structとunionの両方**に要る。structだけだった頃は
+    // `type A = B | int` / `type B = A[] | string`のような「配列越しに自分へ戻るunion」で
+    // 無限再帰し、**スタックオーバーフローで落ちた**(milestone 51でレジストリの全型を
+    // ここへ通すようになって顕在化。それまでは自己参照型を渡す呼び出し元が無かった)。
+    // `type_to_string`が同じ理由で同じ形のガードを持っているのを揃えた
+    fn go(t: &Type, structs: &mut Vec<*const ()>, unions: &mut Vec<*const ()>) -> bool {
+        match t {
+            Type::Union { body } => {
+                let ptr = Rc::as_ptr(body) as *const ();
+                if unions.contains(&ptr) {
+                    return true; // 自己参照(既に検査中)
+                }
+                let Some(b) = body.get() else { return false };
+                unions.push(ptr);
+                let ok = b.members.iter().all(|m| go(m, structs, unions));
+                unions.pop();
+                ok
+            }
+            Type::Struct { fields, .. } => {
+                let ptr = Rc::as_ptr(fields) as *const ();
+                if structs.contains(&ptr) {
+                    return true; // 自己参照(既に検査中)——ここで打ち切ってよい
+                }
+                let Some(fs) = fields.get() else { return false };
+                structs.push(ptr);
+                let ok = fs.iter().all(|f| go(&f.type_, structs, unions));
+                structs.pop();
+                ok
+            }
+            Type::Array(e) | Type::Chan(e) => go(e, structs, unions),
+            Type::Map { key, value } => go(key, structs, unions) && go(value, structs, unions),
+            Type::Fn { params, ret } => params.iter().all(|p| go(p, structs, unions)) && go(ret, structs, unions),
+            _ => true,
+        }
+    }
+    go(t, &mut Vec::new(), &mut Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
