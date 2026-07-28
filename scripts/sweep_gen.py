@@ -129,12 +129,10 @@ HEAD_COND = """struct Holder {
 # subjectを裸の識別子とフィールドパスの両方で作るのは、絞り込みの実装がこの2つで
 # 別扱いになっているため(`stable_path`を通るか否か)。
 #
-# **注意: この軸が作る6件は現在すべて誤検知として記録されている**
-# (`incomparable-types` / `invalid-operation`)。`tests/sweep-expected.txt` は
-# 「今の出力」を凍結する記録であって「正しい出力」ではない——この6件は**直すべき出力**。
-# 誤検知を直せば記録から診断が消えるので、そのときの差分が修正できた証拠になる。
-# 追跡は `docs/handoff.md`「性質検査(オラクルの代わり)」節と
-# `tests/parity/logical-and-narrow-right-operand/`。
+# **この軸は導入した直後に6件すべてが誤検知だった**(`incomparable-types` /
+# `invalid-operation`)。2026-07-28に`full_checker::infer_binary`へ左辺の事実の適用を
+# 移植して全部解消し、記録からも診断が消えている——**軸を足した回に穴が見つかり、
+# 次の回で埋まった**という経緯そのものが、この軸を残しておく理由になっている。
 COND_SUBJECTS = {
     "ident": ("x: int | none = 1", "x"),
     "field": ("h := Holder{v: 1}", "h.v"),

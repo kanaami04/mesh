@@ -1884,11 +1884,16 @@ fn member_tag_value(m: &Type, tag_name: &str) -> Option<String> {
 // (src/checker/expressions.ts)の移植。codegen側のmilestone 13/14で同じロジックを既に
 // `checker.rs`へ移植済みだが、あちらは診断を出さず`Result<_, String>`で即失敗する設計
 // (最小リゾルバ)。こちらは診断(コード+メッセージ+位置)を積んで走査を続ける。
-// **narrowingは不要**: TS版は`&&`/`||`の右辺検査で左辺`x is T`の絞り込みを適用する
-// (F-6)が、絞り込みの対象になるのはunion型だけで、full_checkerのスカラースコープでは
-// union型は`resolve_scalar_type`でANYに潰れる——ANYはnot-bool/incomparable-types等の
-// 全チェックの安全弁を素通りするので、絞り込みの有無で結果が変わらない
-// (codegen milestone 14がスクラッチctxで対処した回帰は、そもそもここでは起きない)
+// **`&&`/`||`の右辺は左辺の絞り込みを適用してから検査する**(F-6)。`&&`は左が真のときだけ
+// 右を評価するのでthen側の事実、`||`は左が偽のときだけ右を評価するのでelse側の事実が使える。
+//
+// **2026-07-28に移植するまで、ここは絞り込みを一切見ていなかった**。当時のコメントは
+// 「絞り込みの対象になるのはunion型だけで、full_checkerではunionが`resolve_scalar_type`で
+// ANYへ潰れるから結果が変わらない」と説明していたが、**unionをモデル化したmilestone 39以降
+// その前提は偽**になっており、`a is Foo && a.value > 0`のような F-6 でdocs記載済みの形が
+// `narrow-required`/`incomparable-types`/`invalid-operation`という**誤検知**になっていた。
+// 前提が消えたのに結論だけが残った典型的なdrift。
+// TS版オラクルを復元して7形すべてが診断ゼロであることを確認してから直した。
 fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Expr, pos: Pos) -> Type {
     // グロブ`use TokenType::*`は`TokenType::Type`(typeキーワード)を取り込んで
     // `Type`enumを隠すため、必要なバリアントだけ明示的にインポートする
@@ -1899,7 +1904,17 @@ fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Ex
         if !types::type_equals(&lt, &BOOL) && !matches!(lt, Type::Any) {
             ctx.error(left.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&lt)));
         }
+        // 左辺の事実を**使い捨てのスコープ**へ積んでから右辺を検査する(TS版と同じ順序:
+        // 左辺を検査 → collectFacts → pushScope → applyFacts → 右辺を検査 → popScope)。
+        // `collect_facts`は左辺を**再検査しない**(診断の重複を避けるため、resolvedTypeが
+        // 埋まっている前提で読むだけ)ので、上の`infer_expr_single`の後に呼ぶ必要がある
+        let (then_facts, else_facts) = collect_facts(ctx, left);
+        ctx.push_scope();
+        for (name, ty) in if op == AndAnd { &then_facts } else { &else_facts } {
+            ctx.narrow(name, ty.clone());
+        }
         let rt = infer_expr_single(ctx, right);
+        ctx.pop_scope();
         if !types::type_equals(&rt, &BOOL) && !matches!(rt, Type::Any) {
             ctx.error(right.pos(), DiagnosticCode::NotBool, format!("'{op}' requires bool operands, got {}", types::type_to_string(&rt)));
         }

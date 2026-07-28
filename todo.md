@@ -3844,6 +3844,29 @@
                 どんな壊れた入力でもコンパイラがpanicしない。試作した「等価な条件の書き換え」
                 (性質A)も`scripts/`へ昇格させる候補だが、等価集合の吟味が要る
                 (`x is int || 1 == 2`が絞り込まないのは仕様の可能性が高い)
+        - [x] **`&&`/`||` の右辺に左辺の絞り込みを適用する(誤検知7形の解消)**
+              ✅ 2026-07-28実装。`docs/features.md` が F-6 で「左の `is` が**右辺の式**と
+              then節の両方に効く」と書いている形が Rust版では効かず、
+              `narrow-required` / `incomparable-types` / `invalid-operation` の
+              **誤検知**になっていた(誤検知はこのプロジェクトで最悪の分類)。
+              - **推測を一切しなかったのがこの回の型**。まず**TS版オラクルを復元して**
+                7形すべてが診断ゼロであることを確認し(=本当に誤検知だと確定させ)、
+                そのうえで `expressions.ts` の `inferBinary` をそのまま移植した
+                (左辺を検査 → `collectFacts` → `pushScope` → `applyFacts` → 右辺を検査 →
+                `popScope`)。修正後も7形すべてオラクルと一致することを再確認。
+                手順は `docs/handoff.md`「TS版のソースは git 履歴に残っている」節。
+              - 原因は典型的なdrift。`infer_binary` 直前のコメントが「unionはANYに潰れるので
+                絞り込みの有無で結果が変わらない」と説明していたが、unionをモデル化した
+                milestone 39以降その前提は偽だった。**前提が消えたのに結論だけが残った形**。
+              - **記録の差分**: parity 1件(誤検知が消えた)+ sweep 6件(`cond_*` から診断が
+                消えた)。他の記録は無変更。**軸を足した回に穴が見つかり、次の回で埋まった**
+                という経緯が `sweep_gen.py` の軸を残す理由になっている。
+              - **残っているのはcodegen側**: `mesh check` は通るようになったが
+                `mesh build` はまだ落ちる——`gen_if` の `unwrap_is_cond` が素の `is` と `!`
+                しか見ないため then節で絞り込まれない。`KNOWN_VIOLATIONS` に登録済みで、
+                codegen側に `collect_facts` 相当を移植すれば消える(次の候補)。
+              - 検証: テスト679件、clippyクリーン、parity 159件差0、sweep 126件差0、
+                run-examples 24本、TS版オラクルと7形一致。
         - [x] **`invalidatePath` の移植(絞り込んだパスへ代入したら事実を捨てる)**
               ✅ 2026-07-28実装。PR #109 のコードレビューが見つけた移植漏れ。TS版
               `narrowing.ts` の `invalidatePath` と `statements.ts` の assign ケースが

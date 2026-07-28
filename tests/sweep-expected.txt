@@ -14,12 +14,12 @@ arm_select_badadd	error[invalid-operation] error[mixed-void-arms]
 arm_select_badcall	error[mixed-void-arms] error[type-mismatch] 
 arm_select_ok	error[mixed-void-arms] 
 arm_select_undef	error[mixed-void-arms] error[undefined-name] 
-cond_field_and_arith	error[invalid-operation] 
-cond_field_and_cmp	error[incomparable-types] 
-cond_field_or_cmp	error[incomparable-types] 
-cond_ident_and_arith	error[invalid-operation] 
-cond_ident_and_cmp	error[incomparable-types] 
-cond_ident_or_cmp	error[incomparable-types] 
+cond_field_and_arith	
+cond_field_and_cmp	
+cond_field_or_cmp	
+cond_ident_and_arith	
+cond_ident_and_cmp	
+cond_ident_or_cmp	
 expr_fnexpr_bad_add	error[invalid-operation] 
 expr_fnexpr_bad_arg	error[type-mismatch] 
 expr_fnexpr_bad_field	error[not-a-struct] 

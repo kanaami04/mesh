@@ -1,9 +1,13 @@
-// docs/features.md が「効く」と書いている F-6 の形:
-//   `a is Foo && a.value > 0` は左の is が右辺の式とthen節の両方に効く
+// F-6 の形: `a is Foo && a.value > 0` は左の is が右辺の式とthen節の両方に効く。
 //
-// **右辺には効いていない**(2026-07-28実測)。full_checker::infer_binary が &&/|| の
-// 右辺を絞り込み前のスコープで検査するため narrow-required という誤検知になる。
-// then節側は正しく絞り込まれるので、下の print(a.value) は診断されない。
+// **2026-07-28まで右辺に効いておらず、narrow-required という誤検知になっていた**
+// (full_checker::infer_binary が &&/|| の右辺を絞り込み前のスコープで検査していた)。
+// TS版オラクルを復元して診断ゼロであることを確認してから修正した。
+//
+// **`mesh check` は通るが `mesh build` はまだ落ちる**——codegen側の `gen_if` は
+// `unwrap_is_cond` が素の `is` と `!` しか見ないため、then節の `a.value` で `a` が
+// 絞り込まれない。追跡は `rust/tests/check_implies_build.rs` の `KNOWN_VIOLATIONS`。
+// codegen側に collect_facts 相当を移植すれば消える。
 struct Foo {
 	value: int
 }

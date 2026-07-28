@@ -83,6 +83,11 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // 落ちる。TS版は`assignable`と`checkArithOp`をターゲットの種類を問わず通していた。
     // 直せば`check`が診断を出すようになり、このケースは性質の前提から外れて自然に消える
     ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
+    // ↓ **full_checker側を直したことで新しく対象に入ったケース**。`&&`/`||`の右辺と
+    // then節の絞り込みは full_checker では効くようになったが、codegen側の`gen_if`は
+    // `unwrap_is_cond`が素の`is`と`!`しか見ないため、`if a is Foo && ... { a.value }`の
+    // then節で`a`が絞り込まれず落ちる。codegen側に`collect_facts`相当を移植すれば消える
+    ("tests/parity/logical-and-narrow-right-operand/main.mesh", "codegen側のgen_ifが&&/||を含む条件の絞り込みを持たない"),
 ];
 
 fn corpus() -> Vec<PathBuf> {
