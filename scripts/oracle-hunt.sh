@@ -45,6 +45,37 @@ if [ ! -x "$RUST_BIN" ]; then
 	exit 2
 fi
 
+# **コンパイラを編集中なら見送る**(終了コード3=スキップ)。
+#
+# このスクリプトは**バイナリを読むだけでリビルドしない**ので、編集途中の作業ツリーで走ると
+# 「そのとき たまたま `target/debug` にあったバイナリ」を正解として扱ってしまう。
+# 自走ループ(`/loop`)から無人で回すと、**編集途中の状態を「オラクルとの差分」として
+# 報告する**ことになる——差分の意味が失われる。
+#
+# **失敗(exit 1)ではなくスキップ(exit 3)にするのが要点**。編集中に「差が出た」と
+# 騒がれても意味がないし、「差0件」と報告されるのも嘘になる。呼び出し側が
+# 「見送った」と「差が無かった」を区別できるようにする。
+#
+# 意図的に汚れたツリーで測りたいときは `ORACLE_HUNT_FORCE=1` を付ける。
+if [ "${ORACLE_HUNT_FORCE:-}" != "1" ]; then
+	dirty=$(git status --porcelain -- rust/ scripts/ 2>/dev/null | head -5)
+	if [ -n "$dirty" ]; then
+		echo "SKIP: rust/ か scripts/ に未コミットの変更がある(編集中とみなして見送る)"
+		echo "$dirty" | sed 's/^/    /'
+		echo "    測りたいなら ORACLE_HUNT_FORCE=1 を付ける"
+		exit 3
+	fi
+	# バイナリがソースより古ければ、直したはずの変更が反映されていない
+	# (`cargo`は`eval "$(mise env -s bash)"`が要るので、忘れてビルドせず測る事故が
+	# docs/handoff.md「検証の進め方」3.に記録されている)
+	stale=$(find rust/src -name '*.rs' -newer "$RUST_BIN" 2>/dev/null | head -1)
+	if [ -n "$stale" ]; then
+		echo "SKIP: $RUST_BIN がソースより古い($stale の方が新しい)"
+		echo "    先に 'cargo build --manifest-path rust/Cargo.toml' を実行すること"
+		exit 3
+	fi
+fi
+
 # **bunはキャッシュの有無に関わらず要る**。キャッシュがある場合に確認を飛ばすと、
 # `bun: command not found`が全件で空出力になり**本物の差分と見分けがつかない**
 # (code reviewで発覚: 差1件・FAILという、コンパイラの退行そっくりの出方をしていた)
