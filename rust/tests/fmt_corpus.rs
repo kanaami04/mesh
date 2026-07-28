@@ -1,14 +1,29 @@
-// `mesh fmt` が **べき等**で**意味を変えない**ことを、examples全体に対して確かめる
+// `mesh fmt` が **べき等**で**意味を変えない**ことを、コーパス全体に対して確かめる
 // (TS撤去 段階3。TS版 `tests/formatter.test.ts` 冒頭のパラメータ化テストの移植)。
 //
-// Rust側にもフォーマッタの単体テストは13件あるが、**コーパス全体を通す性質テストは無かった**
-// ——個別の整形規則が正しくても、実際のプログラムを通したときに壊れないかは別の話。
+// `formatter.rs` 側にも整形規則ごとの単体テストがあるが、**コーパス全体を通す性質テストは
+// 別の話**——個別の規則が正しくても、実際のプログラムを通したときに壊れないかは分からない。
 //
-// 意味を変えないことの確認は**整形前後を実行して標準出力が一致するか**で見る。
-// AST比較ではなく実行結果で判定するのが一番信頼できる(TS版のコメントの方針をそのまま踏襲)。
+// **意味の保存を2通りの判定で見る**(どちらも必要。片方だけでは穴が残る):
+//
+// 1. `examples`(24本)は**整形前後を実行して標準出力が一致するか**。一番信頼できる判定だが、
+//    **走らないプログラムには原理的に効かない**——診断を出させるための `tests/parity/` は
+//    丸ごと対象外になる
+// 2. コーパス全体(156本)は**整形前後で診断が一致するか**。実行を要求しないので走らない
+//    プログラムにも効き、JSランタイム非依存で走る。1が届かない範囲を埋めるために足した
+//    (実際に `!(x is none)` → `!x is none` という不具合がその範囲に住んでいた。しかも
+//    **べき等性は保たれたまま意味だけ壊れる**形だったので、べき等性の検査も素通りしていた)
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+// このファイルの2つのテストは検査対象の**隣に**整形結果を一時ファイルとして置く
+// (依存パッケージのimportを解決させるため)。cargoは同じファイル内のテストを並行実行するので、
+// **相手の一時ファイルを`read_dir`が拾わないよう除外する**——拾うと、相手が消した直後の
+// パスを検査して偽の失敗になる(実際に踏んだ)。異常終了で残った物を拾わない効果もある
+fn is_temp_artifact(p: &Path) -> bool {
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("__"))
+}
 
 fn mesh_bin() -> PathBuf {
     let mut p = std::env::current_exe().expect("テストバイナリのパス");
@@ -30,9 +45,43 @@ fn js_runtime_available() -> bool {
 }
 
 fn fmt(path: &Path) -> String {
+    try_fmt(path).unwrap_or_else(|e| panic!("fmt失敗 {}: {e}", path.display()))
+}
+
+// パースできない入力もコーパスに含まれる(`tests/parity/58-syntax-error/`等)ので、
+// 失敗を`Err`で返す版。**呼び出し側は「なぜ失敗したか」を必ず確かめること**
+// ——確かめずにスキップすると、本物のfmtの不具合を「対象外」として静かに握り潰す
+fn try_fmt(path: &Path) -> Result<String, String> {
     let out = Command::new(mesh_bin()).args(["fmt", path.to_str().unwrap()]).output().expect("mesh fmt を起動できること");
-    assert!(out.status.success(), "fmt失敗 {}: {}", path.display(), String::from_utf8_lossy(&out.stderr));
-    String::from_utf8(out.stdout).expect("整形結果がUTF-8であること")
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(String::from_utf8(out.stdout).expect("整形結果がUTF-8であること"))
+}
+
+// そのファイルが**パースできるか**だけを見る(`mesh ast`はパースして構文木を出すだけで、
+// 型検査はしない)。「fmtが失敗してよいのはパースできない入力のときだけ」を判定するために使う
+fn parses(path: &Path) -> bool {
+    Command::new(mesh_bin())
+        .args(["ast", path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("mesh ast を起動できること")
+        .success()
+}
+
+// `mesh check` が出した診断コードを**出力順のまま**集める。
+// 位置(行・桁)は整形で当然変わるので比べない——変わってはいけないのは「何を報告したか」
+fn check_codes(path: &Path) -> Vec<String> {
+    let out = Command::new(mesh_bin()).args(["check", path.to_str().unwrap()]).output().expect("mesh check を起動できること");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    text.split("error[")
+        .skip(1)
+        .filter_map(|s| s.split(']').next())
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn run(path: &Path) -> (String, String) {
@@ -52,7 +101,7 @@ fn examples全体で整形はべき等で意味を変えない() {
         .expect("examples/ を読めること")
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "mesh"))
+        .filter(|p| p.extension().is_some_and(|x| x == "mesh") && !is_temp_artifact(p))
         .collect();
     files.sort();
     assert!(!files.is_empty(), "examples/ が空(パスの解決が壊れている)");
@@ -79,4 +128,62 @@ fn examples全体で整形はべき等で意味を変えない() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         assert_eq!(fmt_out, orig_out, "{} は整形で実行結果が変わった", f.display());
     }
+}
+
+// 上のテストは意味の保存を**実行して標準出力を比べる**ことで見る。強い判定だが、
+// **走らないプログラムには原理的に効かない**——診断を出させるためのプログラム
+// (`tests/parity/`の132ケース)は丸ごと対象外だった。実際にそこへ
+// 「`!(x is none)`が`!x is none`になる」というfmtの不具合が住み着いていた
+// (整形の**べき等性は保たれたまま意味だけ壊れる**ので、べき等性の検査も素通りしていた)。
+//
+// そこで判定を「実行結果の一致」から「**診断の一致**」へ広げる。実行を要求しないので
+// JSランタイムが無くても走り、対象が examples 24本 → 156本になる。
+#[test]
+fn コーパス全体で整形は診断を変えない() {
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("examples"))
+        .expect("examples/ を読めること")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "mesh") && !is_temp_artifact(p))
+        .collect();
+    files.extend(
+        std::fs::read_dir(root.join("tests/parity"))
+            .expect("tests/parity/ を読めること")
+            .flatten()
+            .map(|e| e.path().join("main.mesh"))
+            .filter(|p| p.is_file()),
+    );
+    files.sort();
+    assert!(files.len() > 100, "コーパスの収集が壊れている(集まったのは{}件)", files.len());
+
+    let mut checked = 0;
+    for f in &files {
+        let formatted = match try_fmt(f) {
+            Ok(s) => s,
+            Err(stderr) => {
+                // **パースできない入力だけがスキップを許される**。fmtが別の理由で落ちたなら不具合。
+                //
+                // 判定は`mesh ast`(パースだけして落ちるか)で行う。**診断コードで判定してはいけない**
+                // ——パーサが出す診断は`syntax-error`だけではなく、`top-level-mut-not-allowed`・
+                // `multiple-return-values-removed`・`bare-struct-shape`もパース段階で出る
+                // (コーパスの該当6件のうち`syntax-error`はたった1件)。「何か診断が出ていれば
+                // スキップ可」に緩めると、fmtが**別の理由で**壊れたケースまで見逃す
+                assert!(!parses(f), "{} は整形に失敗したのにパースは通る(fmtの不具合): {stderr}", f.display());
+                continue;
+            }
+        };
+        // 整形結果は**元と同じディレクトリへ別名で置く**(エントリは1ファイルなので
+        // 隣に置いてもパッケージには混ざらず、`import`は元どおり解決できる)
+        // **上のテストと別の接頭辞にする**——cargoは同じファイル内のテストを並行実行するので、
+        // 同名にすると互いの一時ファイルを消し合って偽の失敗になる(実際に踏んだ)
+        let side = f.with_file_name(format!("__diagfmt_check_{}", f.file_name().expect("ファイル名").to_string_lossy()));
+        std::fs::write(&side, &formatted).expect("整形結果を書けること");
+        let before = check_codes(f);
+        let after = check_codes(&side);
+        let _ = std::fs::remove_file(&side);
+        assert_eq!(after, before, "{} は整形で診断が変わった", f.display());
+        checked += 1;
+    }
+    assert!(checked > 100, "実際に比較できたのが{checked}件しかない(スキップが多すぎる)");
 }
