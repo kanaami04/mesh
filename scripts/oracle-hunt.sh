@@ -97,6 +97,11 @@ if [ "${ORACLE_HUNT_FORCE:-}" != "1" ]; then
 	if [ -n "$stale" ]; then
 		echo "SKIPPED: $RUST_BIN がビルド入力より古い($stale の方が新しい)"
 		echo "    先に 'cargo build --manifest-path rust/Cargo.toml' を実行すること"
+		# **内容を変えずに`touch`だけした場合は、cargoがリビルドしないのでmtimeが進まず
+		# 見送りが続く**(同一秒でもナノ秒差で`-newer`は真になる)。無人ループだと
+		# 「見送り」を延々と報告し続けることになるので、脱出手段を明示しておく
+		echo "    ビルドしても解けないなら、内容が変わっていない可能性がある"
+		echo "    (cargoがリビルドせずmtimeが進まない)。その場合は: touch $RUST_BIN"
 		exit 3
 	fi
 fi
