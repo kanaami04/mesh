@@ -16,6 +16,16 @@
 #   oracle-hunt … 軸をランダムに組み合わせ、**オラクル**と突き合わせる(毎回違う形・探索向き)
 #
 # 記録を持たないので `--update` に相当する抜け道が無い——**判定はオラクルがする**。
+#
+# **終了コード**(呼び出し側=自走ループはこれで振る舞いを分ける):
+#   0 … オラクルと一致(探索したが差は無かった)
+#   1 … `DIFF`(オラクルとの差)または `UNPARSED`(生成物がパースできない=検証になっていない)
+#   2 … 環境の問題(bunが無い / オラクルが壊れている / 引数が不正 / gitが使えない)
+#   3 … `SKIPPED`(コンパイラ編集中・バイナリが古い。**測っていない**)
+#
+# **3を「差0件」と読んではいけない**——測っていないので何も言えていない。
+# `mise run oracle-hunt`経由だとmiseが3も`ERROR task failed`と表示するが、
+# **見送りであって失敗ではない**(出力の`SKIPPED:`で判別する)。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -58,19 +68,34 @@ fi
 #
 # 意図的に汚れたツリーで測りたいときは `ORACLE_HUNT_FORCE=1` を付ける。
 if [ "${ORACLE_HUNT_FORCE:-}" != "1" ]; then
-	dirty=$(git status --porcelain -- rust/ scripts/ 2>/dev/null | head -5)
+	# **gitが使えなければ「クリーン」ではなく「確認できない」として止める**(exit 2)。
+	# `2>/dev/null`で握りつぶして空文字列を「クリーン」と読むと、gitリポジトリでない場所
+	# (tarball展開・`git archive`の出力)やgitが無い環境で**ガードが無音で無効化される**。
+	# `.claude/hooks/enforce-code-review.sh`が採っている「確認できないときは常にdenyする」と
+	# 同じ原則に揃えた(code reviewで発覚)
+	if ! dirty=$(git status --porcelain -- rust/ scripts/ 2>&1); then
+		echo "error: git status が失敗した(編集中かどうか確認できないので止める)" >&2
+		echo "  $dirty" >&2
+		echo "  確認を飛ばして測りたいなら ORACLE_HUNT_FORCE=1 を付ける" >&2
+		exit 2
+	fi
 	if [ -n "$dirty" ]; then
-		echo "SKIP: rust/ か scripts/ に未コミットの変更がある(編集中とみなして見送る)"
-		echo "$dirty" | sed 's/^/    /'
+		echo "SKIPPED: rust/ か scripts/ に未コミットの変更がある(編集中とみなして見送る)"
+		echo "$dirty" | head -5 | sed 's/^/    /'
 		echo "    測りたいなら ORACLE_HUNT_FORCE=1 を付ける"
 		exit 3
 	fi
-	# バイナリがソースより古ければ、直したはずの変更が反映されていない
+	# バイナリがビルド入力より古ければ、直したはずの変更が反映されていない
 	# (`cargo`は`eval "$(mise env -s bash)"`が要るので、忘れてビルドせず測る事故が
-	# docs/handoff.md「検証の進め方」3.に記録されている)
-	stale=$(find rust/src -name '*.rs' -newer "$RUST_BIN" 2>/dev/null | head -1)
+	# docs/handoff.md「検証の進め方」3.に記録されている)。
+	#
+	# **`rust/src/*.rs`だけでは足りない**——`rust/embedded/{runtime,card,diagnostic-codes}.ts`は
+	# `include_str!`でバイナリへ埋め込まれ、とくに`runtime.ts`は**生成JSに直結する**。
+	# `Cargo.toml`/`Cargo.lock`も同様。**コミット済みだがリビルド前**という一瞬が死角だった
+	# (未コミットなら上の`git status`が拾うので、危ないのはその一瞬だけ。code reviewで発覚)
+	stale=$(find rust/src rust/embedded rust/Cargo.toml rust/Cargo.lock -type f -newer "$RUST_BIN" 2>/dev/null | head -1)
 	if [ -n "$stale" ]; then
-		echo "SKIP: $RUST_BIN がソースより古い($stale の方が新しい)"
+		echo "SKIPPED: $RUST_BIN がビルド入力より古い($stale の方が新しい)"
 		echo "    先に 'cargo build --manifest-path rust/Cargo.toml' を実行すること"
 		exit 3
 	fi
@@ -153,12 +178,12 @@ for f in "$OUT"/*.mesh; do
 	# **字句/構文段階の診断コードは`syntax-error`だけではない**——`diagnostic_codes.rs`には
 	# `unexpected-character`/`unknown-escape`/`unterminated-interpolation`/
 	# `unterminated-string`もある。`syntax-error`だけ見ていると、字句レベルで壊れた生成物が
-	# SKIPに数えられずオラクル比較へ回り、**両方が同じエラーを出して「一致」に見える**
+	# UNPARSEDに数えられずオラクル比較へ回り、**両方が同じエラーを出して「一致」に見える**
 	# (code reviewで発覚。当時の生成器は字句エラーを作らなかったので実害は無かったが、
 	# 語彙を広げると踏む)
 	case "$rs" in *syntax-error* | *unexpected-character* | *unknown-escape* | *unterminated-interpolation* | *unterminated-string*)
 		skips=$((skips + 1))
-		echo "SKIP $(basename "$f") — パースできない(生成テンプレートの誤り)"
+		echo "UNPARSED $(basename "$f") — パースできない(生成テンプレートの誤り)"
 		continue
 		;;
 	esac
