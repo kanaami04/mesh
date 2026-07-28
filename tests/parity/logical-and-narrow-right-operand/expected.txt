@@ -1,0 +1,3 @@
+main.mesh:13:17: error[narrow-required]: cannot access field or method on Foo | none — narrow it first (with 'is' or 'match')
+  	if a is Foo && a.value > 0 {
+  	               ^

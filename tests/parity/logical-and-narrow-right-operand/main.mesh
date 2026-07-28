@@ -1,0 +1,16 @@
+// docs/features.md が「効く」と書いている F-6 の形:
+//   `a is Foo && a.value > 0` は左の is が右辺の式とthen節の両方に効く
+//
+// **右辺には効いていない**(2026-07-28実測)。full_checker::infer_binary が &&/|| の
+// 右辺を絞り込み前のスコープで検査するため narrow-required という誤検知になる。
+// then節側は正しく絞り込まれるので、下の print(a.value) は診断されない。
+struct Foo {
+	value: int
+}
+
+fn main() {
+	a: Foo | none = Foo{value: 1}
+	if a is Foo && a.value > 0 {
+		print(a.value)
+	}
+}

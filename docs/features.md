@@ -61,12 +61,18 @@
       `!(a is none)` / `a is none \|\| b is none { return }` はド・モルガンで絞り込まれる
       (else側=両方不成立の積)。フィールドへの代入は古い絞り込みを無効化してから型検査する
       ので健全性は保つ。`match`の対象もフィールドパスまで絞り込めるよう同じ仕組みに統一した。
-      **既知の穴(2026-07-28、性質検査で発見)**: **入れ子のフィールドパス**
-      (`o.inner.v is int`)は`mesh check`は通るが`mesh run`/`build`が失敗する
-      ——コード生成が使う`rust/src/checker.rs`(最小リゾルバ)がフィールドパスの絞り込みを
-      持たないため。診断を出す`full_checker.rs`とは別実装で、そちらだけが対応している。
-      再現は`tests/parity/56-path-narrow-nested/`、追跡は
-      `rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS` |
+      **2026-07-28**: コード生成が使う`rust/src/checker.rs`(最小リゾルバ)にフィールドパスの
+      絞り込みが無く、`mesh check`は通るのに`mesh run`/`build`が失敗する穴があった
+      ——性質検査(`rust/tests/check_implies_build.rs`)で発見し同日修正。絞り込みのキーを
+      識別子名から`stable_path`(`a` / `a.b` / `a.b.c`)へ一般化して`full_checker`と揃えた。
+      **既知の誤検知(2026-07-28に実測で発覚、未修正)**: 上の行が書いている
+      「`a is Foo && a.value > 0` は左の`is`が**右辺の式**に効く」は、**Rust版では効かない**。
+      `full_checker::infer_binary`が`&&`/`||`の右辺を絞り込み前のスコープで検査するため、
+      `narrow-required`という**誤検知**になる(then節側の絞り込みは正しく効く)。
+      直前のコメントが「unionはANYに潰れるので絞り込みの有無で結果が変わらない」と
+      説明しているが、それはunionをモデル化したmilestone 39以降**偽**になっている。
+      codegen側の`checker.rs`には`check_logical_op`のスクラッチctxという対処が既にある
+      (ただし裸の識別子のみ)ので、同じ技法をfull_checkerへ持ち込むのが修正方針 |
 | 汎用の空値(null / nil) | ❌ | 2026-07-17決定(union路線)。「どこにでも入り得る空値」は存在しない。
       不在は `T \| none` と書いた場所にだけ、型として現れる |
 | `any` 型 | ❌ | 2026-07-21実装(H-1、討議のうえkanayama承認)。critique-2026-07.md(B-5-2)の指摘を受け撤去 —
