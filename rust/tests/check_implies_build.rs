@@ -56,18 +56,14 @@ fn builds(path: &Path) -> bool {
 // 増やすときは理由を必ず書くこと。**このリストは両方向に効く**——載せたケースが
 // 通るようになったらテストが落ちるので、直したのに消し忘れることはできない。
 //
-// 3件はcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)。
-// 1件は2つのcheckerの食い違いで、**性質検査で初めて見つかったもの**。
+// 残っているのはcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)だけ。
+//
+// **導入時は4件だった**。うち2件(`56-path-narrow-ok` / `56-path-narrow-nested`)は
+// この性質検査が見つけた`checker.rs`のフィールドパス絞り込みの移植漏れで、同じ回で修正した
+// ——検査を入れて即座に1件返した形。詳細は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     ("tests/parity/49-pkg-receiver-exported-ok/main.mesh", "codegen: パッケージ修飾レシーバが未対応"),
     ("tests/parity/50-pkg-usage-ok/main.mesh", "codegen: パッケージ修飾の値参照(呼び出しを伴わない)が未対応"),
-    ("tests/parity/56-path-narrow-ok/main.mesh", "codegen: パッケージ修飾の値参照(呼び出しを伴わない)が未対応"),
-    // ↓ これだけ性質が違う。**全体の型検査は通っている**のに、codegen側の`checker.rs`が
-    // フィールドパスの絞り込み(`if o.inner.v is int { o.inner.v + 1 }`)を持たないため
-    // `invalid operation: int | none + int` になる。`full_checker.rs`は正しく絞り込む。
-    // 言語機能としては実装済み(F-6「narrowingをフィールドパスへ拡張」)なので、
-    // **checker.rs 側の移植漏れ**。この性質検査で初めて見つかった
-    ("tests/parity/56-path-narrow-nested/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
 ];
 
 fn corpus() -> Vec<PathBuf> {
