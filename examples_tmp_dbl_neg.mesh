@@ -1,0 +1,9 @@
+struct Holder {
+  v: int | none
+}
+fn main() {
+  h := Holder{v: 1}
+  if !!(h.v is int) {
+    print(h.v + 1)
+  }
+}

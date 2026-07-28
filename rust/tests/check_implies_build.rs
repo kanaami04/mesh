@@ -55,50 +55,22 @@ fn builds(path: &Path) -> bool {
 //
 // 増やすときは理由を必ず書くこと。**このリストは両方向に効く**——載せたケースが
 // 通るようになったらテストが落ちるので、直したのに消し忘れることはできない。
+// さらに整合性テストが「登録ケースは`check`が黙っていること」も要求する
+// ——診断が出るようになると性質の前提から外れて黙って対象外へ落ちるため。
 //
 // 2件はcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)。
+// 1件は`check_assign_target`がフィールド代入の値の型を検査しない検出漏れ
+// (TS版は検査していた。`mesh build`だけが落ちる)。
 //
-// **残り2件(`56-path-narrow-*`)は「直そうとしたら直せなかった」もので、経緯に価値がある。**
-// codegen側の`checker.rs`が裸の識別子しか絞り込まないのが原因なので、キーを
-// `stable_path`(`a` / `a.b` / `a.b.c`)へ一般化すれば埋まる——**実際に埋まったが、
-// 同時にもっと悪いものを作った**。`full_checker.rs`はTS版の`invalidatePath`
-// (絞り込んだパスへ代入したら事実を捨てる)を移植し忘れており、codegenがその判定を
-// そのまま真似た結果、`if o.inner.v is int { o.inner.v = none; print(o.inner.v + 1) }`が
-// **checkもbuildも通って実行時に静かに`1`を出す**ようになった(`null + 1 === 1`が
-// `__iarith`のsafe-integerガードをすり抜ける)。一般化前はcodegenが
-// `invalid operation: int | none + int`で**安全に失敗**していた形。
-//
-// **「うるさい失敗」を「静かに誤った出力」に変えるのは退行**なので一般化は取り下げた。
-// 順番が逆で、先に`full_checker`へ`invalidatePath`を移植する必要がある。
-// 詳細は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
+// **導入時は4件で、一度8件まで増えてから3件になった**——この増減自体が記録の価値がある。
+// 増えたのは`full_checker`側の誤検知を直した回で、**checkが黙るようになった結果
+// codegen側の遅れが露出した**から。減ったのは次の回でcodegen側へ`collect_facts`を
+// 移植したから。**性質検査は「片方を直すともう片方の遅れが見える」働きをする**。
+// 経緯は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     ("tests/parity/49-pkg-receiver-exported-ok/main.mesh", "codegen: パッケージ修飾レシーバが未対応"),
     ("tests/parity/50-pkg-usage-ok/main.mesh", "codegen: パッケージ修飾の値参照(呼び出しを伴わない)が未対応"),
-    // ↓ 2件とも「codegen側の`checker.rs`がフィールドパスを絞り込まない」ことによる。
-    // 直し方は分かっているが、`full_checker`の`invalidatePath`移植漏れが先(上記参照)
-    ("tests/parity/56-path-narrow-ok/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
-    ("tests/parity/56-path-narrow-nested/main.mesh", "checker.rs(codegen側)がフィールドパスの絞り込みを持たない"),
-    // ↓ **これは診断を足して直す側**。`check_assign_target`の`Expr::Member`分岐が
-    // 値の型を一切見ないため、`t.n = "s"` / `t.n += "s"` が診断ゼロで通り、codegenだけが
-    // 落ちる。TS版は`assignable`と`checkArithOp`をターゲットの種類を問わず通していた。
-    // 直せば`check`が診断を出すようになり、このケースは性質の前提から外れて自然に消える
     ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
-    // ↓ **full_checker側を直したことで新しく対象に入った3件**。`&&`/`||`まわりの絞り込みは
-    // full_checker では効くようになったが、codegen側が追いついていない。原因は3つ:
-    //   (1) `codegen.rs::gen_if`の`unwrap_is_cond`が素の`is`と`!`しか見ない
-    //       → `if a is Foo && ... { a.value }` のthen節で絞り込まれない
-    //   (2) `checker.rs::check_logical_op`が`Expr::Is`の**裸の`Expr::Ident`**しか特別扱いしない
-    //       → subjectがフィールドパスだと`&&`の右辺で絞り込まれない
-    //   (3) 同じく`!`で包まれた`is`を見ない → `||`の右辺(De Morgan)で絞り込まれない
-    // **sweepの`cond_*`6形のうち4形がこの3つのどれかで落ちる**(ident×`&&`の2形だけ通る)。
-    // ここに置いたのは原因ごとの代表例。codegen側に`collect_facts`相当を移植すれば全部消える。
-    //
-    // **注意: この4形はこのPR以前、`check`の段階で整形された診断が出ていた**(誤検知だったが)。
-    // 誤検知を消した結果、いまは`check`を通って**codegenの生エラー**(整形されない
-    // `checker: ...`文字列)になる。誤検知の解消は正しいが、体験としては未完のまま
-    ("tests/parity/logical-and-narrow-right-operand/main.mesh", "codegen側のgen_ifが&&/||を含む条件の絞り込みを持たない(then節)"),
-    ("tests/parity/cond-narrow-field-subject/main.mesh", "checker.rs::check_logical_opが裸のIdentしか見ない(subjectがフィールドパス)"),
-    ("tests/parity/cond-narrow-demorgan/main.mesh", "checker.rs::check_logical_opが!で包まれたisを見ない(||のDe Morgan)"),
 ];
 
 fn corpus() -> Vec<PathBuf> {

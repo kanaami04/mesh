@@ -1,0 +1,15 @@
+// `else if` の条件による絞り込み。
+//
+// `gen_else` は else if を**インラインで生成する**(`} else if (...) {`という1つの連鎖に
+// するため)ので `gen_if` を通らず、絞り込みもそこで自前に適用する必要がある。
+// `gen_if` だけ直していた頃は `mesh check` は通るのに `mesh build` が
+// `invalid operation: int | none + int` で落ちていた(2026-07-28のcode reviewで発覚)。
+fn main() {
+	x: int | none = 1
+	u: int | string = 1
+	if u is string {
+		print(u)
+	} else if x is int {
+		print(x + 1)
+	}
+}
