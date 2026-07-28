@@ -39,6 +39,8 @@ mise run parity         # 診断の出力が記録どおりか(旧: TS版との�
 mise run sweep          # 「形の組み合わせ」を機械生成してTS版と突き合わせる(parityの死角)
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
 mise run oracle-hunt    # TS版オラクル(git履歴から復元)とランダム生成物を突き合わせる
+                        # **rust/が編集中・バイナリが古いと見送る**(exit 3。測っていない
+                        # ので「差0件」ではない)。測りたいなら ORACLE_HUNT_FORCE=1
 
 scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
                                                  # (run_in_background で起動する)
@@ -47,6 +49,11 @@ scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エー�
 **出荷する前に `mise run parity` と `mise run drift` を回す。**
 parityは診断の出力が記録と違えば失敗する(生成JSの方は`rust/tests/codegen_snapshot.rs`が見る)。
 driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
+
+**`mise run oracle-hunt` は出荷前の必須ではない**(探索用)。ただし**移植漏れを疑うとき**と
+**診断の効き方を変えたとき**は回す価値がある——parity/sweepは記録としか比べないが、
+こちらは**オラクルが判定する**ので「記録が凍結時点で既に間違っていた」場合に届く。
+回すなら**ビルドしてコミットしてから**(汚れたツリーでは見送られる)。
 
 **「オラクルを失った」は正しくない。** TS実装は`cd7273a`で削除されただけで、
 git履歴から**復元して実行できる**:
