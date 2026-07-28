@@ -38,6 +38,7 @@ mise run rust-check     # cd rust && cargo clippy --all-targets
 mise run parity         # 診断の出力が記録どおりか(旧: TS版との突き合わせ)
 mise run sweep          # 「形の組み合わせ」を機械生成してTS版と突き合わせる(parityの死角)
 mise run drift          # 自分の変更が偽にしたコメントの候補を出す
+mise run oracle-hunt    # TS版オラクル(git履歴から復元)とランダム生成物を突き合わせる
 
 scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エージェントの目覚まし
                                                  # (run_in_background で起動する)
@@ -46,6 +47,12 @@ scripts/agent-timeout.sh 10 <エージェントID...>   # レビュー用エー�
 **出荷する前に `mise run parity` と `mise run drift` を回す。**
 parityは診断の出力が記録と違えば失敗する(生成JSの方は`rust/tests/codegen_snapshot.rs`が見る)。
 driftは候補を出すだけなので、出た行と**変更した関数のdocコメント**は自分で読んで判断する。
+
+**「オラクルを失った」は正しくない。** TS実装は`cd7273a`で削除されただけで、
+git履歴から**復元して実行できる**(`git archive cd7273a^ src ... | bun src/cli.ts check`)。
+失ったのは常時稼働の並走であって、問い合わせる手段ではない。移植漏れを埋めるときは
+**挙動を推測する前にまずオラクルに聞く**——手順は docs/handoff.md「TS版のソースは
+git 履歴に残っている」節。`mise run oracle-hunt`はこれを自動化したもの。
 
 **parityは「コーパスに載っている形」しか測れない。** milestone 65で見つけた誤検知5種は
 `!`/`&&`/`||`で包んだ条件式——**単体では全部コーパスにある要素の組み合わせ**だったので
