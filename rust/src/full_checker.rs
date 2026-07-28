@@ -1906,8 +1906,9 @@ fn infer_binary(ctx: &mut FullCheckerCtx, op: TokenType, left: &Expr, right: &Ex
         }
         // 左辺の事実を**使い捨てのスコープ**へ積んでから右辺を検査する(TS版と同じ順序:
         // 左辺を検査 → collectFacts → pushScope → applyFacts → 右辺を検査 → popScope)。
-        // `collect_facts`は左辺を**再検査しない**(診断の重複を避けるため、resolvedTypeが
-        // 埋まっている前提で読むだけ)ので、上の`infer_expr_single`の後に呼ぶ必要がある
+        // `collect_facts`は診断を出さない(TS版と同じ契約。Rust版は型を計算し直すので
+        // 内部で積んだ分を捨てている——`collect_facts`のコメント参照)ので、
+        // **左辺の診断は上の`infer_expr_single`が1回だけ出す**
         let (then_facts, else_facts) = collect_facts(ctx, left);
         ctx.push_scope();
         for (name, ty) in if op == AndAnd { &then_facts } else { &else_facts } {
@@ -3062,6 +3063,22 @@ type NarrowFacts = Vec<(String, Type)>;
 // 5種類の形(`!(x is none)` / `x is int && ...` / 2変数の`&&` / `||`のelse側 / 二重否定)で
 // 実測して確認した(milestone 65)。
 fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
+    // **診断を出さずに事実だけを集める**。TS版`collectFacts`は「呼ぶ前に`checkExprSingle`済みで
+    // `resolvedType`が埋まっている前提(副作用のある呼び出しを一切しない——診断の重複を避けるため)」
+    // と明記している。Rust版のASTには解決済み型のキャッシュが無く、フィールドパスの分岐が
+    // `infer_expr_single`で型を計算し直すため、**そのままだと同じ診断が2度出る**。
+    // 呼び出し側は必ず先に条件式を検査しているので、ここで積まれた分は捨ててよい。
+    //
+    // これを入れるまで `if h.bogus is Foo && h.v > 0` の`unknown-field`が**3回**出ていた
+    // (TS版オラクルは1回)。`&&`/`||`の右辺への絞り込みを足した回に2→3へ悪化したのを
+    // code reviewが見つけ、既存分(check_ifの2回)ごと解消した
+    let before = ctx.diagnostics.len();
+    let facts = collect_facts_inner(ctx, expr);
+    ctx.diagnostics.truncate(before);
+    facts
+}
+
+fn collect_facts_inner(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowFacts) {
     match expr {
         Expr::Is { operand, target, .. } => {
             let found = match &**operand {
@@ -3089,8 +3106,16 @@ fn collect_facts(ctx: &mut FullCheckerCtx, expr: &Expr) -> (NarrowFacts, NarrowF
                     if ctx.lookup(root).is_none_or(|b| b.mutable) {
                         return None;
                     }
+                    // **推論そのものが診断を出したなら絞り込まない**。`w.inner is Foo`で
+                    // `w`が未絞り込みだと`w.inner`はエラーのままANYへ縮退する。そこから
+                    // 作った事実をスコープへ入れると、右辺の`w.inner.value`が
+                    // 「絞り込み済み」と見なされて**本来出るべき診断が消える**
+                    // (TS版は同じ入力で`narrow-required`を2箇所に出す。実測で確認)。
+                    // 呼び出し側は先に条件式を検査しているので、ここで出た分は
+                    // どのみち`collect_facts`のラッパが捨てる——数だけ見て判断する
+                    let before = ctx.diagnostics.len();
                     let ty = infer_expr_single(ctx, m);
-                    if !safe_to_compare(&ty) {
+                    if ctx.diagnostics.len() != before || !safe_to_compare(&ty) {
                         return None;
                     }
                     let (then_ty, else_ty) = crate::checker::narrow_for_is(&ctx.type_ctx, &ty, target);

@@ -83,11 +83,22 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // 落ちる。TS版は`assignable`と`checkArithOp`をターゲットの種類を問わず通していた。
     // 直せば`check`が診断を出すようになり、このケースは性質の前提から外れて自然に消える
     ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
-    // ↓ **full_checker側を直したことで新しく対象に入ったケース**。`&&`/`||`の右辺と
-    // then節の絞り込みは full_checker では効くようになったが、codegen側の`gen_if`は
-    // `unwrap_is_cond`が素の`is`と`!`しか見ないため、`if a is Foo && ... { a.value }`の
-    // then節で`a`が絞り込まれず落ちる。codegen側に`collect_facts`相当を移植すれば消える
-    ("tests/parity/logical-and-narrow-right-operand/main.mesh", "codegen側のgen_ifが&&/||を含む条件の絞り込みを持たない"),
+    // ↓ **full_checker側を直したことで新しく対象に入った3件**。`&&`/`||`まわりの絞り込みは
+    // full_checker では効くようになったが、codegen側が追いついていない。原因は3つ:
+    //   (1) `codegen.rs::gen_if`の`unwrap_is_cond`が素の`is`と`!`しか見ない
+    //       → `if a is Foo && ... { a.value }` のthen節で絞り込まれない
+    //   (2) `checker.rs::check_logical_op`が`Expr::Is`の**裸の`Expr::Ident`**しか特別扱いしない
+    //       → subjectがフィールドパスだと`&&`の右辺で絞り込まれない
+    //   (3) 同じく`!`で包まれた`is`を見ない → `||`の右辺(De Morgan)で絞り込まれない
+    // **sweepの`cond_*`6形のうち4形がこの3つのどれかで落ちる**(ident×`&&`の2形だけ通る)。
+    // ここに置いたのは原因ごとの代表例。codegen側に`collect_facts`相当を移植すれば全部消える。
+    //
+    // **注意: この4形はこのPR以前、`check`の段階で整形された診断が出ていた**(誤検知だったが)。
+    // 誤検知を消した結果、いまは`check`を通って**codegenの生エラー**(整形されない
+    // `checker: ...`文字列)になる。誤検知の解消は正しいが、体験としては未完のまま
+    ("tests/parity/logical-and-narrow-right-operand/main.mesh", "codegen側のgen_ifが&&/||を含む条件の絞り込みを持たない(then節)"),
+    ("tests/parity/cond-narrow-field-subject/main.mesh", "checker.rs::check_logical_opが裸のIdentしか見ない(subjectがフィールドパス)"),
+    ("tests/parity/cond-narrow-demorgan/main.mesh", "checker.rs::check_logical_opが!で包まれたisを見ない(||のDe Morgan)"),
 ];
 
 fn corpus() -> Vec<PathBuf> {

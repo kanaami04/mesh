@@ -285,9 +285,25 @@ Rust版では効いていなかった。`full_checker::infer_binary`が`&&`/`||`
 `applyFacts` → 右辺を検査 → `popScope`)をそのまま移植した。**「本当に誤検知か」も
 「どう直すか」も推測しなかった**。
 
-**残っているのはcodegen側**: `mesh check`は通るようになったが`mesh build`はまだ落ちる
-——`gen_if`の`unwrap_is_cond`が素の`is`と`!`しか見ないため、then節で絞り込まれない。
-`KNOWN_VIOLATIONS`に登録済みで、codegen側に`collect_facts`相当を移植すれば消える。
+**残っているのはcodegen側**: `mesh check`は通るようになったが`mesh build`はまだ落ちる形がある。
+**`cond_*`6形のうち4形**(識別子×`&&`の2形だけ通る)。原因は3つ:
+
+1. `codegen.rs::gen_if`の`unwrap_is_cond`が素の`is`と`!`しか見ない(then節で絞り込まれない)
+2. `checker.rs::check_logical_op`が`is`の**裸の識別子**しか特別扱いしない
+   (subjectがフィールドパスだと`&&`の右辺で効かない)
+3. 同じく`!`で包まれた`is`を見ない(`||`のDe Morganで効かない)
+
+原因ごとの代表例3件を`KNOWN_VIOLATIONS`へ登録済み。codegen側に`collect_facts`相当を
+移植すれば全部消える。
+
+**正直に書いておくと、この4形は移植前は`check`の段階で診断が出ていた**(誤検知だったが
+整形された表示だった)。いまは`check`を通って**codegenの整形されないエラー**になる。
+誤検知の解消は正しいが、**体験としては未完**。codegen側を片付けるまでが1セット。
+
+**レビューで学んだこと**: 「1件の既知の限界」と書いていたが実際は4形だった。
+`check_implies_build`の`corpus()`は`examples/`と`tests/parity/`しか見ないので、
+**sweepが生成する一時ファイルは性質検査の対象外**——だから自動では捕まらなかった。
+性質検査に守らせたい形は、コーパスに置くまでが仕事。
 
 ## このプロジェクトは何か
 

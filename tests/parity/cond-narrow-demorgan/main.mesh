@@ -1,0 +1,14 @@
+// `||` の右辺への絞り込み(ド・モルガン)。**subject は裸の識別子**だが `!` で包んでいる形。
+//
+// `mesh check` は通るが **`mesh build` は落ちる**——codegen が使う
+// `checker.rs::check_logical_op` は `!` で包まれた `is` を見ないため、
+// `||` の右辺(=左が偽のときだけ評価される側)で絞り込みが効かない。
+//
+// 上の `cond-narrow-field-subject` とは**原因が別**(あちらは Member、こちらは否定)。
+// どちらも codegen 側に `collect_facts` 相当を移植すれば消える。
+fn main() {
+	x: int | none = 1
+	if !(x is int) || x > 0 {
+		print(1)
+	}
+}

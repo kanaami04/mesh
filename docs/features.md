@@ -71,10 +71,15 @@
       `narrow-required`/`incomparable-types`/`invalid-operation`の**誤検知**になっていた。
       「unionはANYに潰れるので絞り込みの有無で結果が変わらない」というコメントが残っていたが、
       unionをモデル化したmilestone 39以降その前提は偽だった)。
-      **既知の限界**: `mesh check`は通るが**`mesh build`はまだ落ちる**
-      ——コード生成が使う`checker.rs`側の`gen_if`が`&&`/`||`を含む条件の絞り込みを持たない。
-      追跡は`rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS`、
-      プローブは`tests/parity/logical-and-narrow-right-operand/` |
+      **既知の限界**: `mesh check`は通るが**`mesh build`はまだ落ちる形がある**
+      ——コード生成側が追いついていない。原因は3つで、`codegen.rs::gen_if`の`unwrap_is_cond`が
+      素の`is`と`!`しか見ない(then節で絞り込まれない)/ `checker.rs::check_logical_op`が
+      `is`の**裸の識別子**しか特別扱いしない(subjectがフィールドパスだと`&&`の右辺で効かない)/
+      同じく`!`で包まれた`is`を見ない(`||`のDe Morganで効かない)。
+      **`mise run sweep`の`cond_*`6形のうち4形が落ちる**(識別子×`&&`の2形だけ通る)。
+      追跡は`rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS`(原因ごとの代表例3件)。
+      なおこの4形は移植前は`check`の段階で診断が出ていた(誤検知だったが)ので、
+      誤検知の解消は正しい一方、**体験としては未完**(いまはcodegenの整形されないエラーになる) |
 | 汎用の空値(null / nil) | ❌ | 2026-07-17決定(union路線)。「どこにでも入り得る空値」は存在しない。
       不在は `T \| none` と書いた場所にだけ、型として現れる |
 | `any` 型 | ❌ | 2026-07-21実装(H-1、討議のうえkanayama承認)。critique-2026-07.md(B-5-2)の指摘を受け撤去 —

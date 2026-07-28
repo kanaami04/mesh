@@ -1,0 +1,3 @@
+main.mesh:20:5: error[unknown-field]: Holder has no field 'bogus' (fields: v)
+  	if h.bogus is Foo && h.v > 0 {
+  	   ^

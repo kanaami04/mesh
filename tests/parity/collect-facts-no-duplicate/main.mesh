@@ -1,0 +1,23 @@
+// `collect_facts` は**診断を出さずに事実だけを集める**(TS版 narrowing.ts の契約)。
+//
+// Rust版のASTには解決済み型のキャッシュが無く、フィールドパスの分岐が `infer_expr_single` で
+// 型を計算し直すため、そのままだと同じ診断が複数回出る。実際、この形の `unknown-field` は
+// **3回**出ていた(check_if の2回 + `&&` の右辺への絞り込みを足した回に1回追加)。
+// TS版オラクルは1回。
+//
+// 呼び出し側は必ず先に条件式を検査しているので、`collect_facts` が積んだ分は捨ててよい。
+// **1回だけ出ること**がこのケースの検査内容。
+struct Holder {
+	v: int
+}
+
+struct Foo {
+	value: int
+}
+
+fn main() {
+	h := Holder{v: 1}
+	if h.bogus is Foo && h.v > 0 {
+		print(1)
+	}
+}

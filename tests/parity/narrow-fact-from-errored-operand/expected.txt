@@ -1,0 +1,6 @@
+main.mesh:20:5: error[narrow-required]: cannot access field or method on Wrap | none — narrow it first (with 'is' or 'match')
+  	if w.inner is Foo && w.inner.value > 0 {
+  	   ^
+main.mesh:20:23: error[narrow-required]: cannot access field or method on Wrap | none — narrow it first (with 'is' or 'match')
+  	if w.inner is Foo && w.inner.value > 0 {
+  	                     ^
