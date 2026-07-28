@@ -113,6 +113,38 @@ STMT_INNER = {
     "ok": "print(1)",
 }
 
+HEAD_COND = """struct Holder {
+\tv: int | none
+}
+
+"""
+
+# 軸: **絞り込んだ値を条件式の「右辺」で使う**(2026-07-28追加)。
+#
+# 上の CONDS は `x is int && 1 == 1` のように**右辺が絞り込みと無関係**な形しか作らない。
+# そのため「左の`is`が右辺の式に効く」(F-6でdocs記載済み)が壊れていても直積に出てこなかった
+# ——実際に `full_checker::infer_binary` が右辺を絞り込み前のスコープで検査していて
+# `narrow-required` の誤検知になる、という穴を長く見逃していた。
+#
+# subjectを裸の識別子とフィールドパスの両方で作るのは、絞り込みの実装がこの2つで
+# 別扱いになっているため(`stable_path`を通るか否か)。
+#
+# **注意: この軸が作る6件は現在すべて誤検知として記録されている**
+# (`incomparable-types` / `invalid-operation`)。`tests/sweep-expected.txt` は
+# 「今の出力」を凍結する記録であって「正しい出力」ではない——この6件は**直すべき出力**。
+# 誤検知を直せば記録から診断が消えるので、そのときの差分が修正できた証拠になる。
+# 追跡は `docs/handoff.md`「性質検査(オラクルの代わり)」節と
+# `tests/parity/logical-and-narrow-right-operand/`。
+COND_SUBJECTS = {
+    "ident": ("x: int | none = 1", "x"),
+    "field": ("h := Holder{v: 1}", "h.v"),
+}
+COND_RIGHT_USES = {
+    "and_cmp": "{s} is int && {s} > 0",
+    "or_cmp": "!({s} is int) || {s} > 0",
+    "and_arith": "{s} is int && {s} + 1 > 0",
+}
+
 ARMS = {
     "match": "u: int | string = 1\n\tmatch u {{\n\t\tint => {}\n\t\tstring => print(0)\n\t}}",
     "select": "c := chan<int>(1)\n\tc <- 1\n\tselect {{\n\t\tv := <-c => {}\n\t\t_ => print(9)\n\t}}",
@@ -142,6 +174,11 @@ for (sk, sv), (ik, iv) in itertools.product(STMTS.items(), STMT_INNER.items()):
 
 for (sk, sv), (ik, iv) in itertools.product(ARMS.items(), ARM_INNER.items()):
     write(f"arm_{sk}_{ik}", f"fn main() {{\n\t{sv.format(iv)}\n}}\n{TAIL_STMT}")
+    n += 1
+
+for (sk, (decl, subj)), (uk, uv) in itertools.product(COND_SUBJECTS.items(), COND_RIGHT_USES.items()):
+    cond = uv.format(s=subj)
+    write(f"cond_{sk}_{uk}", f"{HEAD_COND}fn main() {{\n\t{decl}\n\tif {cond} {{\n\t\tprint(1)\n\t}}\n}}\n")
     n += 1
 
 print(f"生成 {n} 件 -> {OUT}")
