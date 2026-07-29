@@ -275,6 +275,11 @@
       常に `mathutil.add(1, 2)` / `mathutil.Point{...}` / 型位置 `mathutil.Point` と修飾する
       (P1: 呼び方は一つ)。未exportアクセス・未知パッケージ・import循環・自己importは
       コンパイルエラー。エントリプログラムはエントリファイル1つ(分割はパッケージ単位で行う)。
+      **2026-07-29(Rust版 milestone 68)に、宣言は通るのに実行できなかった3形が動くようになった**:
+      exportされたトップレベル定数のpkg修飾参照(`mathutil.LIMIT`)・呼び出しを伴わない関数値参照
+      (`f := mathutil.add`)・**他パッケージのstructに生やすメソッド**(`fn (p: lib.Point) show()`)。
+      いずれもTS版は`check`が黙ったまま壊れたJSを出しており(実行時`is not defined`)、
+      Rust版が生成名を宣言側と揃えて解消した。
       **v1の制限**: パスは単一ディレクトリ名のみ(`"a/b"`ネスト不可)。`"mesh/..."`は
       標準ライブラリ用に予約 — `mesh/io`・`mesh/json`は2026-07-20実装済み(F-14、下記参照)、
       `mesh/http`は2026-07-21実装済み(C-6続き、下記参照)。それ以外(`mesh/dom`等)は

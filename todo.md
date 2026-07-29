@@ -867,7 +867,10 @@
           的な書き方)は今回の検証対象のいずれも使わないため対象外のまま(既存の
           `Expr::Member`/`receiver_struct_name`の即Errにフォールバックする)。exportedな
           constのレジストリ登録も同じ理由で対象外(`PackageSymbols.consts`は常に空——
-          将来pkg修飾constの読み出しに対応する際に埋める)。`mesh test`相当や
+          将来pkg修飾constの読み出しに対応する際に埋める)。
+          **↑この3つは milestone 68(2026-07-29)で埋めた**——`receiver_struct_name`は
+          `receiver_struct_ref`へ、値参照は`resolve_package_value`へ、`PackageSymbols.consts`は
+          `generate_package`が登録するようになった。`mesh test`相当や
           `_test.mesh`除外もRust版にはまだ`run`/`build`以外のCLIサブコマンドが無いため対象外。
         - **PR #21の5エージェントcode reviewで4件のバグを発見・PR内で修正済み
           (2026-07-23、いずれも独立に実際のビルド+実行で再現確認済み)**:
@@ -3844,6 +3847,41 @@
                 どんな壊れた入力でもコンパイラがpanicしない。試作した「等価な条件の書き換え」
                 (性質A)も`scripts/`へ昇格させる候補だが、等価集合の吟味が要る
                 (`x is int || 1 == 2`が絞り込まないのは仕様の可能性が高い)
+        - [x] **milestone 68: 既知の破れ(`KNOWN_VIOLATIONS`)を0件にする**
+              ✅ 2026-07-29実装(PR #119)。`rust/tests/check_implies_build.rs`に残っていた
+              3件(=「checkが黙るのにbuildが落ちる」形)をまとめて埋めた。
+              詳細は `docs/handoff.md`「既知の破れ〜を0件にした」節が一次情報源。
+              - **1. 代入文の検査をTS版の構造どおりに組み直した**(`check_assign_target`)。
+                代入先の種類ごとに別々の規則を書いていたため、TS版と4通り食い違っていた:
+                フィールド代入を**まるごと検査していない**(= 既知の破れ本体)/ 複合代入を
+                「右辺を代入先へ代入できるか」で見ていたため`invalid-operation`が
+                `type-mismatch`になる(**違う診断コード**)/ `y /= 0`の`division-by-zero`が
+                出ない / `immutable-assignment`とident代入の文言・位置。
+                TS版`statements.ts`と同じく**代入先の種類で分岐せず`expected`を1つ求めてから
+                共通の規則を当てる**形にし、算術は二項演算子と同じ`check_arith`を共有させた。
+              - **この族はparityコーパスに1件も無かった**(`grep -rl immutable-assignment
+                tests/parity`が空)。**記録との突き合わせでは原理的に届かない**穴で、
+                オラクルに聞いて初めて分かった。`assign-immutable`/`assign-compound-arith`の
+                2ケースをコーパスへ追加(期待値はすべてオラクルの実測)。
+              - **2〜3. パッケージ修飾のcodegen 2件はTS版が壊れていたので移植しなかった**。
+                非mainパッケージが自分のconstを参照すると`LIMIT is not defined`、
+                `fn (p: lib.Point) show()`は`__m_lib$Point_show is not defined`で、
+                どちらもTS版は`check`が黙ったまま実行時に落ちる(オラクルを復元して実測)。
+                生成名を宣言側と揃えて正しく動くようにした。**「オラクルに聞く」は
+                「オラクルに従う」ではない**——オラクルが答えるのは*TS版が何をするか*であって
+                *何が正しいか*ではない。
+              - **ついでに誤検知が1つ消えた**: `fn (p: lib.Point) show()`を宣言しても
+                `p.show()`が`unknown-field`になっていた(`declare_method`がレシーバのstructを
+                自パッケージの表からしか引かない)。TS版は黙る形。
+              - **実装中に自分で誤検知を作り、既存テストが捕まえた**。「解決後の名前に`.`が
+                あれば他パッケージ」という判定にしたら、自パッケージのstructも
+                `qualify_struct_name`で`mathutil.Point`になるため`examples/modules_demo.mesh`が
+                丸ごと壊れた。**判定はレシーバ注釈のpkg修飾で行う**のが正解。
+              - **`oracle_hunt_gen.py`に代入族(38形)を追加**。「0件」が空振りでないことを、
+                **修正前のコンパイラをworktreeに用意して同じシードで回し9件のDIFFが出る**
+                ことで実測した(修正後は0件)。
+              - 検証: `cargo test` 686件 / clippy 0 / parity 167件差0 / sweep 126件差0 /
+                run-examples 24本 / オラクルと6プローブ・弾く経路8件が位置と文言まで一致。
         - [x] **オラクル差分ハンター(`mise run oracle-hunt`)— loop engineering 段階2の中身**
               ✅ 2026-07-28実装。ランダム生成した`.mesh`を Rust版とTS版オラクルの両方へ通し、
               診断が食い違う形を探す。`scripts/oracle-hunt.sh` + `scripts/oracle_hunt_gen.py`。
@@ -3906,7 +3944,8 @@
               (素の `is` と `!` しか見なかった)は不要になったので削除。
               - **`KNOWN_VIOLATIONS` は8件→3件**。`56-path-narrow-*` 2件(PR #109で
                 取り下げたもの)と `cond-*` / `logical-and-narrow-right-operand` 3件が消えた。
-                残りは codegen の明示的な「未対応」2件と `check_assign_target` の検出漏れ1件。
+                残りは codegen の明示的な「未対応」2件と `check_assign_target` の検出漏れ1件
+                (**milestone 68でまとめて解消し0件になった**)。
               - **要点は絞り込みと無効化を同時に入れたこと**。PR #109 で「絞り込みだけ入れて
                 無効化が無い」状態を作りミスコンパイルになった前例があるので、
                 `CheckerCtx::invalidate_path` を同じ回で入れた。**codegen単体テストは
@@ -4061,7 +4100,8 @@
                 `full_checker.rs`、コード生成は`checker.rs`(最小リゾルバ)という**別々の実装**
                 を通るため、片方だけが知っている機能があると食い違う。
               - **導入時点で4件破れていた**。2件はcodegen側の明示的な「未対応」
-                (パッケージ修飾レシーバ / パッケージ修飾の値参照)で既知。
+                (パッケージ修飾レシーバ / パッケージ修飾の値参照)で既知
+                (**milestone 68で埋めてリストは0件になった**)。
               - **残り2件は「直そうとして取り下げた」**。ここが今回いちばん学べたところ。
                 原因は`checker.rs`(codegen側の最小リゾルバ)が裸の識別子しか絞り込まないこと
                 なので、キーを`checker::stable_path`(`a` / `a.b` / `a.b.c`)へ一般化すれば

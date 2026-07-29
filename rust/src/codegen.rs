@@ -1478,9 +1478,10 @@ impl Codegen {
     // (fn_decls)ならpkg接頭辞付きの名前(mainパッケージなら無修飾のまま——fn_js_name参照)、
     // パッケージ修飾(`mathutil.add`)ならそのパッケージのexportedな関数か確認して
     // 同様にpkg接頭辞付きの名前(code review指摘: この分岐が無いと`spawn mathutil.add(...)`
-    // が素の関数値を得られず、既存のMember読み取りガードに落ちて「package/member access
-    // is not yet supported」という紛らわしいエラーになっていた——gen_callの呼び出し形
-    // 〈`(await ...)`まで含めて組み立てる〉とは別に、ここでは呼び出し先の値だけを解決する)、
+    // が素の関数値を得られず、既存のMember読み取りガードに落ちていた——gen_callの呼び出し形
+    // 〈`(await ...)`まで含めて組み立てる〉とは別に、ここでは呼び出し先の値だけを解決する。
+    // milestone 68で`resolve_package_value`が同じ名前を返せるようになったので、この分岐が
+    // 無くても壊れたJSにはならないが、**関数か定数かを確かめずに素通りさせない**ために残す)、
     // それ以外(ローカル変数に入った関数値等)はgen_exprへ素通しする。gen_call/gen_spawnで共有
     fn resolve_free_fn_value(&mut self, callee: &Expr) -> CodegenResult<String> {
         if let Expr::Ident { name, .. } = callee
@@ -1859,12 +1860,16 @@ fn method_js_name(struct_name: &str, method_name: &str) -> String {
     format!("__m_{}_{}", struct_name.replace('.', "$"), method_name)
 }
 
-// トップレベル自由関数の生成JS名: mainパッケージは素の名前のまま、それ以外は
-// "{pkg}${name}"(TS版fnJsNameと同じ)。パッケージ修飾呼び出し(`mathutil.add(...)`)の
-// 呼び出し先と、その関数自身の宣言側の両方でこの名前が一致していないと参照が壊れる。
-// トップレベルconstにはこの接頭辞を付けていない(パッケージ修飾された「呼び出しを
-// 伴わない」値参照が対象外のため——gen_const_decl参照。複数パッケージで同名の
-// トップレベルconstが衝突する場合はgen_const_declが明確なErrで検出する)
+// トップレベルの**自由関数とconst**の生成JS名: mainパッケージは素の名前のまま、
+// それ以外は"{pkg}${name}"(TS版fnJsNameと同じ)。パッケージ修飾参照
+// (`mathutil.add(...)` / `lib.LIMIT`)と、その宣言側の両方でこの名前が一致していないと
+// 参照が壊れる——**壊れ方は静かなので厄介**(TS版は非mainパッケージが自分のconstを
+// 参照する経路でこれを踏んでおり、実行時`LIMIT is not defined`で落ちる)。
+// **milestone 68からconstもここを通る**(それまで無修飾だったのはpkg修飾の値参照が
+// 未対応だったため)。名前を出す側は宣言=`gen_const_decl`/`gen_fn_decl`、参照側は
+// `gen_expr`のIdent(自パッケージ)と`resolve_package_value`/`resolve_free_fn_value`
+// (他パッケージ)。同一パッケージ内の同名constだけは接頭辞で解けないので
+// `gen_const_decl`が明確なErrで検出する
 pub fn fn_js_name(pkg: &str, name: &str) -> String {
     if pkg == "main" { name.to_string() } else { format!("{pkg}${name}") }
 }
