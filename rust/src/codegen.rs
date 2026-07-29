@@ -93,15 +93,20 @@ struct Codegen {
     // `deferTempCounter`と同じくコンパイル全体で1つ(関数ごとにはリセットしない)——
     // 全ての一時変数名がコンパイル全体で一意になればよく、関数内で閉じている必要は無い
     defer_temp_counter: u32,
-    // これまでに生成したトップレベルconstの名前(全パッケージ分、リセットしない)。
-    // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_nameで
-    // pkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
-    // 意図的に無修飾のまま生成している——2つのパッケージ(または同一パッケージの2ファイル)が
-    // 同じ名前のトップレベルconstを宣言すると、生成JSの同じフラットスコープに同名の`const`
-    // 宣言が2つ現れ、JS自体が構文エラーで一切パースできなくなる(実行時クラッシュより
-    // 悪い、ファイル全体が起動不能になる)。これを静かに`Ok(js)`として返さず、重複を
-    // 検出した時点で明確なErrにする
+    // これまでに生成したトップレベルconstの**生成JS名**(全パッケージ分、リセットしない)。
+    // milestone 68でconstもfn_js_nameでpkg接頭辞を付けるようにしたので、別パッケージの
+    // 同名constは衝突しなくなった。**同一パッケージの2ファイルが同じ名前を宣言する形は
+    // 依然として衝突する**(生成JSの同じフラットスコープに同名の`const`宣言が2つ現れ、
+    // JS自体が構文エラーで一切パースできなくなる——実行時クラッシュより悪い、ファイル全体が
+    // 起動不能になる壊れ方)。これを静かに`Ok(js)`として返さず、検出した時点で明確なErrにする
     declared_consts: HashSet<String>,
+    // 今処理中のパッケージのトップレベルconst名(素の名前)。パッケージ内から無修飾で
+    // 参照されたとき、宣言側と同じマングル名へ揃えるために要る(TS版`localFns`と同じ役割)。
+    // **TS版にはconst版が無く、それが実バグだった**——非mainパッケージが自分のconstを
+    // 参照すると宣言は`lib$LIMIT`・参照は`LIMIT`になり、実行時`LIMIT is not defined`で
+    // 落ちる(milestone 68にオラクルを復元して実測。移植せず、こちらで直した)。
+    // Meshはshadowingを禁止しているので、同名のローカル変数と取り違える心配は無い
+    local_consts: HashSet<String>,
 }
 
 impl Codegen {
@@ -116,6 +121,7 @@ impl Codegen {
             defer_used: Vec::new(),
             defer_temp_counter: 0,
             declared_consts: HashSet::new(),
+            local_consts: HashSet::new(),
         }
     }
 
@@ -245,11 +251,17 @@ impl Codegen {
                 });
                 match &fn_decl.receiver {
                     Some(recv) => {
-                        let bare_name = receiver_struct_name(recv)?;
+                        let (recv_pkg, bare_name) = receiver_struct_ref(recv, pkg)?;
                         // レシーバが未宣言/非struct型(例: `fn (x: int) foo()`)なら殻へ静かに
                         // フォールバックさせず、明確なErrにする(おかしなJS関数名`__m_int_foo`等を
-                        // 生成しないため)
-                        if self.ctx.lookup_struct(&bare_name).is_none() {
+                        // 生成しないため)。**pkg修飾レシーバは他パッケージのレジストリを引く**
+                        // (milestone 68)——自パッケージのstruct表には当然入っていない
+                        let declared = if recv_pkg == pkg {
+                            self.ctx.lookup_struct(&bare_name).is_some()
+                        } else {
+                            self.ctx.is_package_alias(&recv_pkg) && self.ctx.lookup_package_type(&recv_pkg, &bare_name).is_some()
+                        };
+                        if !declared {
                             return Err(format!(
                                 "codegen: receiver type '{bare_name}' is not a declared struct (fn '{}' at {}:{})",
                                 fn_decl.name, fn_decl.pos.line, fn_decl.pos.col
@@ -257,7 +269,7 @@ impl Codegen {
                         }
                         // method_tableは全パッケージ共有なのでpkg修飾済みの名前で登録する
                         // (milestone 6——mainパッケージなら無修飾のまま、既存挙動と同じ)
-                        let struct_name = checker::qualify_struct_name(pkg, &bare_name);
+                        let struct_name = checker::qualify_struct_name(&recv_pkg, &bare_name);
                         let mut all_params = vec![checker::resolve_type_node(&self.ctx, &recv.type_node)];
                         all_params.extend(params);
                         self.ctx.declare_method(&struct_name, &fn_decl.name, Type::Fn { params: all_params, ret });
@@ -277,8 +289,10 @@ impl Codegen {
         // 安全ガードごと素通りしてしまう、milestone 3の安全ガードの目的を回避する深刻な
         // バグだった)を修正——union型aliasも同じ`symbols.types`へ登録する
         // (`lookup_package_type`は型の種類を区別しないので、pkg修飾側の参照箇所は
-        // 変更不要)。exportedなconstは今回のどの検証exampleも使わないため対象外のまま
-        // (PackageSymbols.constsは常に空——将来pkg修飾constの読み出しに対応する際に埋める)
+        // 変更不要)。**milestone 68でexportedなconstも登録するようになった**——
+        // `lib.LIMIT`のような「呼び出しを伴わない」pkg修飾の値参照に対応したため
+        // (それまで`PackageSymbols.consts`は常に空で、参照は`package/member access is
+        // not yet supported`という明確なErrになっていた)
         let mut symbols = checker::PackageSymbols::default();
         for t in &all_types {
             if !t.exported {
@@ -306,7 +320,26 @@ impl Codegen {
                 }
             }
         }
+        // exportedなトップレベルconstも登録する(milestone 68)。型は宣言の注釈が優先で、
+        // 無ければ値から推論する——`gen_const_decl`が`self.ctx.declare`へ入れるのと同じ規則
+        for f in files {
+            for c in &f.program.consts {
+                if !c.exported {
+                    continue;
+                }
+                let ty = c
+                    .type_node
+                    .as_ref()
+                    .map(|t| checker::resolve_type_node(&self.ctx, t))
+                    .unwrap_or_else(|| checker::infer_expr(&self.ctx, &c.value));
+                symbols.consts.insert(c.name.clone(), ty);
+            }
+        }
         self.ctx.register_package(pkg, symbols);
+
+        // パッケージ内から無修飾で参照されたconstを宣言側と同じマングル名へ揃えるための表
+        // (`gen_expr`のIdentが引く)。**const本体の生成より前に**全ファイル分そろえる
+        self.local_consts = files.iter().flat_map(|f| f.program.consts.iter()).map(|c| c.name.clone()).collect();
 
         for f in files {
             self.file = f.file.clone();
@@ -325,25 +358,31 @@ impl Codegen {
     }
 
     fn gen_const_decl(&mut self, c: &ConstDecl) -> CodegenResult<()> {
-        // code review指摘(milestone 6): トップレベル関数/メソッドはfn_js_name/method_js_name
-        // でpkg接頭辞が付き衝突しないが、constは(呼び出しを伴わない値参照が対象外のため)
-        // 意図的に無修飾のまま生成している——2つのパッケージ(または同一パッケージの2ファイル)が
-        // 同じ名前のトップレベルconstを宣言すると、生成JSの同じフラットスコープに同名の
-        // `const`宣言が2つ現れ、実行時クラッシュではなくJS自体がパースできない
-        // (`SyntaxError: Identifier 'x' has already been declared`)という、ファイル全体が
-        // 起動不能になるもっと悪い壊れ方をする。これを静かに`Ok(js)`として返さず、
-        // 重複を検出した時点で明確なErrにする
-        if !self.declared_consts.insert(c.name.clone()) {
+        // milestone 68: **constもトップレベル関数と同じpkg接頭辞を付ける**(TS版`genConstDecl`も
+        // `fnJsName(this.pkg, c.name)`で出している)。それまで無修飾だったのは「パッケージ修飾の
+        // 値参照(`lib.LIMIT`)が対象外だったから」で、その対象外を埋めるのが今回。
+        // mainパッケージは無修飾のままなので、単一ファイルの生成JSは一切変わらない。
+        //
+        // 同一パッケージの2ファイルが同じ名前を宣言する形は接頭辞では解けないので、
+        // 引き続きここで検出して明確なErrにする(生成JSの同じフラットスコープに同名の
+        // `const`宣言が2つ現れると、実行時クラッシュではなくJS自体がパースできない
+        // 〈`SyntaxError: Identifier 'x' has already been declared`〉という、ファイル全体が
+        // 起動不能になるもっと悪い壊れ方をする)
+        let js_name = fn_js_name(self.ctx.pkg(), &c.name);
+        if !self.declared_consts.insert(js_name.clone()) {
             return Err(format!(
-                "codegen: top-level const '{}' is declared more than once across the compiled packages ({}:{})",
-                c.name, c.pos.line, c.pos.col
+                "codegen: top-level const '{}' is declared more than once in package '{}' ({}:{})",
+                c.name,
+                self.ctx.pkg(),
+                c.pos.line,
+                c.pos.col
             ));
         }
         let value = self.gen_expr(&c.value)?;
         // 型注釈があればそちらが「本当の型」(TS版checker/modules.tsの`declared ?? valueType`)
         let ty = c.type_node.as_ref().map(|t| checker::resolve_type_node(&self.ctx, t)).unwrap_or_else(|| checker::infer_expr(&self.ctx, &c.value));
         self.ctx.declare(&c.name, ty);
-        self.emit(format!("const {} = {value};", c.name));
+        self.emit(format!("const {js_name} = {value};"));
         Ok(())
     }
 
@@ -353,8 +392,8 @@ impl Codegen {
             recv_params.into_iter().chain(fn_decl.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(", ");
         let js_name = match &fn_decl.receiver {
             Some(recv) => {
-                let struct_name = checker::qualify_struct_name(self.ctx.pkg(), &receiver_struct_name(recv)?);
-                method_js_name(&struct_name, &fn_decl.name)
+                let (recv_pkg, bare_name) = receiver_struct_ref(recv, self.ctx.pkg())?;
+                method_js_name(&checker::qualify_struct_name(&recv_pkg, &bare_name), &fn_decl.name)
             }
             None => fn_js_name(self.ctx.pkg(), &fn_decl.name),
         };
@@ -971,6 +1010,12 @@ impl Codegen {
     // Index等(配列/mapは対象外のまま)は他の対応構文が無いのでこの後の default アームで弾く
     fn gen_lvalue(&mut self, expr: &Expr) -> CodegenResult<String> {
         match expr {
+            // 読み側(`gen_expr`)と**同じ名前**にする。トップレベルconstへの代入自体は
+            // full_checkerが`immutable-assignment`で弾く形なので通常ここへは来ないが、
+            // 名前がずれていると「別の変数を作ってしまう」という静かな壊れ方になる
+            // ——マングル名で出しておけばJS側が`Assignment to constant variable`で
+            // うるさく落ちる(milestone 68)
+            Expr::Ident { name, .. } if self.local_consts.contains(name) => Ok(fn_js_name(self.ctx.pkg(), name)),
             Expr::Ident { name, .. } => Ok(name.clone()),
             Expr::Member { target, name, pos } => {
                 if name == "__proto__" {
@@ -1017,6 +1062,10 @@ impl Codegen {
             }
             Expr::Bool { value, .. } => Ok(value.to_string()),
             Expr::None { .. } => Ok("null".to_string()), // noneの実行時表現はnull
+            // 自パッケージのトップレベルconstは宣言側と同じマングル名で参照する
+            // (milestone 68。mainパッケージでは`fn_js_name`が素の名前を返すので変化なし)。
+            // Meshはshadowingを禁止しているので、同名のローカル変数と取り違える心配は無い
+            Expr::Ident { name, .. } if self.local_consts.contains(name) => Ok(fn_js_name(self.ctx.pkg(), name)),
             Expr::Ident { name, .. } => Ok(name.clone()),
             // milestone 14 code review発覚・実行確認済みの回帰: `x is int && x > 0`のような
             // 複合条件は、右辺(および右辺の中でさらに算術/比較する式)の型検査・コード生成の
@@ -1163,6 +1212,13 @@ impl Codegen {
             // method_tableを確認し、真にメソッド名ならmethod-not-called相当、
             // そうでなければunknown-field相当のメッセージを出し分ける
             Expr::Member { target, name, pos } => {
+                // パッケージ修飾の値参照(`lib.LIMIT` / 関数値としての`lib.add`、milestone 68)。
+                // ローカル変数によるshadowが優先される(`is_package_alias`参照)ので、真に
+                // パッケージ参照と判定できたものだけをマングル名へ直接置き換える——
+                // 宣言側(`gen_const_decl`/`gen_fn_decl`)が同じ`fn_js_name`で出している
+                if let Some(js) = self.resolve_package_value(target, name, *pos)? {
+                    return Ok(js);
+                }
                 let target_ty = checker::infer_expr(&self.ctx, target);
                 if !matches!(target_ty, Type::Struct { .. }) {
                     return Err(format!("codegen: package/member access is not yet supported ({}:{})", pos.line, pos.col));
@@ -1397,6 +1453,25 @@ impl Codegen {
         let callee_js = self.resolve_free_fn_value(callee)?;
         let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
         Ok(format!("(await {callee_js}({}))", args_js.join(", ")))
+    }
+
+    // `alias.name`が「パッケージ修飾の値参照」ならその生成JS名を返す(milestone 68)。
+    // 対象はexportedなトップレベルconst(`lib.LIMIT`)と、**呼び出しを伴わない**関数値参照
+    // (`f := lib.add`)——呼び出し形(`lib.add(1,2)`)はgen_call/resolve_free_fn_valueが
+    // 先にinterceptするのでここへは来ない。
+    //
+    // パッケージだと分かったのにどちらでも無ければ、未export/存在しない名前なので
+    // 明確なErrにする(実行時`undefined`として静かに伝播させない)。struct型名の参照
+    // (`lib.Point`)は式ではなく型/structリテラルの位置に現れるのでここを通らない
+    fn resolve_package_value(&self, target: &Expr, name: &str, pos: Pos) -> CodegenResult<Option<String>> {
+        let Expr::Ident { name: alias, .. } = target else { return Ok(None) };
+        if !self.ctx.is_package_alias(alias) {
+            return Ok(None);
+        }
+        if self.ctx.lookup_package_const(alias, name).is_some() || self.ctx.lookup_package_fn(alias, name).is_some() {
+            return Ok(Some(fn_js_name(alias, name)));
+        }
+        Err(format!("codegen: package '{alias}' has no exported value '{name}' ({}:{})", pos.line, pos.col))
     }
 
     // 自由関数の呼び出し先を素のJS識別子へ解決する。自パッケージの既知のトップレベル関数
@@ -1755,16 +1830,23 @@ pub(crate) fn http_stdlib_symbols() -> checker::PackageSymbols {
     checker::PackageSymbols { types, fns, consts: HashMap::new() }
 }
 
-// レシーバの型注釈から素の(pkg修飾されていない)struct名を取り出す。レシーバは常に
-// 自パッケージ内のstructを指す前提(`fn (p: Point) ...`はPointが今処理中のパッケージの
-// struct、という意味)——他パッケージの型に生やす拡張メソッド的な書き方
-// (`fn (p: math.Point) ...`)はモジュールのこの段階でも対象外のまま
-fn receiver_struct_name(recv: &Receiver) -> CodegenResult<String> {
+// レシーバの型注釈から (パッケージ名, 素のstruct名) を取り出す。pkg修飾が無ければ
+// 「自パッケージのstruct」の意味なので`current_pkg`を補う。
+//
+// **milestone 68でpkg修飾レシーバ(`fn (p: lib.Point) show()`)に対応した**。full_checkerは
+// 以前からこの形を通していた(`unknown_type_name`は「exportされている型は未知にしない」)
+// のに、codegenだけが未対応で`mesh check`は黙るのに`mesh build`が落ちていた
+// (`check_implies_build`の`KNOWN_VIOLATIONS`に登録されていた破れ)。
+//
+// **TS版は「対応していた」のではなく壊れていた**ので移植していない。TS版
+// `receiverStructName`はレシーバのpkg修飾を無視して常に**現在のパッケージ**で修飾するため、
+// 宣言が`__m_Point_show`・呼び出し側が`__m_lib$Point_show`という食い違ったJSを生成し、
+// 実行時に`__m_lib$Point_show is not defined`で落ちる(オラクルを復元して実測)。
+// 呼び出し側は`Type::Struct`の名前(`lib.Point`)からキーを作るので、宣言側もそちらへ揃える
+fn receiver_struct_ref(recv: &Receiver, current_pkg: &str) -> CodegenResult<(String, String)> {
     match &recv.type_node {
-        TypeNode::Name { name, pkg: None, .. } => Ok(name.clone()),
-        TypeNode::Name { pkg: Some(_), pos, .. } => {
-            Err(format!("codegen: package-qualified receivers are not yet supported ({}:{})", pos.line, pos.col))
-        }
+        TypeNode::Name { name, pkg: None, .. } => Ok((current_pkg.to_string(), name.clone())),
+        TypeNode::Name { name, pkg: Some(alias), .. } => Ok((alias.clone(), name.clone())),
         other => Err(format!("codegen: receiver type must be a plain struct name ({}:{})", other.pos().line, other.pos().col)),
     }
 }
@@ -2913,18 +2995,33 @@ mod tests {
     }
 
     #[test]
-    fn 複数パッケージにまたがる同名のトップレベルconstは明確なエラーになる() {
-        // code review指摘: トップレベル関数/メソッドはpkg接頭辞で衝突しないが、constは
-        // 無修飾のまま生成するため、2つのパッケージが同じ名前のトップレベルconstを
-        // 宣言すると生成JSの同じフラットスコープに同名のconst宣言が2つ現れ、
-        // 実行時クラッシュではなくJS自体がパースできない(SyntaxError)という
-        // もっと悪い壊れ方をする。静かに`Ok(js)`を返さず明確なErrにする
-        let err = gen_modules(&[
+    fn 別パッケージの同名トップレベルconstはpkg接頭辞で衝突しない() {
+        // milestone 68でconstにもpkg接頭辞を付けた(TS版`genConstDecl`と同じ`fnJsName`)ので、
+        // かつてErrにしていたこの形は素直に通るようになった。**パッケージが自分のconstを
+        // 無修飾で参照する形**(`pkgb`の`f`が`debug`を読む)も宣言側と同じマングル名になる
+        // ——ここが揃っていないと実行時`debug is not defined`で落ちる(TS版の実バグ)
+        let js = gen_modules(&[
             ("main", "main.mesh", "import \"pkgb\"\ndebug := 1\nfn main() {\n  print(debug)\n  print(pkgb.f())\n}"),
             ("pkgb", "pkgb/b.mesh", "debug := 2\nexport fn f() int {\n  return debug\n}"),
         ])
+        .expect("別パッケージの同名constは衝突しない");
+        assert!(js.contains("const pkgb$debug = 2;"), "got: {js}");
+        assert!(js.contains("const debug = 1;"), "mainパッケージは無修飾のまま: {js}");
+        assert!(js.contains("return pkgb$debug;"), "自パッケージのconst参照もマングル名: {js}");
+    }
+
+    #[test]
+    fn 同一パッケージの2ファイルが同名のトップレベルconstを宣言したら明確なエラーになる() {
+        // pkg接頭辞では解けない衝突。生成JSの同じフラットスコープに同名の`const`宣言が
+        // 2つ現れ、実行時クラッシュではなくJS自体がパースできない(SyntaxError)という
+        // もっと悪い壊れ方をするので、静かに`Ok(js)`を返さず明確なErrにする
+        let err = gen_modules(&[
+            ("main", "main.mesh", "import \"pkgb\"\nfn main() {\n  print(pkgb.f())\n}"),
+            ("pkgb", "pkgb/b.mesh", "debug := 2\nexport fn f() int {\n  return debug\n}"),
+            ("pkgb", "pkgb/c.mesh", "debug := 3\n"),
+        ])
         .unwrap_err();
-        assert!(err.contains("top-level const 'debug' is declared more than once"), "got: {err}");
+        assert!(err.contains("top-level const 'debug' is declared more than once in package 'pkgb'"), "got: {err}");
     }
 
     #[test]

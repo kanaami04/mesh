@@ -1,0 +1,12 @@
+main.mesh:11:2: error[immutable-assignment]: 'x' is immutable — declare it with 'mut' to allow reassignment
+  	x = 2
+  	^
+main.mesh:12:2: error[immutable-assignment]: 'x' is immutable — declare it with 'mut' to allow reassignment
+  	x += 3
+  	^
+main.mesh:13:2: error[immutable-assignment]: 'x' is immutable — declare it with 'mut' to allow '++'
+  	x++
+  	^
+main.mesh:14:2: error[immutable-assignment]: 'x' is immutable — declare it with 'mut' to allow '--'
+  	x--
+  	^

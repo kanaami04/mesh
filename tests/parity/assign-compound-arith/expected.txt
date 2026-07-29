@@ -1,0 +1,15 @@
+main.mesh:21:2: error[invalid-operation]: invalid operation: int + "no"
+  	i += "no"
+  	^
+main.mesh:22:2: error[invalid-operation]: invalid operation: int + "no"
+  	xs[0] += "no"
+  	^
+main.mesh:23:2: error[invalid-operation]: invalid operation: int + "no"
+  	t.n += "no"
+  	^
+main.mesh:24:2: error[invalid-operation]: invalid operation: string + int (hint: use str() to convert values to string)
+  	t.s += 5
+  	^
+main.mesh:25:2: error[invalid-operation]: invalid operation: float + "no"
+  	f += "no"
+  	^
