@@ -1015,8 +1015,7 @@ impl Codegen {
             // 名前がずれていると「別の変数を作ってしまう」という静かな壊れ方になる
             // ——マングル名で出しておけばJS側が`Assignment to constant variable`で
             // うるさく落ちる(milestone 68)
-            Expr::Ident { name, .. } if self.local_consts.contains(name) => Ok(fn_js_name(self.ctx.pkg(), name)),
-            Expr::Ident { name, .. } => Ok(name.clone()),
+            Expr::Ident { name, .. } => Ok(self.ident_js_name(name)),
             Expr::Member { target, name, pos } => {
                 if name == "__proto__" {
                     return Err(format!("codegen: '__proto__' cannot be used as a field name ({}:{})", pos.line, pos.col));
@@ -1062,11 +1061,7 @@ impl Codegen {
             }
             Expr::Bool { value, .. } => Ok(value.to_string()),
             Expr::None { .. } => Ok("null".to_string()), // noneの実行時表現はnull
-            // 自パッケージのトップレベルconstは宣言側と同じマングル名で参照する
-            // (milestone 68。mainパッケージでは`fn_js_name`が素の名前を返すので変化なし)。
-            // Meshはshadowingを禁止しているので、同名のローカル変数と取り違える心配は無い
-            Expr::Ident { name, .. } if self.local_consts.contains(name) => Ok(fn_js_name(self.ctx.pkg(), name)),
-            Expr::Ident { name, .. } => Ok(name.clone()),
+            Expr::Ident { name, .. } => Ok(self.ident_js_name(name)),
             // milestone 14 code review発覚・実行確認済みの回帰: `x is int && x > 0`のような
             // 複合条件は、右辺(および右辺の中でさらに算術/比較する式)の型検査・コード生成の
             // 両方に左辺のnarrowing結果を反映しないと、TS版でテスト済みの正当なコード
@@ -1143,7 +1138,11 @@ impl Codegen {
                 // 同じ検証を通す
                 checker::check_struct_type_field_names(target)?;
                 if let Expr::Ident { name, .. } = &**operand {
-                    Ok(gen_type_test(name, target))
+                    // **`ident_js_name`を通す**——この分岐は`gen_expr`を呼ばない近道なので、
+                    // 素の`name`を渡すとトップレベルconstのマングルが効かない。
+                    // code reviewで実際に踏んだ(非mainパッケージの`limit is int`が
+                    // `checkもbuildも通って実行時に`limit is not defined`)
+                    Ok(gen_type_test(&self.ident_js_name(name), target))
                 } else {
                     let operand_js = self.gen_expr(operand)?;
                     Ok(format!("((__v) => {})({operand_js})", gen_type_test("__v", target)))
@@ -1201,11 +1200,14 @@ impl Codegen {
                 }
                 Ok(format!("(await (async (__m) => {})({subject_js}))", parts.join(" ")))
             }
-            // 裸のメンバーアクセス(呼び出しではない)。targetがstruct型かつnameが宣言済み
-            // フィールドのときだけ素の`.name`を出す——パッケージ修飾(`math.add`)はまだ
-            // 実装が無く「未解決の識別子」としてANYへ落ちるので、ここで弾かないと
-            // 実行時ReferenceErrorになるJSを静かに生成してしまう。メソッド名(フィールドでは
-            // ない名前)を値として参照する式もTS版と同じく対象外のまま(呼び出し式側でだけ解決)。
+            // 裸のメンバーアクセス(呼び出しではない)。**まずパッケージ修飾の値参照
+            // (`lib.LIMIT` / `f := lib.add`)を`resolve_package_value`が引き取る**
+            // (milestone 68。それ以前はここに実装が無く、下のstruct判定で明確なErrにしていた)。
+            // 引き取られなかったものは、targetがstruct型かつnameが宣言済みフィールドの
+            // ときだけ素の`.name`を出す——それ以外は「未解決の識別子」としてANYへ落ちるので、
+            // ここで弾かないと実行時ReferenceErrorになるJSを静かに生成してしまう。
+            // メソッド名(フィールドではない名前)を値として参照する式はTS版と同じく
+            // 対象外のまま(呼び出し式側でだけ解決)。
             // milestone 15: フィールド未検出時に無条件で「メソッド名の値参照」と決め打って
             // いた(method_tableを実際には見ていなかった)ため、単なるtypoでも常に
             // 誤解を招くメッセージになっていた——validate_struct_fieldで実際に
@@ -1453,6 +1455,20 @@ impl Codegen {
         let callee_js = self.resolve_free_fn_value(callee)?;
         let args_js = args.iter().map(|a| self.gen_expr(a)).collect::<CodegenResult<Vec<_>>>()?;
         Ok(format!("(await {callee_js}({}))", args_js.join(", ")))
+    }
+
+    // 識別子の生成JS名。**名前を組み立てる場所をここ1箇所に閉じる**のが要点(milestone 68)。
+    // 自パッケージのトップレベルconstは宣言側と同じマングル名にする(mainパッケージでは
+    // `fn_js_name`が素の名前を返すので変化なし)。Meshはshadowingを禁止しているので、
+    // 同名のローカル変数と取り違える心配は無い。
+    //
+    // **`Expr::Ident`を素で読む場所を増やさないこと**——最初の実装は`gen_expr`と`gen_lvalue`の
+    // 2箇所に同じ判定を書き、`Expr::Is`の「裸Identなら二重評価を避けて直接参照する」近道
+    // (`gen_expr`を通らない3つ目の経路)を取りこぼした。`check`も`build`も通るのに実行時
+    // `limit is not defined`で落ちる、というこのPRが潰そうとしていた形そのものをcode reviewで
+    // 指摘された。`grep -n "Expr::Ident" rust/src/codegen.rs`で経路を数えてから触ること
+    fn ident_js_name(&self, name: &str) -> String {
+        if self.local_consts.contains(name) { fn_js_name(self.ctx.pkg(), name) } else { name.to_string() }
     }
 
     // `alias.name`が「パッケージ修飾の値参照」ならその生成JS名を返す(milestone 68)。
@@ -3013,6 +3029,26 @@ mod tests {
         assert!(js.contains("const pkgb$debug = 2;"), "got: {js}");
         assert!(js.contains("const debug = 1;"), "mainパッケージは無修飾のまま: {js}");
         assert!(js.contains("return pkgb$debug;"), "自パッケージのconst参照もマングル名: {js}");
+    }
+
+    #[test]
+    fn constのマングルはgen_exprを通らない経路でも効く() {
+        // **code reviewが見つけた実バグの回帰テスト**(milestone 68)。`Expr::Is`の
+        // 「裸Identなら二重評価を避けて直接参照する」近道は`gen_expr`を呼ばないので、
+        // マングルの判定を`gen_expr`のIdentアームだけに書くと素の名前が漏れる。
+        // `check`も`build`も通り**実行時に`limit is not defined`**という、このマイルストーンが
+        // 潰そうとしていた形そのものになっていた。名前の組み立ては`ident_js_name`に1本化してある。
+        //
+        // mainパッケージでは`fn_js_name`が素の名前を返すので**この穴は見えない**
+        // ——既存のis/match系テストが全部mainで書かれていたので誰も踏まなかった。
+        let js = gen_modules(&[
+            ("main", "main.mesh", "import \"pkgb\"\nfn main() {\n  print(pkgb.check())\n}"),
+            ("pkgb", "pkgb/b.mesh", "limit: int | none = 10\nexport fn check() bool {\n  return limit is int\n}"),
+        ])
+        .expect("非mainパッケージのconstをisで絞り込める");
+        assert!(js.contains("const pkgb$limit = 10;"), "宣言はマングル名: {js}");
+        assert!(!js.contains("Number.isInteger(limit)"), "isの近道で素の名前が漏れている: {js}");
+        assert!(js.contains("Number.isInteger(pkgb$limit)"), "isの近道もマングル名: {js}");
     }
 
     #[test]
