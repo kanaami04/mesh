@@ -479,6 +479,28 @@ codegen単体テストは`full_checker`のゲートを通らないので、**無
 `scripts/oracle-hunt.sh`は`rust/target/debug/mesh`を見るので、worktree側で
 `cargo build --manifest-path <worktree>/rust/Cargo.toml`してからそのディレクトリで走らせればよい。
 
+**code reviewが実バグを1件見つけた(PR #119)。名前の付け替えは「経路を数えてから」**。
+constにマングル名を導入したとき、判定を`gen_expr`と`gen_lvalue`の`Expr::Ident`アームに
+書いて済ませたが、**`Expr::Is`には「裸Identなら二重評価を避けて直接参照する」近道**があり、
+そこは`gen_expr`を通らない。結果、非mainパッケージの`limit is int`が
+
+    宣言: const pkgb$limit = 10;   参照: Number.isInteger(limit)
+
+という食い違ったJSになり、**checkもbuildも通って実行時`limit is not defined`**——
+このマイルストーンが潰していた形そのものを自分で作っていた。**mainパッケージでは
+`fn_js_name`が素の名前を返すので見えない**のが厄介で、既存のis/match系テストが
+全部mainで書かれていたため素通りした。対応は`ident_js_name`へ1本化すること。
+
+PR #113の「**同じ構文を扱う別経路を片方だけ直す**」がそのまま再現した形で、対策も同じ
+——`grep -n "Expr::Ident" rust/src/codegen.rs`で**経路を数えてから着手する**。
+`Expr::Match`のsubjectも裸Identを特別扱いするが、あちらは絞り込みスコープにしか使わず
+JSは`gen_expr`で出すので無事だった。**「特別扱いの近道」がある場所が危ない**。
+
+**併せて、レビュー指摘を鵜呑みにしないことも実地で効いた**。同じレビューで
+「`is_fully_modeled`ガードを外したのは誤検知では」という指摘も出たが、
+`fn f<T>(xs: T[])`の`xs[0] = 1`をオラクルに通すとTS版も`cannot assign int to T`を出す
+——ガード除去は検出漏れの解消だった。**静的に読んだ推測より1回の実測**。
+
 ### loop engineering の見取り図が変わる時期(未着手。2026-07-29に整理)
 
 **いまの自走ループ(`mise run oracle-hunt`)には期限がある。** オラクルはTS版の凍結スナップショット
