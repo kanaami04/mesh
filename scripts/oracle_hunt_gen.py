@@ -243,7 +243,74 @@ def gen_broken():
     return "\t" + rng.choice(BROKEN_FORMS)
 
 
-FAMILIES = [gen_narrow, gen_fail, gen_prop, gen_coll, gen_match, gen_conc, gen_misc, gen_broken, gen_broken]
+# ---- family: **代入**(milestone 68で追加)-------------------------------
+#
+# **この族が無かったせいで6つの食い違いを長く見逃していた**。parityコーパスにも
+# `immutable-assignment` と代入の `cannot assign` が1件も無く、記録との突き合わせでは
+# 原理的に届かなかった(フィールド代入の未検査 / 複合代入が違う診断コード / 文言2種)。
+#
+# 軸は「代入先の種類(ident / 配列要素 / mapエントリ / structフィールド / ネストした
+# フィールド)」×「素の代入 / 複合代入 / ++」×「型が合う / 合わない」×「mut / 不変」。
+# 複合代入は**算術の規則**(現在値 op 右辺)なので、型が合わないと `type-mismatch` ではなく
+# `invalid-operation` になる——ここが最も間違えやすい。
+ASSIGN_FORMS = [
+    # ident: 素の代入(mut/不変 × 型の可否)
+    "mut y := 1\n\ty = 2\n\tprint(y)",
+    'mut y := 1\n\ty = "s"\n\tprint(y)',
+    "y := 1\n\ty = 2\n\tprint(y)",
+    "mut y: int | none = 1\n\ty = none\n\tprint(y)",
+    'mut y: int | none = 1\n\ty = "s"\n\tprint(y)',
+    # ident: 複合代入(int / float / string の連結 / 型違い)
+    "mut y := 1\n\ty += 2\n\tprint(y)",
+    'mut y := 1\n\ty += "s"\n\tprint(y)',
+    "mut y := 1.5\n\ty *= 2.0\n\tprint(y)",
+    'mut y := 1.5\n\ty -= "s"\n\tprint(y)',
+    'mut y := "a"\n\ty += "b"\n\tprint(y)',
+    'mut y := "a"\n\ty += 1\n\tprint(y)',
+    "mut y := 1\n\ty /= 0\n\tprint(y)",
+    "mut y := 1\n\ty %= 0\n\tprint(y)",
+    # ident: ++/--(mut/不変)
+    "mut y := 1\n\ty++\n\tprint(y)",
+    "y := 1\n\ty++\n\tprint(y)",
+    'mut y := "a"\n\ty++\n\tprint(y)',
+    # structフィールド: 素の代入と複合代入(**レシーバが不変でも書き換えられる**——
+    # structは参照値で、可変性の検査は識別子の再束縛にしか掛からない)
+    "p := Pt{x: 1, y: 2}\n\tp.x = 5\n\tprint(p.x)",
+    'p := Pt{x: 1, y: 2}\n\tp.x = "s"\n\tprint(p.x)',
+    "p := Pt{x: 1, y: 2}\n\tp.x += 5\n\tprint(p.x)",
+    'p := Pt{x: 1, y: 2}\n\tp.x += "s"\n\tprint(p.x)',
+    "p := Pt{x: 1, y: 2}\n\tp.nope = 1\n\tprint(p.x)",
+    "p := Pt{x: 1, y: 2}\n\tp.x++\n\tprint(p.x)",
+    # ネストしたフィールド + union
+    "w := Wrap{inner: Box{v: 1}}\n\tw.inner.v = none\n\tprint(w.inner.v)",
+    'w := Wrap{inner: Box{v: 1}}\n\tw.inner.v = "s"\n\tprint(w.inner.v)',
+    "w := Wrap{inner: Box{v: 1}}\n\tw.inner.v += 1\n\tprint(w.inner.v)",
+    # 配列要素
+    "mut ys := [1, 2]\n\tys[0] = 5\n\tprint(ys)",
+    'mut ys := [1, 2]\n\tys[0] = "s"\n\tprint(ys)',
+    "mut ys := [1, 2]\n\tys[0] += 5\n\tprint(ys)",
+    'mut ys := [1, 2]\n\tys[0] += "s"\n\tprint(ys)',
+    'mut ys := [1, 2]\n\tys["k"] = 1\n\tprint(ys)',
+    # mapエントリ(複合代入は禁止=compound-assign-on-map)
+    'mut m := map<string, int>{"a": 1}\n\tm["b"] = 2\n\tprint(m)',
+    'mut m := map<string, int>{"a": 1}\n\tm["b"] = "s"\n\tprint(m)',
+    'mut m := map<string, int>{"a": 1}\n\tm["b"] += 1\n\tprint(m)',
+    'mut m := map<string, int>{"a": 1}\n\tm[1] = 2\n\tprint(m)',
+    # 絞り込みとの相互作用(絞り込んだパスへ代入したら事実を捨てる)
+    "b := Box{v: 1}\n\tif b.v is int {\n\t\tb.v = none\n\t\tprint(b.v)\n\t}",
+    "b := Box{v: 1}\n\tif b.v is int {\n\t\tb.v = 2\n\t\tprint(b.v + 1)\n\t}",
+    "b := Box{v: 1}\n\tif b.v is int {\n\t\tresetBox(b)\n\t\tprint(b.v)\n\t}",
+    # 代入先が値にならない/存在しない
+    "nope = 1\n\tprint(1)",
+    "mut y := 1\n\ty = print(1)\n\tprint(y)",
+]
+
+
+def gen_assign():
+    return "\t" + rng.choice(ASSIGN_FORMS)
+
+
+FAMILIES = [gen_narrow, gen_fail, gen_prop, gen_coll, gen_match, gen_conc, gen_misc, gen_assign, gen_broken, gen_broken]
 
 # 文脈(生成した本体をどこへ置くか)。絞り込み以外の族にも入れ子の影響を見たいので共通で使う
 WRAPPERS = [

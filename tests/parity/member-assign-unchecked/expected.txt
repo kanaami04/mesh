@@ -1,1 +1,6 @@
-main.mesh: no errors
+main.mesh:19:2: error[type-mismatch]: cannot assign "not an int" to int
+  	t.n = "not an int"
+  	^
+main.mesh:20:2: error[invalid-operation]: invalid operation: int + "also not"
+  	t.n += "also not"
+  	^

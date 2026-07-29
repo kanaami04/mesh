@@ -1,0 +1,30 @@
+// 複合代入(`+=` 等)は「現在値 op 右辺」を計算する規則で、算術の検査は二項演算子と
+// **同じ経路**(TS版 `checkArithOp` / Rust版 `check_arith`)を通る。
+//
+// milestone 68 まで、Rust版は「右辺を代入先へ代入できるか」で見ていたため、
+// 本来 `invalid-operation` になる形に `type-mismatch` を出していた——**違う診断コード**で、
+// この移植の優劣(誤検知 > 違う診断コード > 検出漏れ)では検出漏れより悪い分類。
+// 代入先が ident / 配列要素 / structフィールド のどれでも同じ規則になる。
+//
+// 位置はすべて**代入文の先頭**。最後の3行は正しい複合代入で、診断が出ないことを見る
+// (`string += string` は連結として通り、`int += int` / `float += float` も通る)。
+struct T {
+	n: int
+	s: string
+}
+
+fn main() {
+	t := T{n: 1, s: "a"}
+	mut xs := [1, 2]
+	mut f := 1.5
+	mut i := 1
+	i += "no"
+	xs[0] += "no"
+	t.n += "no"
+	t.s += 5
+	f += "no"
+	i += 2
+	f += 0.5
+	t.s += "ok"
+	print(t.n, t.s, xs, f, i)
+}

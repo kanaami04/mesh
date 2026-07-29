@@ -58,20 +58,16 @@ fn builds(path: &Path) -> bool {
 // さらに整合性テストが「登録ケースは`check`が黙っていること」も要求する
 // ——診断が出るようになると性質の前提から外れて黙って対象外へ落ちるため。
 //
-// 2件はcodegen側の明示的な「未対応」(`codegen.rs` が名指しでErrを返す既知の穴)。
-// 1件は`check_assign_target`がフィールド代入の値の型を検査しない検出漏れ
-// (TS版は検査していた。`mesh build`だけが落ちる)。
+// **milestone 68で空になった**(導入時4件 → 一度8件 → 3件 → 0件)。この増減自体に記録の
+// 価値がある。8件へ増えたのは`full_checker`側の誤検知を直した回で、**checkが黙るように
+// なった結果codegen側の遅れが露出した**から。3件へ減ったのは次の回でcodegen側へ
+// `collect_facts`を移植したから。**性質検査は「片方を直すともう片方の遅れが見える」
+// 働きをする**。最後の3件(pkg修飾レシーバ / pkg修飾の値参照 / フィールド代入の未検査)は
+// milestone 68でまとめて埋めた。経緯は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
 //
-// **導入時は4件で、一度8件まで増えてから3件になった**——この増減自体が記録の価値がある。
-// 増えたのは`full_checker`側の誤検知を直した回で、**checkが黙るようになった結果
-// codegen側の遅れが露出した**から。減ったのは次の回でcodegen側へ`collect_facts`を
-// 移植したから。**性質検査は「片方を直すともう片方の遅れが見える」働きをする**。
-// 経緯は `docs/handoff.md`「性質検査(オラクルの代わり)」節。
-const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-    ("tests/parity/49-pkg-receiver-exported-ok/main.mesh", "codegen: パッケージ修飾レシーバが未対応"),
-    ("tests/parity/50-pkg-usage-ok/main.mesh", "codegen: パッケージ修飾の値参照(呼び出しを伴わない)が未対応"),
-    ("tests/parity/member-assign-unchecked/main.mesh", "check_assign_targetがフィールド代入の値の型を検査しない(TS版は検査していた)"),
-];
+// **空を維持するのが目的ではない**。増やすときは理由を必ず書くこと——ここが空である
+// ことより、破れを黙って見逃さないことのほうが大事。
+const KNOWN_VIOLATIONS: &[(&str, &str)] = &[];
 
 fn corpus() -> Vec<PathBuf> {
     let root = repo_root();

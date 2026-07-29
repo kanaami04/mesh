@@ -2409,20 +2409,11 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 // **代入先の型を見る前に古い絞り込みを捨てる**(TS版と同じ順序)。順序が逆だと
                 // 代入先の型が絞り込み後の型になり、**宣言型には代入できるはずの値が弾かれる**
                 // ——`if o.v is int { o.v = none }`の`none`が`int`へ代入できないと言われる。
-                //
-                // **注意: フィールドへの代入は値の型が検査されない**(`check_assign_target`の
-                // `Expr::Member`分岐は`infer_expr`を呼ぶだけ)。TS版は`assignable(valueType,
-                // expected)`と複合代入の`checkArithOp`をターゲットの種類を問わず通すので、
-                // `t.n = "s"`も`t.n += "s"`も診断される。**Rust版は診断ゼロ**——このPRとは
-                // 無関係な既存の検出漏れで、`mesh build`だけが落ちる(=`check`が黙ったのに
-                // ビルドできないという食い違い)。プローブは
-                // `tests/parity/member-assign-unchecked/`、追跡は
-                // `rust/tests/check_implies_build.rs`の`KNOWN_VIOLATIONS`
                 if let Some(path) = narrowing_target_path(ctx, target) {
                     ctx.invalidate_path(&path);
                 }
                 let value_ty = value_tys.get(i).cloned().unwrap_or(ANY);
-                check_assign_target(ctx, target, &value_ty, *pos, compound_op.as_ref());
+                check_assign_target(ctx, target, values.get(i), &value_ty, *pos, *compound_op);
             }
         }
         Stmt::IncDec { target, op, pos } => {
@@ -2437,7 +2428,10 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
                 // 借用を跨がないよう可変性をboolへ落としてからctx.errorを呼ぶ
                 let immutable = matches!(ctx.lookup(name), Some(b) if !b.mutable);
                 if immutable {
-                    ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' was declared without 'mut' and cannot be reassigned"));
+                    // **文言に演算子を埋め込む**(TS版`statements.ts`のincDecケース)——
+                    // 代入の`immutable-assignment`は「declare it with 'mut' to allow
+                    // reassignment」で、こちらは「to allow '++'」と書き分けられている
+                    ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' is immutable — declare it with 'mut' to allow '{op}'"));
                 }
             }
         }
@@ -2579,20 +2573,62 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
     }
 }
 
-fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type, stmt_pos: Pos, compound_op: Option<&TokenType>) {
-    // milestone 33/34: 配列要素・mapエントリへの代入(`xs[0] = v` / `m["k"] = v`)は、
-    // 添字読みと同じ経路(`infer_index`)で型を得て値を照合する(TS版`statements.ts`の
-    // assignケース)。**mapの代入先の型は読みの`V | none`ではなく`V`**。
-    // **位置は代入文自身**(TS版は`stmt.pos`で報告する)——targetの位置を使うと
-    // `a, xs[0] = 2, "no"`のような複数代入でTS版と列がずれる(code reviewで発覚)
-    if let Expr::Index { target: container, index, pos } = target {
-        let info = infer_index(ctx, container, index, *pos);
+// 代入先1つ分の検査(TS版`statements.ts`のassignケース後半をそのまま移植)。
+//
+// **milestone 68でTS版の構造どおりに組み直した**。それまでは代入先の種類ごとに別々の
+// 規則を書いていて、次の4つがTS版と食い違っていた。**どれもparityコーパスに1件も
+// 入っておらず**(`grep -rl immutable-assignment tests/parity`が空だった)、記録との
+// 突き合わせでは永久に見つからない——オラクルへ問い合わせて分かったもの:
+//
+//   1. **フィールド代入を検査していなかった**(`t.n = "s"` / `t.n += "s"`が診断ゼロ)。
+//      `mesh check`は黙るのに`mesh build`が落ちるので、`check_implies_build`の破れとして
+//      `KNOWN_VIOLATIONS`に登録されていた
+//   2. **複合代入を「右辺を代入先へ代入できるか」で見ていた**。TS版は「現在値 op 右辺」を
+//      計算する規則なので、`x += "s"`はTS版`invalid-operation: int + "s"`に対して
+//      Rust版は`type-mismatch`——**違う診断コード**(検出漏れより悪い分類)
+//   3. `immutable-assignment`の文言がTS版と違っていた
+//   4. ident代入の`type-mismatch`が独自文言かつ**位置がtargetだった**(TS版は代入文自身)
+//
+// 要点は**代入先の種類で分岐せず、`expected`(代入先の型)を1つ求めてから共通の規則を
+// 当てる**こと。TS版がそう書かれている。
+//
+// `value_expr`はint同士の`/= 0`・`%= 0`をリテラルとして弾くために要る(型だけでは
+// 「0」という値まで分からない)。複数代入(`a, b = 1, 2`)で足りなければNone——ただし
+// **複合代入は構文上ターゲットが常に1つ**なので、実際にNoneになるのは非複合代入だけ
+fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_expr: Option<&Expr>, value_ty: &Type, stmt_pos: Pos, compound_op: Option<TokenType>) {
+    // 1. 代入先を推論する(TS版`checkExpr(ctx, target)`)。添字だけは`infer_index`を
+    //    直接呼ぶ——読み(mapなら`V | none`)と書き(`V`)とコンテナ型を**一度の評価で**
+    //    得るため(素直に二度評価するとundefined-name等が2回出る)
+    let (expected, container) = match target {
+        Expr::Index { target: c, index, pos } => {
+            let info = infer_index(ctx, c, index, *pos);
+            // **mapの代入先の型は読みの`V | none`ではなく`V`**(TS版も`expected`を
+            // `container.value`へ差し替える)
+            (info.write, Some(info.container))
+        }
+        _ => (infer_expr_single(ctx, target), None),
+    };
+
+    // 2. identなら束縛の有無と可変性を見る。どちらも**ここで打ち切る**(TS版も`continue`)
+    if let Expr::Ident { name, pos } = target {
+        match ctx.lookup(name) {
+            // 未宣言は上の`infer_expr_single`が共通経路で`undefined-name`を報告済み
+            None => return,
+            Some(b) if !b.mutable => {
+                ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' is immutable — declare it with 'mut' to allow reassignment"));
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // 3. 複合代入(`x += 1`等)は「現在値 op 右辺」を計算し、その結果を代入先へ戻せるかを見る。
+    //    算術の検査は二項演算子と**同じ`check_arith`**を通す(F-9b。TS版も`checkArithOp`を共有)
+    if let Some(op) = compound_op {
         // milestone 34: mapへの複合代入(`m[k] += 1`)は禁止——キーが存在しないかもしれず
         // (読みは常に`V | none`)、「現在値 op 右辺」を無条件に計算すると欠損キーが
         // 黙って壊れた値になるため(TS版`compound-assign-on-map`)
-        if let Some(op) = compound_op
-            && matches!(info.container, Type::Map { .. })
-        {
+        if matches!(container, Some(Type::Map { .. })) {
             // 文言は**実際に書かれた演算子**で組み立てる(TS版`statements.ts`も
             // `stmt.compoundOp`を埋め込む)——`+=`固定にすると`-=`等でTS版と食い違う
             // (code reviewで発覚・両CLIで再現確認)
@@ -2603,27 +2639,20 @@ fn check_assign_target(ctx: &mut FullCheckerCtx, target: &Expr, value_ty: &Type,
             );
             return;
         }
-        if is_fully_modeled(&info.write) && !assignable_checked(value_ty, &info.write) {
-            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&info.write)));
+        // 右辺の式が取れないのは複数代入だけで、そちらは構文上複合代入にならない。
+        // 万一来ても算術を検査しないだけ(検出漏れ側に倒す)
+        let Some(value_expr) = value_expr else { return };
+        let result = check_arith(ctx, op, &expected, value_expr, value_ty, stmt_pos);
+        if !assignable_checked(&result, &expected) {
+            ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(&result), types::type_to_string(&expected)));
         }
         return;
     }
-    let Expr::Ident { name, pos } = target else {
-        infer_expr(ctx, target); // member代入(フィールド)はinfer_member側で検証済み
-        return;
-    };
-    match ctx.lookup(name) {
-        None => {
-            infer_expr(ctx, target); // 共通経路でundefined-nameを報告
-        }
-        Some(b) if !b.mutable => {
-            ctx.error(*pos, DiagnosticCode::ImmutableAssignment, format!("'{name}' was declared without 'mut' and cannot be reassigned"));
-        }
-        Some(b) if !assignable_checked(value_ty, &b.ty) => {
-            let declared_ty_str = types::type_to_string(&b.ty);
-            ctx.error(*pos, DiagnosticCode::TypeMismatch, format!("cannot assign a value of type '{}' to '{name}' of type '{declared_ty_str}'", types::type_to_string(value_ty)));
-        }
-        _ => {}
+
+    // 4. 素の代入。**位置は代入文自身**(TS版は`stmt.pos`で報告する)——targetの位置を使うと
+    //    `a, xs[0] = 2, "no"`のような複数代入でTS版と列がずれる(code reviewで発覚)
+    if !assignable_checked(value_ty, &expected) {
+        ctx.error(stmt_pos, DiagnosticCode::TypeMismatch, format!("cannot assign {} to {}", types::type_to_string(value_ty), types::type_to_string(&expected)));
     }
 }
 
@@ -3363,13 +3392,29 @@ fn declare_method(ctx: &mut FullCheckerCtx, f: &FnDecl) {
     // **TS版には無い誤検知**が出る。
     // **milestone 42まで**は未宣言のレシーバ(`fn (y: Bogus) f()`)もここで落ちていたが、
     // `unknown-type`を移植したので上のANY差し替え経由で`invalid-receiver-type`まで
-    // TS版と同じに出るようになった。今ここに残るのはpkg修飾のケース(パッケージ跨ぎの
-    // 検査を移植するまでは検出漏れ側)。
+    // TS版と同じに出るようになった。
     // 型aliasが名前付きstructを指す場合は解決後の実名で引くので通る。
-    // **milestone 51**: `sname`はpkg修飾済み(`mathutil.Point`)になりうるので、
-    // レジストリのキー(パッケージ内の素の名前)へ戻してから引く
-    let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
-    if ctx.type_ctx.lookup_struct(&bare).is_none() {
+    //
+    // **milestone 68でpkg修飾レシーバ(`fn (p: lib.Point) show()`)も登録するようになった**。
+    // それまでは`sname`(`lib.Point`)を素の名前へ落として**自パッケージの**struct表を引いて
+    // いたため必ず空振りし、メソッドが登録されず`p.show()`が`unknown-field`になっていた
+    // ——TS版が黙る形なので**誤検知**(この移植で最悪の分類)。codegen側も同時に対応した
+    // (`receiver_struct_ref`)ので、宣言・呼び出し・生成JSの3つで名前が揃う
+    // 判定は**注釈がpkg修飾されているか**で行う。解決後の`sname`を見て`.`で分けるやり方は
+    // 誤り——自パッケージのstructも`qualify_struct_name`で`mathutil.Point`になるので、
+    // `mathutil`パッケージ自身の`fn (p: Point) magnitudeSq()`が「他パッケージ参照」と
+    // 誤判定され、`import_aliases`に自分の名前が無いために登録が飛ぶ
+    // (`examples/modules_demo.mesh`が`unknown-field`で落ちて発覚した誤検知)
+    let registered = match &recv.type_node {
+        // pkg修飾レシーバ: exportされて完全に解決できるものだけ通す
+        TypeNode::Name { name, pkg: Some(alias), .. } => package_type_resolves(ctx, alias, name),
+        // 素の名前: 自パッケージのstruct表(キーは素の名前)を引く。
+        // 型aliasが名前付きstructを指す場合は解決後の実名で引くので、`sname`側を使う
+        _ => ctx.type_ctx.lookup_struct(sname.rsplit('.').next().unwrap_or(&sname)).is_some(),
+    };
+    // **殻structのフォールバックを弾く**のがここの仕事(上のコメント参照)——レジストリに
+    // 実在するstructでなければ、登録も残りの診断もせず素通りさせる
+    if !registered {
         ctx.type_params.clear();
         return;
     }

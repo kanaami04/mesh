@@ -1,0 +1,16 @@
+// `immutable-assignment` の文言(代入 / インクリメントで**書き分けられている**)。
+//
+// milestone 68 まで、この診断はparityコーパスに1件も入っていなかった
+// (`grep -rl immutable-assignment tests/parity` が空だった)ため、Rust版が
+// 独自文言(`'x' was declared without 'mut' and cannot be reassigned`)を出していても
+// 記録との突き合わせでは永久に気づけなかった。期待値はTS版オラクルの実測。
+//
+// 代入は「to allow reassignment」、`++`/`--` は「to allow '++'」と**演算子が入る**。
+fn main() {
+	x := 1
+	x = 2
+	x += 3
+	x++
+	x--
+	print(x)
+}
