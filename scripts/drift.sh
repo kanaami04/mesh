@@ -18,22 +18,38 @@ git rev-parse --verify -q "$BASE" >/dev/null || {
 	exit 2
 }
 
-PATHS=(rust/src src)
+# `rust/embedded/`も見る(2026-07-29に追加)。**出荷するランタイム/カードの本体**が
+# ここにあり、コメントは`rust/src`と同じように腐る——実際、ランタイムの`__panic`を
+# 変更した回に「差分が無い」と報告されて気づいた。
+# `src`(TS実装)は`cd7273a`で削除済みなので落とした
+PATHS=(rust/src rust/embedded)
 
-# 検索語を3種類つくる(docs/handoff.md「検証の進め方」2''と同じ分類)。
+# 検索語を4種類つくる(docs/handoff.md「検証の進め方」2''と同じ分類)。
 #   (a) 追加した診断コード名 … `Xxx => "kebab-case"` の追加行
 #   (b) **変更が入った関数の名前** … hunkヘッダ(`@@ ... @@ fn foo(`)から取る。
 #       追加/削除行から`fn name`を拾う方式だと、**本体だけ変えた関数**を取りこぼす
 #       ——milestone 51で7件中4件がそれ(`resolve_type_ann`等)だった
 #   (c) 触った構造の名前 … `*_table`/`*_registry`/`scopes[0]` のような仕組みの名前
+#   (d) 触ったランタイム内部の名前 … `rust/embedded/runtime.ts`は`__panic`/`__Panic`のように
+#       すべて`__`接頭辞で書かれている。(b)のRust向けパターン(`fn name`)では拾えないので
+#       別軸にする(2026-07-29に追加。`__panic`の表示を変えた回に「差分が無い」と
+#       報告されて気づいた)。**候補を出すだけ**なので拾い過ぎる側に倒してよい。
+#       **hunkヘッダからも取る**のが要点——(b)と同じ理由で、追加/削除行だけ見ると
+#       `const __panic = (e) => {`のように**宣言行が変わらず本体だけ変わった**ものを
+#       取りこぼす(実際に踏んだ: `__panicSink`しか出ず`__panic`が漏れた)。
+#       gitの既定のhunkヘッダ検出が`.ts`でも宣言行を拾ってくれる
 added_codes=$(git diff "$BASE"...HEAD -- "${PATHS[@]}" | grep '^+' | grep -oE '=> "[a-z][a-z-]+"' | tr -d '=>" ' | sort -u)
 changed_fns=$(git diff "$BASE"...HEAD -U0 -- "${PATHS[@]}" |
 	grep -oE '^@@[^@]*@@ *(pub )?(pub\(crate\) )?fn [a-z_0-9]+' | grep -oE 'fn [a-z_0-9]+$' | sed 's/^fn //' | sort -u)
 touched_idents=$(git diff "$BASE"...HEAD -- "${PATHS[@]}" | grep -E '^[+-]' |
 	grep -oE '\b(scopes\[0\]|[a-z_]{3,}_(table|registry|types|aliases|exports|decls))\b' | sort -u)
+runtime_idents=$( {
+	git diff "$BASE"...HEAD -- "${PATHS[@]}" | grep -E '^[+-]'
+	git diff "$BASE"...HEAD -U0 -- "${PATHS[@]}" | grep -E '^@@'
+} | grep -oE '\b__[A-Za-z][A-Za-z0-9]*\b' | sort -u)
 
 # 一般名詞すぎて意味のあるヒットにならない語は落とす(`add`/`go`/`main`/`new`等)
-terms=$(printf '%s\n%s\n%s\n' "$added_codes" "$changed_fns" "$touched_idents" |
+terms=$(printf '%s\n%s\n%s\n%s\n' "$added_codes" "$changed_fns" "$touched_idents" "$runtime_idents" |
 	grep -v '^$' | awk 'length($0) >= 6' |
 	grep -vxE 'main|new|check|value|types|format|insert|expect|result' | sort -u)
 
@@ -42,7 +58,7 @@ if [ -z "$terms" ]; then
 	exit 0
 fi
 
-echo "=== 検索語(a:追加した診断コード b:変更が入った関数 c:触った仕組みの名前)"
+echo "=== 検索語(a:追加した診断コード b:変更が入った関数 c:触った仕組みの名前 d:ランタイム内部の名前)"
 printf '%s\n' "$terms" | tr '\n' ' '
 echo
 echo
@@ -52,7 +68,7 @@ hits=0
 for t in $terms; do
 	out=$(grep -rn -- "$t" "${PATHS[@]}" docs/handoff.md docs/features.md 2>/dev/null |
 		grep -E '未移植|対象外|次段階|効かない|潰れ|未対応|ANYのまま|ANYへ' |
-		grep -v '^docs/handoff.md:[0-9]*: *[(（][abc][)）]')
+		grep -v '^docs/handoff.md:[0-9]*: *[(（][abcd][)）]')
 	if [ -n "$out" ]; then
 		echo "--- $t"
 		printf '%s\n' "$out" | sed 's/^/    /'
