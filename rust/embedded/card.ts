@@ -32,6 +32,10 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
   void switch case default do while with export import extends super null undefined try
   catch finally throw eval arguments\`. Naming a function \`eval\` is a compile error —
   pick another name (e.g. \`evaluate\`).
+- Names starting with \`__\` are RESERVED for the compiler and can NOT be declared
+  (\`__cache := 1\` is a compile error). The generated JavaScript puts its own helpers and
+  temporaries there, so a user name would silently shadow them. \`__\` has no special meaning
+  in Mesh — visibility is decided by \`export\`, not by naming — so just drop the underscores.
 - Function parameters are always immutable (you cannot reassign the parameter itself).
 - \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
   (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)
@@ -696,6 +700,9 @@ instead of by code — use whichever is more convenient.
     top-level bindings are always immutable         → 'mut' isn't allowed at the top level (F-9c);
                                                         pass mutable state as a parameter instead
     'x' shadows an outer binding                    → rename it, or assign with = to a mut binding
+    '__x' is reserved for the compiler              → drop the leading underscores ('__x' → 'x');
+                                                        '__' has no meaning in Mesh (use export
+                                                        for visibility)
     cannot access field or method on User | none    → add: if u is none { return }, then narrow it first
     undefined: 'render' (when render is a method)   → methods have no bare-name form; write t.render(), not render(t)
     'render' is a method — call it like render(...) → you wrote t.render (no parens); add ()
