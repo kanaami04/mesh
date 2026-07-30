@@ -114,13 +114,33 @@ const __select = async (channels, handlers, defaultHandler) => {
 // __panicSinkが立っている間(mesh testの実行中だけ)はexitせず記録だけする
 let __panicSink = null;
 let __bgTasks = null;
+// **Meshのpanic(仕様内)と、生成JSが投げた素のエラー(コンパイラのバグ)を区別する**
+// (2026-07-29)。標準ライブラリの失敗経路はすべて`error`値へ変換している(io$readFile /
+// json$parse / http$listen 参照)ので、`__Panic`でないものがここへ届くのは
+// **生成JSが壊れているとき**だけ——`ReferenceError: x is not defined`のような形になる。
+//
+// それを`panic:`と表示するのは**責任の押し付け**で、ユーザー(やAI)は自分のプログラムを
+// 疑って時間を使うことになる。実際、非mainパッケージのトップレベルconstを参照する
+// コード生成のバグが`panic: limit is not defined`として出ており、Meshのpanicと
+// 見分けが付かなかった。P4(コンパイラはAIの相棒)の観点でも、誰のバグかは明示する。
+//
+// **`rust/tests/build_implies_run.rs`がこの印を見る**(「診断ゼロでビルドできた
+// プログラムを実行してもinternal errorは出ない」という性質検査)。
 const __panic = (e) => {
   const msg = e instanceof Error ? e.message : String(e);
+  const internal = !(e instanceof __Panic);
   if (__panicSink) {
-    __panicSink.push(msg);
+    // mesh test中は1件の失敗として隔離する(exitしない)。印は残す
+    __panicSink.push(internal ? "internal error: " + msg : msg);
     return;
   }
-  console.error("panic:", msg);
+  if (internal) {
+    console.error("internal error:", msg);
+    console.error("  これはMeshコンパイラのバグです(生成されたJSが壊れています)。報告してください:");
+    console.error("  https://github.com/kanaami04/mesh/issues");
+  } else {
+    console.error("panic:", msg);
+  }
   globalThis.process?.exit?.(1);
 };
 // ランタイム検査(層1): バグは黙って進まず、位置つきで即停止する

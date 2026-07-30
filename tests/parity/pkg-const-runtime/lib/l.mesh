@@ -1,0 +1,29 @@
+// 非mainパッケージのトップレベルconstは生成JSでは`lib$...`へマングルされる
+// (milestone 68)。**参照経路ごとに漏れやすい**ので、このパッケージの中から
+// 素の名前で読む形を並べておく。
+export LIMIT := 10
+export LABEL := "lib"
+
+maybe: int | none = 3
+
+// `is`の「裸Identなら二重評価を避けて直接参照する」近道は`gen_expr`を通らない。
+// ここが漏れると check も build も通って実行時に `maybe is not defined` で落ちる
+// (milestone 68のcode reviewで実際に踏んだ形)
+export fn narrowed() int {
+	if maybe is int {
+		return maybe + LIMIT
+	}
+	return 0
+}
+
+// matchのsubjectも裸Identを特別扱いする経路
+export fn matched() string {
+	return match maybe {
+		int => LABEL
+		none => "none"
+	}
+}
+
+export fn arith() int {
+	return LIMIT * 2
+}

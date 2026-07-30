@@ -303,6 +303,14 @@
       `panic: file:line:col: index 10 out of range (length 3)` の形で即停止(exit 1)。
       リテラルの `1 / 0` はコンパイル時に検出。floatのゼロ除算はInfinity(Goと同じ割り切り) |
 | goroutine内エラーの捕捉 | ✅ | `__panic` が受け止めて exit 1 |
+| **コンパイラのバグと仕様内のpanicを表示し分ける** | ✅ | 2026-07-29実装。`__Panic`
+      (範囲外アクセス・整数オーバーフロー等の**仕様内の停止**)は従来どおり `panic: ...`。
+      生成JSが投げた素のエラー(`ReferenceError`等)は `internal error: ...` +
+      「これはMeshコンパイラのバグです」の案内にする。標準ライブラリの失敗経路はすべて
+      `error`値へ変換しているので、`__Panic`以外がここへ届くのは**生成JSが壊れているとき
+      だけ**。`panic:`と一緒に出していた頃は、コード生成のバグ(`limit is not defined`)を
+      ユーザーが自分のプログラムの問題として調べる形になっていた。
+      この印を性質検査(`rust/tests/build_implies_run.rs`)が判定に使う |
 | `sleep(ms)` | ✅ | |
 
 ## 標準ライブラリ

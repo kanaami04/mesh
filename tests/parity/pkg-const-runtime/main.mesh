@@ -1,0 +1,15 @@
+// **`build ⇒ run` の性質検査(`rust/tests/build_implies_run.rs`)に守らせたい形**。
+// 診断ゼロなので実行され、生成JSの識別子が食い違っていれば `internal error` で落ちる。
+//
+// mainパッケージでは`fn_js_name`が素の名前を返すため、**単一ファイルのテストでは
+// この穴が構造的に見えない**。パッケージを跨いだケースをコーパスに置くまでが仕事。
+import "lib"
+
+LIMIT := 1
+
+fn main() {
+	print(lib.narrowed())
+	print(lib.matched())
+	print(lib.arith())
+	print(lib.LIMIT, lib.LABEL, LIMIT)
+}
