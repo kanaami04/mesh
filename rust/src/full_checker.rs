@@ -76,6 +76,10 @@ pub struct FullCheckerCtx {
     // ローカル変数と全く同じdeclare()を通ることで予約語・組み込み名衝突・重複宣言・
     // shadowingの検査が自動的に効くようになる
     scopes: Vec<HashMap<String, Binding>>,
+    // いま検査している関数がコンパイラの**合成物**か(`json struct`のデコーダ/エンコーダ)。
+    // 立っている間だけ`__`接頭辞の宣言を許す(`declare`のコメント参照)。
+    // `check_package`が関数ごとに立てて倒す
+    in_synthesized_fn: bool,
     // 今検査中の関数の戻り値型のスタック(TS版`ctx.retStack`と同じ形)。
     // **milestone 40で実際に深さ2以上になる**——無名関数の本体を検査するようになり、
     // その中の`?`は「囲む関数」ではなく**無名関数自身**の戻り値型と突き合わせる
@@ -128,6 +132,7 @@ impl FullCheckerCtx {
     fn new() -> Self {
         FullCheckerCtx {
             scopes: vec![HashMap::new()],
+            in_synthesized_fn: false,
             ret_stack: Vec::new(),
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
@@ -165,6 +170,39 @@ impl FullCheckerCtx {
         }
         if RESERVED.contains(&name) {
             self.error(pos, DiagnosticCode::ReservedWord, format!("'{name}' is a reserved word and cannot be used as a name"));
+            return;
+        }
+        // **`__`で始まる名前はコンパイラのもの**(2026-07-29に予約)。生成JSは一時変数と
+        // ランタイム関数をこの接頭辞で置いている(`__m`/`__v`/`__d0`/`__idx`/`__panic`…)ので、
+        // ユーザーが同じ名前を宣言すると**フラットなJSスコープで内部名を隠す**。
+        //
+        // 実測した2つの壊れ方(どちらもTS版から存在した言語レベルの穴):
+        //   `__m := 100` のあと `match v { int => __m }` が**100ではなくsubjectの値を返す**
+        //   (matchはsubjectを`(async (__m) => ...)`のIIFE引数で渡すため)——checkもbuildも
+        //   通って**実行結果だけが誤る**、いちばん悪い壊れ方。
+        //   `__idx := 42` はランタイム関数`__idx`を隠し、配列添字が`42 is not a function`になる。
+        //
+        // **Meshでは`__`に意味が無い**(Pythonの名前マングリングやJSの`#`と違う。可視性は
+        // `export`の有無で決まる)ので、ユーザーが失うものは無い。逆にコンパイラは
+        // 「ここは自分のもの」と言える名前空間を得る——一時変数を1つ増やすたびに
+        // 誤コンパイルの種が増える状態を終わらせるのが目的。
+        // フィールド名`__proto__`を既に個別に拒否していた(codegen.rs)のを一般化した形。
+        //
+        // **診断コードは`reserved-word`を流用する**(新しいコードを増やさない)。
+        //
+        // **合成された関数の本体では許す**(`in_synthesized_fn`)。`json struct`の
+        // デコーダ/エンコーダは`__ef_*`のような名前を10種類使っており(`json_decode.rs`)、
+        // それは`__`をコンパイラの名前空間として予約した**目的そのもの**なので弾いてはいけない。
+        // 合成物は「以降のcheck/codegenを無改造で流用する」ために普通の`FnDecl`として
+        // `program.fns`へ積まれる設計なので、ASTからは区別できない——判定は`check_package`が
+        // json structから決まる名前(`decode{Name}`/`encode{Name}`)で行う。
+        // **parityを回して初めて気づいた**(10件の誤検知になっていた)。
+        if !self.in_synthesized_fn && name.starts_with("__") {
+            self.error(
+                pos,
+                DiagnosticCode::ReservedWord,
+                format!("'{name}' is reserved for the compiler — names starting with '__' cannot be declared"),
+            );
             return;
         }
         if crate::checker::is_builtin(name) {
@@ -3840,11 +3878,24 @@ pub fn check_package_shared(
     // 未定義名・型不一致・引数不一致が一切検出されない大きな穴になっていた
     // (`check_fn`がレシーバをスコープへ宣言するようになったのとセット)
     spans.push((main_start, ctx.diagnostics.len(), main_file_idx));
+    // **コンパイラが合成した関数の名前**(`json struct`ごとの`decode{Name}`/`encode{Name}`。
+    // `json_decode.rs`が`program.fns`へ普通のFnDeclとして積む)。この本体だけ`__`接頭辞の
+    // 宣言を許す——合成側は`__ef_*`等を使っており、`__`を予約した目的そのものだから。
+    // **ASTに合成マーカーを持たせない**のは「以降のcheck/codegenを無改造で流用する」という
+    // json struct実装の設計方針(json_decode.rsの冒頭コメント)を崩さないため
+    let synthesized: std::collections::HashSet<String> = files
+        .iter()
+        .flat_map(|(_, p)| p.types.iter())
+        .filter(|t| t.is_json)
+        .flat_map(|t| [format!("decode{}", t.name), format!("encode{}", t.name)])
+        .collect();
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for f in &program.fns {
+            ctx.in_synthesized_fn = f.receiver.is_none() && synthesized.contains(&f.name);
             check_fn(&mut ctx, f);
         }
+        ctx.in_synthesized_fn = false;
         spans.push((start, ctx.diagnostics.len(), i));
     }
 
@@ -4653,6 +4704,37 @@ mod tests {
         let diags = check("fn main() {\n    await := 1\n}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::ReservedWord);
+    }
+
+    #[test]
+    fn 二重アンダースコア接頭辞の宣言はreserved_wordを報告する() {
+        // `__`はコンパイラの名前空間(生成JSの一時変数・ランタイム関数)。ユーザーが宣言すると
+        // フラットなJSスコープで内部名を隠す——`__m`はmatchのsubjectに食われて
+        // **実行結果だけが誤り**、`__idx`はランタイム関数を隠して`is not a function`になる。
+        // どちらもTS版から存在した言語レベルの穴で、2026-07-29に予約した
+        let diags = check("fn main() {\n    __m := 1\n    print(__m)\n}\n");
+        assert_eq!(diags[0].code, DiagnosticCode::ReservedWord);
+        assert!(diags[0].message.contains("reserved for the compiler"), "{:?}", diags[0].message);
+        // 素の`__`も、3本以上も同じ
+        assert_eq!(check("fn main() {\n    __ := 1\n}\n")[0].code, DiagnosticCode::ReservedWord);
+        assert_eq!(check("fn main() {\n    ___x := 1\n}\n")[0].code, DiagnosticCode::ReservedWord);
+        // **単一のアンダースコアはブランク識別子なので通す**(値を意図的に捨てる)
+        assert!(check("fn main() {\n    _ = 1\n}\n").is_empty());
+        // 名前の**途中**や末尾のアンダースコアは対象外(接頭辞だけを見る)
+        assert!(check("fn main() {\n    a__b := 1\n    print(a__b)\n}\n").is_empty());
+        assert!(check("fn main() {\n    _x := 1\n    print(_x)\n}\n").is_empty());
+    }
+
+    #[test]
+    fn json_structの合成デコーダは二重アンダースコアを使えるままにする() {
+        // 合成側(`json_decode.rs`)は`__ef_*`等を10種類使っている。`__`を予約した**目的**が
+        // 「コンパイラが安心して使える名前空間」なので、ここを弾いてはいけない。
+        // **parityを回して初めて気づいた誤検知**(10件出ていた)ので回帰テストを置く
+        let diags = check("import \"mesh/json\"\n\njson struct User {\n    name: string\n    age: int\n}\n\nfn main() {\n    v := json.parse(\"{}\")\n    print(1)\n}\n");
+        assert!(
+            !diags.iter().any(|d| d.code == DiagnosticCode::ReservedWord),
+            "合成デコーダの内部名がreserved_wordになっている: {diags:?}"
+        );
     }
 
     #[test]

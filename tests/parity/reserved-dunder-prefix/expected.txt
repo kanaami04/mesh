@@ -1,0 +1,45 @@
+main.mesh:20:1: error[reserved-word]: '__helper' is reserved for the compiler — names starting with '__' cannot be declared
+  fn __helper() int {
+  ^
+main.mesh:17:1: error[reserved-word]: '__LIMIT' is reserved for the compiler — names starting with '__' cannot be declared
+  __LIMIT := 10
+  ^
+main.mesh:25:13: error[reserved-word]: '__n' is reserved for the compiler — names starting with '__' cannot be declared
+  fn takesArg(__n: int) int {
+              ^
+main.mesh:30:5: error[reserved-word]: '__h' is reserved for the compiler — names starting with '__' cannot be declared
+  fn (__h: Holder) value() int {
+      ^
+main.mesh:36:2: error[reserved-word]: '__local' is reserved for the compiler — names starting with '__' cannot be declared
+  	__local := 1
+  	^
+main.mesh:38:2: error[reserved-word]: '__counter' is reserved for the compiler — names starting with '__' cannot be declared
+  	mut __counter := 0
+  	^
+main.mesh:40:6: error[reserved-word]: '__i' is reserved for the compiler — names starting with '__' cannot be declared
+  	for __i := 0; __i < 1; __i++ {
+  	    ^
+main.mesh:40:16: error[undefined-name]: undefined: '__i'
+  	for __i := 0; __i < 1; __i++ {
+  	              ^
+main.mesh:40:25: error[undefined-name]: undefined: '__i'
+  	for __i := 0; __i < 1; __i++ {
+  	                       ^
+main.mesh:44:2: error[reserved-word]: '__k' is reserved for the compiler — names starting with '__' cannot be declared
+  	for __k, __x := range [1, 2] {
+  	^
+main.mesh:44:2: error[reserved-word]: '__x' is reserved for the compiler — names starting with '__' cannot be declared
+  	for __k, __x := range [1, 2] {
+  	^
+main.mesh:48:2: error[reserved-word]: '__' is reserved for the compiler — names starting with '__' cannot be declared
+  	__ := 1
+  	^
+main.mesh:49:2: error[reserved-word]: '___deep' is reserved for the compiler — names starting with '__' cannot be declared
+  	___deep := 2
+  	^
+main.mesh:52:8: error[undefined-name]: undefined: '__local'
+  	print(__local, __counter)
+  	      ^
+main.mesh:52:17: error[undefined-name]: undefined: '__counter'
+  	print(__local, __counter)
+  	               ^

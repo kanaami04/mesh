@@ -1,0 +1,30 @@
+// `_ = expr` は代入ではなく「値を意図的に捨てる」(docs/features.md のブランク識別子)。
+//
+// **2026-07-29まで壊れたJSを生成していた**。`_`はどこにも宣言されないのに codegen が
+// 素直に `_ = ...` というJSを出しており、実行時に `_ is not defined` で落ちていた
+// ——`mesh check` は通るので `build ⇒ run` の破れ(`rust/tests/build_implies_run.rs`)。
+// `__`接頭辞の予約を検証しているときに、ブランク識別子が通ることの確認で見つかった。
+//
+// **経路が2つある**のが要点: 文としての `_ = expr`(`gen_stmt`)と、for のinit/post
+// (`gen_simple_stmt`)。片方だけ直す形にしないため両方を並べてある。
+// 右辺の**副作用は保たれる**必要がある(捨てるのは値だけ)。
+fn side(tag: string) int {
+	print(tag)
+	return 7
+}
+
+fn main() {
+	// 文としての捨て(値だけ・副作用あり)
+	_ = 9
+	_ = side("stmt")
+	// forのinit(別経路)
+	mut n := 0
+	for _ = side("init"); n < 2; n++ {
+		print(n)
+	}
+	// 単一アンダースコアはfor rangeでも従来どおり使える
+	for _, v := range [10, 20] {
+		print(v)
+	}
+	print(n)
+}
