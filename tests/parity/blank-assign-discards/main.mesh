@@ -13,6 +13,12 @@ fn side(tag: string) int {
 	return 7
 }
 
+// **トップレベルの `_ := expr` も捨てる**(ローカルと同じ扱い)。ここが無いと
+// codegenが `const _ = ...` を出し、2つ書いた時点で `mesh check` は黙るのに
+// `mesh build` が落ちていた(`check ⇒ build` の破れ。code reviewで発覚)。
+_ := side("top1")
+_ := side("top2")
+
 fn main() {
 	// 文としての捨て(値だけ・副作用あり)
 	_ = 9

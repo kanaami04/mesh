@@ -358,6 +358,16 @@ impl Codegen {
     }
 
     fn gen_const_decl(&mut self, c: &ConstDecl) -> CodegenResult<()> {
+        // **`_ := expr` は捨てる**(ローカルの`ShortVarDecl`と同じ扱い。上の`names[0] == "_"`分岐)。
+        // ここが無いと`const _ = ...`というJSを出し、2回書いたときに`declared_consts`が
+        // 明確なErrにする——**`mesh check`は黙るのに`mesh build`が落ちる**形だった
+        // (`check ⇒ build`の破れ。code reviewで発覚)。`_`はどこにも束縛しないので
+        // 名前の重複という概念自体が無く、右辺を副作用のために評価するだけでよい
+        if c.name == "_" {
+            let value = self.gen_expr(&c.value)?;
+            self.emit(format!("{value};"));
+            return Ok(());
+        }
         // milestone 68: **constもトップレベル関数と同じpkg接頭辞を付ける**(TS版`genConstDecl`も
         // `fnJsName(this.pkg, c.name)`で出している)。それまで無修飾だったのは「パッケージ修飾の
         // 値参照(`lib.LIMIT`)が対象外だったから」で、その対象外を埋めるのが今回。
