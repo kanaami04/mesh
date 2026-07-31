@@ -114,13 +114,50 @@ const __select = async (channels, handlers, defaultHandler) => {
 // __panicSinkが立っている間(mesh testの実行中だけ)はexitせず記録だけする
 let __panicSink = null;
 let __bgTasks = null;
+// **投げられた値が「誰のせいか」を3種類に分ける**(2026-07-29)。
+//
+//   1. `__Panic`               … 仕様内の停止(範囲外アクセス・整数オーバーフロー等) → `panic:`
+//   2. **ホストの限界**        … スタック溢れ。Meshは再帰の深さを保証していないので
+//                                 整数オーバーフローと同じ「限界に当たった」停止 → `panic:`
+//   3. それ以外の素のJSエラー … 生成JSが壊れている = **コンパイラのバグ** → `internal error:`
+//
+// 3を`panic:`に丸めていた頃は、コード生成のバグ(`limit is not defined`)がMeshのpanicと
+// 見分けが付かず、ユーザー(やAI)が自分のプログラムを疑って時間を使う形になっていた。
+// P4(コンパイラはAIの相棒)の観点でも、誰のバグかは明示する。
+//
+// **2を別に切り出したのはcode reviewの指摘**。「`__Panic`以外は生成JSの壊れだけ」という
+// 当初の主張は**不完全**だった——標準ライブラリの失敗経路はすべて`error`値へ変換している
+// (io$readFile / json$parse / http$listen)が、**JSエンジン自身の限界**はそのどれも通らない。
+// 素朴に「`__Panic`でなければコンパイラのバグ」とすると、ユーザー自身の深い再帰が
+// 「これはMeshコンパイラのバグです」と報告される(実測して確認)。
+// 判定は**スタック溢れだけ**に絞る——RangeError全体を仕様内に寄せると、本物のバグが
+// RangeErrorの形で出たときに見逃す。
+//
+// **`rust/tests/build_implies_run.rs`がこの印を見る**(「診断ゼロでビルドできた
+// プログラムを実行してもinternal errorは出ない」という性質検査)。
+//
+// **判定はこの3つに閉じる**。同じ問いを3つの経路(__panic / __httpDispatch / __runTests)が
+// 必要とするので、片方だけ直す形にしない——これもcode reviewで指摘された
+// (最初は__panicだけ分けていた)。
+const __isHostLimit = (e) => e instanceof RangeError && /call stack|stack size/i.test(e.message);
+const __isCompilerBug = (e) => !(e instanceof __Panic) && !__isHostLimit(e);
+const __blame = (e) => (__isCompilerBug(e) ? "internal error: " : "") + (e instanceof Error ? e.message : String(e));
 const __panic = (e) => {
-  const msg = e instanceof Error ? e.message : String(e);
   if (__panicSink) {
-    __panicSink.push(msg);
+    // mesh test中は1件の失敗として隔離する(exitしない)。印は残す
+    __panicSink.push(__blame(e));
     return;
   }
-  console.error("panic:", msg);
+  if (__isCompilerBug(e)) {
+    console.error(__blame(e));
+    console.error("  This is a bug in the Mesh compiler — the generated JavaScript is broken.");
+    console.error("  Please report it: https://github.com/kanaami04/mesh/issues");
+  } else {
+    console.error("panic:", e instanceof Error ? e.message : String(e));
+    if (__isHostLimit(e)) {
+      console.error("  hint: Mesh does not guarantee tail-call elimination — reduce the recursion depth or rewrite it as a loop.");
+    }
+  }
   globalThis.process?.exit?.(1);
 };
 // ランタイム検査(層1): バグは黙って進まず、位置つきで即停止する
@@ -389,7 +426,9 @@ const __httpDispatch = async (req, res, handler) => {
       }
       return;
     }
-    console.error("panic (isolated to this request):", e instanceof Error ? e.message : String(e));
+    // 障害分離の報告でも「誰のせいか」を分ける(__panicと同じ判定)。生成JSが壊れて
+    // いるのにハンドラのpanicとして出すと、サーバーのログを読む人が自分のコードを疑う
+    console.error(`${__isCompilerBug(e) ? "internal error" : "panic"} (isolated to this request):`, e instanceof Error ? e.message : String(e));
     if (!res.headersSent) {
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("internal server error");
@@ -453,12 +492,10 @@ const __runTests = async (tests) => {
           : { name: t.name, file: t.file, pass: false, message: __fmt(r) },
       );
     } catch (e) {
-      results.push({
-        name: t.name,
-        file: t.file,
-        pass: false,
-        message: e instanceof Error ? e.message : String(e),
-      });
+      // テスト本体が投げた場合も「誰のせいか」を分ける(__panicSinkへ入る背景タスクと同じ扱い)。
+      // ここが素のままだと、生成JSが壊れているのに**ただ失敗したテスト**として並び、
+      // 期待どおりの失敗と見分けが付かない
+      results.push({ name: t.name, file: t.file, pass: false, message: __blame(e) });
     }
   }
   await Promise.all(__bgTasks); // spawn/detachした背景タスクの決着を待つ(いずれも拒否はしない)
