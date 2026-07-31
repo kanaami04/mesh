@@ -115,6 +115,18 @@ pub struct FnDecl {
     pub ret: Option<TypeNode>, // 戻り値なし = None
     pub body: Block,
     pub exported: bool,
+    // **コンパイラが合成した関数か**(`json struct`のデコーダ/エンコーダ。`json_decode.rs`)。
+    // パーサが作るものは常にfalse——つまり「ソースに書かれたか」と同義。
+    //
+    // full_checkerが`__`接頭辞の宣言を許すかの判定に使う(2026-07-29)。合成側は`__ef_*`の
+    // ような名前を10種類使っており、それは`__`をコンパイラの名前空間として予約した目的
+    // そのものなので弾いてはいけない。**名前(`decode{Name}`)で見分けるのは誤り**——
+    // ユーザーが同名の関数を手書きできる(`json_decode.rs`の衝突テスト参照)ため、その
+    // 手書き関数まで免除してしまう(code reviewで指摘)。
+    //
+    // 「合成物も普通のFnDeclとして扱う」というjson struct実装の方針(json_decode.rs冒頭)は
+    // **崩していない**——check/codegenの*経路*は分岐しておらず、増えたのは印だけ
+    pub synthesized: bool,
     pub pos: Pos,
 }
 

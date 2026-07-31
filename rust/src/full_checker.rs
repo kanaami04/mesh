@@ -57,7 +57,10 @@ use std::rc::Rc;
 
 // JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)。
 // **pub なのはカード完全性の検査(`rust/tests/card_completeness.rs`)から参照するため**
-// ——実装が受け付ける名前が`mesh card`に載っているか、をCIで見張っている
+// ——このリストに載っている名前が`mesh card`に書かれているか、をCIで見張っている。
+// **見張れるのはこのリストだけ**——`declare`にはもう1つ「`__`で始まる名前は宣言できない」
+// という規則があるが、あれはリストではなく接頭辞の判定なのでこの検査の対象外(カードには
+// 手で書いてある)。「実装が弾くものは全部カードに載っている」とまでは機械保証されていない
 pub const RESERVED: &[&str] = &[
     "await", "async", "function", "const", "let", "var", "class", "new", "this", "typeof", "instanceof", "in", "of", "yield", "delete", "void", "switch", "case", "default", "do", "while",
     "with", "export", "import", "extends", "super", "null", "undefined", "try", "catch", "finally", "throw", "eval", "arguments",
@@ -76,6 +79,10 @@ pub struct FullCheckerCtx {
     // ローカル変数と全く同じdeclare()を通ることで予約語・組み込み名衝突・重複宣言・
     // shadowingの検査が自動的に効くようになる
     scopes: Vec<HashMap<String, Binding>>,
+    // いま検査している関数がコンパイラの**合成物**か(`json struct`のデコーダ/エンコーダ)。
+    // 立っている間だけ`__`接頭辞の宣言を許す(`declare`のコメント参照)。
+    // `check_package`が関数ごとに立てて倒す
+    in_synthesized_fn: bool,
     // 今検査中の関数の戻り値型のスタック(TS版`ctx.retStack`と同じ形)。
     // **milestone 40で実際に深さ2以上になる**——無名関数の本体を検査するようになり、
     // その中の`?`は「囲む関数」ではなく**無名関数自身**の戻り値型と突き合わせる
@@ -128,6 +135,7 @@ impl FullCheckerCtx {
     fn new() -> Self {
         FullCheckerCtx {
             scopes: vec![HashMap::new()],
+            in_synthesized_fn: false,
             ret_stack: Vec::new(),
             diagnostics: Vec::new(),
             type_ctx: crate::checker::CheckerCtx::new(),
@@ -165,6 +173,44 @@ impl FullCheckerCtx {
         }
         if RESERVED.contains(&name) {
             self.error(pos, DiagnosticCode::ReservedWord, format!("'{name}' is a reserved word and cannot be used as a name"));
+            return;
+        }
+        // **`__`で始まる名前はコンパイラのもの**(2026-07-29に予約)。生成JSは一時変数と
+        // ランタイム関数をこの接頭辞で置いている(`__m`/`__v`/`__d0`/`__idx`/`__panic`…)ので、
+        // ユーザーが同じ名前を宣言すると**フラットなJSスコープで内部名を隠す**。
+        //
+        // 実測した2つの壊れ方(どちらもTS版から存在した言語レベルの穴):
+        //   `__m := 100` のあと `match v { int => __m }` が**100ではなくsubjectの値を返す**
+        //   (matchはsubjectを`(async (__m) => ...)`のIIFE引数で渡すため)——checkもbuildも
+        //   通って**実行結果だけが誤る**、いちばん悪い壊れ方。
+        //   `__idx := 42` はランタイム関数`__idx`を隠し、配列添字が`42 is not a function`になる。
+        //
+        // **Meshでは`__`に意味が無い**(Pythonの名前マングリングやJSの`#`と違う。可視性は
+        // `export`の有無で決まる)ので、ユーザーが失うものは無い。逆にコンパイラは
+        // 「ここは自分のもの」と言える名前空間を得る——一時変数を1つ増やすたびに
+        // 誤コンパイルの種が増える状態を終わらせるのが目的。
+        // **対象は「生成JSでフラットスコープの名前になるもの」だけ**。struct/type名とメソッド名は
+        // 必ずマングルされる(`__m___Hack___helper`)ので衝突せず、この検査は通らない経路のまま。
+        // **structのフィールド名も意図的に対象外**——フィールドはオブジェクトのプロパティ
+        // (=JSONのキー)になるので、GraphQLの`__typename`のような実在するキーを表現できる
+        // 必要がある。`codegen.rs`が`__proto__`だけを個別に拒否しているのはprototype汚染対策で、
+        // **この規則とは別物**(あちらはプロパティキー、こちらは裸の識別子)。
+        //
+        // **診断コードは`reserved-word`を流用する**(新しいコードを増やさない)。
+        //
+        // **合成された関数の本体では許す**(`in_synthesized_fn`)。`json struct`の
+        // デコーダ/エンコーダは`__ef_*`のような名前を10種類使っており(`json_decode.rs`)、
+        // それは`__`をコンパイラの名前空間として予約した**目的そのもの**なので弾いてはいけない。
+        // 合成物は「以降のcheck/codegenを無改造で流用する」ために普通の`FnDecl`として
+        // `program.fns`へ積まれる設計なので、ASTからは区別できない——判定は`check_package`が
+        // json structから決まる名前(`decode{Name}`/`encode{Name}`)で行う。
+        // **parityを回して初めて気づいた**(10件の誤検知になっていた)。
+        if !self.in_synthesized_fn && name.starts_with("__") {
+            self.error(
+                pos,
+                DiagnosticCode::ReservedWord,
+                format!("'{name}' is reserved for the compiler — names starting with '__' cannot be declared"),
+            );
             return;
         }
         if crate::checker::is_builtin(name) {
@@ -2402,8 +2448,18 @@ fn check_stmt(ctx: &mut FullCheckerCtx, stmt: &Stmt) {
             // 右辺は代入が起きる前の状態で評価されるので、絞り込み事実もまだ古いままでよい
             let value_tys: Vec<Type> = values.iter().map(|v| infer_expr_single(ctx, v)).collect();
             for (i, target) in targets.iter().enumerate() {
-                // `_ = f()`は代入ではないので事実を捨てない(TS版も`continue`で飛ばす)
-                if matches!(target, Expr::Ident { name, .. } if name == "_") {
+                // `_ = f()`は代入ではないので事実を捨てない(TS版も`continue`で飛ばす)。
+                //
+                // **複合代入(`_ += 1`)は飛ばさない**(2026-07-29)。あれは`_`を**読む**形で、
+                // Meshは`print(_)`を`undefined: '_'`と報告する——同じ規則を当てる。
+                // TS版はここを一律に飛ばしており、`_ += 1`が**checkを通って実行時に
+                // `_ is not defined`で落ちる**(実測)。オラクルに合わせると検出漏れを
+                // 移植することになるので、揃えずに直した(PR #119と同じ判断
+                // ——「オラクルに聞く」は「オラクルに従う」ではない)。
+                // 診断コードは既存の`undefined-name`で、新しいコードは増えない
+                if compound_op.is_none()
+                    && matches!(target, Expr::Ident { name, .. } if name == "_")
+                {
                     continue;
                 }
                 // **代入先の型を見る前に古い絞り込みを捨てる**(TS版と同じ順序)。順序が逆だと
@@ -3843,8 +3899,19 @@ pub fn check_package_shared(
     for (i, (_, program)) in files.iter().enumerate() {
         let start = ctx.diagnostics.len();
         for f in &program.fns {
+            // **コンパイラが合成した関数の本体だけ`__`接頭辞の宣言を許す**(`FnDecl.synthesized`)。
+            // 合成側(`json_decode.rs`)は`__ef_*`等を使っており、`__`を予約した目的そのもの。
+            //
+            // **名前(`decode{Name}`)で見分けてはいけない**——ユーザーは同名の関数を手書きでき
+            // (`json_decode.rs`の衝突テスト参照。milestone 66から`already-declared`で報告する
+            // 設計)、名前判定だとその手書き関数まで免除して`__`の誤用を見逃す。
+            // 初版は名前判定にしていてcode reviewで指摘された。ASTの印にすれば
+            // **合成物そのもの**だけを指せるうえ、`json_decode.rs`の命名規約をchecker側で
+            // 再現する結合も消える(片方を変えたらもう片方が黙って壊れる形だった)
+            ctx.in_synthesized_fn = f.synthesized;
             check_fn(&mut ctx, f);
         }
+        ctx.in_synthesized_fn = false;
         spans.push((start, ctx.diagnostics.len(), i));
     }
 
@@ -4653,6 +4720,73 @@ mod tests {
         let diags = check("fn main() {\n    await := 1\n}\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, DiagnosticCode::ReservedWord);
+    }
+
+    #[test]
+    fn 二重アンダースコア接頭辞の宣言はreserved_wordを報告する() {
+        // `__`はコンパイラの名前空間(生成JSの一時変数・ランタイム関数)。ユーザーが宣言すると
+        // フラットなJSスコープで内部名を隠す——`__m`はmatchのsubjectに食われて
+        // **実行結果だけが誤り**、`__idx`はランタイム関数を隠して`is not a function`になる。
+        // どちらもTS版から存在した言語レベルの穴で、2026-07-29に予約した
+        let diags = check("fn main() {\n    __m := 1\n    print(__m)\n}\n");
+        assert_eq!(diags[0].code, DiagnosticCode::ReservedWord);
+        assert!(diags[0].message.contains("reserved for the compiler"), "{:?}", diags[0].message);
+        // 素の`__`も、3本以上も同じ
+        assert_eq!(check("fn main() {\n    __ := 1\n}\n")[0].code, DiagnosticCode::ReservedWord);
+        assert_eq!(check("fn main() {\n    ___x := 1\n}\n")[0].code, DiagnosticCode::ReservedWord);
+        // **単一のアンダースコアはブランク識別子なので通す**(値を意図的に捨てる)
+        assert!(check("fn main() {\n    _ = 1\n}\n").is_empty());
+        // 名前の**途中**や末尾のアンダースコアは対象外(接頭辞だけを見る)
+        assert!(check("fn main() {\n    a__b := 1\n    print(a__b)\n}\n").is_empty());
+        assert!(check("fn main() {\n    _x := 1\n    print(_x)\n}\n").is_empty());
+    }
+
+    #[test]
+    fn ブランク識別子は捨てるときだけ使えて読むと未定義になる() {
+        // `_`は「値を捨てる」ための書き口で、**読めない**(`print(_)`が`undefined: '_'`)。
+        // 同じ規則を`_`を読む代入にも当てる。**TS版はここを一律に飛ばしていた**ので
+        // `_ += 1`がcheckを通って実行時に`_ is not defined`で落ちていた(実測)
+        assert!(check("fn f() int {\n    return 1\n}\n\nfn main() {\n    _ = f()\n}\n").is_empty(), "素の捨ては通る");
+        for src in ["_ += 1", "_ -= 1", "_++", "_--"] {
+            let diags = check(&format!("fn main() {{\n    {src}\n}}\n"));
+            assert_eq!(diags[0].code, DiagnosticCode::UndefinedName, "{src}: {diags:?}");
+        }
+    }
+
+    #[test]
+    fn json_structの合成デコーダは二重アンダースコアを使えるままにする() {
+        // 合成側(`json_decode.rs`)は`__ef_*`等を10種類使っている。`__`を予約した**目的**が
+        // 「コンパイラが安心して使える名前空間」なので、ここを弾いてはいけない。
+        // **parityを回して初めて気づいた誤検知**(10件出ていた)ので回帰テストを置く。
+        //
+        // **`check_with_json`を使うのが要点**——素の`check`は合成器を通さないので
+        // `program.fns`に`__ef_*`を使う本体が入らず、**テストが空振りする**
+        // (初版がそうなっていてcode reviewで指摘された)
+        let src = "import \"mesh/json\"\n\njson struct User {\n    name: string\n    age: int\n}\n\nfn main() {\n    print(1)\n}\n";
+        let diags = check_with_json(src);
+        assert!(
+            !diags.iter().any(|d| d.code == DiagnosticCode::ReservedWord),
+            "合成デコーダの内部名がreserved_wordになっている: {diags:?}"
+        );
+        // 空振りしていないことの確認: 合成器が実際に`__`を使う本体を積んでいる
+        let mut program = parse(src).expect("test source must parse");
+        crate::json_decode::synthesize_json_decoders(&mut program).expect("synthesis must succeed");
+        assert!(program.fns.iter().any(|f| f.synthesized), "合成関数が積まれていない");
+    }
+
+    #[test]
+    fn 手書き関数が合成デコーダと同名でも二重アンダースコアは免除されない() {
+        // 免除は**ASTの印**(`FnDecl.synthesized`)で決める。名前(`decode{Name}`)で見分けると、
+        // ユーザーが同名の関数を手書きしたときにその本体まで免除してしまう
+        // (`json_decode.rs`は衝突しても合成を止めず`already-declared`で報告する設計)。
+        // 初版は名前判定でこの穴があり、code reviewで指摘された
+        let diags = check_with_json(
+            "import \"mesh/json\"\n\njson struct User {\n    name: string\n}\n\nfn decodeUser(v: json.Value) User | error {\n    __evil := 1\n    return error(\"hand-written\")\n}\n\nfn main() {\n    print(1)\n}\n",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == DiagnosticCode::ReservedWord),
+            "手書き関数の`__evil`が免除されている: {diags:?}"
+        );
     }
 
     #[test]

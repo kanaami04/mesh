@@ -358,6 +358,16 @@ impl Codegen {
     }
 
     fn gen_const_decl(&mut self, c: &ConstDecl) -> CodegenResult<()> {
+        // **`_ := expr` は捨てる**(ローカルの`ShortVarDecl`と同じ扱い。上の`names[0] == "_"`分岐)。
+        // ここが無いと`const _ = ...`というJSを出し、2回書いたときに`declared_consts`が
+        // 明確なErrにする——**`mesh check`は黙るのに`mesh build`が落ちる**形だった
+        // (`check ⇒ build`の破れ。code reviewで発覚)。`_`はどこにも束縛しないので
+        // 名前の重複という概念自体が無く、右辺を副作用のために評価するだけでよい
+        if c.name == "_" {
+            let value = self.gen_expr(&c.value)?;
+            self.emit(format!("{value};"));
+            return Ok(());
+        }
         // milestone 68: **constもトップレベル関数と同じpkg接頭辞を付ける**(TS版`genConstDecl`も
         // `fnJsName(this.pkg, c.name)`で出している)。それまで無修飾だったのは「パッケージ修飾の
         // 値参照(`lib.LIMIT`)が対象外だったから」で、その対象外を埋めるのが今回。
@@ -524,6 +534,21 @@ impl Codegen {
                 // Indexターゲットに対応しない設計のまま。下のgen_index_assign参照)
                 if let Expr::Index { target: container, index, pos: idx_pos } = &targets[0] {
                     return self.gen_index_assign(&targets[0], container, index, *idx_pos, *compound_op, &values[0]);
+                }
+                // **`_ = expr` は代入ではなく「値を意図的に捨てる」**(`docs/features.md`の
+                // ブランク識別子)。`_`はどこにも宣言されないので、素直に`_ = ...`というJSを
+                // 出すと**実行時に`_ is not defined`で落ちる**——`check`は通るので
+                // `build⇒run`の破れだった(2026-07-29に`build_implies_run`の検証中に発見)。
+                // 右辺は副作用のために評価する必要があるので、式文として出す。
+                // **素の代入だけ**に限る——`_ += 1`は`_`を*読む*形なので
+                // `full_checker`が`undefined: '_'`で止める(ここで黙って捨てると
+                // 「うるさい失敗」を「静かな無動作」に変えることになる)
+                if compound_op.is_none()
+                    && matches!(&targets[0], Expr::Ident { name, .. } if name == "_")
+                {
+                    let rhs = self.gen_expr(&values[0])?;
+                    self.emit(format!("{rhs};"));
+                    return Ok(());
                 }
                 let lvalue = self.gen_lvalue(&targets[0])?;
                 let rhs = self.gen_expr(&values[0])?;
@@ -867,6 +892,14 @@ impl Codegen {
             Stmt::Assign { targets, values, compound_op, pos } => {
                 if targets.len() != 1 || values.len() != 1 {
                     return Err(format!("codegen: multi-target assignment is not yet supported ({}:{})", pos.line, pos.col));
+                }
+                // **`gen_stmt`側と同じく`_ = expr`は代入ではない**(値を捨てる式)。
+                // forのinit/postは**別経路**なので、片方だけ直すと`for _ = f(); ...`が
+                // 実行時に`_ is not defined`で落ちる。複合代入を除くのも`gen_stmt`側と同じ
+                if compound_op.is_none()
+                    && matches!(&targets[0], Expr::Ident { name, .. } if name == "_")
+                {
+                    return self.gen_expr(&values[0]);
                 }
                 let lvalue = self.gen_lvalue(&targets[0])?;
                 let rhs = self.gen_expr(&values[0])?;

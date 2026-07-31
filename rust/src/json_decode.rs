@@ -5,10 +5,16 @@
 //
 // アプローチ(TS版と同じ): 生JSを手組みするのではなく、Meshの構文レベルのAST(Stmt/Expr)を
 // 合成し、通常のFnDeclとしてprogram.fnsへ追加する。こうすることで、以降のcheck/codegenの
-// 経路は一切変更せずそのまま流用でき(合成した関数も普通の関数として型解決・コード生成
+// 経路は分岐させずそのまま流用でき(合成した関数も普通の関数として型解決・コード生成
 // される)、json.field/json.asString等のヘルパー(codegen.rsのjson_stdlib_symbols+
 // prelude()側に実装済み)を`?`で繋ぐだけの「手書きデコーダと全く同じ形」のコードを
 // 機械的に組み立てる。
+//
+// **唯一の例外は`FnDecl.synthesized`という印**(2026-07-29)。`__`接頭辞をコンパイラに
+// 予約したので、ここが使う`__ef_*`等の名前を許すために`full_checker`が印を読む。
+// **経路は分岐していない**(検査は同じ`check_fn`を通る)が、「合成物であること」は
+// 下流から見えるようになった——名前(`decode{Name}`)で見分ける実装は、ユーザーが同名の
+// 関数を手書きできる(下記の衝突テスト)ため誤って免除してしまい、code reviewで指摘された。
 //
 // 対応するフィールド型(TS版と同じv1スコープ): int/float/string/bool、他のjson struct
 // (同一ファイル内)への参照、それらの配列、それらの'T | none'。それ以外(素のstruct・map・
@@ -270,6 +276,7 @@ fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
         params: vec![Param { name: v_param.to_string(), type_node: TypeNode::Name { name: "Value".to_string(), pkg: Some("json".to_string()), pos }, pos }],
         ret: Some(union_type(vec![name_type(&td.name, pos), name_type("error", pos)], pos)),
         body: block(stmts),
+        synthesized: true,
         exported: td.exported,
         pos,
     })
@@ -464,6 +471,7 @@ fn synthesize_encoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
         params: vec![Param { name: x_param.to_string(), type_node: name_type(&td.name, pos), pos }],
         ret: Some(json_value_type_node(pos)),
         body: block(stmts),
+        synthesized: true,
         exported: td.exported,
         pos,
     })
