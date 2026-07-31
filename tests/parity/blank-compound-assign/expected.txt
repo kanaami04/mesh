@@ -1,0 +1,12 @@
+main.mesh:15:2: error[undefined-name]: undefined: '_'
+  	_ += 1
+  	^
+main.mesh:16:2: error[undefined-name]: undefined: '_'
+  	_ -= side()
+  	^
+main.mesh:17:2: error[undefined-name]: undefined: '_'
+  	_++
+  	^
+main.mesh:18:2: error[undefined-name]: undefined: '_'
+  	_--
+  	^

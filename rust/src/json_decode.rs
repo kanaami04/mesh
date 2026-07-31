@@ -270,6 +270,7 @@ fn synthesize_decoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
         params: vec![Param { name: v_param.to_string(), type_node: TypeNode::Name { name: "Value".to_string(), pkg: Some("json".to_string()), pos }, pos }],
         ret: Some(union_type(vec![name_type(&td.name, pos), name_type("error", pos)], pos)),
         body: block(stmts),
+        synthesized: true,
         exported: td.exported,
         pos,
     })
@@ -464,6 +465,7 @@ fn synthesize_encoder_fn(td: &TypeDecl, json_struct_names: &HashSet<String>) -> 
         params: vec![Param { name: x_param.to_string(), type_node: name_type(&td.name, pos), pos }],
         ret: Some(json_value_type_node(pos)),
         body: block(stmts),
+        synthesized: true,
         exported: td.exported,
         pos,
     })

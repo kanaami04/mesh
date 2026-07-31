@@ -529,8 +529,13 @@ impl Codegen {
                 // ブランク識別子)。`_`はどこにも宣言されないので、素直に`_ = ...`というJSを
                 // 出すと**実行時に`_ is not defined`で落ちる**——`check`は通るので
                 // `build⇒run`の破れだった(2026-07-29に`build_implies_run`の検証中に発見)。
-                // 右辺は副作用のために評価する必要があるので、式文として出す
-                if matches!(&targets[0], Expr::Ident { name, .. } if name == "_") {
+                // 右辺は副作用のために評価する必要があるので、式文として出す。
+                // **素の代入だけ**に限る——`_ += 1`は`_`を*読む*形なので
+                // `full_checker`が`undefined: '_'`で止める(ここで黙って捨てると
+                // 「うるさい失敗」を「静かな無動作」に変えることになる)
+                if compound_op.is_none()
+                    && matches!(&targets[0], Expr::Ident { name, .. } if name == "_")
+                {
                     let rhs = self.gen_expr(&values[0])?;
                     self.emit(format!("{rhs};"));
                     return Ok(());
@@ -879,9 +884,11 @@ impl Codegen {
                     return Err(format!("codegen: multi-target assignment is not yet supported ({}:{})", pos.line, pos.col));
                 }
                 // **`gen_stmt`側と同じく`_ = expr`は代入ではない**(値を捨てる式)。
-                // forのinit/postは**別経路**なので、片方だけ直すと`for ; ; _ = f()`が
-                // 実行時に`_ is not defined`で落ちる
-                if matches!(&targets[0], Expr::Ident { name, .. } if name == "_") {
+                // forのinit/postは**別経路**なので、片方だけ直すと`for _ = f(); ...`が
+                // 実行時に`_ is not defined`で落ちる。複合代入を除くのも`gen_stmt`側と同じ
+                if compound_op.is_none()
+                    && matches!(&targets[0], Expr::Ident { name, .. } if name == "_")
+                {
                     return self.gen_expr(&values[0]);
                 }
                 let lvalue = self.gen_lvalue(&targets[0])?;

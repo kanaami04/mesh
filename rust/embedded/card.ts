@@ -32,10 +32,14 @@ Mesh has no features beyond what is listed here. When unsure, prefer the pattern
   void switch case default do while with export import extends super null undefined try
   catch finally throw eval arguments\`. Naming a function \`eval\` is a compile error —
   pick another name (e.g. \`evaluate\`).
-- Names starting with \`__\` are RESERVED for the compiler and can NOT be declared
-  (\`__cache := 1\` is a compile error). The generated JavaScript puts its own helpers and
-  temporaries there, so a user name would silently shadow them. \`__\` has no special meaning
-  in Mesh — visibility is decided by \`export\`, not by naming — so just drop the underscores.
+- Names starting with \`__\` are RESERVED for the compiler: variables, constants, parameters
+  and function names can NOT start with \`__\` (\`__cache := 1\` is a compile error). The
+  generated JavaScript puts its own helpers and temporaries there, so such a name would
+  silently shadow them. \`__\` has no special meaning in Mesh — visibility is decided by
+  \`export\`, not by naming — so just drop the underscores.
+  STRUCT FIELD names are NOT restricted: \`__typename: string\` is fine (fields become object
+  properties / JSON keys, not flat-scope names), which is what you want for payloads that
+  really do carry such a key.
 - Function parameters are always immutable (you cannot reassign the parameter itself).
 - \`:=\` widens string-literal types to \`string\`, so \`mut s := "a"\` allows \`s = "b"\` later.
   (A literal type like \`"a"\` only appears where you write it explicitly, e.g. in a union.)

@@ -508,7 +508,7 @@ impl Parser {
         let params = self.parse_params()?;
         let ret = self.parse_return_type()?;
         let body = self.parse_block()?;
-        Ok(FnDecl { name, receiver, type_params, params, ret, body, exported, pos: start.pos })
+        Ok(FnDecl { name, receiver, type_params, params, ret, body, exported, synthesized: false, pos: start.pos })
     }
 
     // fn first<T>(...) / fn zip<A, B>(...) の <T, ...> 部分。無ければ空配列
