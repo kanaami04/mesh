@@ -57,7 +57,10 @@ use std::rc::Rc;
 
 // JS化したときに意味を持ってしまう名前(TS版`checker/context.ts`のRESERVEDをそのまま移植)。
 // **pub なのはカード完全性の検査(`rust/tests/card_completeness.rs`)から参照するため**
-// ——実装が受け付ける名前が`mesh card`に載っているか、をCIで見張っている
+// ——このリストに載っている名前が`mesh card`に書かれているか、をCIで見張っている。
+// **見張れるのはこのリストだけ**——`declare`にはもう1つ「`__`で始まる名前は宣言できない」
+// という規則があるが、あれはリストではなく接頭辞の判定なのでこの検査の対象外(カードには
+// 手で書いてある)。「実装が弾くものは全部カードに載っている」とまでは機械保証されていない
 pub const RESERVED: &[&str] = &[
     "await", "async", "function", "const", "let", "var", "class", "new", "this", "typeof", "instanceof", "in", "of", "yield", "delete", "void", "switch", "case", "default", "do", "while",
     "with", "export", "import", "extends", "super", "null", "undefined", "try", "catch", "finally", "throw", "eval", "arguments",
@@ -186,7 +189,12 @@ impl FullCheckerCtx {
         // `export`の有無で決まる)ので、ユーザーが失うものは無い。逆にコンパイラは
         // 「ここは自分のもの」と言える名前空間を得る——一時変数を1つ増やすたびに
         // 誤コンパイルの種が増える状態を終わらせるのが目的。
-        // フィールド名`__proto__`を既に個別に拒否していた(codegen.rs)のを一般化した形。
+        // **対象は「生成JSでフラットスコープの名前になるもの」だけ**。struct/type名とメソッド名は
+        // 必ずマングルされる(`__m___Hack___helper`)ので衝突せず、この検査は通らない経路のまま。
+        // **structのフィールド名も意図的に対象外**——フィールドはオブジェクトのプロパティ
+        // (=JSONのキー)になるので、GraphQLの`__typename`のような実在するキーを表現できる
+        // 必要がある。`codegen.rs`が`__proto__`だけを個別に拒否しているのはprototype汚染対策で、
+        // **この規則とは別物**(あちらはプロパティキー、こちらは裸の識別子)。
         //
         // **診断コードは`reserved-word`を流用する**(新しいコードを増やさない)。
         //
