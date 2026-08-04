@@ -173,9 +173,25 @@ fi
 # 250件で位置込みと集合のみを両方試して差が出ないことを確認したうえで、厳しい側を採った
 diags() { grep -oE '[0-9]+:[0-9]+: error\[[a-z-]+\]' | tr '\n' '|'; }
 
+# **生成JSの「本体」だけを取り出す**(2026-07-31)。ランタイムのprelude部分は比べない
+# ——Rust版の`rust/embedded/runtime.ts`は撤去後も変更が入る(2026-07-29に`__panic`の
+# 表示を分けた)のに対し、TS版オラクルは`cd7273a^`で凍結されているため、preludeは
+# **必ず食い違う**。比べたいのは「同じMeshソースから同じJSプログラムが出るか」。
+#
+# **なぜ診断だけでは足りないか**: milestone 66で「json structのエンコーダ合成が
+# 丸ごと未移植」が見つかったのは生成JSを比べたからで、**診断は一致していた**。
+# 同じ類の移植漏れは診断の突き合わせでは構造的に見えない。
+# `mise run parity`はコーパスに対してこれをやっているが、**ランダムな入力に対しては
+# 誰も比べていなかった**——そこがこの追加で埋まる。
+body() { sed -n '/^\/\/ ===== end runtime =====$/,$p'; }
+
 diffs=0
 skips=0
 n=0
+# **生成JSを実際に何件比べたか**。診断ゼロのケースだけが対象なので、これを出さないと
+# 「差0件」が「比べた結果0件」なのか「1件も比べていない」のか読み手に区別できない
+# (docs/handoff.md「0件でしたという報告ほど検証が要る」)
+js_compared=0
 for f in "$OUT"/*.mesh; do
 	n=$((n + 1))
 	rs=$("$RUST_BIN" check "$f" 2>&1 | diags)
@@ -199,11 +215,40 @@ for f in "$OUT"/*.mesh; do
 		echo "DIFF $(basename "$f" .mesh)"
 		echo "    Rust: [$rs]"
 		echo "    TS  : [$ts]"
+		continue
+	fi
+	# **診断が一致し、かつ両方とも診断ゼロのときだけ生成JSを比べる**。
+	# 診断が出るプログラムはそもそもビルドされないので、比較対象が存在しない
+	[ -z "$rs" ] || continue
+	js_rs=$("$RUST_BIN" "$f" --emit-js 2>/dev/null | body)
+	# **TS版は`-o`で書き出す形しか無い**ので一時ファイルへ受ける。`-o /dev/stdout`にすると
+	# 「wrote /dev/stdout」というステータス行が本文に混ざり、**全件が偽のDIFF**になる
+	# (この追加を入れた直後に30件中18件で踏んだ)
+	ts_js_file="$OUT/.ts_emit.js"
+	(cd "$ORACLE" && bun src/cli.ts build "$f" -o "$ts_js_file" >/dev/null 2>&1)
+	js_ts=$(body <"$ts_js_file" 2>/dev/null)
+	rm -f "$ts_js_file"
+	# **どちらかが空なら比較になっていない**(ビルドが落ちた/出力形式が変わった)。
+	# 「両方空だから一致」という**偽の一致**を作らないよう、ここで止める
+	if [ -z "$js_rs" ] || [ -z "$js_ts" ]; then
+		diffs=$((diffs + 1))
+		cp "$f" "$FINDS/"
+		echo "DIFF $(basename "$f" .mesh) — 診断ゼロなのに生成JSが取れない(Rust側 ${#js_rs} 文字 / TS側 ${#js_ts} 文字)"
+		continue
+	fi
+	js_compared=$((js_compared + 1))
+	if [ "$js_rs" != "$js_ts" ]; then
+		diffs=$((diffs + 1))
+		cp "$f" "$FINDS/"
+		printf '%s\n' "$js_rs" >"$FINDS/$(basename "$f" .mesh).rust.js"
+		printf '%s\n' "$js_ts" >"$FINDS/$(basename "$f" .mesh).ts.js"
+		echo "DIFF $(basename "$f" .mesh) — 診断は一致したが**生成JSが違う**"
+		diff <(printf '%s\n' "$js_ts") <(printf '%s\n' "$js_rs") | head -12 | sed 's/^/    /'
 	fi
 done
 
 echo "---"
-echo "対象 $n 件 / オラクルとの差 ${diffs} 件 / パース失敗 ${skips} 件 / seed=$SEED"
+echo "対象 $n 件(うち生成JSも比べた ${js_compared} 件)/ オラクルとの差 ${diffs} 件 / パース失敗 ${skips} 件 / seed=$SEED"
 if [ "$diffs" -gt 0 ]; then
 	echo "差が出た形: $FINDS"
 	echo "**同じ集合を再生成するには: scripts/oracle-hunt.sh $COUNT $SEED**"
