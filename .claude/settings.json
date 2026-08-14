@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/doc-review-check.sh\"",
+            "timeout": 10,
+            "statusMessage": "md変更のdoc-reviewチェック中"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+# doc-reviewフックのローカル状態(最終レビュー時刻のマーカー)
+.claude/.doc-review-marker
+
+# Rust実装開始後のビルド成果物
+/target/
+
+# 生成JSの実行検証(E2Eテスト)で使うNode関連
+node_modules/
