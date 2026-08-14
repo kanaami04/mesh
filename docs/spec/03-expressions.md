@@ -24,6 +24,8 @@ unary     = ( "!" | "-" ) unary | postfix
 postfix   = primary { call | index | field | "?" } [ "?" stringLit ]
             (* 素の ? は連鎖の途中に書ける(f()?.name)。? の直後がstringLitなら文脈付き伝播で、これは連鎖の終端のみ *)
 call      = [ typeArgs ] "(" [ expr { "," expr } ] ")"
+            (* typeArgsを書けるのは裸の識別子callee(自由関数)の直後のみ。
+               メソッドは型パラメータを持てない(5章F-8)ため `.` の後の "<" は常に比較 *)
 typeArgs  = "<" type { "," type } ">"                    (* typeは2章 *)
 index     = "[" expr "]"
 field     = "." identifier
@@ -74,7 +76,7 @@ ifExpr = "if" expr block [ "else" ( block | ifExpr ) ]
 条件位置にstructリテラルを直接書く場合は括弧で囲む(ヘッダ位置の `{` 衝突回避。規則本体は4章のヘッダ規則と共通)。
 
 - **X-12**(値位置の定義): 式が「値として使われる」のは、let/mutの初期化・実引数・returnの値・structリテラルのフィールド・**値が要求されるブロックの最終式**の位置にあるとき。値の要求は外側から内側へ伝播する(値位置のmatch式の腕ブロックの最終式は値位置。値を捨てる文の位置なら要求されない)。**関数本体の最終式が値位置となるか(暗黙のreturn)は5章が定める**。値位置のif式は `else` が必須であり、無ければエラー E0311。〔負例: `if-value-no-else`〕
-- **X-13**: if式の値は各腕ブロックの最後の式。**期待型がある位置**では各腕に期待型を伝播する(T-13)。期待型が無い位置では、T-27の拡大を適用した上で両腕の型が同一であることを要求し、異なればエラー E0312 とし、union型の注釈を案内すること(`if c { 1 } else { 1.5 }` は `float` として合法)。**発散する腕**(最終文が `return`・`continue`・`break`)は型の要求から除外する(**全腕が発散するif/match式が値位置に置かれた場合は本規則がE0408を報告する**)。matchの腕にも同じ規則を適用する。〔負例: `if-arm-type-mismatch`(int/string)/ 正例: `if-arm-union-expected`、`if-arm-widening`(int/float)、`if-arm-diverging`(片腕return)〕
+- **X-13**: if式の値は各腕ブロックの最後の式。**期待型がある位置**では各腕に期待型を伝播する(T-13)。期待型が無い位置では、T-27の拡大を適用した上で両腕の型が同一であることを要求し、異なればエラー E0312 とし、union型の注釈を案内すること(`if c { 1 } else { 1.5 }` は `float` として合法)。**発散する腕**(最終文が発散する=4章S-23)は型の要求から除外する(**全腕が発散するif/match式が「関数本体の最終文以外の」値位置に置かれた場合は本規則がE0408を報告する**。関数本体の最終文としては合法=5章F-6)。matchの腕にも同じ規則を適用する。〔負例: `if-arm-type-mismatch`(int/string)/ 正例: `if-arm-union-expected`、`if-arm-widening`(int/float)、`if-arm-diverging`(片腕return)〕
 
 ## 3.6 match式(ADR-0025/0034)
 
@@ -96,14 +98,13 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 ## 3.7 narrowing(`is`。ADR-0005/0034)
 
 - **X-19**: `x is T` の `T` は `x` の静的型(union)の**単一メンバー**であること(memberTypeの文法によりunion・fn型は書けない)。メンバーでない型を書いたらエラー E0318(常に偽になる検査のため)。結果は `bool`。〔負例: `is-foreign-type`〕
-- **X-20**(対象は変数のみ): `is` の左辺は**ローカル変数またはパラメータの裸の識別子**に限ること(ADR-0034)。フィールドパス(`u.addr is Home`)・呼び出し結果(`findUser(1) is User`)・複合式・括弧付きはエラー E0319 とし、「一時変数に取り出してください(`let addr = u.addr`)」を案内すること。〔負例: `is-field-path`、`is-non-variable`〕
+- **X-20**(対象は変数のみ): `is` の左辺は**ローカル変数またはパラメータの裸の識別子**に限ること(ADR-0034)。ただし**スコープ内のどこか(定義位置より後方を含む)でクロージャに参照捕捉されるmut変数は、フローの位置によらず全域で対象外**(捕捉より前の位置でも絞り込めない。捕捉先の呼び出しで型が変わりうるため。エラー E0319 のメッセージ変種「捕捉された変数は絞り込めません。`let` にコピーしてください」=5章F-13)。フィールドパス(`u.addr is Home`)・呼び出し結果(`findUser(1) is User`)・複合式・括弧付きはエラー E0319 とし、「一時変数に取り出してください(`let addr = u.addr`)」を案内すること。〔負例: `is-field-path`、`is-non-variable`、`narrowing-captured-mut`〕
 - **X-21**(フロー効果): 次の規則で `x` の型が絞り込まれること:
   - `if x is T { ... }` のthen側で `x: T`、else側で `x: 残りのメンバー`。`!(x is T)` は効果が反転する。
   - `x is T && 式` の右側で `x: T`。`x is T || 式` の右側で `x: 残りのメンバー`(左が偽の文脈)。
-  - **片側の腕が `return` で終わるとき、if文以降の `x` の型は「通過する側の腕で成立している型」**(`if x is none { return }` の後は `x: 残り`、`if !(x is int) { return }` の後は `x: int`、elseがreturnなら then側の型)。「〜で終わる」とは腕ブロックの**最終文**がその文であることを指す(4章S-17と共通の定義)。
+  - **片側の腕の最終文が発散する(4章S-23)とき、if文以降の `x` の型は「通過する側の腕で成立している型」**(`if x is none { return }` の後は `x: 残り`、`if !(x is int) { return }` の後は `x: int`、elseが発散ならthen側の型)。発散が `continue`/`break` の場合の適用範囲は4章S-17。
   - **絞り込みはif/&&/||の構文を通じてのみ伝わる**。boolを変数に取ると伝わらない(`let ok = x is T` の後の `if ok` は絞り込まない)。
   - 合流(if全体を抜けた後、両腕からの到達がある場合)では宣言型に戻る。
-  - ループ内の `continue`/`break` によるearly-exit(`if item is none { continue }` の後の絞り込み)への拡張は、break/continueを定義する4章がこの「通過する側の型」規則を引き継いで定める。
   
   〔正例テスト: `narrowing-flow`(5形すべて)〕
 - **X-22**: mutな変数への再代入は、その変数の絞り込みを無効化すること。**forループ本体の内側では、ループ内で再代入されるmut変数のループ外絞り込みは無効**(back-edgeのため保守的に扱う)。〔負例: `narrowing-invalidation`(再代入後の絞り込み前アクセスがE0320になること)〕
@@ -112,7 +113,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 ## 3.8 or と `?`(ADR-0005/0028)
 
 - **X-24**(素のor): `expr or fallback` は `expr` の型に失敗メンバーとして **noneのみ** を持つとき書けること。**none以外の失敗メンバー(error、またはerror struct/error type)を含むなら**エラー E0321 で束縛形を案内すること(黙殺防止)。失敗メンバーを持たない型へのorはエラー E0323「この値は失敗しません。boolの選択なら `||` です」。成功メンバーが1つも無い型(`none` のみ等)へのorもE0323のメッセージ変種(「常に失敗します」)。型規則: 成功メンバーの型を `S`、`fallback` の型を `F` とすると、`F` は `S` または `S | none` に代入可能であること(T-27適用)。結果の型は正規化した `S | Fのメンバー` — つまり `F` がnoneを持たなければ `S`、持てば `S | none`。この規則により左結合の連鎖 `a or b or c`(bが `int | none`、cが `int`)が成立する。`fallback` は失敗時のみ評価。〔正例: `or-fallback`、`or-chain` / 負例: `or-silent-error`(error structを含むケースも)、`or-on-non-failable`〕
-- **X-25**(束縛形): `expr or e => { ... }` は失敗メンバー(none・error・error struct)の値を `e` に束縛してブロックを評価し、その値で置き換えること。`e` の型は**失敗メンバーのunion**(複数ならそのunion、1つならその型)。ブロック値の代入可能性(**成功メンバーのunion**へ)は、**or式全体が値位置(X-12)にあるときのみ**要求する(文の位置の `save(u) or e => { log(e) }` は合法)。ブロックの**最終文**が発散文(`return`・`continue`・`break`。X-13と同じ一般化)の場合も要求を免除する(途中の発散文だけでは免除しない)。束縛名にはX-18(シャドーイング禁止)が適用される。〔正例: `or-binding`(失敗メンバー複数の束縛型)、`or-binding-statement`(文位置でのログ処理)〕
+- **X-25**(束縛形): `expr or e => { ... }` は失敗メンバー(none・error・error struct)の値を `e` に束縛してブロックを評価し、その値で置き換えること。`e` の型は**失敗メンバーのunion**(複数ならそのunion、1つならその型)。ブロック値の代入可能性(**成功メンバーのunion**へ)は、**or式全体が値位置(X-12)にあるときのみ**要求する(文の位置の `save(u) or e => { log(e) }` は合法)。ブロックの**最終文**が発散する(4章S-23)場合も要求を免除する(途中の発散文だけでは免除しない)。束縛名にはX-18(シャドーイング禁止)が適用される。〔正例: `or-binding`(失敗メンバー複数の束縛型)、`or-binding-statement`(文位置でのログ処理)〕
 - **X-26**(`?` の式としての型): `expr?` は `expr` の型から失敗メンバー(none・error・error struct)を除いた型を持つこと。失敗時は呼び出し元へ即return(伝播のメンバー単位検査・`? "文脈"` の昇格は6章)。失敗メンバーを持たない型への `?` はエラー E0322(不要な `?`)。**成功メンバーが1つも残らない場合**(`fn f() error` への `f()?`)もE0322のメッセージ変種とし、「常に伝播します。match か return を使ってください」と案内すること。`? "文脈"` は後置連鎖の**終端にのみ**書ける(直後に `.`/`[`/`(` を続けるのはエラー E0326。括弧で包むよう案内)。パース規則: 後置連鎖中の `?` は、直後のトークンが文字列リテラルのとき文脈付き伝播(終端形)として読むこと(1トークン先読みで決定的)。〔負例: `question-on-non-failable`、`question-all-failure`、`question-context-chain`〕
 
 ## conformance対応表
@@ -145,7 +146,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 | unreachable-arm / foreign-pattern | 負例 | X-17 |
 | pattern-shadowing | 負例 | X-18 |
 | is-foreign-type | 負例 | X-19 |
-| is-field-path / is-non-variable | 負例 | X-20 |
+| is-field-path / is-non-variable / narrowing-captured-mut | 負例 | X-20 |
 | narrowing-flow | 正例 | X-21 |
 | narrowing-invalidation | 負例 | X-22 |
 | use-before-narrowing | 負例 | X-23 |
