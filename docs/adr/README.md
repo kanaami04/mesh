@@ -23,7 +23,7 @@
 - [ADR-0001](0001-implementation-language-rust.md) — 実装言語をRustにする ✅
 - [ADR-0002](0002-target-js-transpile.md) — コンパイルターゲットはJS(トランスパイル方式) ✅
 - [ADR-0003](0003-ui-builtin-syntax.md) — UIは言語組み込み構文 ✅
-- [ADR-0004](0004-language-name-musubi.md) — 言語名はMusubi ✅
+- [ADR-0004](0004-language-name-musubi.md) — ~~言語名はMusubi~~ ⛔ superseded by 0039
 - [ADR-0005](0005-absence-and-failure-as-union.md) — 不在と失敗はunion型(`T | none` / `T | error`)✅
 - [ADR-0006](0006-nominal-typing.md) — 型の同一性は名前的 ✅
 - [ADR-0007](0007-local-type-inference.md) — 局所型推論(関数境界の注釈必須)✅
@@ -58,3 +58,4 @@
 - [ADR-0036](0036-closures-and-implicit-return.md) — クロージャはmut参照捕捉・暗黙のreturn ✅
 - [ADR-0037](0037-error-handling-details.md) — error値の構造・error type不採用・cause連鎖 ✅
 - [ADR-0038](0038-module-details.md) — トップレベルはletのみ・定数式初期化・as別名・リーク禁止・ルートimport不可 ✅
+- [ADR-0039](0039-language-name-mesh.md) — 言語名はMesh(0004を上書き)✅

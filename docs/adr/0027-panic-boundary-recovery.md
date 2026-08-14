@@ -14,8 +14,8 @@
 - panicの回復は**ランタイムの境界だけ**が内部的に行う(実装は生成JSのtry/catch):
   - `http.serve`: panicしたリクエストは500応答にし、サーバは生存する。
   - UIイベント: そのイベント処理だけ中断し、画面は生存する(開発時はエラー表示)。
-  - `musubi test`: そのテストだけfailにし、残りは続行する。
-- panicの生成JS表現は専用エラー(仮称 `MusubiPanic`)のthrowとし、FFI由来の例外と区別できるようにする。診断は位置+原因+ヒント付き(style-guide原則4)。
+  - `mesh test`: そのテストだけfailにし、残りは続行する。
+- panicの生成JS表現は専用エラー(仮称 `MeshPanic`)のthrowとし、FFI由来の例外と区別できるようにする。診断は位置+原因+ヒント付き(style-guide原則4)。
 - 将来「ユーザーが自作の境界を作りたい」需要が実証されたら、生のrecoverではなく境界を作る標準ライブラリAPI(例: `task.isolate(fn)`)の追加を新ADRで検討する。
 
 ## 検討した代替案と捨てた理由
@@ -32,7 +32,7 @@
 - ADR-0005(エラー値): 予期される失敗=値、バグ=panicの2系統分離を維持。recover非公開により「エラーが2系統に増える」ことを防ぐ。
 - ADR-0015(int panic)・仕様の範囲外アクセス等: 本ADRの回復規則が適用される。
 - ADR-0021(色なしasync): 境界のcatchはasync境界(await中のthrow)も受け止める必要がある(コード生成の設計事項)。
-- ADR-0022(FFI): JS例外は境界で `T | error` に正規化される(ADR-0005)ため、境界回復が受けるのはMusubiPanicのみ。
+- ADR-0022(FFI): JS例外は境界で `T | error` に正規化される(ADR-0005)ため、境界回復が受けるのはMeshPanicのみ。
 
 ## Consequences
 
