@@ -24,8 +24,9 @@ unary     = ( "!" | "-" ) unary | postfix
 postfix   = primary { call | index | field | "?" } [ "?" stringLit ]
             (* 素の ? は連鎖の途中に書ける(f()?.name)。? の直後がstringLitなら文脈付き伝播で、これは連鎖の終端のみ *)
 call      = [ typeArgs ] "(" [ expr { "," expr } ] ")"
-            (* typeArgsを書けるのは裸の識別子callee(自由関数)の直後のみ。
-               メソッドは型パラメータを持てない(5章F-8)ため `.` の後の "<" は常に比較 *)
+            (* typeArgsを書けるのは自由関数callee(裸の識別子、またはimport参照名で修飾された
+               pkg.識別子=7章M-7)の直後のみ。メソッドは型パラメータを持てない(5章F-8)ため、
+               値に対するメソッド呼び出しの "." の後の "<" は常に比較 *)
 typeArgs  = "<" type { "," type } ">"                    (* typeは2章 *)
 index     = "[" expr "]"
 field     = "." identifier
@@ -33,10 +34,12 @@ primary   = literal | identifier | structLit | listLit | ifExpr | matchExpr | fn
           | errorExpr | "(" expr ")"
 errorExpr = "error" "(" expr ")"          (* error値の生成式。構文形であり関数値ではない=6章H-2 *)
 literal   = number | stringLit | "true" | "false" | "none"    (* number/stringLitの字句は1章 *)
-structLit = identifier [ typeArgs ] "{" [ fieldInit { "," fieldInit } [ "," ] ] "}"
+structLit = [ identifier "." ] identifier [ typeArgs ] "{" [ fieldInit { "," fieldInit } [ "," ] ] "}"
+            (* pkg.Type{...} の修飾形は7章M-7 *)
 fieldInit = identifier ":" expr
 listLit   = "[" [ expr { "," expr } [ "," ] ] "]"
-memberType= identifier [ typeArgs ] | "none" | "error"   (* isとmatchパターンの型。単一メンバーのみ *)
+memberType= [ identifier "." ] identifier [ typeArgs ] | "none" | "error"
+            (* isとmatchパターンの型。単一メンバーのみ。pkg.修飾可=7章M-7 *)
 ```
 
 `fnExpr`(無名関数)は5章、`block` は4章、`stringLit`・数値等のリテラル字句は1章で定める。
@@ -45,7 +48,7 @@ memberType= identifier [ typeArgs ] | "none" | "error"   (* isとmatchパター�
 - **X-3**: `==`/`!=` と比較演算子は**連鎖できない**こと(`a < b < c` はエラー E0301 とし、`a < b && b < c` を案内)。〔負例: `comparison-chain`〕
 - **X-27**: 範囲式 `a..b` は**式ではない**(forヘッダ専用の構文=4章。ADR-0034)。式の位置に `..` が現れたらエラー E0302 を報告すること。〔負例: `range-outside-for`〕
 - **X-28**(orの構文判別): `or` の直後は、トークン列が「識別子または `_`、続いて `=>`」なら束縛形、それ以外はフォールバック式と解釈すること(2トークン先読みで決定的)。`x or _`(`=>` なし)はエラー E0325「`_` は値ではありません。`or _ => { ... }` の `=>` 忘れでは?」。〔負例: `or-underscore-no-arrow`〕
-- **X-29**(ジェネリック呼び出しの判別): `識別子 <` に続くトークン列が型引数リストとしてパース可能で、閉じ `>` の直後が `(` のとき、**常にジェネリック呼び出しと解釈する**こと(比較としての合法な読みが存在する場合でも。C#と同じ解決)。それ以外は比較演算子と解釈する。試行パースは型文法(2章)がトークン列長で有界のため停止する。比較の意図で書くときは括弧を使う(`f((a < b), (c > (d)))`)。〔正例テスト: `generic-call-disambiguation`(`f<int>(xs)` と `a < b`)/ 挙動検証: `generic-call-ambiguous-comma`(`f(a < b, c > (d))` がジェネリック呼び出しに固定されること)〕
+- **X-29**(ジェネリック呼び出しの判別): calleeが「裸の識別子」または「import参照名で修飾された `pkg.識別子`」(参照名の解決はM-15により一意)で、続く `<` からのトークン列が型引数リストとしてパース可能、かつ閉じ `>` の直後が `(` のとき、**常にジェネリック呼び出しと解釈する**こと(比較としての合法な読みが存在する場合でも。C#と同じ解決。`util.first<int>(xs)` もこの形)。それ以外は比較演算子と解釈する。試行パースは型文法(2章)がトークン列長で有界のため停止する。比較の意図で書くときは括弧を使う(`f((a < b), (c > (d)))`)。〔正例テスト: `generic-call-disambiguation`(`f<int>(xs)` と `a < b`)/ 挙動検証: `generic-call-ambiguous-comma`(`f(a < b, c > (d))` がジェネリック呼び出しに固定されること)〕
 
 ## 3.3 演算子の型規則
 
@@ -68,7 +71,7 @@ memberType= identifier [ typeArgs ] | "none" | "error"   (* isとmatchパター�
 - **X-11**(structリテラル): `User{name: "a", age: 1}` は**全フィールドを過不足なく**指定すること。欠落・余剰・重複はエラー E0310(欠落フィールド名を列挙)。フィールドの順序は自由。デフォルト値・省略記法はv1には無い。〔負例: `struct-literal-fields`〕
 - listリテラルの型付けはT-13/T-14。生成した値への即時のメソッド呼び出しは合法(`User{...}.greet()`)。
 - 呼び出しの実引数・添字の型規則は2章(T-16・T-22〜T-27)に従う。
-- **X-30**(フィールドアクセス): `e.f` は、`e` の静的型がstruct(または組み込み `error`=6章H-2)であり、`f` がそのフィールドまたはメソッド(5章)の名前であるときにのみ書けること。存在しない名前はエラー E0327 とし、近い名前があれば候補を提示すること。union型のままのアクセスはX-23(E0320)が優先する。〔負例: `field-access-unknown`〕
+- **X-30**(フィールドアクセス): `e.f` は、`e` の静的型がstruct(または組み込み `error`=6章H-2)であり、`f` がそのフィールドまたはメソッド(5章)の名前であるときにのみ書けること。**`e` がimport参照名の裸の識別子である場合は本規則の対象外**(パッケージ修飾=7章M-7/M-15として解決される)。存在しない名前はエラー E0327 とし、近い名前があれば候補を提示すること。union型のままのアクセスはX-23(E0320)が優先する。〔負例: `field-access-unknown`〕
 
 ## 3.5 if式(ADR-0009)
 

@@ -10,7 +10,8 @@
 type      = unionType
 unionType = primary { "|" primary }
 primary   = "none" | "error" | "int" | "float" | "bool" | "string"
-          | identifier [ "<" type { "," type } ">" ]     (* 名前付き型・ジェネリック適用 *)
+          | [ identifier "." ] identifier [ "<" type { "," type } ">" ]
+            (* 名前付き型・ジェネリック適用。pkg.Type の修飾形は7章M-7 *)
           | fnType
           | "(" type ")"
 fnType    = "fn" "(" [ type { "," type } ] ")" type    (* 戻り型は必須。T-26 *)

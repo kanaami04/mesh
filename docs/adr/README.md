@@ -9,7 +9,7 @@
 ## 運用ルール
 
 1. **大きな決定をしたら、番号を振ったADRを1ファイル書く**(テンプレは template.md)。
-2. ADRは**追記専用**。過去のADRの本文は書き換えない(歴史を消さない)。
+2. ADRは**追記専用**。過去のADRの本文は書き換えない(歴史を消さない)。ただし**mainにマージされる前のADR**(作業ブランチ上で執筆中のもの)は推敲として改稿してよい(マージ後は追記専用)。
 3. **決定を覆すとき**は: 新ADRを書く → 旧ADRのStatusを `superseded by ADR-XXXX` に変更(これだけは旧ファイルを触ってよい)→ ASSUMPTIONS.md の関連前提を更新 → spec/等の影響文書を直す。
 4. 各ADRには「**この決定が依存している前提(Assumptions)**」を明記する。前提が崩れた時にどのADRを見直すべきか逆引きできるようにするため。
 5. 迷ったらADRにする。「書くほどでもない」と思った決定が後で一番揉める。
@@ -57,3 +57,4 @@
 - [ADR-0035](0035-statement-details.md) — パラメータ不変・効果なし式文/未使用変数はエラー・deferなし ✅
 - [ADR-0036](0036-closures-and-implicit-return.md) — クロージャはmut参照捕捉・暗黙のreturn ✅
 - [ADR-0037](0037-error-handling-details.md) — error値の構造・error type不採用・cause連鎖 ✅
+- [ADR-0038](0038-module-details.md) — トップレベルはletのみ・定数式初期化・as別名・リーク禁止・ルートimport不可 ✅
