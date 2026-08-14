@@ -67,13 +67,14 @@ memberType= identifier [ typeArgs ] | "none" | "error"   (* isとmatchパター�
 ## 3.5 if式(ADR-0009)
 
 ```ebnf
-ifExpr = "if" expr block "else" ( block | ifExpr )     (* 文の位置ではelse省略可(4章) *)
+ifExpr = "if" expr block [ "else" ( block | ifExpr ) ]
+         (* 構文木は4章ifFormと共通。elseの必須性は構文でなく値位置の検査(E0311)で課す *)
 ```
 
 条件位置にstructリテラルを直接書く場合は括弧で囲む(ヘッダ位置の `{` 衝突回避。規則本体は4章のヘッダ規則と共通)。
 
 - **X-12**(値位置の定義): 式が「値として使われる」のは、let/mutの初期化・実引数・returnの値・structリテラルのフィールド・**値が要求されるブロックの最終式**の位置にあるとき。値の要求は外側から内側へ伝播する(値位置のmatch式の腕ブロックの最終式は値位置。値を捨てる文の位置なら要求されない)。**関数本体の最終式が値位置となるか(暗黙のreturn)は5章が定める**。値位置のif式は `else` が必須であり、無ければエラー E0311。〔負例: `if-value-no-else`〕
-- **X-13**: if式の値は各腕ブロックの最後の式。**期待型がある位置**では各腕に期待型を伝播する(T-13)。期待型が無い位置では、T-27の拡大を適用した上で両腕の型が同一であることを要求し、異なればエラー E0312 とし、union型の注釈を案内すること(`if c { 1 } else { 1.5 }` は `float` として合法)。〔負例: `if-arm-type-mismatch`(int/string)/ 正例: `if-arm-union-expected`、`if-arm-widening`(int/float)〕
+- **X-13**: if式の値は各腕ブロックの最後の式。**期待型がある位置**では各腕に期待型を伝播する(T-13)。期待型が無い位置では、T-27の拡大を適用した上で両腕の型が同一であることを要求し、異なればエラー E0312 とし、union型の注釈を案内すること(`if c { 1 } else { 1.5 }` は `float` として合法)。**発散する腕**(最終文が `return`・`continue`・`break`)は型の要求から除外する(**全腕が発散するif/match式が値位置に置かれた場合は本規則がE0408を報告する**)。matchの腕にも同じ規則を適用する。〔負例: `if-arm-type-mismatch`(int/string)/ 正例: `if-arm-union-expected`、`if-arm-widening`(int/float)、`if-arm-diverging`(片腕return)〕
 
 ## 3.6 match式(ADR-0025/0034)
 
@@ -99,7 +100,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 - **X-21**(フロー効果): 次の規則で `x` の型が絞り込まれること:
   - `if x is T { ... }` のthen側で `x: T`、else側で `x: 残りのメンバー`。`!(x is T)` は効果が反転する。
   - `x is T && 式` の右側で `x: T`。`x is T || 式` の右側で `x: 残りのメンバー`(左が偽の文脈)。
-  - **片側の腕が `return` で終わるとき、if文以降の `x` の型は「通過する側の腕で成立している型」**(`if x is none { return }` の後は `x: 残り`、`if !(x is int) { return }` の後は `x: int`、elseがreturnなら then側の型)。
+  - **片側の腕が `return` で終わるとき、if文以降の `x` の型は「通過する側の腕で成立している型」**(`if x is none { return }` の後は `x: 残り`、`if !(x is int) { return }` の後は `x: int`、elseがreturnなら then側の型)。「〜で終わる」とは腕ブロックの**最終文**がその文であることを指す(4章S-17と共通の定義)。
   - **絞り込みはif/&&/||の構文を通じてのみ伝わる**。boolを変数に取ると伝わらない(`let ok = x is T` の後の `if ok` は絞り込まない)。
   - 合流(if全体を抜けた後、両腕からの到達がある場合)では宣言型に戻る。
   - ループ内の `continue`/`break` によるearly-exit(`if item is none { continue }` の後の絞り込み)への拡張は、break/continueを定義する4章がこの「通過する側の型」規則を引き継いで定める。
@@ -111,7 +112,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 ## 3.8 or と `?`(ADR-0005/0028)
 
 - **X-24**(素のor): `expr or fallback` は `expr` の型に失敗メンバーとして **noneのみ** を持つとき書けること。**none以外の失敗メンバー(error、またはerror struct/error type)を含むなら**エラー E0321 で束縛形を案内すること(黙殺防止)。失敗メンバーを持たない型へのorはエラー E0323「この値は失敗しません。boolの選択なら `||` です」。成功メンバーが1つも無い型(`none` のみ等)へのorもE0323のメッセージ変種(「常に失敗します」)。型規則: 成功メンバーの型を `S`、`fallback` の型を `F` とすると、`F` は `S` または `S | none` に代入可能であること(T-27適用)。結果の型は正規化した `S | Fのメンバー` — つまり `F` がnoneを持たなければ `S`、持てば `S | none`。この規則により左結合の連鎖 `a or b or c`(bが `int | none`、cが `int`)が成立する。`fallback` は失敗時のみ評価。〔正例: `or-fallback`、`or-chain` / 負例: `or-silent-error`(error structを含むケースも)、`or-on-non-failable`〕
-- **X-25**(束縛形): `expr or e => { ... }` は失敗メンバー(none・error・error struct)の値を `e` に束縛してブロックを評価し、その値で置き換えること。`e` の型は**失敗メンバーのunion**(複数ならそのunion、1つならその型)。ブロック値の代入可能性(**成功メンバーのunion**へ)は、**or式全体が値位置(X-12)にあるときのみ**要求する(文の位置の `save(u) or e => { log(e) }` は合法)。ブロックの**最終文**が `return` の場合も要求を免除する(途中のreturnだけでは免除しない)。束縛名にはX-18(シャドーイング禁止)が適用される。〔正例: `or-binding`(失敗メンバー複数の束縛型)、`or-binding-statement`(文位置でのログ処理)〕
+- **X-25**(束縛形): `expr or e => { ... }` は失敗メンバー(none・error・error struct)の値を `e` に束縛してブロックを評価し、その値で置き換えること。`e` の型は**失敗メンバーのunion**(複数ならそのunion、1つならその型)。ブロック値の代入可能性(**成功メンバーのunion**へ)は、**or式全体が値位置(X-12)にあるときのみ**要求する(文の位置の `save(u) or e => { log(e) }` は合法)。ブロックの**最終文**が発散文(`return`・`continue`・`break`。X-13と同じ一般化)の場合も要求を免除する(途中の発散文だけでは免除しない)。束縛名にはX-18(シャドーイング禁止)が適用される。〔正例: `or-binding`(失敗メンバー複数の束縛型)、`or-binding-statement`(文位置でのログ処理)〕
 - **X-26**(`?` の式としての型): `expr?` は `expr` の型から失敗メンバー(none・error・error struct)を除いた型を持つこと。失敗時は呼び出し元へ即return(伝播のメンバー単位検査・`? "文脈"` の昇格は6章)。失敗メンバーを持たない型への `?` はエラー E0322(不要な `?`)。**成功メンバーが1つも残らない場合**(`fn f() error` への `f()?`)もE0322のメッセージ変種とし、「常に伝播します。match か return を使ってください」と案内すること。`? "文脈"` は後置連鎖の**終端にのみ**書ける(直後に `.`/`[`/`(` を続けるのはエラー E0326。括弧で包むよう案内)。パース規則: 後置連鎖中の `?` は、直後のトークンが文字列リテラルのとき文脈付き伝播(終端形)として読むこと(1トークン先読みで決定的)。〔負例: `question-on-non-failable`、`question-all-failure`、`question-context-chain`〕
 
 ## conformance対応表
@@ -137,7 +138,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 | struct-literal-fields | 負例 | X-11 |
 | if-value-no-else | 負例 | X-12 |
 | if-arm-type-mismatch | 負例 | X-13 |
-| if-arm-union-expected / if-arm-widening | 正例 | X-13 |
+| if-arm-union-expected / if-arm-widening / if-arm-diverging | 正例 | X-13 |
 | match-non-union | 負例 | X-14 |
 | literal-pattern / none-binding | 負例 | X-15 |
 | non-exhaustive-match | 負例 | X-16 |

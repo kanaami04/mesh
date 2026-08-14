@@ -56,7 +56,7 @@ component state view
 
 ```
 while class null undefined enum async await try catch throw
-var const function switch case do interface new this typeof instanceof
+var const function switch case do interface new this typeof instanceof defer
 ```
 
 - **L-7**: 完全予約語・誘導用予約語が識別子位置に現れたとき、エラー E0104 を報告すること。誘導用は代替を案内すること(`while` →「条件ループは `for 条件 { }`」、`null`/`undefined` →「不在は `T | none`」、`new` →「structは `User{...}` で生成します」、`this` →「レシーバ名(`fn (u: User)` の `u`)を使います」)。〔負例: `reserved-while`、`reserved-null`、`reserved-new`〕
