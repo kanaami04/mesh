@@ -23,11 +23,11 @@
 
 ## Phase 2: 最小コンパイラ(Rust)
 
-- cargoワークスペース作成、`musubi build file.msb` でJSを出力
+- cargoワークスペース作成、`mesh build file.mesh` でJSを出力
 - 字句解析器(手書き)→ 構文解析器(手書き再帰下降)→ AST → JS生成(まず型検査なし)
 - スナップショットテスト基盤(insta)+ Node実行E2Eテスト基盤
 
-**完了条件**: Phase 1で決めた範囲の.msbがJSになりNodeで正しく動く。テストがCIとして回る。
+**完了条件**: Phase 1で決めた範囲の.meshがJSになりNodeで正しく動く。テストがCIとして回る。
 
 ## Phase 3: 型検査
 
@@ -38,13 +38,13 @@
 
 ## Phase 4: データ型とモジュール
 
-- struct+メソッド、判別可能union(タグで種類を見分けられるunion型)、モジュールシステム、JS FFI(MusubiからJSの関数やnpmライブラリを呼ぶ仕組み)
+- struct+メソッド、判別可能union(タグで種類を見分けられるunion型)、モジュールシステム、JS FFI(MeshからJSの関数やnpmライブラリを呼ぶ仕組み)
 
 ## Phase 5: 標準ライブラリ第1弾 + BE基盤
 
 - core(string/list/map)、json(FE/BE型共有を実質化するため検証つきデコードを最初から)、http server
 
-**完了条件**: MusubiだけでJSON APIサーバが書ける。
+**完了条件**: MeshだけでJSON APIサーバが書ける。
 
 ## Phase 6: UI構文とリアクティビティ(FE)
 
@@ -55,12 +55,12 @@
 
 ## Phase 7: フルスタック統合
 
-- FE/BE型共有、開発サーバ(`musubi dev`)、バンドル
-- **完了条件**: TODOアプリ(FE+API+永続化)がMusubiのみで動く = vision成功指標1
+- FE/BE型共有、開発サーバ(`mesh dev`)、バンドル
+- **完了条件**: TODOアプリ(FE+API+永続化)がMeshのみで動く = vision成功指標1
 
 ## Phase 8: ツールチェーン
 
-- `musubi fmt`、LSP(エディタ補完・エラー表示)、VSCode拡張
+- `mesh fmt`、LSP(エディタ補完・エラー表示)、VSCode拡張
 
 ## Phase 9: ドッグフーディングとAI検証
 

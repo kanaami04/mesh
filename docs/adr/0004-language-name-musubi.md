@@ -1,6 +1,6 @@
 # ADR-0004: 言語名はMusubi(結び)
 
-- **Status**: accepted
+- **Status**: superseded by ADR-0039(2026-08-14に言語名をMeshへ変更)
 - **Date**: 2026-08-13
 - **決定者**: ユーザー + Claude
 

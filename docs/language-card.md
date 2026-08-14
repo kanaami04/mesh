@@ -1,10 +1,10 @@
-# Musubi 言語カード v0.1
+# Mesh 言語カード v0.1
 
-MusubiのコードをAI・人間が書くための1枚(仕様1〜7章準拠。正は docs/spec/)。**このカードは必要な作業のときだけ読み込む**(常駐させない)。
+MeshのコードをAI・人間が書くための1枚(仕様1〜7章準拠。正は docs/spec/)。**このカードは必要な作業のときだけ読み込む**(常駐させない)。
 
-## 一目でわかるMusubi
+## 一目でわかるMesh
 
-```musubi
+```mesh
 import "std/json"
 import "shop/cart"                     // パッケージ=ディレクトリ。常に cart.f() で修飾
 
@@ -77,7 +77,7 @@ fn main() {
 
 ## エラー処理
 
-```musubi
+```mesh
 let age = parseAge(s) or 0                    // 素のor: noneのフォールバック専用
 let age = parseAge(s) or e => {               // errorは束縛必須(黙殺できない)
   log(e)

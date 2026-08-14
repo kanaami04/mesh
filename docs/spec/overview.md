@@ -1,4 +1,4 @@
-# Musubi 言語仕様 — 骨子(Phase 1で確定させる)
+# Mesh 言語仕様 — 骨子(Phase 1で確定させる)
 
 各章の状態: ✅決定(ADRあり) / ⬜未着手
 
@@ -15,11 +15,11 @@
 | 9. UI構文 | コンポーネント、state、view(JSX風) | ✅方式のみ(ADR-0003)、中身⬜ |
 | 10. JS interop (FFI) | extern宣言+js.Value+検証つき変換(無検証のJS値は入らない) | ✅方針(ADR-0022)、詳細⬜ |
 | 11. 標準ライブラリ | core/json(検証つきデコード)/http/ui | ⬜ |
-| 12. ツール仕様 | musubi CLI、fmt、test | ⬜ |
+| 12. ツール仕様 | mesh CLI、fmt、test | ⬜ |
 
 ## 構文スケッチ(たたき台 — **未決定**。Phase 1の議論素材)
 
-```musubi
+```mesh
 // BE も FE も同じ言語。これは全体の雰囲気を掴むためのスケッチ。
 
 struct User {

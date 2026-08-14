@@ -7,7 +7,7 @@
 ## 1.1 ソースファイルと適用範囲
 
 - **L-1**: ソースファイルがUTF-8として不正なとき、コンパイラは位置つきでエラー E0101 を報告すること。〔負例: `invalid-utf8`〕
-- 拡張子は `.msb`。
+- 拡張子は `.mesh`。
 - この章の規則は、`component` の `view` ブロック内部(タグ記法の領域)を**除く**全ソースに適用する。viewブロック内部は9章が定める別の字句モードに切り替わる。
 
 ## 1.2 トークン分割
@@ -52,7 +52,7 @@ import export or is none error extern true false break continue
 component state view
 ```
 
-**誘導用予約語**(Musubiに無い機能。他言語ユーザー・AIの誤用を明快なエラーにするため予約):
+**誘導用予約語**(Meshに無い機能。他言語ユーザー・AIの誤用を明快なエラーにするため予約):
 
 ```
 while class null undefined enum async await try catch throw
