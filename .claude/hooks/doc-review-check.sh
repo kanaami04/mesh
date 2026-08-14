@@ -10,6 +10,13 @@ fi
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}" || exit 0
 marker=".claude/.doc-review-marker"
 
+# 未コミットのmd変更が無ければ検査不要(pull/checkout等によるmtime更新の誤検知を防ぐ。
+# コミット済みの内容はマージ可能ルールでレビュー済みのため対象外)
+if [ -z "$(git status --porcelain -- '*.md' 2>/dev/null)" ]; then
+  touch "$marker" 2>/dev/null
+  exit 0
+fi
+
 # 初回はマーカーを作るだけ(それ以前の変更は対象にしない)
 if [ ! -f "$marker" ]; then
   touch "$marker"
