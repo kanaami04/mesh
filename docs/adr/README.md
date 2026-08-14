@@ -55,3 +55,4 @@
 - [ADR-0033](0033-value-semantics.md) — structは値意味論・等価は値の比較(list/map==はエラー)✅
 - [ADR-0034](0034-expression-details.md) — matchは型パターンのみ・範囲式はforヘッダ限定・narrowingは変数のみ ✅
 - [ADR-0035](0035-statement-details.md) — パラメータ不変・効果なし式文/未使用変数はエラー・deferなし ✅
+- [ADR-0036](0036-closures-and-implicit-return.md) — クロージャはmut参照捕捉・暗黙のreturn ✅
