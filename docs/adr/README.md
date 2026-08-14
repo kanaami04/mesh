@@ -51,3 +51,4 @@
 - [ADR-0029](0029-anonymous-fn-contextual-typing.md) — 無名関数は文脈的型付けで省略可(0007を精密化)✅
 - [ADR-0030](0030-lexical-details.md) — 字句詳細: 識別子ASCII・数値フルセット・単一行文字列 ✅
 - [ADR-0031](0031-continuation-list-bracket-depth-contextual-keywords.md) — 継続一覧確定・括弧深度・UI語の文脈キーワード化 ✅
+- [ADR-0032](0032-type-system-details.md) — 型詳細: list/map記法・type透過・文字列添字・範囲外panic ✅
