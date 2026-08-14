@@ -49,3 +49,5 @@
 - [ADR-0027](0027-panic-boundary-recovery.md) — panicは境界回復・recover非公開 ✅
 - [ADR-0028](0028-or-binding-block-form.md) — orの束縛形は `or e => { 式 }`(0005を精密化)✅
 - [ADR-0029](0029-anonymous-fn-contextual-typing.md) — 無名関数は文脈的型付けで省略可(0007を精密化)✅
+- [ADR-0030](0030-lexical-details.md) — 字句詳細: 識別子ASCII・数値フルセット・単一行文字列 ✅
+- [ADR-0031](0031-continuation-list-bracket-depth-contextual-keywords.md) — 継続一覧確定・括弧深度・UI語の文脈キーワード化 ✅
