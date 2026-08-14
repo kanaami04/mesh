@@ -19,7 +19,7 @@ language/
 ├── README.md            # このファイル
 ├── CLAUDE.md            # AI協働のための作業ルール・正文書ルール
 ├── AGENTS.md            # → CLAUDE.md へのsymlink(AIツール向け業界標準の置き場所)
-├── .claude/skills/      # リポジトリ手順のスキル化(adr, doc-review, drift-check, spec-write, tdd)
+├── .claude/skills/      # リポジトリ手順のスキル化(adr, doc-review, drift-check, spec-review, spec-write, tdd)
 ├── docs/
 │   ├── vision.md            # 要件定義・理想像・非目標
 │   ├── roadmap.md           # フェーズ別ロードマップ
