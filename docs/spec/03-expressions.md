@@ -29,7 +29,10 @@ call      = [ typeArgs ] "(" [ expr { "," expr } ] ")"
 typeArgs  = "<" type { "," type } ">"                    (* typeは2章 *)
 index     = "[" expr "]"
 field     = "." identifier
-primary   = literal | identifier | structLit | listLit | ifExpr | matchExpr | fnExpr | "(" expr ")"
+primary   = literal | identifier | structLit | listLit | ifExpr | matchExpr | fnExpr
+          | errorExpr | "(" expr ")"
+errorExpr = "error" "(" expr ")"          (* error値の生成式。構文形であり関数値ではない=6章H-2 *)
+literal   = number | stringLit | "true" | "false" | "none"    (* number/stringLitの字句は1章 *)
 structLit = identifier [ typeArgs ] "{" [ fieldInit { "," fieldInit } [ "," ] ] "}"
 fieldInit = identifier ":" expr
 listLit   = "[" [ expr { "," expr } [ "," ] ] "]"
@@ -65,6 +68,7 @@ memberType= identifier [ typeArgs ] | "none" | "error"   (* isとmatchパター�
 - **X-11**(structリテラル): `User{name: "a", age: 1}` は**全フィールドを過不足なく**指定すること。欠落・余剰・重複はエラー E0310(欠落フィールド名を列挙)。フィールドの順序は自由。デフォルト値・省略記法はv1には無い。〔負例: `struct-literal-fields`〕
 - listリテラルの型付けはT-13/T-14。生成した値への即時のメソッド呼び出しは合法(`User{...}.greet()`)。
 - 呼び出しの実引数・添字の型規則は2章(T-16・T-22〜T-27)に従う。
+- **X-30**(フィールドアクセス): `e.f` は、`e` の静的型がstruct(または組み込み `error`=6章H-2)であり、`f` がそのフィールドまたはメソッド(5章)の名前であるときにのみ書けること。存在しない名前はエラー E0327 とし、近い名前があれば候補を提示すること。union型のままのアクセスはX-23(E0320)が優先する。〔負例: `field-access-unknown`〕
 
 ## 3.5 if式(ADR-0009)
 
@@ -112,7 +116,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 
 ## 3.8 or と `?`(ADR-0005/0028)
 
-- **X-24**(素のor): `expr or fallback` は `expr` の型に失敗メンバーとして **noneのみ** を持つとき書けること。**none以外の失敗メンバー(error、またはerror struct/error type)を含むなら**エラー E0321 で束縛形を案内すること(黙殺防止)。失敗メンバーを持たない型へのorはエラー E0323「この値は失敗しません。boolの選択なら `||` です」。成功メンバーが1つも無い型(`none` のみ等)へのorもE0323のメッセージ変種(「常に失敗します」)。型規則: 成功メンバーの型を `S`、`fallback` の型を `F` とすると、`F` は `S` または `S | none` に代入可能であること(T-27適用)。結果の型は正規化した `S | Fのメンバー` — つまり `F` がnoneを持たなければ `S`、持てば `S | none`。この規則により左結合の連鎖 `a or b or c`(bが `int | none`、cが `int`)が成立する。`fallback` は失敗時のみ評価。〔正例: `or-fallback`、`or-chain` / 負例: `or-silent-error`(error structを含むケースも)、`or-on-non-failable`〕
+- **X-24**(素のor): `expr or fallback` は `expr` の型に失敗メンバーとして **noneのみ** を持つとき書けること。**none以外の失敗メンバー(error、またはerror struct)を含むなら**エラー E0321 で束縛形を案内すること(黙殺防止)。失敗メンバーを持たない型へのorはエラー E0323「この値は失敗しません。boolの選択なら `||` です」。成功メンバーが1つも無い型(`none` のみ等)へのorもE0323のメッセージ変種(「常に失敗します」)。型規則: 成功メンバーの型を `S`、`fallback` の型を `F` とすると、`F` は `S` または `S | none` に代入可能であること(T-27適用)。結果の型は正規化した `S | Fのメンバー` — つまり `F` がnoneを持たなければ `S`、持てば `S | none`。この規則により左結合の連鎖 `a or b or c`(bが `int | none`、cが `int`)が成立する。`fallback` は失敗時のみ評価。〔正例: `or-fallback`、`or-chain` / 負例: `or-silent-error`(error structを含むケースも)、`or-on-non-failable`〕
 - **X-25**(束縛形): `expr or e => { ... }` は失敗メンバー(none・error・error struct)の値を `e` に束縛してブロックを評価し、その値で置き換えること。`e` の型は**失敗メンバーのunion**(複数ならそのunion、1つならその型)。ブロック値の代入可能性(**成功メンバーのunion**へ)は、**or式全体が値位置(X-12)にあるときのみ**要求する(文の位置の `save(u) or e => { log(e) }` は合法)。ブロックの**最終文**が発散する(4章S-23)場合も要求を免除する(途中の発散文だけでは免除しない)。束縛名にはX-18(シャドーイング禁止)が適用される。〔正例: `or-binding`(失敗メンバー複数の束縛型)、`or-binding-statement`(文位置でのログ処理)〕
 - **X-26**(`?` の式としての型): `expr?` は `expr` の型から失敗メンバー(none・error・error struct)を除いた型を持つこと。失敗時は呼び出し元へ即return(伝播のメンバー単位検査・`? "文脈"` の昇格は6章)。失敗メンバーを持たない型への `?` はエラー E0322(不要な `?`)。**成功メンバーが1つも残らない場合**(`fn f() error` への `f()?`)もE0322のメッセージ変種とし、「常に伝播します。match か return を使ってください」と案内すること。`? "文脈"` は後置連鎖の**終端にのみ**書ける(直後に `.`/`[`/`(` を続けるのはエラー E0326。括弧で包むよう案内)。パース規則: 後置連鎖中の `?` は、直後のトークンが文字列リテラルのとき文脈付き伝播(終端形)として読むこと(1トークン先読みで決定的)。〔負例: `question-on-non-failable`、`question-all-failure`、`question-context-chain`〕
 
@@ -137,6 +141,7 @@ scrutinee(match対象の式)にstructリテラルを直接書く場合は括弧�
 | equals-none | 負例 | X-9 |
 | truthy | 負例 | X-10 |
 | struct-literal-fields | 負例 | X-11 |
+| field-access-unknown | 負例 | X-30 |
 | if-value-no-else | 負例 | X-12 |
 | if-arm-type-mismatch | 負例 | X-13 |
 | if-arm-union-expected / if-arm-widening / if-arm-diverging | 正例 | X-13 |

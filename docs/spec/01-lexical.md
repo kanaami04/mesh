@@ -59,7 +59,7 @@ while class null undefined enum async await try catch throw
 var const function switch case do interface new this typeof instanceof defer
 ```
 
-- **L-7**: 完全予約語・誘導用予約語が識別子位置に現れたとき、エラー E0104 を報告すること。誘導用は代替を案内すること(`while` →「条件ループは `for 条件 { }`」、`null`/`undefined` →「不在は `T | none`」、`new` →「structは `User{...}` で生成します」、`this` →「レシーバ名(`fn (u: User)` の `u`)を使います」)。〔負例: `reserved-while`、`reserved-null`、`reserved-new`〕
+- **L-7**: 完全予約語・誘導用予約語が識別子位置に現れたとき、エラー E0104 を報告すること。なお完全予約語の一部は**専用構文の構成要素**として文法が定める位置に現れる(型名としての `none`/`error`=2章、値リテラルとしての `none`/`true`/`false`=3章literal、生成式 `error(...)`=3章、matchパターン・`is` のmemberType位置=3章、`error struct`=6章)。これらは識別子としての使用ではなくE0104の対象外。誘導用は代替を案内すること(`while` →「条件ループは `for 条件 { }`」、`null`/`undefined` →「不在は `T | none`」、`new` →「structは `User{...}` で生成します」、`this` →「レシーバ名(`fn (u: User)` の `u`)を使います」)。〔負例: `reserved-while`、`reserved-null`、`reserved-new`〕
 - **L-8**: `or` の束縛位置に `error` が書かれたとき(`or error => { ... }`)、専用の案内「`error` は予約語です。`e` など別名で束縛してください」を出すこと(エラーコードは E0104 のメッセージ変種)。〔負例: `or-bind-error-name`〕
 - **L-27**: 文脈キーワードは字句解析では常に**識別子トークン**として出力されること。予約の判定はパーサが `component` 文法の内部でのみ行う。したがって `let state = loadState()` は通常コードで合法。〔正例テスト: `contextual-keyword-ident`〕
 - 誘導用予約語の採録基準: JS/TS/Python由来の高頻度誤用語。白紙AI実験(Phase 9)の実測で増減を見直す。
