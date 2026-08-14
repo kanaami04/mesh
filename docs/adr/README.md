@@ -56,3 +56,4 @@
 - [ADR-0034](0034-expression-details.md) — matchは型パターンのみ・範囲式はforヘッダ限定・narrowingは変数のみ ✅
 - [ADR-0035](0035-statement-details.md) — パラメータ不変・効果なし式文/未使用変数はエラー・deferなし ✅
 - [ADR-0036](0036-closures-and-implicit-return.md) — クロージャはmut参照捕捉・暗黙のreturn ✅
+- [ADR-0037](0037-error-handling-details.md) — error値の構造・error type不採用・cause連鎖 ✅
