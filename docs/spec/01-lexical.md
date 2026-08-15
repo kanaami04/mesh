@@ -131,6 +131,7 @@ let user = findUser(id)?
 ```
 
 - **L-25**: `}` は文を終端すること(`else` は `}` と同一行に書く。詳細は4章)。〔負例テストは4章で定義〕
+- **L-29**(改行コード。ADR-0041): 改行はLF(`\n`)またはCRLF(`\r\n`)であること。CRLFは1個の改行として扱う(字句上は1個のNewlineで、字面は保持する)。単独のCR(直後が `\n` でない `\r`)はエラー E0117「改行コードが不正です。LF または CRLF を使ってください」。Unicode改行類(U+0085・U+2028・U+2029)は改行とみなさない(L-26の対象)。〔正例: `crlf-newline` / 負例: `lone-cr`〕
 
 ## 1.9 演算子・区切り記号のトークン一覧
 
@@ -154,6 +155,8 @@ let user = findUser(id)?
 | reserved-while / reserved-null / reserved-new | 負例 | L-7 |
 | or-bind-error-name | 負例 | L-8 |
 | contextual-keyword-ident | 正例 | L-27 |
+| crlf-newline | 正例 | L-29 |
+| lone-cr | 負例 | L-29 |
 | underscore-edge | 負例 | L-9 |
 | float-dot-edge | 負例 | L-10 |
 | int-literal-overflow | 負例 | L-11 |

@@ -40,11 +40,13 @@ pub enum ErrorCode {
     E0105,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103、
-    /// `/*`=E0102、`\r`=CRLFは仕様1章が未定義)も現状は暫定でこのコードになる。
+    /// `/*`=E0102)も現状は暫定でこのコードになる。
     /// 各規則の実装サイクルで正しいコードに置き換える。
     /// また未実装の正当なトークン(演算子 `+` `(` 等、文字列開始 `"`)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
     E0116,
+    /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
+    E0117,
 }
 
 /// 字句解析エラー。
@@ -93,6 +95,25 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 &source[start..end],
                 Span { start, end },
             ));
+        } else if c == '\r' {
+            chars.next();
+            if chars.peek().map(|&(_, d)| d) == Some('\n') {
+                chars.next();
+                let end = start + 2;
+                tokens.push(token(
+                    TokenKind::Newline,
+                    &source[start..end],
+                    Span { start, end },
+                ));
+            } else {
+                return Err(LexError {
+                    code: ErrorCode::E0117,
+                    span: Span {
+                        start,
+                        end: start + 1,
+                    },
+                });
+            }
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {

@@ -584,24 +584,55 @@ fn trailing_spaces_before_newline_are_skipped() {
     );
 }
 
-/// CR(`\r`)単独は現状E0116になること(**暫定挙動の固定**)。
-/// 仕様1章はCRLFを含む改行コードを未定義のため負例IDは無い。CRLFの扱いを
-/// 決定するサイクルでこのテストは見直される(受理に決まれば赤くなって修正漏れを防ぐ)。
+/// 直後が `\n` でない単独の `\r` はE0117になること(仕様1章L-29〔負例: lone-cr〕)。
 #[test]
-fn carriage_return_reports_e0116_with_span() {
+fn lone_carriage_return_reports_e0117_with_span() {
     // Arrange
     let source = "\r";
 
     // Act
-    let err = lex(source).expect_err("`\\r` は現状の字句規則に該当しないためエラーになること");
+    let err = lex(source).expect_err("単独の`\\r`はE0117としてエラーになること");
 
     // Assert
     assert_eq!(
         err,
         LexError {
-            code: ErrorCode::E0116,
+            code: ErrorCode::E0117,
             span: Span { start: 0, end: 1 },
         }
+    );
+}
+
+/// CRLF(`\r\n`)は1個のNewlineトークンになり、textは生の字面 `\r\n` になること
+/// (仕様1章L-29〔正例: crlf-newline〕・ADR-0041)。
+#[test]
+fn crlf_produces_single_newline_token() {
+    // Arrange
+    let source = "1\r\n2";
+
+    // Act
+    let tokens = lex(source).expect("CRLFを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\r\n".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
     );
 }
 
