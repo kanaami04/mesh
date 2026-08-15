@@ -400,6 +400,40 @@ fn digit_separator_before_letter_reports_e0105_with_span() {
     );
 }
 
+/// 改行がNewlineトークンとして切り出されること(仕様1章L-19の字句側の基盤)。
+/// textは生の字面 `"\n"` を保持する。文終端か継続かの判定(L-19/L-20/L-21)は
+/// パーサ側の将来責務で、字句解析器は改行の事実だけをトークン化する。
+#[test]
+fn newline_produces_newline_token() {
+    // Arrange
+    let source = "1\n2";
+
+    // Act
+    let tokens = lex(source).expect("改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int)と
 /// 桁区切りを1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う

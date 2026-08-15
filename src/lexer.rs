@@ -12,6 +12,8 @@ pub enum TokenKind {
     Ident,
     /// 代入記号 `=`。
     Eq,
+    /// 改行(仕様1章L-19の文終端の基盤)。
+    Newline,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -77,6 +79,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             chars.next();
             let end = start + '='.len_utf8();
             tokens.push(token(TokenKind::Eq, "=", Span { start, end }));
+        } else if c == '\n' {
+            chars.next();
+            let end = start + '\n'.len_utf8();
+            tokens.push(token(TokenKind::Newline, "\n", Span { start, end }));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {
