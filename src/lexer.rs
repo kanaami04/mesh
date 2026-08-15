@@ -155,6 +155,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     let backslash = i;
                     chars.next();
                     match chars.peek().copied() {
+                        Some((j, nl @ ('\n' | '\r'))) => {
+                            // `\` の直後が生の改行(LF・CR単独とも)のときは、一覧に無い
+                            // エスケープ文字(E0111)ではなくL-16の未終端文字列として扱う
+                            // (仕様1章L-16)。spanは改行1バイトのみ(行をまたがない)。
+                            return Err(LexError {
+                                code: ErrorCode::E0108,
+                                span: Span {
+                                    start: j,
+                                    end: j + nl.len_utf8(),
+                                },
+                            });
+                        }
                         Some((u_index, 'u')) => {
                             chars.next();
                             check_unicode_escape(&mut chars, backslash, u_index + 'u'.len_utf8())?;
@@ -172,11 +184,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             });
                         }
                         None => {
+                            // `\` の直後にEOFに達したときも一覧に無いエスケープ文字
+                            // (E0111)ではなくL-16の未終端文字列として扱う(仕様1章L-16)。
+                            // spanは未終端文字列の流儀どおり開き `"` の1バイト。
                             return Err(LexError {
-                                code: ErrorCode::E0111,
+                                code: ErrorCode::E0108,
                                 span: Span {
-                                    start: backslash,
-                                    end: backslash + '\\'.len_utf8(),
+                                    start,
+                                    end: start + '"'.len_utf8(),
                                 },
                             });
                         }

@@ -1299,6 +1299,53 @@ fn japanese_string_literal_is_allowed() {
     );
 }
 
+/// `\` の直後に生の改行が来たときは、一覧に無いエスケープ文字(E0111)ではなく
+/// L-16の生の改行として扱われ、エラーE0108になること。spanは違反した改行1バイト
+/// (`\` を含まない)を指すこと(仕様1章L-16〔負例: string-raw-newline〕)。
+/// 実装バグの再現: 現状は`\`直後の1文字を無条件に「一覧に無いエスケープ」とみなし
+/// E0111・span 1..3(`\`から改行直後まで)を返す。この span は改行をまたぐため、
+/// エラー表示が違反行を単独で抜き出せない不正な形になる。
+#[test]
+fn backslash_before_raw_newline_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"\\\n\"";
+
+    // Act
+    let err = lex(source).expect_err("`\\` の直後に生の改行が来た文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
+/// `\` の直後にファイルが終わったときは、一覧に無いエスケープ文字(E0111)ではなく
+/// L-16の未終端文字列(EOF形)として扱われ、エラーE0108になること。spanは開き `"`
+/// 1バイト(未終端文字列の流儀。仕様1章L-16〔負例: string-unterminated-eof〕)。
+/// 実装バグの再現: 現状は「一覧に無いエスケープ文字」の分岐に落ち、存在しない
+/// 違反文字を指そうとしてE0111・span 1..2(`\` の1バイトのみ)を返す。
+#[test]
+fn backslash_at_eof_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"\\";
+
+    // Act
+    let err = lex(source).expect_err("`\\` の直後にEOFに達した文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント・エスケープ入り文字列
 /// を1入力に含むスナップショット。
