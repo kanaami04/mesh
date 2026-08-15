@@ -1194,13 +1194,14 @@ fn dollar_without_brace_is_literal_in_string() {
     );
 }
 
-/// 許可エスケープ一式(`\n` `\t` `\\` `\$` `\u{H}`)が透過され、textが生の字面のまま
-/// 保持されること(仕様1章1.7。`\"` と `\r` は個別テストで固定済み)。
+/// 許可エスケープ7種のうち `\"` 以外の6種(`\n` `\t` `\r` `\\` `\$` `\u{H}`)が透過され、
+/// textが生の字面のまま保持されること(仕様1章1.7。`\"` は
+/// escaped_quote_does_not_terminate_string が個別に固定)。
 /// Redを経ていない後追いの回帰テスト。
 #[test]
 fn valid_escapes_pass_through_with_raw_text() {
     // Arrange
-    let source = "\"a\\n\\t\\\\\\$\\u{3042}z\"";
+    let source = "\"a\\n\\t\\r\\\\\\$\\u{3042}z\"";
 
     // Act
     let tokens = lex(source).expect("許可エスケープ一式の字句解析はエラーにならないこと");
@@ -1210,8 +1211,8 @@ fn valid_escapes_pass_through_with_raw_text() {
         tokens,
         vec![Token {
             kind: TokenKind::Str,
-            text: "\"a\\n\\t\\\\\\$\\u{3042}z\"".to_string(),
-            span: Span { start: 0, end: 20 },
+            text: "\"a\\n\\t\\r\\\\\\$\\u{3042}z\"".to_string(),
+            span: Span { start: 0, end: 22 },
         }]
     );
 }
@@ -1258,11 +1259,13 @@ fn unicode_escape_missing_brace_reports_e0112_with_span() {
 }
 
 /// `\u{H}` のHが7桁以上の形もE0112になること(仕様1章L-15〔負例: unicode-escape-range〕)。
-/// spanはエスケープ全体。Redを経ていない後追いの回帰テスト(一様形式検証の分岐網羅)。
+/// spanはエスケープ全体。入力は7桁だが**値はU+0041で範囲内**の `0000041` を使い、
+/// 範囲チェックに隠れず桁数規則を単独で固定する(impl-reviewの変異テストで検出された穴)。
+/// Redを経ていない後追いの回帰テスト。
 #[test]
 fn unicode_escape_too_many_digits_reports_e0112_with_span() {
     // Arrange
-    let source = "\"\\u{1234567}\"";
+    let source = "\"\\u{0000041}\"";
 
     // Act
     let err = lex(source).expect_err("`\\u{H}` のHが7桁の形はエラーになること");
@@ -1273,6 +1276,112 @@ fn unicode_escape_too_many_digits_reports_e0112_with_span() {
         LexError {
             code: ErrorCode::E0112,
             span: Span { start: 1, end: 12 },
+        }
+    );
+}
+
+/// `\u{H}` の**有効側の境界値**(最大U+10FFFF・サロゲート直下U+D7FF・直上U+E000)が
+/// すべて通ること(仕様1章L-15の通る側)。境界を1つずらす退行(>= 化・端の増減)は
+/// この1本のどれかのエスケープがエラー化して検知される(変異テストで検出された穴)。
+#[test]
+fn unicode_escape_boundary_values_are_accepted() {
+    // Arrange
+    let source = "\"\\u{10FFFF}\\u{D7FF}\\u{E000}\"";
+
+    // Act
+    let tokens = lex(source).expect("境界値の `\\u{H}` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"\\u{10FFFF}\\u{D7FF}\\u{E000}\"".to_string(),
+            span: Span { start: 0, end: 28 },
+        }]
+    );
+}
+
+/// サロゲート域の**上端**U+DFFFもE0112になること(仕様1章L-15〔負例: unicode-escape-range〕。
+/// 下端U+D800は既存テストが固定。上端の縮小退行を検知する境界テスト)。
+#[test]
+fn unicode_escape_surrogate_upper_end_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{DFFF}\"";
+
+    // Act
+    let err = lex(source).expect_err("サロゲート上端`\\u{DFFF}`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 9 },
+        }
+    );
+}
+
+/// `\u{` の後に閉じ `}` を得られないまま文字列が終わる形のspanが「消費済みの末尾」で
+/// 止まること(仕様1章L-15注・E0112がL-16より優先。span規則はcheck_unicode_escapeのdocに固定)。
+/// Redを経ていない後追いの回帰テスト(一様形式検証の3番目のspan規則)。
+#[test]
+fn unicode_escape_unclosed_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{12";
+
+    // Act
+    let err = lex(source).expect_err("閉じ `}` の無い `\\u{` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 6 },
+        }
+    );
+}
+
+/// `\$` に波括弧が続く形 `\${x}` が補間にならず、生の字面のままStrになること
+/// (仕様1章L-28・1.7サンプル `"値は \${price} で参照"`)。
+/// 補間(L-17)実装が `$` の先読みで直前の `\` を見落とす退行をこのテストが検知する。
+#[test]
+fn escaped_dollar_before_brace_is_literal_in_string() {
+    // Arrange
+    let source = "\"\\${x}\"";
+
+    // Act
+    let tokens = lex(source).expect("`\\${x}` を含む文字列の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"\\${x}\"".to_string(),
+            span: Span { start: 0, end: 7 },
+        }]
+    );
+}
+
+/// 文字列中の**単独CR**もE0108になること(仕様1章L-16のCR形〔負例: string-raw-newline〕)。
+/// CRLFは文字列外でも合法なため、E0108がE0117(L-29)より優先する事実を
+/// 検証できるのはこの単独CR形だけ(impl-reviewの指摘による追加)。
+#[test]
+fn lone_cr_in_string_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"a\rb\"";
+
+    // Act
+    let err = lex(source).expect_err("文字列中の単独`\\r`はE0108としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 2, end: 3 },
         }
     );
 }
@@ -1347,13 +1456,13 @@ fn backslash_at_eof_reports_e0108_with_span() {
 }
 
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
-/// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント・エスケープ入り文字列
-/// を1入力に含むスナップショット。
+/// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
+/// エスケープ入り文字列を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let msg = \"答え: 1_000\\n\" // 挨拶\r\nmsg\n"
+        "let n = 1_000 // 合計\r\nlet msg = \"答え\\n\"\nn"
     ));
 }
