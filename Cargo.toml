@@ -1,8 +1,16 @@
-[workspace]
-resolver = "3"
-members = ["crates/mesh"]
-
-[workspace.package]
+[package]
+name = "mesh"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/kanaami04/mesh"
+description = "Mesh: FEとBEを1つの言語で編み合わせる、人に読みやすくAIに書きやすい言語(JSトランスパイラ)"
+
+[dev-dependencies]
+insta = "1"
+
+# テストは src/tests/ に置く(このリポジトリの流儀)。
+# cargoの既定はルート tests/ のため、ファイルを追加したらここに [[test]] を1つ足す。
+[[test]]
+name = "lexer"
+path = "src/tests/lexer.rs"

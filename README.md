@@ -31,7 +31,7 @@ language/
 │   ├── research/            # 他言語調査(MoonBit, Topcoat, Gleam...)
 │   ├── spec/                # 言語仕様書
 │   └── adr/                 # 意思決定記録(ADR)+ 前提台帳
-├── crates/mesh/         # コンパイラ本体+CLI(Rust。cargo build / cargo test)
+├── src/                 # コンパイラ本体+CLI(Rust単一crate。テストは src/tests/)
 ├── examples/            # Meshのサンプルコード(仕様確定後)
 └── tests/               # conformanceテスト(仕様と1:1対応)
 ```

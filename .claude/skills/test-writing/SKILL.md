@@ -1,6 +1,6 @@
 ---
 name: test-writing
-description: Meshコンパイラ(crates/mesh)のテストの書き方規約。テストを書く・レビューするとき、およびtddスキルのRed/Greenサブエージェントへ規約を渡すときに使う。字句解析器の最初の3 TDDサイクル(2026-08-15)で実証した規約の蒸留。
+description: Meshコンパイラ(ルート単一crate)のテストの書き方規約。テストを書く・レビューするとき、およびtddスキルのRed/Greenサブエージェントへ規約を渡すときに使う。字句解析器の最初の3 TDDサイクル(2026-08-15)で実証した規約の蒸留。
 ---
 
 # test-writing — Meshコンパイラのテスト規約
@@ -12,14 +12,14 @@ description: Meshコンパイラ(crates/mesh)のテストの書き方規約。�
 cargoはPATH外にある。すべてのcargo実行は次の形:
 
 ```
-export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && cargo test -p mesh
+export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && cargo test
 ```
 
 該当テストのみは `--test <ファイル名>`。Greenの成功条件には `cargo fmt --all --check` と `cargo clippy --all-targets -- -D warnings` を必ず含める。
 
 ## 配置と命名
 
-- TDD対象のテストは `crates/mesh/tests/<モジュール名>.rs`(統合テスト。例: `tests/lexer.rs`)。
+- TDD対象のテストは `src/tests/<モジュール名>.rs`(統合テスト。例: `src/tests/lexer.rs`)。**ファイルを新設したらCargo.tomlに `[[test]] name/path` を1エントリ追記する**(src/tests/はcargo既定外のため)。スナップショットは `src/tests/snapshots/` に生成される。
 - fn名は英語snake_caseで「入力→期待」を表す(`empty_source_produces_no_tokens`)。
 - 各テストに日本語docコメントで振る舞いを1文書く。**仕様の規則に対応するときは規則番号を書く**(例: `仕様1章L-6`)。
 - 1テスト関数=1振る舞い。同一振る舞いの正例なら複数ケースを同関数に入れてよい(`"42"` と `"1 22"`)。
@@ -38,8 +38,8 @@ export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && c
 ## スナップショット(insta)の併用
 
 - **TDDサイクルの検証には使わない**(期待値明示のassertで回す)。サイクル群の完了後に**回帰の網**として追加する。
-- 書き方: テストファイル末尾に `insta::assert_debug_snapshot!(対象式)`。スナップショットは `tests/snapshots/` に生成される。
-- 初回生成: `INSTA_UPDATE=always cargo test -p mesh --test <名前>` → 生成された `.snap` を**必ず目視レビュー**(内容が仕様と一致するか)→ 通常実行で緑を確認 → `.snap` もコミットする。
+- 書き方: テストファイル末尾に `insta::assert_debug_snapshot!(対象式)`。スナップショットは `src/tests/snapshots/` に生成される。
+- 初回生成: `INSTA_UPDATE=always cargo test --test <名前>`(PATH・cdは上記コマンド形)→ 生成された `.snap` を**必ず目視レビュー**(内容が仕様と一致するか)→ 通常実行で緑を確認 → `.snap` もコミットする。
 - 意図しない差分が出たら「実装のバグ」か「仕様の意図的変更」かを判断し、後者のみ更新する。
 
 ## 未確立(次のサイクル群で規約化する)
