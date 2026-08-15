@@ -14,11 +14,21 @@ pub enum TokenKind {
     Eq,
 }
 
-/// 1個のトークン。種類と、ソース上の元の文字列を持つ。
+/// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// バイトオフセット(含む)。
+    pub start: usize,
+    /// バイトオフセット(含まない)。
+    pub end: usize,
+}
+
+/// 1個のトークン。種類と、ソース上の元の文字列・位置を持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
     pub text: String,
+    pub span: Span,
 }
 
 /// 字句解析エラー。
@@ -32,10 +42,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     while let Some(&(start, c)) = chars.peek() {
         if c.is_ascii_digit() {
             let text = scan_while(source, &mut chars, start, c, |d| d.is_ascii_digit());
-            tokens.push(Token {
-                kind: TokenKind::Int,
-                text: text.to_string(),
-            });
+            tokens.push(token(TokenKind::Int, text, start));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let text = scan_while(source, &mut chars, start, c, |d| {
                 d.is_ascii_alphanumeric() || d == '_'
@@ -45,16 +52,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             } else {
                 TokenKind::Ident
             };
-            tokens.push(Token {
-                kind,
-                text: text.to_string(),
-            });
+            tokens.push(token(kind, text, start));
         } else if c == '=' {
             chars.next();
-            tokens.push(Token {
-                kind: TokenKind::Eq,
-                text: "=".to_string(),
-            });
+            tokens.push(token(TokenKind::Eq, "=", start));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {
@@ -62,6 +63,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
     }
     Ok(tokens)
+}
+
+/// `start` 位置から `text` の長さぶんを占めるトークンを構築する(spanはバイト長から算出)。
+fn token(kind: TokenKind, text: &str, start: usize) -> Token {
+    Token {
+        kind,
+        text: text.to_string(),
+        span: Span {
+            start,
+            end: start + text.len(),
+        },
+    }
 }
 
 /// 先頭文字 `first`(位置 `start`)から、`pred` を満たす限り読み進めて

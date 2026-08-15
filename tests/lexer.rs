@@ -1,7 +1,7 @@
 //! 字句解析器(lexer)の統合テスト。
 //! docs/spec/01-lexical.md を正とし、TDDサイクルごとに1振る舞いずつ追加する。
 
-use mesh::lexer::{Token, TokenKind, lex};
+use mesh::lexer::{Span, Token, TokenKind, lex};
 
 /// 空のソース文字列を字句解析すると、空のトークン列が返ること。
 #[test]
@@ -21,6 +21,7 @@ fn decimal_integer_literal_produces_single_int_token() {
         vec![Token {
             kind: TokenKind::Int,
             text: "42".to_string(),
+            span: Span { start: 0, end: 2 },
         }]
     );
 
@@ -31,10 +32,12 @@ fn decimal_integer_literal_produces_single_int_token() {
             Token {
                 kind: TokenKind::Int,
                 text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
             },
             Token {
                 kind: TokenKind::Int,
                 text: "22".to_string(),
+                span: Span { start: 2, end: 4 },
             },
         ]
     );
@@ -53,18 +56,22 @@ fn identifiers_and_keyword_let_are_distinguished() {
             Token {
                 kind: TokenKind::KwLet,
                 text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
             },
             Token {
                 kind: TokenKind::Ident,
                 text: "x".to_string(),
+                span: Span { start: 4, end: 5 },
             },
             Token {
                 kind: TokenKind::Eq,
                 text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
             },
             Token {
                 kind: TokenKind::Int,
                 text: "1".to_string(),
+                span: Span { start: 8, end: 9 },
             },
         ]
     );
@@ -75,6 +82,7 @@ fn identifiers_and_keyword_let_are_distinguished() {
         vec![Token {
             kind: TokenKind::Ident,
             text: "lettuce".to_string(),
+            span: Span { start: 0, end: 7 },
         }]
     );
 
@@ -84,7 +92,41 @@ fn identifiers_and_keyword_let_are_distinguished() {
         vec![Token {
             kind: TokenKind::Ident,
             text: "_tmp".to_string(),
+            span: Span { start: 0, end: 4 },
         }]
+    );
+}
+
+/// 各トークンがソース中のバイトオフセット位置(span)を持つこと。
+/// 位置つきエラー報告の基盤であり、仕様1章の各E01xx規則が「位置つき」報告を要求する。
+#[test]
+fn tokens_carry_byte_offset_spans() {
+    let tokens =
+        lex("let answer = 42").expect("`let answer = 42` の字句解析はエラーにならないこと");
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "answer".to_string(),
+                span: Span { start: 4, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "42".to_string(),
+                span: Span { start: 13, end: 15 },
+            },
+        ]
     );
 }
 
