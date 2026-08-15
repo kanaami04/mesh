@@ -47,7 +47,7 @@ docs/の全文書とClaudeの解説は **docs/style-guide.md** に従う。核�
 - `spec-write` … 仕様章の執筆・改訂手順。ADRをEARS形式+正例・負例に展開し、負例へのconformanceテストID予約まで行う。
 - `spec-review` … 仕様章の新規執筆・大改訂の品質ゲート。独立サブエージェントの敵対的レビュー(3ペルソナ・LGTM禁止)→修正→同一エージェントによる解消検証を、新規要修正ゼロまで反復する。spec-writeの締めで必ず実行。
 - `tdd` … 実装フェーズのRed→Green→Refactorワークフロー。このプロジェクトで洗練させ、安定したらグローバル(~/.claude/skills/)へ昇格させる予定。
-- `test-writing` … Meshコンパイラのテストの書き方規約(配置・命名・期待値明示・instaの併用手順)。tddのRed/Greenサブエージェントへのプロンプトにこの規約を渡す。
+- `test-writing` … Meshコンパイラのテストの書き方規約(配置・命名・**AAAマーカー・1テスト1assert**・期待値明示・instaの併用手順)。tddのRed/Greenサブエージェントへのプロンプトにこの規約を渡す。
 
 ## 作業の終え方(マージ可能ルール)
 

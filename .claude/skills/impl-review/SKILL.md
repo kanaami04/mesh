@@ -22,6 +22,8 @@ description: 実装(src/・tests/・Cargo.toml)を変更した作業の締めに
 
 渡すもの: 差分全文 / 変更ファイルの全文パス / 関連仕様章のパス / .claude/skills/test-writing/SKILL.md / 検査観点。
 
+- 縮退則: 差分が tests/ のみ(プロダクトコード無変更)の場合は**観点Aの1体**でよい(観点BのUTF-8境界・panic経路検査はsrc/の変更を対象とするため)。
+
 ### 3. 指摘の分類と処理
 
 | 深刻度 | 基準 | 処理 |
