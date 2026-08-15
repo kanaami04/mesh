@@ -52,6 +52,8 @@ pub enum ErrorCode {
     E0116,
     /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
     E0117,
+    /// 一覧に無いエスケープ(仕様1章L-14)。
+    E0111,
 }
 
 /// 字句解析エラー。
@@ -123,8 +125,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         } else if c == '"' {
             // 文字列リテラル(仕様1章1.7)。開き `"` を消費し、閉じ `"` まで読み進める。
             // textはクォート込みの生の字面。
-            // `\` はエスケープとして透過する: 直後の1文字を無条件に消費し、
-            // その文字が `"` であっても閉じクォートと判定しない(妥当性検証はまだ行わない)。
+            // `\` はエスケープとして扱う: 直後の1文字が許可一覧
+            // (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
+            // その文字が `"` であっても閉じクォートと判定しない。
+            // 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
+            // `\u{...}` の中身の検証(E0112)は次サイクル。
             chars.next();
             let mut end = None;
             while let Some(&(i, d)) = chars.peek() {
@@ -141,8 +146,31 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         },
                     });
                 } else if d == '\\' {
+                    let backslash = i;
                     chars.next();
-                    chars.next();
+                    match chars.peek().copied() {
+                        Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$' | 'u')) => {
+                            chars.next();
+                        }
+                        Some((j, e)) => {
+                            return Err(LexError {
+                                code: ErrorCode::E0111,
+                                span: Span {
+                                    start: backslash,
+                                    end: j + e.len_utf8(),
+                                },
+                            });
+                        }
+                        None => {
+                            return Err(LexError {
+                                code: ErrorCode::E0111,
+                                span: Span {
+                                    start: backslash,
+                                    end: backslash + '\\'.len_utf8(),
+                                },
+                            });
+                        }
+                    }
                 } else {
                     chars.next();
                 }

@@ -1018,6 +1018,28 @@ fn escaped_quote_does_not_terminate_string() {
     );
 }
 
+/// 文字列リテラル内のエスケープが一覧(`\n` `\t` `\r` `\\` `\"` `\$` `\u{H}`)に
+/// 無い文字のときはエラーE0111になり、`\` から始まる2バイト(バックスラッシュ+
+/// 違反文字)を位置として報告すること(仕様1章L-14〔負例: invalid-escape〕)。
+/// 「近い正解の案内」はエラーメッセージ実装のサイクルで検証する。
+#[test]
+fn invalid_escape_reports_e0111_with_span() {
+    // Arrange
+    let source = "\"a\\qb\"";
+
+    // Act
+    let err = lex(source).expect_err("一覧に無いエスケープ `\\q` を含む文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0111,
+            span: Span { start: 2, end: 4 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。
