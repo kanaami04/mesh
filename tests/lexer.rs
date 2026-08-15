@@ -753,10 +753,10 @@ fn line_comment_produces_no_tokens() {
 
 /// 行コメントのスキャンは `\r\n` の手前(`\r` の直前)で止まり、`\r` をコメントに
 /// 飲み込まないこと(仕様1章L-4とL-29の相互作用・ADR-0041)。
-/// 現実装は `\n` の手前までしか読み飛ばしを止めないため、CRLF行では `\r` が
-/// コメントの一部として消費されてしまい、続くNewlineトークンが `\r\n`(2バイト)
-/// ではなく `\n`(1バイト)に縮む——これはL-29「CRLFは1個の改行として扱い、
-/// 字面は保持する」への違反になる。
+/// コメントの読み飛ばしを `\n` の手前だけで止める実装だと、CRLF行では `\r` が
+/// コメントの一部として消費され、続くNewlineトークンが `\r\n`(2バイト)ではなく
+/// `\n`(1バイト)に縮む——L-29「CRLFは1個の改行として扱い、字面は保持する」への
+/// 違反となる。この退行を検知する境界テスト。
 #[test]
 fn line_comment_stops_before_crlf() {
     // Arrange
@@ -810,11 +810,61 @@ fn block_comment_reports_e0102_with_span() {
     );
 }
 
+/// 改行なしでファイル末尾に達したコメントも正しく閉じること(仕様1章L-4)。
+/// Redを経ていない後追いの回帰テスト(実装が最初からEOF停止を満たすため)。
+#[test]
+fn line_comment_at_eof_produces_no_tokens() {
+    // Arrange
+    let source = "1 // c";
+
+    // Act
+    let tokens = lex(source).expect("EOFで終わるコメントの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1".to_string(),
+            span: Span { start: 0, end: 1 },
+        }]
+    );
+}
+
+/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること(仕様1章1.3)。
+/// Redを経ていない後追いの回帰テスト(`///` は `//` で始まるため自動的にコメントになる)。
+#[test]
+fn doc_comment_is_treated_as_line_comment_in_v1() {
+    // Arrange
+    let source = "/// d\n1";
+
+    // Act
+    let tokens = lex(source).expect("`///` コメントの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
-/// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
+/// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
+/// を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\r\nanswer\n"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000 // 答え\r\nanswer\n"));
 }
