@@ -718,8 +718,9 @@ fn consecutive_newlines_each_produce_token() {
 }
 
 /// `//` から行末まではコメントとして読み飛ばされ、トークンを生成しないこと
-/// (仕様1章L-4)。改行自体はコメントに含まれず、独立したNewlineトークンとして残る
-/// (L-4「行末トークンの判定はコメントを除去した後の行末に対して行う」の字句側基盤)。
+/// (仕様1章L-4〔正例: line-comment〕)。改行自体はコメントに含まれず、独立した
+/// Newlineトークンとして残る(L-4「行末トークンの判定はコメントを除去した後の
+/// 行末に対して行う」の字句側基盤)。
 #[test]
 fn line_comment_produces_no_tokens() {
     // Arrange
@@ -868,7 +869,7 @@ fn comment_content_is_opaque_to_all_lexical_rules() {
 }
 
 /// コメント中に単独のCRが現れたときはL-29(E0117)がL-4より優先すること
-/// (仕様1章L-4の注記・ADR-0041「単独のCRは専用エラー」に例外を設けない)。
+/// (仕様1章L-4注1〔負例: lone-cr〕・ADR-0041「単独のCRは専用エラー」に例外を設けない)。
 #[test]
 fn lone_cr_inside_comment_reports_e0117_with_span() {
     // Arrange
@@ -942,7 +943,8 @@ fn comment_only_lines_produce_bare_newline_tokens() {
     );
 }
 
-/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること(仕様1章L-30)。
+/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること
+/// (仕様1章L-30〔正例: doc-comment-v1〕)。
 /// Redを経ていない後追いの回帰テスト(`///` は `//` で始まるため自動的にコメントになる)。
 #[test]
 fn doc_comment_is_treated_as_line_comment_in_v1() {
