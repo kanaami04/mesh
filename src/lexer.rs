@@ -54,6 +54,8 @@ pub enum ErrorCode {
     E0117,
     /// 一覧に無いエスケープ(仕様1章L-14)。
     E0111,
+    /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
+    E0112,
 }
 
 /// 字句解析エラー。
@@ -129,7 +131,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             // (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
             // その文字が `"` であっても閉じクォートと判定しない。
             // 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
-            // `\u{...}` の中身の検証(E0112)は次サイクル。
+            // `\u{...}` は範囲超過(E0112)のみ検証する(下記の `u` 分岐を参照)。
             chars.next();
             let mut end = None;
             while let Some(&(i, d)) = chars.peek() {
@@ -149,7 +151,46 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     let backslash = i;
                     chars.next();
                     match chars.peek().copied() {
-                        Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$' | 'u')) => {
+                        Some((_, 'u')) => {
+                            chars.next();
+                            // `\u{H}` のコードポイント範囲チェック(仕様1章L-15)。
+                            // `{`〜`}` が1〜6桁の16進数で閉じている形だけを検証し、
+                            // U+10FFFFを超える値をE0112(span=`\`から`}`の直後まで)にする。
+                            // 形式が崩れている場合(`{`が無い/中身が空・非16進/7桁以上/
+                            // `}`が来ない)とサロゲート域は、ここでは検証せず従来どおり透過する。
+                            if chars.peek().map(|&(_, d)| d) == Some('{') {
+                                chars.next();
+                                let mut digits = String::new();
+                                while let Some(&(_, h)) = chars.peek() {
+                                    if !h.is_ascii_hexdigit() {
+                                        break;
+                                    }
+                                    digits.push(h);
+                                    chars.next();
+                                }
+                                let close =
+                                    chars.peek().and_then(|&(j, h)| (h == '}').then_some(j));
+                                if let Some(brace) = close
+                                    && !digits.is_empty()
+                                    && digits.len() <= 6
+                                {
+                                    chars.next();
+                                    // 6桁以下の16進数はu32に必ず収まる
+                                    let value = u32::from_str_radix(&digits, 16)
+                                        .expect("6桁以下の16進数はu32に収まる");
+                                    if value > 0x10FFFF {
+                                        return Err(LexError {
+                                            code: ErrorCode::E0112,
+                                            span: Span {
+                                                start: backslash,
+                                                end: brace + '}'.len_utf8(),
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$')) => {
                             chars.next();
                         }
                         Some((j, e)) => {

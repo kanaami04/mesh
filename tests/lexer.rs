@@ -1040,6 +1040,29 @@ fn invalid_escape_reports_e0111_with_span() {
     );
 }
 
+/// `\u{H}` エスケープのHが16進1〜6桁でない・U+10FFFF超・サロゲート域
+/// U+D800〜DFFFのいずれかのときエラーE0112になり、`\u{H}` エスケープ全体
+/// (`\` から `}` まで)を位置として報告すること(仕様1章L-15〔負例: unicode-escape-range〕)。
+/// 代表ケースとしてU+10FFFF超(`\u{110000}`)を検証する
+/// (16進桁数違反・サロゲート域は後続サイクルで同関数に追加する)。
+#[test]
+fn unicode_escape_out_of_range_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{110000}\"";
+
+    // Act
+    let err = lex(source).expect_err("U+10FFFFを超える`\\u{H}`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 11 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。
