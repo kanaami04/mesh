@@ -6,3 +6,6 @@
 
 # 生成JSの実行検証(E2Eテスト)で使うNode関連
 node_modules/
+
+# impl-reviewフックのローカル状態(レビュー済みコミットのマーカー)
+.claude/.impl-review-marker
