@@ -99,7 +99,7 @@ binDigit  = "0" | "1"      octDigit = "0"…"7"
 - エスケープ: `\n` `\t` `\r` `\\` `\"` `\$` `\u{H}`(Hは1〜6桁の16進)。
 - **L-14**: 一覧に無いエスケープ(`\q` 等)はエラー E0111 とし、近い正解があれば案内すること。〔負例: `invalid-escape`〕
 - **L-15**: `\u{H}` の H が16進1〜6桁でない・U+10FFFFを超える・サロゲート域(U+D800〜U+DFFF)のとき、エラー E0112 を報告すること。〔負例: `unicode-escape-range`〕
-- **L-16**: リテラル中に生の改行が現れた、または閉じ `"` の前にファイルが終わったとき、エラー E0108 を報告し `\n` または閉じ `"` を案内すること。〔負例: `string-raw-newline`、`string-unterminated-eof`〕
+- **L-16**: リテラル中に生の改行が現れた、または閉じ `"` の前にファイルが終わったとき、エラー E0108 を報告し `\n` または閉じ `"` を案内すること。ここでいう生の改行にはLF・CRLF・単独CRを含む。**文字列リテラルの内側ではE0108がL-29(E0117)より優先する**(ADR-0041)。〔負例: `string-raw-newline`(CR形を含む)、`string-unterminated-eof`〕
 - **L-17**(補間): `${` から対応する `}` までは**通常の字句モードで再帰的に**トークン化すること。「対応する `}`」は、再帰トークン化の結果の**トークン列上で**括弧類(`( ) [ ] { }`)の対応を数えて決める(ネストした文字列リテラルやエスケープの中の括弧「文字」は数えない)。補間内にはネストした文字列リテラルを書ける。ただし: (a) 補間を含む文字列全体は物理1行に収まること、(b) 補間内にコメントは書けない(`//` はエラー E0115)。〔正例テスト: `interpolation-nested`(`"${f("x")}"`、`"${f("(")}"`、`"${m[k] or 0}"`)/ 負例: `interpolation-comment`〕
 - **L-18**: `${` が対応する `}` を得ないままリテラル・行が終わる、または補間内の括弧が不均衡なまま終わるとき、エラー E0109 を報告すること。**補間の内側ではE0109がL-16(E0108)より優先する**。〔負例: `unterminated-interpolation`〕
 - **L-28**: 直後が `{` でない `$` はただの文字であること(`"$5"` は合法)。リテラルとして `${` と書きたいときだけ `\$` を使う。〔正例テスト: `dollar-literal`〕
@@ -142,7 +142,7 @@ let user = findUser(id)?
 
 各トークンの意味・優先順位は3章で定義する(複合代入の意味論も3章)。
 
-- **L-26**(キャッチオール): この一覧・本章のどの規則にも該当しない文字・記号列はエラー E0116 とし、近い正解があれば案内すること: `===` →「等価比較は `==`」/ `->` →「戻り値型は空白のみ・matchの腕は `=>`」/ `` ` `` →「文字列は `"`(`"` でも `${}` 補間が使えます)」/ `'` →「文字列は `"`」。`;` はL-19が優先する。〔負例: `triple-equals`、`backtick-string`、`single-quote-string`〕
+- **L-26**(キャッチオール): この一覧・本章のどの規則にも該当しない文字・記号列はエラー E0116 とし、近い正解があれば案内すること: `===` →「等価比較は `==`」/ `->` →「戻り値型は空白のみ・matchの腕は `=>`」/ `` ` `` →「文字列は `"`(`"` でも `${}` 補間が使えます)」/ `'` →「文字列は `"`」。`;` はL-19が、単独CRはL-29が優先する。〔負例: `triple-equals`、`backtick-string`、`single-quote-string`〕
 
 ## conformance対応表
 
@@ -155,8 +155,6 @@ let user = findUser(id)?
 | reserved-while / reserved-null / reserved-new | 負例 | L-7 |
 | or-bind-error-name | 負例 | L-8 |
 | contextual-keyword-ident | 正例 | L-27 |
-| crlf-newline | 正例 | L-29 |
-| lone-cr | 負例 | L-29 |
 | underscore-edge | 負例 | L-9 |
 | float-dot-edge | 負例 | L-10 |
 | int-literal-overflow | 負例 | L-11 |
@@ -176,4 +174,6 @@ let user = findUser(id)?
 | struct-literal-missing-trailing-comma | 負例 | L-22 |
 | no-leading-operator-continuation | 負例 | L-23 |
 | postfix-question-newline | 挙動検証 | L-24 |
+| crlf-newline | 正例 | L-29 |
+| lone-cr | 負例 | L-29 |
 | triple-equals / backtick-string / single-quote-string | 負例 | L-26 |

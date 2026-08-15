@@ -603,6 +603,49 @@ fn lone_carriage_return_reports_e0117_with_span() {
     );
 }
 
+/// 行中のCR(直後が `\n` 以外の文字)もE0117になること(仕様1章L-29〔負例: lone-cr〕)。
+/// 単独CRの2形(EOF直前=上のテスト/行中=このテスト)のうち、旧Mac形式
+/// `"1\r2"` が踏む実用上の主経路を固定する。
+#[test]
+fn mid_line_carriage_return_reports_e0117_with_span() {
+    // Arrange
+    let source = "1\r2";
+
+    // Act
+    let err = lex(source).expect_err("行中の`\\r`はE0117としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0117,
+            span: Span { start: 1, end: 2 },
+        }
+    );
+}
+
+/// Unicode改行類(U+2028 LINE SEPARATOR)は改行とみなさず、E0116のままであること
+/// (仕様1章L-29第3項。ADR-0041が代替案を検討のうえ確定した挙動の固定——
+/// 「JSはU+2028を改行扱いするから合わせる」変更が入ったら、このテストが検知する)。
+/// U+0085・U+2029も同じ規則。spanは文字のバイト幅(U+2028は3バイト)。
+#[test]
+fn unicode_line_separator_is_not_newline() {
+    // Arrange
+    let source = "1\u{2028}2";
+
+    // Act
+    let err = lex(source).expect_err("U+2028は改行でないためE0116エラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 1, end: 4 },
+        }
+    );
+}
+
 /// CRLF(`\r\n`)は1個のNewlineトークンになり、textは生の字面 `\r\n` になること
 /// (仕様1章L-29〔正例: crlf-newline〕・ADR-0041)。
 #[test]
@@ -675,10 +718,10 @@ fn consecutive_newlines_each_produce_token() {
 }
 
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
-/// 桁区切りを1入力に含むスナップショット。
+/// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\nanswer"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\r\nanswer\n"));
 }

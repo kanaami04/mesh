@@ -1,6 +1,6 @@
 ---
 source: tests/lexer.rs
-expression: "mesh::lexer::lex(\"let answer = 1_000\\nanswer\")"
+expression: "mesh::lexer::lex(\"let answer = 1_000\\r\\nanswer\\n\")"
 ---
 Ok(
     [
@@ -38,18 +38,26 @@ Ok(
         },
         Token {
             kind: Newline,
-            text: "\n",
+            text: "\r\n",
             span: Span {
                 start: 18,
-                end: 19,
+                end: 20,
             },
         },
         Token {
             kind: Ident,
             text: "answer",
             span: Span {
-                start: 19,
-                end: 25,
+                start: 20,
+                end: 26,
+            },
+        },
+        Token {
+            kind: Newline,
+            text: "\n",
+            span: Span {
+                start: 26,
+                end: 27,
             },
         },
     ],

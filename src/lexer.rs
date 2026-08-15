@@ -44,6 +44,8 @@ pub enum ErrorCode {
     /// 各規則の実装サイクルで正しいコードに置き換える。
     /// また未実装の正当なトークン(演算子 `+` `(` 等、文字列開始 `"`)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
+    /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
+    /// (L-29が非改行と規定=ADR-0041。上の暫定と違い置き換え予定なし)。
     E0116,
     /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
     E0117,
@@ -99,7 +101,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             chars.next();
             if chars.peek().map(|&(_, d)| d) == Some('\n') {
                 chars.next();
-                let end = start + 2;
+                // CRLFは1個の改行(仕様1章L-29)。endは他分岐と同じくバイト長から導出する
+                let end = start + '\r'.len_utf8() + '\n'.len_utf8();
                 tokens.push(token(
                     TokenKind::Newline,
                     &source[start..end],
@@ -110,7 +113,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     code: ErrorCode::E0117,
                     span: Span {
                         start,
-                        end: start + 1,
+                        end: start + '\r'.len_utf8(),
                     },
                 });
             }
