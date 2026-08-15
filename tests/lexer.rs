@@ -1,7 +1,7 @@
 //! 字句解析器(lexer)の統合テスト。
 //! docs/spec/01-lexical.md を正とし、TDDサイクルごとに1振る舞いずつ追加する。
 
-use mesh::lexer::{Span, Token, TokenKind, lex};
+use mesh::lexer::{ErrorCode, LexError, Span, Token, TokenKind, lex};
 
 /// 空のソース文字列を字句解析すると、空のトークン列が返ること。
 #[test]
@@ -127,6 +127,19 @@ fn tokens_carry_byte_offset_spans() {
                 span: Span { start: 13, end: 15 },
             },
         ]
+    );
+}
+
+/// どの字句規則にも該当しない文字はエラーE0116として位置つきで報告されること(仕様1章L-26)。
+#[test]
+fn unknown_character_reports_e0116_with_span() {
+    let err = lex("let @ = 1").expect_err("`@` は字句規則に該当しないためエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 4, end: 5 },
+        }
     );
 }
 

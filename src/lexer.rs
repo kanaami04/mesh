@@ -31,9 +31,19 @@ pub struct Token {
     pub span: Span,
 }
 
+/// 字句エラーのコード(仕様1章のE01xx)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
+    E0116,
+}
+
 /// 字句解析エラー。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LexError;
+pub struct LexError {
+    pub code: ErrorCode,
+    pub span: Span,
+}
 
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
@@ -59,7 +69,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {
-            return Err(LexError);
+            return Err(LexError {
+                code: ErrorCode::E0116,
+                span: Span {
+                    start,
+                    end: start + c.len_utf8(),
+                },
+            });
         }
     }
     Ok(tokens)
