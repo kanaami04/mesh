@@ -186,7 +186,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
             }
             let end = end.ok_or(LexError {
-                code: ErrorCode::E0116,
+                code: ErrorCode::E0108,
                 span: Span {
                     start,
                     end: start + '"'.len_utf8(),

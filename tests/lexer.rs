@@ -1062,6 +1062,28 @@ fn raw_newline_in_string_reports_e0108_with_span() {
     );
 }
 
+/// 閉じ `"` の前にファイルが終わったときはエラーE0108になり、開き `"` 1バイトを
+/// 位置として報告すること(仕様1章L-16〔負例: string-unterminated-eof〕)。
+/// spanが開き `"` を指すのは「どこから始まった文字列が閉じていないか」を示すため
+/// (Rustコンパイラの流儀に合わせる)。
+#[test]
+fn unterminated_string_at_eof_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"abc";
+
+    // Act
+    let err = lex(source).expect_err("閉じクォートの前にEOFに達した文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
 /// `\u{H}` エスケープのHが16進1〜6桁でない・U+10FFFF超・サロゲート域
 /// U+D800〜DFFFのいずれかのときエラーE0112になり、`\u{H}` エスケープ全体
 /// (`\` から `}` まで)を位置として報告すること(仕様1章L-15〔負例: unicode-escape-range〕)。
