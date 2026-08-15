@@ -34,10 +34,13 @@ pub struct Token {
 /// 字句エラーのコード(仕様1章のE01xx)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
-    /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
-    E0116,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
+    /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
+    /// 注意: 固有の規則を持つが未実装の文字(改行=L-19、`;`=E0110、
+    /// 非ASCII識別子=E0103、`/*`=E0102)も現状は暫定でこのコードになる。
+    /// 各規則の実装サイクルで正しいコードに置き換える。
+    E0116,
 }
 
 /// 字句解析エラー。
@@ -53,13 +56,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut chars = source.char_indices().peekable();
     while let Some(&(start, c)) = chars.peek() {
         if c.is_ascii_digit() {
-            let text = scan_while(source, &mut chars, start, c, |d| {
+            let (text, end) = scan_while(source, &mut chars, start, c, |d| {
                 d.is_ascii_digit() || d == '_'
             });
             check_digit_separators(text, start)?;
-            tokens.push(token(TokenKind::Int, text, start));
+            tokens.push(token(TokenKind::Int, text, Span { start, end }));
         } else if c.is_ascii_alphabetic() || c == '_' {
-            let text = scan_while(source, &mut chars, start, c, |d| {
+            let (text, end) = scan_while(source, &mut chars, start, c, |d| {
                 d.is_ascii_alphanumeric() || d == '_'
             });
             let kind = if text == "let" {
@@ -67,10 +70,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             } else {
                 TokenKind::Ident
             };
-            tokens.push(token(kind, text, start));
+            tokens.push(token(kind, text, Span { start, end }));
         } else if c == '=' {
             chars.next();
-            tokens.push(token(TokenKind::Eq, "=", start));
+            let end = start + '='.len_utf8();
+            tokens.push(token(TokenKind::Eq, "=", Span { start, end }));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {
@@ -110,27 +114,26 @@ fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
     Ok(())
 }
 
-/// `start` 位置から `text` の長さぶんを占めるトークンを構築する(spanはバイト長から算出)。
-fn token(kind: TokenKind, text: &str, start: usize) -> Token {
+/// トークンを構築する。spanはソース上の実位置を呼び出し側が渡す。
+/// textの長さからspanを逆算してはいけない: 将来textが正規化されて
+/// ソースの字面と長さが変わったとき(文字列エスケープ等)、spanが静かに壊れるため。
+fn token(kind: TokenKind, text: &str, span: Span) -> Token {
     Token {
         kind,
         text: text.to_string(),
-        span: Span {
-            start,
-            end: start + text.len(),
-        },
+        span,
     }
 }
 
 /// 先頭文字 `first`(位置 `start`)から、`pred` を満たす限り読み進めて
-/// 最長一致の部分文字列を返す(仕様1章L-2の共通部品)。
+/// 最長一致の部分文字列と終端バイトオフセット(半開区間のend)を返す(仕様1章L-2の共通部品)。
 fn scan_while<'s>(
     source: &'s str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     start: usize,
     first: char,
     pred: impl Fn(char) -> bool,
-) -> &'s str {
+) -> (&'s str, usize) {
     let mut end = start + first.len_utf8();
     chars.next();
     while let Some(&(i, d)) = chars.peek() {
@@ -141,5 +144,5 @@ fn scan_while<'s>(
             break;
         }
     }
-    &source[start..end]
+    (&source[start..end], end)
 }

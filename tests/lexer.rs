@@ -46,7 +46,7 @@ fn decimal_integer_literal_produces_single_int_token() {
 /// 識別子と予約語が切り出され、区別されること(仕様1章1.4・1.5)。
 /// `let x = 1` は KwLet / Ident / Eq / Int の4トークンになること。
 /// 予約語は最長一致で判定し、`lettuce` のような「letで始まる識別子」を
-/// 予約語に誤認しないこと。先頭 `_` も正規の識別子として扱うこと(仕様1章L-6)。
+/// 予約語に誤認しないこと。先頭 `_` も正規の識別子として扱うこと(仕様1章1.4)。
 #[test]
 fn identifiers_and_keyword_let_are_distinguished() {
     let tokens = lex("let x = 1").expect("`let x = 1` の字句解析はエラーにならないこと");
@@ -101,8 +101,8 @@ fn identifiers_and_keyword_let_are_distinguished() {
 /// 位置つきエラー報告の基盤であり、仕様1章の各E01xx規則が「位置つき」報告を要求する。
 #[test]
 fn tokens_carry_byte_offset_spans() {
-    let tokens =
-        lex("let answer = 42").expect("`let answer = 42` の字句解析はエラーにならないこと");
+    let source = "let answer = 42";
+    let tokens = lex(source).expect("`let answer = 42` の字句解析はエラーにならないこと");
     assert_eq!(
         tokens,
         vec![
@@ -128,6 +128,31 @@ fn tokens_carry_byte_offset_spans() {
             },
         ]
     );
+
+    // 不変条件: 現段階の全トークン種で text はソースのspan位置の切り出しと一致する。
+    // (将来、文字列エスケープ等でtextが正規化されるトークン種はこの限りではない)
+    for t in &tokens {
+        assert_eq!(
+            t.text,
+            &source[t.span.start..t.span.end],
+            "textとsource[span]が一致すること"
+        );
+    }
+}
+
+/// エラーのspanはバイトオフセットであること(文字数ではない)。
+/// マルチバイト文字 `±`(U+00B1、UTF-8で2バイト)のE0116は2バイト幅のspanを持つ。
+/// 仕様1章の位置つき報告(E01xx)がバイト単位で一貫していることの固定。
+#[test]
+fn multibyte_character_error_span_counts_bytes() {
+    let err = lex("1 ± 2").expect_err("`±` は字句規則に該当しないためエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 4 },
+        }
+    );
 }
 
 /// どの字句規則にも該当しない文字はエラーE0116として位置つきで報告されること(仕様1章L-26)。
@@ -143,6 +168,59 @@ fn unknown_character_reports_e0116_with_span() {
     );
 }
 
+/// バッククォートとシングルクォートがE0116として位置つきで報告されること
+/// (仕様1章L-26〔負例: backtick-string、single-quote-string〕)。
+/// 「近い正解の案内」(`"` を使う)はエラーメッセージ実装のサイクルで検証する。
+/// 注: 同じL-26の負例 triple-equals(`===`)は演算子未実装の現状では
+/// `Eq`×3に分かれてエラーにならないため、演算子実装のサイクルで追加する。
+#[test]
+fn backtick_and_single_quote_report_e0116_with_span() {
+    let err = lex("`abc`").expect_err("バッククォート文字列はエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+
+    let err = lex("'abc'").expect_err("シングルクォート文字列はエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
+/// `_` で始まる字句は識別子として解釈されること(仕様1章1.4: `_1`・`_tmp` は正規の識別子)。
+/// L-9の「先頭の `_` はエラー」は数値リテラル内部の規則で、10進では `_` 始まりに
+/// 数値スキャンが到達しないため衝突しない(仕様1章L-9の注記)。
+/// `_` 単体も字句段階ではIdent(「値を捨てる」特別扱いは仕様4章の担当)。
+#[test]
+fn leading_underscore_lexes_as_identifier() {
+    let tokens = lex("_1").expect("`_1` の字句解析はエラーにならないこと");
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Ident,
+            text: "_1".to_string(),
+            span: Span { start: 0, end: 2 },
+        }]
+    );
+
+    let tokens = lex("_").expect("`_` 単体の字句解析はエラーにならないこと");
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Ident,
+            text: "_".to_string(),
+            span: Span { start: 0, end: 1 },
+        }]
+    );
+}
+
 /// 桁区切り `_` を含む整数リテラルが1個のIntトークンとして切り出されること(仕様1章L-9)。
 /// textはソースの生の字面のまま保持し、`_` を除去しないこと(値への正規化はコード生成側の責務)。
 #[test]
@@ -154,6 +232,17 @@ fn integer_with_digit_separator_is_single_token() {
             kind: TokenKind::Int,
             text: "1_000".to_string(),
             span: Span { start: 0, end: 5 },
+        }]
+    );
+
+    // 区切りが複数ある正例(仕様1章の正例列 `1_000_000`)。検査ループの2周目以降を固定する。
+    let tokens = lex("1_000_000").expect("`1_000_000` の字句解析はエラーにならないこと");
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1_000_000".to_string(),
+            span: Span { start: 0, end: 9 },
         }]
     );
 }
@@ -183,11 +272,23 @@ fn misplaced_digit_separator_reports_e0105_with_span() {
             span: Span { start: 1, end: 2 },
         }
     );
+
+    // 優先順位の固定: 数値スキャンは `_` を貪欲に取り込むため、`1_x` は
+    // L-12(E0113、将来実装)ではなくE0105と報告する(仕様1章L-9の注記)。
+    let err = lex("1_x").expect_err("`1_x` は桁区切りエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 1, end: 2 },
+        }
+    );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した字句全体のスナップショット。
+/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int)と
+/// 桁区切りを1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 42"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000"));
 }
