@@ -751,6 +751,44 @@ fn line_comment_produces_no_tokens() {
     );
 }
 
+/// 行コメントのスキャンは `\r\n` の手前(`\r` の直前)で止まり、`\r` をコメントに
+/// 飲み込まないこと(仕様1章L-4とL-29の相互作用・ADR-0041)。
+/// 現実装は `\n` の手前までしか読み飛ばしを止めないため、CRLF行では `\r` が
+/// コメントの一部として消費されてしまい、続くNewlineトークンが `\r\n`(2バイト)
+/// ではなく `\n`(1バイト)に縮む——これはL-29「CRLFは1個の改行として扱い、
+/// 字面は保持する」への違反になる。
+#[test]
+fn line_comment_stops_before_crlf() {
+    // Arrange
+    let source = "1 // c\r\n2";
+
+    // Act
+    let tokens =
+        lex(source).expect("CRLF行末の行コメントを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\r\n".to_string(),
+                span: Span { start: 6, end: 8 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う

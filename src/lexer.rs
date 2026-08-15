@@ -122,11 +122,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         } else if c == '/' {
             chars.next();
             if chars.peek().map(|&(_, d)| d) == Some('/') {
-                // 行コメント(仕様1章L-4)。`\n` の手前まで読み飛ばし、トークンは生成しない。
-                // `\n` 自体は消費せず、既存のNewline分岐に処理を委ねる。
+                // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
+                // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
+                // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
                 chars.next();
                 while let Some(&(_, d)) = chars.peek() {
-                    if d == '\n' {
+                    if d == '\n' || d == '\r' {
                         break;
                     }
                     chars.next();
