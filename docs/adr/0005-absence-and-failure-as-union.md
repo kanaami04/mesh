@@ -1,6 +1,6 @@
 # ADR-0005: 不在と失敗はunion型で表す(`T | none` / `T | error`)
 
-- **Status**: accepted
+- **Status**: accepted(規則5は0028、規則7は0037で精密化)
 - **Date**: 2026-08-13
 - **決定者**: ユーザー + Claude
 

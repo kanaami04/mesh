@@ -2,7 +2,7 @@
 
 ソースコードの文字列をトークン(意味の最小単位)に分割する規則を定める。根拠ADR: [0010](../adr/0010-newline-statement-separator.md)(改行区切り)/ [0015](../adr/0015-numbers-int53-float.md)(数値)/ [0018](../adr/0018-string-interpolation.md)(補間)/ [0024](../adr/0024-comments-and-naming.md)(コメント・命名)/ [0026](../adr/0026-line-continuation-binary-only.md)(行継続)/ [0030](../adr/0030-lexical-details.md)(識別子・数値記法・単一行文字列)/ [0031](../adr/0031-continuation-list-bracket-depth-contextual-keywords.md)(継続一覧・括弧深度・文脈キーワード)。
 
-エラーコードは `E01xx` を字句エラーに割り当てる。負例にはconformanceテストID(`tests/01-lexical/` 配下)を併記する。
+エラーコードは `E01xx` を字句エラーに割り当てる。負例にはconformanceテストID(`tests/01-lexical/` 配下)を併記する。規則番号(L-n)は**安定ID**であり、追記により節の順序と一致しない場合がある(改番はしない)。
 
 ## 1.1 ソースファイルと適用範囲
 
@@ -46,10 +46,11 @@ let mut fn struct type if else match for in return
 import export or is none error extern true false break continue
 ```
 
-**文脈キーワード**(ADR-0031。`component` 宣言の文法内でのみ予約。通常コードでは識別子として使える):
+**文脈キーワード**(ADR-0031。特定の文法内でのみ予約され、通常コードでは識別子として使える):
 
 ```
-component state view
+component state view    (component宣言の内部=9章)
+as                      (import文の内部のみ=7章M-3)
 ```
 
 **誘導用予約語**(Meshに無い機能。他言語ユーザー・AIの誤用を明快なエラーにするため予約):

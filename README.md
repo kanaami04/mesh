@@ -25,18 +25,20 @@ language/
 │   ├── roadmap.md           # フェーズ別ロードマップ
 │   ├── testing-strategy.md  # テスト戦略
 │   ├── style-guide.md       # 文章スタイルガイド(文書・出力・エラーメッセージ設計)
+│   ├── language-card.md     # AI向け言語カード(必要時のみ読み込む)
+│   ├── design-audit-*.md    # 設計監査の記録
 │   ├── learning/            # 言語の作り方 学習教材
 │   ├── research/            # 他言語調査(MoonBit, Topcoat, Gleam...)
 │   ├── spec/                # 言語仕様書
 │   └── adr/                 # 意思決定記録(ADR)+ 前提台帳
-├── crates/              # Rustワークスペース(実装開始時に作成)
+├── crates/mesh/         # コンパイラ本体+CLI(Rust。cargo build / cargo test)
 ├── examples/            # Meshのサンプルコード(仕様確定後)
 └── tests/               # conformanceテスト(仕様と1:1対応)
 ```
 
 ## いま何のフェーズか
 
-**Phase 0: 資料整備**(実装前)。進捗と次の一手は [docs/roadmap.md](docs/roadmap.md) を参照。
+**Phase 2: 最小コンパイラの実装**(Rust)。仕様策定(Phase 0〜1)は完了済み(仕様1〜7章+ADR39本+言語カード)。進捗と次の一手は [docs/roadmap.md](docs/roadmap.md) を参照。
 
 ## 読み始める順番
 
