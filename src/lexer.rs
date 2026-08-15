@@ -51,7 +51,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut chars = source.char_indices().peekable();
     while let Some(&(start, c)) = chars.peek() {
         if c.is_ascii_digit() {
-            let text = scan_while(source, &mut chars, start, c, |d| d.is_ascii_digit());
+            let text = scan_while(source, &mut chars, start, c, |d| {
+                d.is_ascii_digit() || d == '_'
+            });
             tokens.push(token(TokenKind::Int, text, start));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let text = scan_while(source, &mut chars, start, c, |d| {

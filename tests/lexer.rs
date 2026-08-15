@@ -143,6 +143,21 @@ fn unknown_character_reports_e0116_with_span() {
     );
 }
 
+/// 桁区切り `_` を含む整数リテラルが1個のIntトークンとして切り出されること(仕様1章L-9)。
+/// textはソースの生の字面のまま保持し、`_` を除去しないこと(値への正規化はコード生成側の責務)。
+#[test]
+fn integer_with_digit_separator_is_single_token() {
+    let tokens = lex("1_000").expect("桁区切り付き整数リテラルの字句解析はエラーにならないこと");
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1_000".to_string(),
+            span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した字句全体のスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う。
 #[test]
