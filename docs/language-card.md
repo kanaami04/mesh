@@ -5,7 +5,6 @@ MeshのコードをAI・人間が書くための1枚(仕様1〜7章準拠。正�
 ## 一目でわかるMesh
 
 ```mesh
-import "std/json"
 import "shop/cart"                     // パッケージ=ディレクトリ。常に cart.f() で修飾
 
 struct User {
@@ -13,8 +12,8 @@ struct User {
   age:  int
 }
 
-error struct DbError { table: string } // 失敗を表す型(宣言マーカーつき)
-type Item = Todo | User                // unionの命名(透過的な別名)
+error struct DbError { table: string }         // 失敗を表す型(宣言マーカーつき)
+type LoadResult = User | DbError | error       // unionの命名(透過的な別名)
 
 let maxItems = 100                     // トップレベルはlet(不変)+定数式のみ
 
@@ -26,7 +25,7 @@ fn findUser(id: int) User | none {     // 戻り値型は閉じ括弧の後に�
   ...
 }
 
-fn load(id: int) User | DbError | error {
+fn load(id: int) LoadResult {
   let row = query(id)?                 // ? = 失敗をそのまま呼び出し元へ伝播
   parse(row) ? "user ${id} の解析に失敗" // ? "文脈" = errorに昇格して伝播
 }
@@ -34,14 +33,16 @@ fn load(id: int) User | DbError | error {
 fn main() {
   mut count = 0                        // 再代入するならmut。共有状態はmain内+クロージャ
   let user = findUser(1) or User{name: "guest", age: 0}   // noneのフォールバック
+  print(user.greet())
   match load(1) {                      // matchは型パターンのみ・全メンバー網羅・腕は => { }
     User u    => { print(u.greet()) }
     DbError e => { print("DB: ${e.table}") }
     error e   => { print(e.message) }
   }
-  for item in cart.items() {           // for x in xs / for i in 0..n / for 条件 { } の3形のみ
+  for _ in cart.items() {              // for x in xs / for i in 0..n / for 条件 { } の3形のみ
     count += 1
   }
+  print("${count} 件を処理")            // 未使用変数はエラーになるので必ず読む
 }
 ```
 
