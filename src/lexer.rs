@@ -36,6 +36,8 @@ pub struct Token {
 pub enum ErrorCode {
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     E0116,
+    /// 桁区切り `_` の位置違反(仕様1章L-9)。
+    E0105,
 }
 
 /// 字句解析エラー。
@@ -54,6 +56,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             let text = scan_while(source, &mut chars, start, c, |d| {
                 d.is_ascii_digit() || d == '_'
             });
+            check_digit_separators(text, start)?;
             tokens.push(token(TokenKind::Int, text, start));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let text = scan_while(source, &mut chars, start, c, |d| {
@@ -81,6 +84,30 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
     }
     Ok(tokens)
+}
+
+/// 数値リテラルの桁区切り `_` が「数字と数字の間」にあるか検査する(仕様1章L-9)。
+/// 左から走査し、直前と直後の両方がASCII数字でない最初の `_` をE0105として報告する。
+/// spanはその `_` 1バイトぶん(`_` はASCIIなので1バイト固定)。
+fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'_' {
+            continue;
+        }
+        let prev_is_digit = i > 0 && bytes[i - 1].is_ascii_digit();
+        let next_is_digit = bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+        if !(prev_is_digit && next_is_digit) {
+            return Err(LexError {
+                code: ErrorCode::E0105,
+                span: Span {
+                    start: start + i,
+                    end: start + i + 1,
+                },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `start` 位置から `text` の長さぶんを占めるトークンを構築する(spanはバイト長から算出)。

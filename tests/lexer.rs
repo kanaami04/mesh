@@ -158,6 +158,33 @@ fn integer_with_digit_separator_is_single_token() {
     );
 }
 
+/// 桁区切り `_` が不正な位置(数字と数字の間以外)にあるとエラーE0105が
+/// 位置つきで報告されること(仕様1章L-9・負例ID underscore-edge)。
+/// 数値リテラル中を左から走査し、「直前と直後の両方が数字」でない最初の `_`
+/// を報告する。spanはその `_` 1バイトのみ。
+/// 注: `0x_FF` も仕様上のunderscore-edge負例だが、16進リテラル未実装のため
+/// 今回は対象外(0x_FFのケースは16進実装のサイクルで追加する)。
+#[test]
+fn misplaced_digit_separator_reports_e0105_with_span() {
+    let err = lex("1__0").expect_err("`_`が連続する整数リテラルはエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 1, end: 2 },
+        }
+    );
+
+    let err = lex("1_").expect_err("末尾が`_`の整数リテラルはエラーになること");
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 1, end: 2 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した字句全体のスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う。
 #[test]
