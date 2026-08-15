@@ -37,15 +37,16 @@ fn decimal_integer_literal_produces_single_int_token() {
     );
 }
 
-/// 空白で区切られた整数リテラルが独立したIntトークンになり、
-/// 空白自体はトークンにならないこと(仕様1章1.2)。
+/// 空白類で区切られた整数リテラルが独立したIntトークンになり、
+/// 空白類自体はトークンにならないこと(仕様1章1.2: スペース・タブ)。
+/// 入力はスペースとタブの両方を含む代表例。
 #[test]
 fn whitespace_separates_integer_literals() {
     // Arrange
-    let source = "1 22";
+    let source = "1 \t22";
 
     // Act
-    let tokens = lex(source).expect("空白区切りの整数リテラルの字句解析はエラーにならないこと");
+    let tokens = lex(source).expect("空白類区切りの整数リテラルの字句解析はエラーにならないこと");
 
     // Assert
     assert_eq!(
@@ -59,14 +60,15 @@ fn whitespace_separates_integer_literals() {
             Token {
                 kind: TokenKind::Int,
                 text: "22".to_string(),
-                span: Span { start: 2, end: 4 },
+                span: Span { start: 3, end: 5 },
             },
         ]
     );
 }
 
-/// 予約語 `let` が識別子と区別されてKwLetトークンになること(仕様1章1.5)。
-/// `let x = 1` は KwLet / Ident / Eq / Int の4トークンになる。
+/// 予約語 `let` が識別子と区別されてKwLetトークンになること(仕様1章1.4・1.5)。
+/// 検証項目はトークン**種類**の区別のみ(text・spanの固定は
+/// tokens_carry_byte_offset_spans が同型入力で担うため、重複を避けて種類列に絞る)。
 #[test]
 fn keyword_let_is_distinguished_from_identifiers() {
     // Arrange
@@ -77,28 +79,12 @@ fn keyword_let_is_distinguished_from_identifiers() {
 
     // Assert
     assert_eq!(
-        tokens,
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
         vec![
-            Token {
-                kind: TokenKind::KwLet,
-                text: "let".to_string(),
-                span: Span { start: 0, end: 3 },
-            },
-            Token {
-                kind: TokenKind::Ident,
-                text: "x".to_string(),
-                span: Span { start: 4, end: 5 },
-            },
-            Token {
-                kind: TokenKind::Eq,
-                text: "=".to_string(),
-                span: Span { start: 6, end: 7 },
-            },
-            Token {
-                kind: TokenKind::Int,
-                text: "1".to_string(),
-                span: Span { start: 8, end: 9 },
-            },
+            TokenKind::KwLet,
+            TokenKind::Ident,
+            TokenKind::Eq,
+            TokenKind::Int,
         ]
     );
 }
@@ -124,10 +110,7 @@ fn identifier_with_keyword_prefix_is_not_reserved() {
     );
 }
 
-/// `_` で始まる字句は識別子として解釈されること(仕様1章1.4: `_1`・`_tmp` は正規の識別子)。
-/// L-9の「先頭の `_` はエラー」は数値リテラル内部の規則で、10進では `_` 始まりに
-/// 数値スキャンが到達しないため衝突しない(仕様1章L-9注1)。
-/// 入力 `_tmp1` は「_+英字+数字」を1入力でカバーする代表例。
+/// `_` で始まり英字・数字が続く字句は識別子であること(仕様1章1.4: `_tmp` は正規の識別子)。
 #[test]
 fn underscore_prefixed_name_is_identifier() {
     // Arrange
@@ -143,6 +126,29 @@ fn underscore_prefixed_name_is_identifier() {
             kind: TokenKind::Ident,
             text: "_tmp1".to_string(),
             span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
+/// `_` の**直後に数字**が続く形も識別子であること(仕様1章1.4・L-9注1が名指しする `_1`)。
+/// L-9の「先頭の `_` はエラー」は数値リテラル内部の規則で、10進では `_` 始まりに
+/// 数値スキャンが到達しないため衝突しない(仕様1章L-9注1)。
+/// 「`_` の次が数字なら数値スキャンへ回す」誤実装(→E0105化)を検知する境界テスト。
+#[test]
+fn underscore_followed_by_digit_is_identifier() {
+    // Arrange
+    let source = "_1";
+
+    // Act
+    let tokens = lex(source).expect("`_1` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Ident,
+            text: "_1".to_string(),
+            span: Span { start: 0, end: 2 },
         }]
     );
 }
@@ -207,7 +213,8 @@ fn tokens_carry_byte_offset_spans() {
 }
 
 /// エラーのspanはバイトオフセットであること(文字数ではない)。
-/// マルチバイト文字 `±`(U+00B1、UTF-8で2バイト)のE0116は2バイト幅のspanを持つ。
+/// マルチバイト文字 `±`(U+00B1、UTF-8で2バイト)のE0116(仕様1章L-26)は2バイト幅のspanを持つ。
+/// 仕様1章の位置つき報告(E01xx)がバイト単位で一貫していることの固定。
 /// 注: `±` は識別子位置に無い記号なので、L-6(非ASCII識別子=E0103)実装後もE0116のまま。
 #[test]
 fn multibyte_character_error_span_counts_bytes() {
@@ -372,8 +379,9 @@ fn trailing_digit_separator_reports_e0105_with_span() {
     );
 }
 
-/// `_` の直後に英字が続く形はL-12(E0113、将来実装)ではなくE0105になること。
-/// 数字直後の `_` は数値リテラルの一部として読むため(仕様1章L-9注2で固定した優先順位)。
+/// `_` の直後に英字が続く形はL-12(E0113、将来実装)ではなくE0105になること
+/// (仕様1章L-9注2で固定した優先順位〔負例: underscore-edge〕)。
+/// 数字直後の `_` は数値リテラルの一部として読むため。
 #[test]
 fn digit_separator_before_letter_reports_e0105_with_span() {
     // Arrange
