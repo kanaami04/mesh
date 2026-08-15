@@ -717,6 +717,40 @@ fn consecutive_newlines_each_produce_token() {
     );
 }
 
+/// `//` から行末まではコメントとして読み飛ばされ、トークンを生成しないこと
+/// (仕様1章L-4)。改行自体はコメントに含まれず、独立したNewlineトークンとして残る
+/// (L-4「行末トークンの判定はコメントを除去した後の行末に対して行う」の字句側基盤)。
+#[test]
+fn line_comment_produces_no_tokens() {
+    // Arrange
+    let source = "1 // c\n2";
+
+    // Act
+    let tokens = lex(source).expect("行コメントを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う

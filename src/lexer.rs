@@ -119,6 +119,27 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
         } else if c == ' ' || c == '\t' {
             chars.next();
+        } else if c == '/' {
+            chars.next();
+            if chars.peek().map(|&(_, d)| d) == Some('/') {
+                // 行コメント(仕様1章L-4)。`\n` の手前まで読み飛ばし、トークンは生成しない。
+                // `\n` 自体は消費せず、既存のNewline分岐に処理を委ねる。
+                chars.next();
+                while let Some(&(_, d)) = chars.peek() {
+                    if d == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            } else {
+                return Err(LexError {
+                    code: ErrorCode::E0116,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8(),
+                    },
+                });
+            }
         } else {
             return Err(LexError {
                 code: ErrorCode::E0116,
