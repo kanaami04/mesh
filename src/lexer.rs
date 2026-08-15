@@ -78,11 +78,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         } else if c == '=' {
             chars.next();
             let end = start + '='.len_utf8();
-            tokens.push(token(TokenKind::Eq, "=", Span { start, end }));
+            // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
+            // 分岐条件との二重管理でなく構造で守る)
+            tokens.push(token(
+                TokenKind::Eq,
+                &source[start..end],
+                Span { start, end },
+            ));
         } else if c == '\n' {
             chars.next();
             let end = start + '\n'.len_utf8();
-            tokens.push(token(TokenKind::Newline, "\n", Span { start, end }));
+            tokens.push(token(
+                TokenKind::Newline,
+                &source[start..end],
+                Span { start, end },
+            ));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {
