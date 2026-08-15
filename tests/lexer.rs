@@ -1365,6 +1365,47 @@ fn escaped_dollar_before_brace_is_literal_in_string() {
     );
 }
 
+/// `\` の直後の**単独CR**もE0108(CR1バイトのspan)になること(仕様1章L-16)。
+/// LF形は backslash_before_raw_newline_reports_e0108_with_span が固定済みで、
+/// CR側だけ検知を外す退行(変異N03)をこのテストが殺す。
+#[test]
+fn backslash_before_lone_cr_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"\\\r\"";
+
+    // Act
+    let err = lex(source).expect_err("`\\` 直後の単独`\\r`はE0108としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
+/// `\u{` の内側に生の改行が来てもE0112がL-16(E0108)より優先すること
+/// (仕様1章L-15注の改行形。EOF形は unicode_escape_unclosed_... が固定済み)。
+#[test]
+fn unicode_escape_broken_by_newline_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{41\n}\"";
+
+    // Act
+    let err = lex(source).expect_err("`\\u{` の内側の改行はE0112としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 6 },
+        }
+    );
+}
+
 /// 文字列中の**単独CR**もE0108になること(仕様1章L-16のCR形〔負例: string-raw-newline〕)。
 /// CRLFは文字列外でも合法なため、E0108がE0117(L-29)より優先する事実を
 /// 検証できるのはこの単独CR形だけ(impl-reviewの指摘による追加)。
