@@ -36,6 +36,8 @@ pub struct Token {
 /// 字句エラーのコード(仕様1章のE01xx)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// ブロックコメント `/*` は存在しない(仕様1章L-5)。
+    E0102,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
@@ -132,6 +134,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     }
                     chars.next();
                 }
+            } else if chars.peek().map(|&(_, d)| d) == Some('*') {
+                // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
+                // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
+                return Err(LexError {
+                    code: ErrorCode::E0102,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8() + '*'.len_utf8(),
+                    },
+                });
             } else {
                 return Err(LexError {
                     code: ErrorCode::E0116,

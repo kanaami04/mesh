@@ -789,6 +789,27 @@ fn line_comment_stops_before_crlf() {
     );
 }
 
+/// ブロックコメント `/*` がエラーE0102として位置つきで報告されること
+/// (仕様1章L-5「ブロックコメントはありません。`//` を使ってください」〔負例: block-comment〕)。
+/// spanは `/*` の2バイトぶん。エラーメッセージ文言の検証はメッセージ実装サイクルの担当。
+#[test]
+fn block_comment_reports_e0102_with_span() {
+    // Arrange
+    let source = "/* x";
+
+    // Act
+    let err = lex(source).expect_err("ブロックコメント `/*` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0102,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
