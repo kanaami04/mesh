@@ -31,9 +31,9 @@ language/
 │   ├── research/            # 他言語調査(MoonBit, Topcoat, Gleam...)
 │   ├── spec/                # 言語仕様書
 │   └── adr/                 # 意思決定記録(ADR)+ 前提台帳
-├── src/                 # コンパイラ本体+CLI(Rust単一crate。テストは src/tests/)
+├── src/                 # コンパイラ本体+CLI(Rust単一crate)
 ├── examples/            # Meshのサンプルコード(仕様確定後)
-└── tests/               # conformanceテスト(仕様と1:1対応)
+└── tests/               # Rust統合テスト+conformanceテスト(仕様と1:1対応)
 ```
 
 ## いま何のフェーズか

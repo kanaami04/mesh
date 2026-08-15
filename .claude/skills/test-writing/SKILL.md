@@ -19,7 +19,7 @@ export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && c
 
 ## 配置と命名
 
-- TDD対象のテストは `src/tests/<モジュール名>.rs`(統合テスト。例: `src/tests/lexer.rs`)。**ファイルを新設したらCargo.tomlに `[[test]] name/path` を1エントリ追記する**(src/tests/はcargo既定外のため)。スナップショットは `src/tests/snapshots/` に生成される。
+- TDD対象のテストは `tests/<モジュール名>.rs`(統合テスト。例: `tests/lexer.rs`)。cargo既定の配置なので、ファイルを追加するだけで自動発見される(Cargo.tomlの編集は不要)。スナップショットは `tests/snapshots/` に生成される。
 - fn名は英語snake_caseで「入力→期待」を表す(`empty_source_produces_no_tokens`)。
 - 各テストに日本語docコメントで振る舞いを1文書く。**仕様の規則に対応するときは規則番号を書く**(例: `仕様1章L-6`)。
 - 1テスト関数=1振る舞い。同一振る舞いの正例なら複数ケースを同関数に入れてよい(`"42"` と `"1 22"`)。
@@ -38,7 +38,7 @@ export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && c
 ## スナップショット(insta)の併用
 
 - **TDDサイクルの検証には使わない**(期待値明示のassertで回す)。サイクル群の完了後に**回帰の網**として追加する。
-- 書き方: テストファイル末尾に `insta::assert_debug_snapshot!(対象式)`。スナップショットは `src/tests/snapshots/` に生成される。
+- 書き方: テストファイル末尾に `insta::assert_debug_snapshot!(対象式)`。スナップショットは `tests/snapshots/` に生成される。
 - 初回生成: `INSTA_UPDATE=always cargo test --test <名前>`(PATH・cdは上記コマンド形)→ 生成された `.snap` を**必ず目視レビュー**(内容が仕様と一致するか)→ 通常実行で緑を確認 → `.snap` もコミットする。
 - 意図しない差分が出たら「実装のバグ」か「仕様の意図的変更」かを判断し、後者のみ更新する。
 

@@ -8,9 +8,3 @@ description = "Mesh: FEとBEを1つの言語で編み合わせる、人に読み
 
 [dev-dependencies]
 insta = "1"
-
-# テストは src/tests/ に置く(このリポジトリの流儀)。
-# cargoの既定はルート tests/ のため、ファイルを追加したらここに [[test]] を1つ足す。
-[[test]]
-name = "lexer"
-path = "src/tests/lexer.rs"

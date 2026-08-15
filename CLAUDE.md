@@ -63,7 +63,7 @@ docs/の全文書とClaudeの解説は **docs/style-guide.md** に従う。核�
 
 - **実装は `tdd` スキルのRed→Green→Refactorサイクルで進める**。テストが先、失敗確認が先。スナップショットテストはサイクル完了後の回帰の網として使う(スキル内の併用ルール参照)。
 - Rust edition 2024、`cargo fmt` + `cargo clippy` をクリーンに保つ。
-- crate構成はリポジトリ直下の単一crate(`src/`。テストは `src/tests/`+Cargo.tomlの`[[test]]`エントリ)から始め、痛みが出てから分割する。
+- crate構成はリポジトリ直下の単一crate(`src/`。統合テストはcargo既定の `tests/`)から始め、痛みが出てから分割する。
 - パーサは**手書き再帰下降**(エラーメッセージ品質を最優先するため。パーサジェネレータは使わない)。
 - テストは docs/testing-strategy.md に従う。**スナップショットテスト(insta)が主力**。新機能はスナップショット+負例(エラーになるべきコード)をセットで追加。
 - 生成JSの実行検証はNode.jsで行う(E2Eテスト)。
