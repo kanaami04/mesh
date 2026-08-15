@@ -52,6 +52,8 @@ pub enum ErrorCode {
     E0116,
     /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
     E0117,
+    /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
+    E0108,
     /// 一覧に無いエスケープ(仕様1章L-14)。
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
@@ -140,8 +142,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     end = Some(i + '"'.len_utf8());
                     break;
                 } else if d == '\n' || d == '\r' {
+                    // 文字列リテラルの内側では生の改行(LF・CR単独とも)はE0108
+                    // (仕様1章L-16。文字列内ではE0108がL-29=E0117より優先=ADR-0041)。
                     return Err(LexError {
-                        code: ErrorCode::E0116,
+                        code: ErrorCode::E0108,
                         span: Span {
                             start: i,
                             end: i + d.len_utf8(),

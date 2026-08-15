@@ -1040,6 +1040,28 @@ fn invalid_escape_reports_e0111_with_span() {
     );
 }
 
+/// 文字列リテラル中に生の改行(LF)が現れたときはエラーE0108になり、
+/// 違反した改行1バイトを位置として報告すること
+/// (仕様1章L-16〔負例: string-raw-newline〕)。
+/// CRLF・単独CRの形は網で追加する(L-16はE0117より優先=ADR-0041)。
+#[test]
+fn raw_newline_in_string_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"a\nb\"";
+
+    // Act
+    let err = lex(source).expect_err("文字列リテラル中の生の改行はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
 /// `\u{H}` エスケープのHが16進1〜6桁でない・U+10FFFF超・サロゲート域
 /// U+D800〜DFFFのいずれかのときエラーE0112になり、`\u{H}` エスケープ全体
 /// (`\` から `}` まで)を位置として報告すること(仕様1章L-15〔負例: unicode-escape-range〕)。
