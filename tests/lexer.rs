@@ -1063,6 +1063,29 @@ fn unicode_escape_out_of_range_reports_e0112_with_span() {
     );
 }
 
+/// `\u{H}` エスケープのHがサロゲート域U+D800〜U+DFFFのいずれかのときエラーE0112になり、
+/// `\u{H}` エスケープ全体(`\` から `}` まで)を位置として報告すること
+/// (仕様1章L-15〔負例: unicode-escape-range〕)。
+/// サロゲートはUTF-16のペア用符号位置であり単独では文字を表さないため、
+/// 範囲としては有効でも(U+10FFFF以下でも)拒否する。
+#[test]
+fn unicode_escape_surrogate_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{D800}\"";
+
+    // Act
+    let err = lex(source).expect_err("サロゲート域`\\u{D800}`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 9 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。

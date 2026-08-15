@@ -155,9 +155,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             chars.next();
                             // `\u{H}` のコードポイント範囲チェック(仕様1章L-15)。
                             // `{`〜`}` が1〜6桁の16進数で閉じている形だけを検証し、
-                            // U+10FFFFを超える値をE0112(span=`\`から`}`の直後まで)にする。
+                            // U+10FFFFを超える値とサロゲート域(U+D800〜U+DFFF)を
+                            // E0112(span=`\`から`}`の直後まで)にする。
                             // 形式が崩れている場合(`{`が無い/中身が空・非16進/7桁以上/
-                            // `}`が来ない)とサロゲート域は、ここでは検証せず従来どおり透過する。
+                            // `}`が来ない)は、ここでは検証せず従来どおり透過する。
                             if chars.peek().map(|&(_, d)| d) == Some('{') {
                                 chars.next();
                                 let mut digits = String::new();
@@ -178,7 +179,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                                     // 6桁以下の16進数はu32に必ず収まる
                                     let value = u32::from_str_radix(&digits, 16)
                                         .expect("6桁以下の16進数はu32に収まる");
-                                    if value > 0x10FFFF {
+                                    if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
                                         return Err(LexError {
                                             code: ErrorCode::E0112,
                                             span: Span {
