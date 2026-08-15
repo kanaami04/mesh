@@ -60,3 +60,4 @@
 - [ADR-0038](0038-module-details.md) — トップレベルはletのみ・定数式初期化・as別名・リーク禁止・ルートimport不可 ✅
 - [ADR-0039](0039-language-name-mesh.md) — 言語名はMesh(0004を上書き)✅
 - [ADR-0040](0040-spec-authoring-decisions.md) — 仕様執筆時確定事項の追補採録(X-29/F-1/T-26/H-10/M-16/L-7)✅
+- [ADR-0041](0041-newline-codes-crlf.md) — 改行はLF/CRLFを受理・単独CRはE0117・Unicode改行類は非改行 ✅

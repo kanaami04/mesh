@@ -12,6 +12,8 @@ pub enum TokenKind {
     Ident,
     /// 代入記号 `=`。
     Eq,
+    /// 改行(仕様1章L-19の文終端の基盤)。
+    Newline,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -37,12 +39,16 @@ pub enum ErrorCode {
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
-    /// 注意: 固有の規則を持つが未実装の文字(改行=L-19、`;`=E0110、
-    /// 非ASCII識別子=E0103、`/*`=E0102)も現状は暫定でこのコードになる。
+    /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103、
+    /// `/*`=E0102)も現状は暫定でこのコードになる。
     /// 各規則の実装サイクルで正しいコードに置き換える。
     /// また未実装の正当なトークン(演算子 `+` `(` 等、文字列開始 `"`)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
+    /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
+    /// (L-29が非改行と規定=ADR-0041。上の暫定と違い置き換え予定なし)。
     E0116,
+    /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
+    E0117,
 }
 
 /// 字句解析エラー。
@@ -76,7 +82,41 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         } else if c == '=' {
             chars.next();
             let end = start + '='.len_utf8();
-            tokens.push(token(TokenKind::Eq, "=", Span { start, end }));
+            // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
+            // 分岐条件との二重管理でなく構造で守る)
+            tokens.push(token(
+                TokenKind::Eq,
+                &source[start..end],
+                Span { start, end },
+            ));
+        } else if c == '\n' {
+            chars.next();
+            let end = start + '\n'.len_utf8();
+            tokens.push(token(
+                TokenKind::Newline,
+                &source[start..end],
+                Span { start, end },
+            ));
+        } else if c == '\r' {
+            chars.next();
+            if chars.peek().map(|&(_, d)| d) == Some('\n') {
+                chars.next();
+                // CRLFは1個の改行(仕様1章L-29)。endは他分岐と同じくバイト長から導出する
+                let end = start + '\r'.len_utf8() + '\n'.len_utf8();
+                tokens.push(token(
+                    TokenKind::Newline,
+                    &source[start..end],
+                    Span { start, end },
+                ));
+            } else {
+                return Err(LexError {
+                    code: ErrorCode::E0117,
+                    span: Span {
+                        start,
+                        end: start + '\r'.len_utf8(),
+                    },
+                });
+            }
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else {

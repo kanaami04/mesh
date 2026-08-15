@@ -400,11 +400,328 @@ fn digit_separator_before_letter_reports_e0105_with_span() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int)と
-/// 桁区切りを1入力に含むスナップショット。
+/// 改行がNewlineトークンとして切り出されること(仕様1章L-19の字句側の基盤)。
+/// textは生の字面 `"\n"` を保持する。文終端の挿入判定(L-19/L-20/L-21)は
+/// **字句側**の後続サイクルの責務(ADR-0010のGo方式・ADR-0031の深度スタック)。
+/// 現サイクルは改行の事実だけをトークン化する。
+#[test]
+fn newline_produces_newline_token() {
+    // Arrange
+    let source = "1\n2";
+
+    // Act
+    let tokens = lex(source).expect("改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+        ]
+    );
+}
+
+/// 複数行のプログラム全体が字句解析でき、**2行目以降のspanが改行ぶん正しく
+/// オフセットされる**こと(2つ目の `let` が10..13になる。仕様1章L-19の受け入れ確認)。
+/// このオフセット検証が固有価値なので、単一行のspanテストと統合しないこと。
+/// Newline実装後は最初から通るためRedを経ていない、後追いの回帰テスト。
+#[test]
+fn multi_line_program_lexes_across_newlines() {
+    // Arrange
+    let source = "let x = 1\nlet y = 2";
+
+    // Act
+    let tokens = lex(source).expect("複数行プログラムの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 10, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+        ]
+    );
+}
+
+/// 末尾改行つきの入力が最後にNewlineトークンを持つこと(仕様1章L-19)。
+/// POSIX準拠のテキストファイルは末尾に改行を持つのが標準で、実際の
+/// .meshファイルのほぼすべてがこの形になる。
+#[test]
+fn trailing_newline_produces_final_newline_token() {
+    // Arrange
+    let source = "1\n";
+
+    // Act
+    let tokens = lex(source).expect("末尾改行つき入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+        ]
+    );
+}
+
+/// 改行だけの入力が空でなく1個のNewlineトークンになること(仕様1章L-19)。
+/// 空入力(トークンゼロ)との境界。オフセット0のNewlineもここで固定する。
+#[test]
+fn newline_only_source_produces_single_newline_token() {
+    // Arrange
+    let source = "\n";
+
+    // Act
+    let tokens = lex(source).expect("改行のみの入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Newline,
+            text: "\n".to_string(),
+            span: Span { start: 0, end: 1 },
+        }]
+    );
+}
+
+/// 行末の空白は改行トークンに影響しないこと(仕様1章1.2・L-19)。
+/// 将来のL-20「行末のトークン」判定は、行末の空白がトークンにならないこと
+/// を前提に成立する——その字句側の前提をここで固定する。
+#[test]
+fn trailing_spaces_before_newline_are_skipped() {
+    // Arrange
+    let source = "1 \n2";
+
+    // Act
+    let tokens = lex(source).expect("行末空白+改行の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 直後が `\n` でない単独の `\r` はE0117になること(仕様1章L-29〔負例: lone-cr〕)。
+#[test]
+fn lone_carriage_return_reports_e0117_with_span() {
+    // Arrange
+    let source = "\r";
+
+    // Act
+    let err = lex(source).expect_err("単独の`\\r`はE0117としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0117,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
+/// 行中のCR(直後が `\n` 以外の文字)もE0117になること(仕様1章L-29〔負例: lone-cr〕)。
+/// 単独CRの2形(EOF直前=上のテスト/行中=このテスト)のうち、旧Mac形式
+/// `"1\r2"` が踏む実用上の主経路を固定する。
+#[test]
+fn mid_line_carriage_return_reports_e0117_with_span() {
+    // Arrange
+    let source = "1\r2";
+
+    // Act
+    let err = lex(source).expect_err("行中の`\\r`はE0117としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0117,
+            span: Span { start: 1, end: 2 },
+        }
+    );
+}
+
+/// Unicode改行類(U+2028 LINE SEPARATOR)は改行とみなさず、E0116のままであること
+/// (仕様1章L-29第3項。ADR-0041が代替案を検討のうえ確定した挙動の固定——
+/// 「JSはU+2028を改行扱いするから合わせる」変更が入ったら、このテストが検知する)。
+/// U+0085・U+2029も同じ規則。spanは文字のバイト幅(U+2028は3バイト)。
+#[test]
+fn unicode_line_separator_is_not_newline() {
+    // Arrange
+    let source = "1\u{2028}2";
+
+    // Act
+    let err = lex(source).expect_err("U+2028は改行でないためE0116エラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 1, end: 4 },
+        }
+    );
+}
+
+/// CRLF(`\r\n`)は1個のNewlineトークンになり、textは生の字面 `\r\n` になること
+/// (仕様1章L-29〔正例: crlf-newline〕・ADR-0041)。
+#[test]
+fn crlf_produces_single_newline_token() {
+    // Arrange
+    let source = "1\r\n2";
+
+    // Act
+    let tokens = lex(source).expect("CRLFを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\r\n".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 連続した改行がそれぞれ独立したNewlineトークンになること(仕様1章L-19)。
+/// 空行(空文)のスキップはパーサの担当で、字句は事実をそのまま伝える。
+#[test]
+fn consecutive_newlines_each_produce_token() {
+    // Arrange
+    let source = "1\n\n2";
+
+    // Act
+    let tokens = lex(source).expect("連続改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
+/// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\r\nanswer\n"));
 }
