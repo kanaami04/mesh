@@ -36,12 +36,13 @@ pub struct Token {
 /// 字句エラーのコード(仕様1章のE01xx)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// ブロックコメント `/*` は存在しない(仕様1章L-5)。
+    E0102,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
-    /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103、
-    /// `/*`=E0102)も現状は暫定でこのコードになる。
-    /// 各規則の実装サイクルで正しいコードに置き換える。
+    /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
+    /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
     /// また未実装の正当なトークン(演算子 `+` `(` 等、文字列開始 `"`)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
     /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
@@ -119,6 +120,38 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
         } else if c == ' ' || c == '\t' {
             chars.next();
+        } else if c == '/' {
+            chars.next();
+            if chars.peek().map(|&(_, d)| d) == Some('/') {
+                // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
+                // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
+                // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
+                chars.next();
+                while let Some(&(_, d)) = chars.peek() {
+                    if d == '\n' || d == '\r' {
+                        break;
+                    }
+                    chars.next();
+                }
+            } else if chars.peek().map(|&(_, d)| d) == Some('*') {
+                // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
+                // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
+                return Err(LexError {
+                    code: ErrorCode::E0102,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8() + '*'.len_utf8(),
+                    },
+                });
+            } else {
+                return Err(LexError {
+                    code: ErrorCode::E0116,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8(),
+                    },
+                });
+            }
         } else {
             return Err(LexError {
                 code: ErrorCode::E0116,

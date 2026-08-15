@@ -717,11 +717,267 @@ fn consecutive_newlines_each_produce_token() {
     );
 }
 
+/// `//` から行末まではコメントとして読み飛ばされ、トークンを生成しないこと
+/// (仕様1章L-4〔正例: line-comment〕)。改行自体はコメントに含まれず、独立した
+/// Newlineトークンとして残る(L-4「行末トークンの判定はコメントを除去した後の
+/// 行末に対して行う」の字句側基盤)。
+#[test]
+fn line_comment_produces_no_tokens() {
+    // Arrange
+    let source = "1 // c\n2";
+
+    // Act
+    let tokens = lex(source).expect("行コメントを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+        ]
+    );
+}
+
+/// 行コメントのスキャンは `\r\n` の手前(`\r` の直前)で止まり、`\r` をコメントに
+/// 飲み込まないこと(仕様1章L-4とL-29の相互作用・ADR-0041)。
+/// コメントの読み飛ばしを `\n` の手前だけで止める実装だと、CRLF行では `\r` が
+/// コメントの一部として消費され、続くNewlineトークンが `\r\n`(2バイト)ではなく
+/// `\n`(1バイト)に縮む——L-29「CRLFは1個の改行として扱い、字面は保持する」への
+/// 違反となる。この退行を検知する境界テスト。
+#[test]
+fn line_comment_stops_before_crlf() {
+    // Arrange
+    let source = "1 // c\r\n2";
+
+    // Act
+    let tokens =
+        lex(source).expect("CRLF行末の行コメントを含む入力の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\r\n".to_string(),
+                span: Span { start: 6, end: 8 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+        ]
+    );
+}
+
+/// ブロックコメント `/*` がエラーE0102として位置つきで報告されること
+/// (仕様1章L-5「ブロックコメントはありません。`//` を使ってください」〔負例: block-comment〕)。
+/// spanは `/*` の2バイトぶん。エラーメッセージ文言の検証はメッセージ実装サイクルの担当。
+#[test]
+fn block_comment_reports_e0102_with_span() {
+    // Arrange
+    let source = "/* x";
+
+    // Act
+    let err = lex(source).expect_err("ブロックコメント `/*` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0102,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+}
+
+/// 改行なしでファイル末尾に達したコメントも正しく閉じること(仕様1章L-4)。
+/// Redを経ていない後追いの回帰テスト(実装が最初からEOF停止を満たすため)。
+#[test]
+fn line_comment_at_eof_produces_no_tokens() {
+    // Arrange
+    let source = "1 // c";
+
+    // Act
+    let tokens = lex(source).expect("EOFで終わるコメントの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1".to_string(),
+            span: Span { start: 0, end: 1 },
+        }]
+    );
+}
+
+/// コメントの中身は完全に不透明であること(仕様1章L-4・1.4)。コメント外なら
+/// エラーになる字句(`/*`=E0102・`;`・`"`・`` ` ``)や日本語を含んでも反応しない。
+/// 後続トークンのspanで、マルチバイトを含むコメントのバイト幅スキップも同時に固定する。
+/// 次サイクル以降(`;`→E0110・文字列・E0103)が「コメント内なのに反応する」
+/// 退行を起こしたとき、このテストが検知する(変異テストで必要性を実証済み)。
+#[test]
+fn comment_content_is_opaque_to_all_lexical_rules() {
+    // Arrange
+    let source = "1 // /* ; \" ` 合計\n2";
+
+    // Act
+    let tokens = lex(source).expect("コメント内の字句はすべて無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+        ]
+    );
+}
+
+/// コメント中に単独のCRが現れたときはL-29(E0117)がL-4より優先すること
+/// (仕様1章L-4注1〔負例: lone-cr〕・ADR-0041「単独のCRは専用エラー」に例外を設けない)。
+#[test]
+fn lone_cr_inside_comment_reports_e0117_with_span() {
+    // Arrange
+    let source = "1 // a\rb";
+
+    // Act
+    let err = lex(source).expect_err("コメント中の単独`\\r`はE0117としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0117,
+            span: Span { start: 6, end: 7 },
+        }
+    );
+}
+
+/// 単独の `/`(直後が `/` でも `*` でもない)は暫定E0116のままであること
+/// (除算演算子は演算子サイクルで実装。仕様1章L-26)。
+/// span退行(範囲外化)とコード取り違えの両方を変異テストで検知できることを確認済み。
+#[test]
+fn lone_slash_reports_e0116_with_span() {
+    // Arrange
+    let source = "1 / 2";
+
+    // Act
+    let err = lex(source).expect_err("単独の`/`は演算子未実装の現状ではエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
+/// コメントのみの行は裸のNewlineトークンを並べること(仕様1章L-4)。
+/// 将来の終端挿入(ADR-0010)は「直前がNewlineなら挿入しない」を備える必要がある——
+/// その前提となる字句側の出力形をここで固定する。
+#[test]
+fn comment_only_lines_produce_bare_newline_tokens() {
+    // Arrange
+    let source = "// a\n// b\n1";
+
+    // Act
+    let tokens = lex(source).expect("コメントのみの行の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+        ]
+    );
+}
+
+/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること
+/// (仕様1章L-30〔正例: doc-comment-v1〕)。
+/// Redを経ていない後追いの回帰テスト(`///` は `//` で始まるため自動的にコメントになる)。
+#[test]
+fn doc_comment_is_treated_as_line_comment_in_v1() {
+    // Arrange
+    let source = "/// d\n1";
+
+    // Act
+    let tokens = lex(source).expect("`///` コメントの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
-/// 桁区切り・改行2形(LF/CRLF)を1入力に含むスナップショット。
+/// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
+/// を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\r\nanswer\n"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000 // 答え\r\nanswer\n"));
 }
