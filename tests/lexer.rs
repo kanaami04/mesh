@@ -434,11 +434,112 @@ fn newline_produces_newline_token() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int)と
+/// 複数行のプログラム全体が改行トークンを挟んで字句解析できること(仕様1章L-19の受け入れ確認)。
+/// Newline実装後は最初から通るため、TDDサイクルではなく回帰の網として追加(規約の分類どおり)。
+#[test]
+fn multi_line_program_lexes_across_newlines() {
+    // Arrange
+    let source = "let x = 1\nlet y = 2";
+
+    // Act
+    let tokens = lex(source).expect("複数行プログラムの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 10, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+        ]
+    );
+}
+
+/// 連続した改行がそれぞれ独立したNewlineトークンになること(仕様1章L-19)。
+/// 空行(空文)のスキップはパーサの担当で、字句は事実をそのまま伝える。
+#[test]
+fn consecutive_newlines_each_produce_token() {
+    // Arrange
+    let source = "1\n\n2";
+
+    // Act
+    let tokens = lex(source).expect("連続改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切りを1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000\nanswer"));
 }
