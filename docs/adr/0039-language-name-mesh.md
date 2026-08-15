@@ -33,5 +33,5 @@ ADR-0004でMusubiを採用し、仕様1〜7章まで執筆した段階で、ユ�
 ## Consequences
 
 - リポジトリURLは https://github.com/kanaami04/mesh(旧musubi URLは自動リダイレクト)。
-- 実装フェーズのcrate名は `crates/mesh`、ソース拡張子は `.mesh`。
+- 実装フェーズのcrate名は `mesh`、ソース拡張子は `.mesh`(当初は `crates/mesh` に置く想定だったが、2026-08-15にリポジトリ直下の単一crateへ変更。crate名自体は不変)。
 - 旧Mesh(TS実装)はGitHubから削除済み。参照が必要な場合はローカルの `~/kanaami/mesh` を使う。

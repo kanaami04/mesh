@@ -19,7 +19,7 @@ language/
 ├── README.md            # このファイル
 ├── CLAUDE.md            # AI協働のための作業ルール・正文書ルール
 ├── AGENTS.md            # → CLAUDE.md へのsymlink(AIツール向け業界標準の置き場所)
-├── .claude/skills/      # リポジトリ手順のスキル化(adr, doc-review, drift-check, spec-review, spec-write, tdd)
+├── .claude/skills/      # リポジトリ手順のスキル化(adr, doc-review, drift-check, spec-review, spec-write, tdd, test-writing)
 ├── docs/
 │   ├── vision.md            # 要件定義・理想像・非目標
 │   ├── roadmap.md           # フェーズ別ロードマップ
@@ -31,9 +31,9 @@ language/
 │   ├── research/            # 他言語調査(MoonBit, Topcoat, Gleam...)
 │   ├── spec/                # 言語仕様書
 │   └── adr/                 # 意思決定記録(ADR)+ 前提台帳
-├── crates/mesh/         # コンパイラ本体+CLI(Rust。cargo build / cargo test)
+├── src/                 # コンパイラ本体+CLI(Rust単一crate)
 ├── examples/            # Meshのサンプルコード(仕様確定後)
-└── tests/               # conformanceテスト(仕様と1:1対応)
+└── tests/               # Rust統合テスト+conformanceテスト(仕様と1:1対応)
 ```
 
 ## いま何のフェーズか
