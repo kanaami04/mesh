@@ -29,7 +29,7 @@ language/
 │   ├── research/            # 他言語調査(MoonBit, Topcoat, Gleam...)
 │   ├── spec/                # 言語仕様書
 │   └── adr/                 # 意思決定記録(ADR)+ 前提台帳
-├── crates/              # Rustワークスペース(実装開始時に作成)
+├── crates/mesh/         # コンパイラ本体+CLI(Rust。cargo build / cargo test)
 ├── examples/            # Meshのサンプルコード(仕様確定後)
 └── tests/               # conformanceテスト(仕様と1:1対応)
 ```
