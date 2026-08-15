@@ -1086,6 +1086,28 @@ fn unicode_escape_surrogate_reports_e0112_with_span() {
     );
 }
 
+/// `\u{H}` エスケープのHが16進1〜6桁の形式を満たさないとき(代表ケース: 空の波括弧
+/// `\u{}` で0桁)エラーE0112になり、`\u{H}` エスケープ全体(`\` から `}` まで)を
+/// 位置として報告すること(仕様1章L-15〔負例: unicode-escape-range〕)。
+/// 他の形式違反(`{`なし・7桁以上・閉じ`}`なし)はGreen実装後に網で固定する。
+#[test]
+fn unicode_escape_empty_braces_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{}\"";
+
+    // Act
+    let err = lex(source).expect_err("空の波括弧`\\u{}`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 5 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。

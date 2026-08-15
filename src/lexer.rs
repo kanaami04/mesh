@@ -131,7 +131,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             // (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
             // その文字が `"` であっても閉じクォートと判定しない。
             // 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
-            // `\u{...}` は範囲超過(E0112)のみ検証する(下記の `u` 分岐を参照)。
+            // `\u{...}` は形式と値をまとめて検証する(check_unicode_escape、E0112)。
             chars.next();
             let mut end = None;
             while let Some(&(i, d)) = chars.peek() {
@@ -151,45 +151,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     let backslash = i;
                     chars.next();
                     match chars.peek().copied() {
-                        Some((_, 'u')) => {
+                        Some((u_index, 'u')) => {
                             chars.next();
-                            // `\u{H}` のコードポイント範囲チェック(仕様1章L-15)。
-                            // `{`〜`}` が1〜6桁の16進数で閉じている形だけを検証し、
-                            // U+10FFFFを超える値とサロゲート域(U+D800〜U+DFFF)を
-                            // E0112(span=`\`から`}`の直後まで)にする。
-                            // 形式が崩れている場合(`{`が無い/中身が空・非16進/7桁以上/
-                            // `}`が来ない)は、ここでは検証せず従来どおり透過する。
-                            if chars.peek().map(|&(_, d)| d) == Some('{') {
-                                chars.next();
-                                let mut digits = String::new();
-                                while let Some(&(_, h)) = chars.peek() {
-                                    if !h.is_ascii_hexdigit() {
-                                        break;
-                                    }
-                                    digits.push(h);
-                                    chars.next();
-                                }
-                                let close =
-                                    chars.peek().and_then(|&(j, h)| (h == '}').then_some(j));
-                                if let Some(brace) = close
-                                    && !digits.is_empty()
-                                    && digits.len() <= 6
-                                {
-                                    chars.next();
-                                    // 6桁以下の16進数はu32に必ず収まる
-                                    let value = u32::from_str_radix(&digits, 16)
-                                        .expect("6桁以下の16進数はu32に収まる");
-                                    if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
-                                        return Err(LexError {
-                                            code: ErrorCode::E0112,
-                                            span: Span {
-                                                start: backslash,
-                                                end: brace + '}'.len_utf8(),
-                                            },
-                                        });
-                                    }
-                                }
-                            }
+                            check_unicode_escape(&mut chars, backslash, u_index + 'u'.len_utf8())?;
                         }
                         Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$')) => {
                             chars.next();
@@ -274,6 +238,56 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
     }
     Ok(tokens)
+}
+
+/// `\u{H}` エスケープの形式と値を検証する(仕様1章L-15)。`\` の位置 `backslash` と
+/// `u` の直後のバイトオフセット `after_u` を受け取り、`u` の次の文字から読み進める。
+/// 正しい形(`{`+16進1〜6桁+`}`、値がU+10FFFF以下かつサロゲート域U+D800〜U+DFFF外)なら
+/// `}` まで消費して `Ok`。違反はすべてE0112で、spanは `\` から次の位置まで:
+/// - `u` の直後が `{` でない → `u` の直後(=`\u` の2バイト)
+/// - `{` 以降が16進1〜6桁+`}` でなく、違反確定位置が `}` → その `}` の直後
+/// - 上記以外(16進以外の文字・文字列終端・EOF) → 違反文字の手前(=消費済みの末尾)
+fn check_unicode_escape(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    backslash: usize,
+    after_u: usize,
+) -> Result<(), LexError> {
+    let error = |end| LexError {
+        code: ErrorCode::E0112,
+        span: Span {
+            start: backslash,
+            end,
+        },
+    };
+    let Some(&(brace_open, '{')) = chars.peek() else {
+        return Err(error(after_u));
+    };
+    chars.next();
+    // 違反が「閉じ `}` 以外で確定した」ときのspan終端。消費した最後の文字の直後を指す。
+    let mut consumed_end = brace_open + '{'.len_utf8();
+    let mut digits = String::new();
+    while let Some(&(i, h)) = chars.peek() {
+        if !h.is_ascii_hexdigit() {
+            break;
+        }
+        digits.push(h);
+        consumed_end = i + h.len_utf8();
+        chars.next();
+    }
+    let Some(&(brace_close, '}')) = chars.peek() else {
+        return Err(error(consumed_end));
+    };
+    chars.next();
+    let end = brace_close + '}'.len_utf8();
+    if digits.is_empty() || digits.len() > 6 {
+        return Err(error(end));
+    }
+    // 6桁以下の16進数はu32に必ず収まる
+    let value = u32::from_str_radix(&digits, 16).expect("6桁以下の16進数はu32に収まる");
+    if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
+        return Err(error(end));
+    }
+    Ok(())
 }
 
 /// 数値リテラルの桁区切り `_` が「数字と数字の間」にあるか検査する(仕様1章L-9)。
