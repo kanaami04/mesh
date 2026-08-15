@@ -14,6 +14,8 @@ pub enum TokenKind {
     Eq,
     /// 改行(仕様1章L-19の文終端の基盤)。
     Newline,
+    /// 文字列リテラル(仕様1章1.7)。textはクォート込みの生の字面。
+    Str,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -118,6 +120,40 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     },
                 });
             }
+        } else if c == '"' {
+            // 文字列リテラル(仕様1章1.7)。開き `"` を消費し、閉じ `"` まで読み進める。
+            // textはクォート込みの生の字面(エスケープは未実装。`\n`/`\r`/EOFで打ち切る)。
+            chars.next();
+            let mut end = None;
+            while let Some(&(i, d)) = chars.peek() {
+                if d == '"' {
+                    chars.next();
+                    end = Some(i + '"'.len_utf8());
+                    break;
+                } else if d == '\n' || d == '\r' {
+                    return Err(LexError {
+                        code: ErrorCode::E0116,
+                        span: Span {
+                            start: i,
+                            end: i + d.len_utf8(),
+                        },
+                    });
+                } else {
+                    chars.next();
+                }
+            }
+            let end = end.ok_or(LexError {
+                code: ErrorCode::E0116,
+                span: Span {
+                    start,
+                    end: start + '"'.len_utf8(),
+                },
+            })?;
+            tokens.push(token(
+                TokenKind::Str,
+                &source[start..end],
+                Span { start, end },
+            ));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else if c == '/' {

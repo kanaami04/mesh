@@ -972,6 +972,28 @@ fn doc_comment_is_treated_as_line_comment_in_v1() {
     );
 }
 
+/// 二重引用符の単一行文字列リテラルが1個のStrトークンとして切り出されること(仕様1章1.7)。
+/// textはクォートを含む生の字面(エスケープ解決した値は持たない。値への変換は
+/// コード生成側の責務——桁区切り `_` のtext保持と同じ整理)。
+#[test]
+fn string_literal_produces_single_str_token() {
+    // Arrange
+    let source = "\"abc\"";
+
+    // Act
+    let tokens = lex(source).expect("文字列リテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"abc\"".to_string(),
+            span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。
