@@ -11,9 +11,9 @@
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/code-review-check.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/impl-review-check.sh\"",
             "timeout": 10,
-            "statusMessage": "コード変更のcode-reviewチェック中"
+            "statusMessage": "コード変更のimpl-reviewチェック中"
           }
         ]
       }

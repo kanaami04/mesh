@@ -7,5 +7,5 @@
 # 生成JSの実行検証(E2Eテスト)で使うNode関連
 node_modules/
 
-# code-reviewフックのローカル状態(レビュー済みコミットのマーカー)
-.claude/.code-review-marker
+# impl-reviewフックのローカル状態(レビュー済みコミットのマーカー)
+.claude/.impl-review-marker

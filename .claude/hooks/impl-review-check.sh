@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stopフック: 作業ブランチにレビュー未実施のコード変更(src/ tests/ Cargo.toml)が
-# コミットされていたら停止をブロックし、code-reviewスキルを強制する。
-# マーカー(.claude/.code-review-marker)は「どのコミットまでレビュー済みか」のハッシュを保持する。
+# コミットされていたら停止をブロックし、impl-reviewスキルを強制する。
+# マーカー(.claude/.impl-review-marker)は「どのコミットまでレビュー済みか」のハッシュを保持する。
 # 例外: コード変更なし / mainブランチ / ユーザー免除(スキルの例外手順でマーカー更新)。
 # ループ防止: フック起因の継続中(stop_hook_active)は素通しする。
 input=$(cat)
@@ -11,7 +11,7 @@ if echo "$input" | jq -e '.stop_hook_active == true' >/dev/null 2>&1; then
 fi
 
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}" || exit 0
-marker=".claude/.code-review-marker"
+marker=".claude/.impl-review-marker"
 
 # mainブランチ・detached HEADは対象外
 branch=$(git branch --show-current 2>/dev/null)
@@ -39,6 +39,6 @@ unreviewed=$(git log --oneline "$reviewed"..HEAD -- src tests Cargo.toml 2>/dev/
 if [ -n "$unreviewed" ]; then
   # 一度ブロックしたらマーカーを進める(doc-review同様、ロックアウト防止の一発通知方式)
   git rev-parse HEAD > "$marker" 2>/dev/null
-  jq -n --arg c "$unreviewed" '{"decision":"block","reason":("レビュー未実施のコード変更コミットがあります。code-review スキルを実行してから完了してください(ユーザーがレビュー不要と明示した場合はスキルの例外手順に従う)。対象コミット:\n" + $c)}'
+  jq -n --arg c "$unreviewed" '{"decision":"block","reason":("レビュー未実施のコード変更コミットがあります。impl-review スキルを実行してから完了してください(ユーザーがレビュー不要と明示した場合はスキルの例外手順に従う)。対象コミット:\n" + $c)}'
 fi
 exit 0
