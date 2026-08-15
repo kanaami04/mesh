@@ -831,7 +831,118 @@ fn line_comment_at_eof_produces_no_tokens() {
     );
 }
 
-/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること(仕様1章1.3)。
+/// コメントの中身は完全に不透明であること(仕様1章L-4・1.4)。コメント外なら
+/// エラーになる字句(`/*`=E0102・`;`・`"`・`` ` ``)や日本語を含んでも反応しない。
+/// 後続トークンのspanで、マルチバイトを含むコメントのバイト幅スキップも同時に固定する。
+/// 次サイクル以降(`;`→E0110・文字列・E0103)が「コメント内なのに反応する」
+/// 退行を起こしたとき、このテストが検知する(変異テストで必要性を実証済み)。
+#[test]
+fn comment_content_is_opaque_to_all_lexical_rules() {
+    // Arrange
+    let source = "1 // /* ; \" ` 合計\n2";
+
+    // Act
+    let tokens = lex(source).expect("コメント内の字句はすべて無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+        ]
+    );
+}
+
+/// コメント中に単独のCRが現れたときはL-29(E0117)がL-4より優先すること
+/// (仕様1章L-4の注記・ADR-0041「単独のCRは専用エラー」に例外を設けない)。
+#[test]
+fn lone_cr_inside_comment_reports_e0117_with_span() {
+    // Arrange
+    let source = "1 // a\rb";
+
+    // Act
+    let err = lex(source).expect_err("コメント中の単独`\\r`はE0117としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0117,
+            span: Span { start: 6, end: 7 },
+        }
+    );
+}
+
+/// 単独の `/`(直後が `/` でも `*` でもない)は暫定E0116のままであること
+/// (除算演算子は演算子サイクルで実装。仕様1章L-26)。
+/// span退行(範囲外化)とコード取り違えの両方を変異テストで検知できることを確認済み。
+#[test]
+fn lone_slash_reports_e0116_with_span() {
+    // Arrange
+    let source = "1 / 2";
+
+    // Act
+    let err = lex(source).expect_err("単独の`/`は演算子未実装の現状ではエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
+/// コメントのみの行は裸のNewlineトークンを並べること(仕様1章L-4)。
+/// 将来の終端挿入(ADR-0010)は「直前がNewlineなら挿入しない」を備える必要がある——
+/// その前提となる字句側の出力形をここで固定する。
+#[test]
+fn comment_only_lines_produce_bare_newline_tokens() {
+    // Arrange
+    let source = "// a\n// b\n1";
+
+    // Act
+    let tokens = lex(source).expect("コメントのみの行の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+        ]
+    );
+}
+
+/// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること(仕様1章L-30)。
 /// Redを経ていない後追いの回帰テスト(`///` は `//` で始まるため自動的にコメントになる)。
 #[test]
 fn doc_comment_is_treated_as_line_comment_in_v1() {
