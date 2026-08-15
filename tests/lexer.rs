@@ -1152,12 +1152,161 @@ fn unicode_escape_empty_braces_reports_e0112_with_span() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
-/// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
+/// 空文字列リテラル `""` が1個のStrトークンになること(仕様1章1.7)。
+/// Redを経ていない後追いの回帰テスト(開き直後の閉じの境界)。
+#[test]
+fn empty_string_literal_produces_single_str_token() {
+    // Arrange
+    let source = "\"\"";
+
+    // Act
+    let tokens = lex(source).expect("空文字列リテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"\"".to_string(),
+            span: Span { start: 0, end: 2 },
+        }]
+    );
+}
+
+/// 直後が `{` でない `$` はただの文字であること(仕様1章L-28〔正例: dollar-literal〕)。
+/// Redを経ていない後追いの回帰テスト(補間実装のサイクルでも壊れてはならない境界)。
+#[test]
+fn dollar_without_brace_is_literal_in_string() {
+    // Arrange
+    let source = "\"$5\"";
+
+    // Act
+    let tokens = lex(source).expect("`$5` を含む文字列の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"$5\"".to_string(),
+            span: Span { start: 0, end: 4 },
+        }]
+    );
+}
+
+/// 許可エスケープ一式(`\n` `\t` `\\` `\$` `\u{H}`)が透過され、textが生の字面のまま
+/// 保持されること(仕様1章1.7。`\"` と `\r` は個別テストで固定済み)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn valid_escapes_pass_through_with_raw_text() {
+    // Arrange
+    let source = "\"a\\n\\t\\\\\\$\\u{3042}z\"";
+
+    // Act
+    let tokens = lex(source).expect("許可エスケープ一式の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"a\\n\\t\\\\\\$\\u{3042}z\"".to_string(),
+            span: Span { start: 0, end: 20 },
+        }]
+    );
+}
+
+/// 文字列中のCRLF(の `\r`)もE0108になること(仕様1章L-16: CR形を含む
+/// 〔負例: string-raw-newline〕。文字列内ではE0108がE0117より優先=ADR-0041)。
+/// Redを経ていない後追いの回帰テスト(実装はLF/CRを同分岐で処理)。
+#[test]
+fn crlf_in_string_reports_e0108_with_span() {
+    // Arrange
+    let source = "\"a\r\nb\"";
+
+    // Act
+    let err = lex(source).expect_err("文字列中のCRLFはエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0108,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
+/// `\u` の直後に `{` が無い形もE0112になること(仕様1章L-15〔負例: unicode-escape-range〕)。
+/// spanは `\u` の2バイト。Redを経ていない後追いの回帰テスト(一様形式検証の分岐網羅)。
+#[test]
+fn unicode_escape_missing_brace_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\uZ\"";
+
+    // Act
+    let err = lex(source).expect_err("`\\u` の直後に `{` が無い形はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// `\u{H}` のHが7桁以上の形もE0112になること(仕様1章L-15〔負例: unicode-escape-range〕)。
+/// spanはエスケープ全体。Redを経ていない後追いの回帰テスト(一様形式検証の分岐網羅)。
+#[test]
+fn unicode_escape_too_many_digits_reports_e0112_with_span() {
+    // Arrange
+    let source = "\"\\u{1234567}\"";
+
+    // Act
+    let err = lex(source).expect_err("`\\u{H}` のHが7桁の形はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 1, end: 12 },
+        }
+    );
+}
+
+/// 文字列リテラルの日本語は制限されないこと(仕様1章L-6の但し書き)。
+/// spanはバイト単位(5文字×3バイト+クォート2=17バイト)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn japanese_string_literal_is_allowed() {
+    // Arrange
+    let source = "\"こんにちは\"";
+
+    // Act
+    let tokens = lex(source).expect("日本語文字列の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"こんにちは\"".to_string(),
+            span: Span { start: 0, end: 17 },
+        }]
+    );
+}
+
+/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
+/// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント・エスケープ入り文字列
 /// を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
-    insta::assert_debug_snapshot!(mesh::lexer::lex("let answer = 1_000 // 答え\r\nanswer\n"));
+    insta::assert_debug_snapshot!(mesh::lexer::lex(
+        "let msg = \"答え: 1_000\\n\" // 挨拶\r\nmsg\n"
+    ));
 }
