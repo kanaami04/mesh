@@ -994,6 +994,30 @@ fn string_literal_produces_single_str_token() {
     );
 }
 
+/// 文字列リテラル内のエスケープ `\"` は文字列を閉じないこと(仕様1章1.7:
+/// エスケープ `\n` `\t` `\r` `\\` `\"` `\$` `\u{H}`)。
+/// textはエスケープを解決しない生の字面(値への変換はコード生成側の責務——
+/// 桁区切り `_` のtext保持と同じ整理)。
+#[test]
+fn escaped_quote_does_not_terminate_string() {
+    // Arrange
+    let source = "\"a\\\"b\"";
+
+    // Act
+    let tokens =
+        lex(source).expect("エスケープされた `\\\"` を含む文字列の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str,
+            text: "\"a\\\"b\"".to_string(),
+            span: Span { start: 0, end: 6 },
+        }]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Newline)と
 /// 桁区切り・改行2形(LF/CRLF)・日本語入り行コメント(1.4: コメントの日本語は制限しない)
 /// を1入力に含むスナップショット。

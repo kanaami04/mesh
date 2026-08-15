@@ -122,7 +122,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
         } else if c == '"' {
             // 文字列リテラル(仕様1章1.7)。開き `"` を消費し、閉じ `"` まで読み進める。
-            // textはクォート込みの生の字面(エスケープは未実装。`\n`/`\r`/EOFで打ち切る)。
+            // textはクォート込みの生の字面。
+            // `\` はエスケープとして透過する: 直後の1文字を無条件に消費し、
+            // その文字が `"` であっても閉じクォートと判定しない(妥当性検証はまだ行わない)。
             chars.next();
             let mut end = None;
             while let Some(&(i, d)) = chars.peek() {
@@ -138,6 +140,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             end: i + d.len_utf8(),
                         },
                     });
+                } else if d == '\\' {
+                    chars.next();
+                    chars.next();
                 } else {
                     chars.next();
                 }
