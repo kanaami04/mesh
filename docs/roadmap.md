@@ -32,7 +32,7 @@
 - 演算子・記号列: `===` 等のE0116は複数文字spanが必要(現状は1文字固定)。負例ID triple-equals のテストもここで追加
 - 文字列リテラル+補間(L-14〜L-18・L-28)、コメント(L-4/L-5)、行継続(L-19〜L-25)
 - エラーメッセージ層: ErrorCode→文言+修正候補の対応表とDisplay実装(testing-strategy原則2のスナップショット対象)。「字句エラーは1件で止めるか全件集めるか」はパーサ着手前にADR化
-- 設計メモ: scan_whileの引数契約を型で守る(Lexer struct化の候補)/ EOFの空span表現 / Token.textの&str化検討
+- 設計メモ: scan_whileの引数契約を型で守る(Lexer struct化の候補)/ EOFの空span表現 / Token.textの&str化検討 / `lex_ok`テストヘルパー(全正例テストで `text == source[span]` 不変条件を自動検査。文字列リテラル等の正規化トークン導入時に必須)
 
 ## Phase 3: 型検査
 

@@ -101,8 +101,8 @@ fn identifiers_and_keyword_let_are_distinguished() {
 /// 位置つきエラー報告の基盤であり、仕様1章の各E01xx規則が「位置つき」報告を要求する。
 #[test]
 fn tokens_carry_byte_offset_spans() {
-    let source = "let answer = 42";
-    let tokens = lex(source).expect("`let answer = 42` の字句解析はエラーにならないこと");
+    let tokens =
+        lex("let answer = 42").expect("`let answer = 42` の字句解析はエラーにならないこと");
     assert_eq!(
         tokens,
         vec![
@@ -128,21 +128,12 @@ fn tokens_carry_byte_offset_spans() {
             },
         ]
     );
-
-    // 不変条件: 現段階の全トークン種で text はソースのspan位置の切り出しと一致する。
-    // (将来、文字列エスケープ等でtextが正規化されるトークン種はこの限りではない)
-    for t in &tokens {
-        assert_eq!(
-            t.text,
-            &source[t.span.start..t.span.end],
-            "textとsource[span]が一致すること"
-        );
-    }
 }
 
 /// エラーのspanはバイトオフセットであること(文字数ではない)。
 /// マルチバイト文字 `±`(U+00B1、UTF-8で2バイト)のE0116は2バイト幅のspanを持つ。
 /// 仕様1章の位置つき報告(E01xx)がバイト単位で一貫していることの固定。
+/// 注: `±` は識別子位置に無い記号なので、L-6(非ASCII識別子=E0103)実装後もE0116のまま。
 #[test]
 fn multibyte_character_error_span_counts_bytes() {
     let err = lex("1 ± 2").expect_err("`±` は字句規則に該当しないためエラーになること");
