@@ -882,6 +882,40 @@ fn float_missing_integer_part_reports_e0106_with_span() {
     );
 }
 
+/// 基数接頭辞つき整数(仕様1章1.6: `"0x" hexInt | "0b" binInt | "0o" octInt`)が
+/// それぞれ1個のIntトークンになり、textは生の字面のままであること。
+/// 16進の英字は大文字小文字とも hexDigit として受理する。
+#[test]
+fn radix_prefixed_integers_produce_int_tokens() {
+    // Arrange
+    let source = "0xFF 0b1010 0o755";
+
+    // Act
+    let tokens = lex(source).expect("基数接頭辞つき整数の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "0xFF".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0b1010".to_string(),
+                span: Span { start: 5, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0o755".to_string(),
+                span: Span { start: 12, end: 17 },
+            },
+        ]
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

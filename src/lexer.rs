@@ -242,7 +242,46 @@ fn next_token(
         return Ok(None);
     };
     if c.is_ascii_digit() {
+        // 基数接頭辞つき整数リテラル(仕様1章1.6: `int = decInt | "0x" hexInt | "0b" binInt | "0o" octInt`)。
+        // `0` の直後が `x`/`b`/`o` で、かつその次が対応する基数の有効数字のときだけ
+        // 基数リテラルとして読む(2文字先読みの最長一致)。この条件を満たさない場合
+        // (`0x` の後に有効数字が無い、`0z` 等)は下の10進読み取りに委ね、
+        // 従来どおり Int("0")+Ident(...) に割れる。`0x` 単独のE0113診断はL-12サイクルの
+        // 担当であり、ここでは先取りしない。
+        if c == '0' {
+            let prefix = peek_at(source, start + '0'.len_utf8());
+            let is_radix_digit: Option<fn(char) -> bool> = match prefix {
+                Some('x') => Some(|d: char| d.is_ascii_hexdigit()),
+                Some('b') => Some(|d: char| matches!(d, '0' | '1')),
+                Some('o') => Some(|d: char| matches!(d, '0'..='7')),
+                _ => None,
+            };
+            if let Some(is_radix_digit) = is_radix_digit {
+                let prefix_char = prefix.expect("is_radix_digitがSomeならprefixもSome");
+                let digits_at = start + '0'.len_utf8() + prefix_char.len_utf8();
+                if peek_at(source, digits_at).is_some_and(is_radix_digit) {
+                    // `0` と接頭辞(x/b/o)を消費し、基数の有効数字列(と桁区切り `_`)を読む。
+                    chars.next();
+                    chars.next();
+                    let &(digit_start, digit_first) = chars
+                        .peek()
+                        .expect("先読みで有効数字の存在を確認済みのため必ず1文字ある");
+                    let (_, end) = scan_while(source, chars, digit_start, digit_first, |d| {
+                        is_radix_digit(d) || d == '_'
+                    });
+                    let text = &source[start..end];
+                    // 桁区切り `_` の検査(check_digit_separators)は「隣が10進数字か」を
+                    // 前提とするため、16進等の基数リテラルにそのままかけると誤診断になる
+                    // (例: `0xF_F` は `_` の隣が10進数字でないためE0105を誤って出してしまう)。
+                    // 基数別の桁区切り検査はL-9サイクル(次サイクル)の担当とし、
+                    // 今回は基数リテラルへの桁区切り検査を意図的にスキップする。
+                    return Ok(Some(token(TokenKind::Int, text, Span { start, end })));
+                }
+            }
+        }
         // 数値リテラル(仕様1章1.6)。まず整数部(数字と桁区切り `_`)を最長一致で読む。
+        // (ここに到達するのは基数接頭辞リテラルでない場合のみ。上のブロックで
+        // 早期returnするため、以降のfloat/指数部判定に基数リテラルが混入することはない。)
         let (_, mut end) = scan_while(source, chars, start, c, |d| d.is_ascii_digit() || d == '_');
         // `.` を小数点として取り込むのは**直後がASCII数字のときだけ**(仕様1章L-3)。
         // `1..5` の `..`(DotDot)や `1.method` の `.`(Dot)を数値に飲み込まないための
