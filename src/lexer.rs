@@ -247,7 +247,7 @@ fn next_token(
         // 消極規則で、判定は2文字ぶんの非消費先読み(peek_at)で行う。`.` も次の文字も
         // ASCIIなので `end + 1` は必ず文字境界。取り込まない場合は `.` を消費せず
         // Intで止め、演算子側の分岐(DotDot/Dot)に処理を委ねる。
-        let is_float = peek_at(source, end) == Some('.')
+        let mut is_float = peek_at(source, end) == Some('.')
             && peek_at(source, end + '.'.len_utf8()).is_some_and(|d| d.is_ascii_digit());
         if is_float {
             // `.` を消費し、続く小数部(整数部と同じく数字と `_`)を読む。
@@ -257,6 +257,33 @@ fn next_token(
                 d.is_ascii_digit() || d == '_'
             });
             end = frac_end;
+        }
+        // 指数部(仕様1章1.6の `exponent = ("e"|"E") ["+"|"-"] decInt`)。
+        // 小数点の有無に関わらず判定する(`decInt exponent` の形も認めるため、
+        // `1e6` は小数点が無くてもFloat)。
+        // 取り込むのは**`e`/`E`(と省略可能な符号)の直後がASCII数字のときだけ**という
+        // 消極規則。`1e` や `1e+` のように数字が続かない場合は `e` を1文字も消費せず
+        // 数値をInt/Floatで確定し、`e...` は識別子側の分岐(`1end` → Int+Ident)や
+        // 後続の診断(E0113系)に委ねる。字句段階で先に `e` を食べてしまうと、
+        // それらの処理が本来の字面を見られなくなる。
+        // 先読みは `e`・符号・数字すべてASCIIなので、`peek_at` に渡すオフセットは常に文字境界。
+        if let Some(marker) = peek_at(source, end).filter(|d| matches!(d, 'e' | 'E')) {
+            let after_marker = end + marker.len_utf8();
+            let sign = peek_at(source, after_marker).filter(|d| matches!(d, '+' | '-'));
+            let digits_at = after_marker + sign.map_or(0, char::len_utf8);
+            if peek_at(source, digits_at).is_some_and(|d| d.is_ascii_digit()) {
+                // ここで初めて消費する: `e`/`E`、あれば符号、続けて数字列。
+                chars.next();
+                if sign.is_some() {
+                    chars.next();
+                }
+                let &(exp_start, exp_first) = chars.peek().expect("先読みで指数部の数字を確認済み");
+                let (_, exp_end) = scan_while(source, chars, exp_start, exp_first, |d| {
+                    d.is_ascii_digit() || d == '_'
+                });
+                end = exp_end;
+                is_float = true;
+            }
         }
         // 桁区切り `_` の検査(仕様1章L-9)は `.` を跨いだ字面全体にかける
         // (`1_000.5` の整数部・小数部を1回で見る)。`.` は数字でないため

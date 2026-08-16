@@ -788,6 +788,43 @@ fn float_before_dotdot_splits_range() {
     );
 }
 
+/// 指数部つきfloatが1個のFloatトークンになること(仕様1章1.6の指数正例4形: 小文字e・大文字E・小数+負符号・正符号)。
+#[test]
+fn exponent_forms_produce_float_tokens() {
+    // Arrange
+    let source = "1e6 1E6 2.5e-3 1e+6";
+
+    // Act
+    let tokens = lex(source).expect("指数部つきfloatの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Float,
+                text: "1e6".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Float,
+                text: "1E6".to_string(),
+                span: Span { start: 4, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Float,
+                text: "2.5e-3".to_string(),
+                span: Span { start: 8, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Float,
+                text: "1e+6".to_string(),
+                span: Span { start: 15, end: 19 },
+            },
+        ]
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]
