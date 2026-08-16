@@ -2,7 +2,7 @@
 //! docs/spec/01-lexical.md を正とし、TDDサイクルごとに1振る舞いずつ追加する。
 //! 書き方はAAAパターン+1テスト1assert(規約: .claude/skills/test-writing/SKILL.md)。
 
-use mesh::lexer::{ErrorCode, LexError, Span, Token, TokenKind, lex};
+use mesh::lexer::{ErrorCode, LexError, Span, StrSegment, Token, TokenKind, lex};
 
 /// 空のソース文字列を字句解析すると、空のトークン列が返ること。
 #[test]
@@ -987,7 +987,10 @@ fn string_literal_produces_single_str_token() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "abc".to_string(),
+                span: Span { start: 1, end: 4 },
+            }]),
             text: "\"abc\"".to_string(),
             span: Span { start: 0, end: 5 },
         }]
@@ -1011,7 +1014,10 @@ fn escaped_quote_does_not_terminate_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "a\\\"b".to_string(),
+                span: Span { start: 1, end: 5 },
+            }]),
             text: "\"a\\\"b\"".to_string(),
             span: Span { start: 0, end: 6 },
         }]
@@ -1166,7 +1172,7 @@ fn empty_string_literal_produces_single_str_token() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![]),
             text: "\"\"".to_string(),
             span: Span { start: 0, end: 2 },
         }]
@@ -1187,7 +1193,10 @@ fn dollar_without_brace_is_literal_in_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "$5".to_string(),
+                span: Span { start: 1, end: 3 },
+            }]),
             text: "\"$5\"".to_string(),
             span: Span { start: 0, end: 4 },
         }]
@@ -1210,7 +1219,10 @@ fn valid_escapes_pass_through_with_raw_text() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "a\\n\\t\\r\\\\\\$\\u{3042}z".to_string(),
+                span: Span { start: 1, end: 21 },
+            }]),
             text: "\"a\\n\\t\\r\\\\\\$\\u{3042}z\"".to_string(),
             span: Span { start: 0, end: 22 },
         }]
@@ -1295,7 +1307,10 @@ fn unicode_escape_boundary_values_are_accepted() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "\\u{10FFFF}\\u{D7FF}\\u{E000}".to_string(),
+                span: Span { start: 1, end: 27 },
+            }]),
             text: "\"\\u{10FFFF}\\u{D7FF}\\u{E000}\"".to_string(),
             span: Span { start: 0, end: 28 },
         }]
@@ -1358,7 +1373,10 @@ fn escaped_dollar_before_brace_is_literal_in_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "\\${x}".to_string(),
+                span: Span { start: 1, end: 6 },
+            }]),
             text: "\"\\${x}\"".to_string(),
             span: Span { start: 0, end: 7 },
         }]
@@ -1442,7 +1460,10 @@ fn japanese_string_literal_is_allowed() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "こんにちは".to_string(),
+                span: Span { start: 1, end: 16 },
+            }]),
             text: "\"こんにちは\"".to_string(),
             span: Span { start: 0, end: 17 },
         }]

@@ -15,7 +15,8 @@ pub enum TokenKind {
     /// 改行(仕様1章L-19の文終端の基盤)。
     Newline,
     /// 文字列リテラル(仕様1章1.7)。textはクォート込みの生の字面。
-    Str,
+    /// 区分(セグメント)列を内包する(ADR-0042: 入れ子方式)。
+    Str(Vec<StrSegment>),
     /// `(`(仕様1章1.9)。
     LParen,
     /// `)`(仕様1章1.9)。
@@ -47,6 +48,16 @@ pub struct Token {
     pub kind: TokenKind,
     pub text: String,
     pub span: Span,
+}
+
+/// 文字列リテラルの区分(ADR-0042: 入れ子方式)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrSegment {
+    /// テキスト片。textはエスケープ未解決の生の字面、spanはソース絶対位置(クォートを含まない)。
+    Text { text: String, span: Span },
+    /// 補間 `${...}`。tokensは通常の字句モードで再帰トークン化した列(仕様1章L-17)、
+    /// spanは `${` から対応する `}` まで。
+    Interp { tokens: Vec<Token>, span: Span },
 }
 
 /// 字句エラーのコード(仕様1章のE01xx)。バリアントは番号の昇順に並べる。
@@ -225,8 +236,20 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     end: start + '"'.len_utf8(),
                 },
             })?;
+            let content_start = start + '"'.len_utf8();
+            let content_end = end - '"'.len_utf8();
+            let mut segments = Vec::new();
+            if content_start != content_end {
+                segments.push(StrSegment::Text {
+                    text: source[content_start..content_end].to_string(),
+                    span: Span {
+                        start: content_start,
+                        end: content_end,
+                    },
+                });
+            }
             tokens.push(token(
-                TokenKind::Str,
+                TokenKind::Str(segments),
                 &source[start..end],
                 Span { start, end },
             ));

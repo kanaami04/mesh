@@ -69,7 +69,17 @@ Ok(
             },
         },
         Token {
-            kind: Str,
+            kind: Str(
+                [
+                    Text {
+                        text: "答え\\n",
+                        span: Span {
+                            start: 36,
+                            end: 44,
+                        },
+                    },
+                ],
+            ),
             text: "\"答え\\n\"",
             span: Span {
                 start: 35,
