@@ -968,6 +968,87 @@ fn underscore_in_radix_and_exponent_reports_e0105_with_span() {
     );
 }
 
+/// 仕様1章L-12〔負例: number-malformed〕。指数部が空・基数接頭辞の後に数字が無い・
+/// 基数外の数字・先頭ゼロの10進・数字直後の識別子文字の5形はE0113。
+/// spanはリテラル全体を指すこと(修正候補が全体置換のため、`0b102` を `0b10`+`2` に分割しない流儀を5形に適用)。
+#[test]
+fn malformed_number_reports_e0113_with_span() {
+    // Arrange (1: 指数部が空)
+    let source = "1e";
+
+    // Act
+    let err = lex(source).expect_err("`1e` は指数部が空でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+
+    // Arrange (2: 基数接頭辞の後に数字が無い)
+    let source = "0x";
+
+    // Act
+    let err = lex(source).expect_err("`0x` は基数接頭辞の後に数字が無くエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+
+    // Arrange (3: 基数外の数字)
+    let source = "0b102";
+
+    // Act
+    let err = lex(source).expect_err("`0b102` は基数外の数字でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 5 },
+        }
+    );
+
+    // Arrange (4: 先頭ゼロの10進)
+    let source = "0755";
+
+    // Act
+    let err = lex(source).expect_err("`0755` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+
+    // Arrange (5: 数字の直後に識別子文字)
+    let source = "123abc";
+
+    // Act
+    let err = lex(source).expect_err("`123abc` は数字の直後の識別子文字でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 6 },
+        }
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

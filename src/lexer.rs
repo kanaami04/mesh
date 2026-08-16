@@ -176,6 +176,8 @@ pub enum ErrorCode {
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
     E0112,
+    /// 不正な数値リテラル(仕様1章L-12)。
+    E0113,
     /// 補間の内側のコメント `//`(仕様1章L-17(b))。
     E0115,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
@@ -284,6 +286,10 @@ fn next_token(
                     check_digit_separators(&source[digits_at..end], digits_at, |b| {
                         is_radix_digit(char::from(b))
                     })?;
+                    // 末尾検査(仕様1章L-12)。基数スキャンが止まった直後に英数字・`_` が
+                    // 続くのは基数外の数字(`0b102` の `2`)か語の貼り付き(`0xFFg`)で、
+                    // どちらも不正な数値リテラル。詳細は check_trailing_alnum を参照。
+                    check_trailing_alnum(source, chars, start)?;
                     return Ok(Some(token(TokenKind::Int, text, Span { start, end })));
                 }
             }
@@ -368,6 +374,24 @@ fn next_token(
         // (`_` の直前が `e` で非数字のため)ので、指数部専用の検査は要らない。
         let text = &source[start..end];
         check_digit_separators(text, start, |b: u8| b.is_ascii_digit())?;
+        // 不正な数値リテラルの検査2つ(仕様1章L-12)。順序は
+        // **末尾検査 → 先頭ゼロ検査**に固定する。両方に該当する `0755abc` は
+        // 末尾検査が先に発火し、spanが字面全体(`0..7`)になる方を採る
+        // (どちらもE0113なのでコードは変わらず、spanが広い側=読み手が直す範囲を
+        // すべて指す側を選んだ)。
+        //
+        // 桁区切り検査(E0105)より**後**に置くのは仕様1章L-9注2の精神による:
+        // `1_x` は「`_` の位置違反」とだけ言えばよく、E0113を重ねて出さない。
+        check_trailing_alnum(source, chars, start)?;
+        // 先頭ゼロ検査: 10進**int**が `0` で始まり2文字以上なら不正(`0755`・`00`)。
+        // `0` 単独は正当。基数リテラル(`0b1010`)は上のブロックで早期returnするため
+        // ここには来ない。floatの先頭ゼロ(`00.5`)はL-12の対象外(仕様は10進intのみ明記)。
+        if !is_float && text.len() > 1 && text.starts_with('0') {
+            return Err(LexError {
+                code: ErrorCode::E0113,
+                span: Span { start, end },
+            });
+        }
         // Int・Floatとも text はソースの生の字面のまま持つ(正規化しない)。
         // 値への変換は後段の担当で、字句解析器は位置と字面の対応を壊さない。
         let kind = if is_float {
@@ -847,6 +871,39 @@ fn check_digit_separators(
         }
     }
     Ok(())
+}
+
+/// 数値リテラルの直後に英数字・`_` が貼り付いていないか検査する(仕様1章L-12の末尾検査)。
+/// 数値を読み終えた位置(=`chars` の現在位置)から見て次が `[0-9A-Za-z_]` なら、
+/// その連なりを消費して `start..(連なりの終端)` のE0113を返す。連なりが無ければ `Ok(())`。
+///
+/// 「数字で始まる字面は、途中で数値リテラルとして解釈できなくなっても識別子に化けない」
+/// という統一ルールで、これ1つで4つの不正形を捕まえる:
+/// `1e`(指数ガードを通らず `e` が残る)・`0x`(基数ガードを通らず10進 `0` の後に `x` が残る)・
+/// `0b102`(基数スキャンが `0b10` で止まり `2` が残る)・`123abc`。
+/// 指数ガード・基数ガードが「消極判定=条件を満たさなければ1文字も消費しない」設計なのは
+/// このためで、ガードを外れた字面が自然にここへ落ちてくる。
+///
+/// 消費するのは英数字と `_` だけ。`123abc.def` の `.` 以降は消費せず、spanは `123abc` で止まる
+/// (エラーは「数値リテラルが壊れている」ことだけを指し、後続の式まで巻き込まない)。
+fn check_trailing_alnum(
+    source: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    start: usize,
+) -> Result<(), LexError> {
+    let Some(&(tail_start, first)) = chars.peek() else {
+        return Ok(());
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return Ok(());
+    }
+    let (_, end) = scan_while(source, chars, tail_start, first, |d| {
+        d.is_ascii_alphanumeric() || d == '_'
+    });
+    Err(LexError {
+        code: ErrorCode::E0113,
+        span: Span { start, end },
+    })
 }
 
 /// 完全予約語22語(仕様1章1.5)を対応するKw*トークン種別に引く表引き関数。
