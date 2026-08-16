@@ -1286,24 +1286,37 @@ fn lone_cr_inside_comment_reports_e0117_with_span() {
     );
 }
 
-/// 単独の `/`(直後が `/` でも `*` でもない)は暫定E0116のままであること
-/// (除算演算子は演算子サイクルで実装。仕様1章L-26)。
-/// span退行(範囲外化)とコード取り違えの両方を変異テストで検知できることを確認済み。
+/// `/` は除算演算子(仕様1章1.9)として1文字トークンになり、`//` はL-4の行コメントとして
+/// トークンを生成しないこと(仕様1章L-4)。暫定E0116テスト(lone_slash_reports_e0116_with_span)
+/// をこの正例で置き換えた。
 #[test]
-fn lone_slash_reports_e0116_with_span() {
+fn slash_is_division_and_double_slash_is_comment() {
     // Arrange
-    let source = "1 / 2";
+    let source = "10 / 2 // half";
 
     // Act
-    let err = lex(source).expect_err("単独の`/`は演算子未実装の現状ではエラーになること");
+    let tokens = lex(source).expect("`/`は除算、`//`はコメントとしてエラーにならないこと");
 
     // Assert
     assert_eq!(
-        err,
-        LexError {
-            code: ErrorCode::E0116,
-            span: Span { start: 2, end: 3 },
-        }
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "10".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Slash,
+                text: "/".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+        ]
     );
 }
 
@@ -1963,6 +1976,83 @@ fn punctuation_tokens_are_lexed_individually() {
                 kind: TokenKind::RParen,
                 text: ")".to_string(),
                 span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
+/// 1文字演算子12種 `+ - * / % < > ! ? . | :` がそれぞれ個別のトークンになること(仕様1章1.9)。
+#[test]
+fn one_char_operators_are_lexed_individually() {
+    // Arrange
+    let source = "+ - * / % < > ! ? . | :";
+
+    // Act
+    let tokens = lex(source).expect("1文字演算子12種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Plus,
+                text: "+".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Minus,
+                text: "-".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Star,
+                text: "*".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Slash,
+                text: "/".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Percent,
+                text: "%".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Lt,
+                text: "<".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Gt,
+                text: ">".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Bang,
+                text: "!".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Question,
+                text: "?".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Dot,
+                text: ".".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Pipe,
+                text: "|".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 22, end: 23 },
             },
         ]
     );

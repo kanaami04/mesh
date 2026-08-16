@@ -73,6 +73,30 @@ pub enum TokenKind {
     RBrace,
     /// `,`(仕様1章1.9)。
     Comma,
+    /// `+`(仕様1章1.9)。
+    Plus,
+    /// `-`(仕様1章1.9)。
+    Minus,
+    /// `*`(仕様1章1.9)。
+    Star,
+    /// `/`(仕様1章1.9)。
+    Slash,
+    /// `%`(仕様1章1.9)。
+    Percent,
+    /// `<`(仕様1章1.9)。
+    Lt,
+    /// `>`(仕様1章1.9)。
+    Gt,
+    /// `!`(仕様1章1.9)。
+    Bang,
+    /// `?`(仕様1章1.9)。
+    Question,
+    /// `.`(仕様1章1.9)。
+    Dot,
+    /// `|`(仕様1章1.9)。
+    Pipe,
+    /// `:`(仕様1章1.9)。
+    Colon,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -126,7 +150,7 @@ pub enum ErrorCode {
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
-    /// また未実装の正当なトークン(演算子 `+` `(` 等)も
+    /// また未実装の正当なトークンの構成文字(`&&` の `&` 等)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
     /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
     /// (L-29が非改行と規定=ADR-0041。上の暫定と違い置き換え予定なし)。
@@ -204,7 +228,53 @@ fn next_token(
         } else {
             Ok(Some(token(TokenKind::Ident, text, Span { start, end })))
         }
-    } else if let Some(kind) = punctuation_kind(c) {
+    } else if c == '/'
+        && matches!(
+            source[start + '/'.len_utf8()..].chars().next(),
+            Some('/' | '*')
+        )
+    {
+        // `/` の2文字目を**消費せずに**先読みして、コメント(`//`・`/*`)だけをここで捌く
+        // (仕様1章L-4・L-5)。単独の `/` はこの分岐に入らず、下の1文字演算子表で
+        // Slashトークン(除算)になる(仕様1章1.9)。
+        // 先読みはソース文字列側で行う: `start` は未消費位置なので `source[start..]` が
+        // イテレータの残りと一致し、`/` は1バイトなので `start + 1` は必ず文字境界にある。
+        chars.next();
+        let (_, second) = chars.next().expect("ガードで2文字目の存在を確認済み");
+        if second == '/' {
+            if in_interpolation {
+                // 補間 `${...}` の内側では行コメントを許さない(仕様1章L-17(b))。
+                // spanは `//` の2バイト(両方ASCIIなので各1バイト)。
+                return Err(LexError {
+                    code: ErrorCode::E0115,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8() + '/'.len_utf8(),
+                    },
+                });
+            }
+            // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
+            // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
+            // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
+            while let Some(&(_, d)) = chars.peek() {
+                if d == '\n' || d == '\r' {
+                    break;
+                }
+                chars.next();
+            }
+            Ok(None)
+        } else {
+            // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
+            // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
+            Err(LexError {
+                code: ErrorCode::E0102,
+                span: Span {
+                    start,
+                    end: start + '/'.len_utf8() + '*'.len_utf8(),
+                },
+            })
+        }
+    } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
         chars.next();
         let end = start + c.len_utf8();
         Ok(Some(token(kind, &source[start..end], Span { start, end })))
@@ -251,50 +321,6 @@ fn next_token(
     } else if c == ' ' || c == '\t' {
         chars.next();
         Ok(None)
-    } else if c == '/' {
-        chars.next();
-        if chars.peek().map(|&(_, d)| d) == Some('/') {
-            chars.next();
-            if in_interpolation {
-                // 補間 `${...}` の内側では行コメントを許さない(仕様1章L-17(b))。
-                // spanは `//` の2バイト(両方ASCIIなので各1バイト)。
-                return Err(LexError {
-                    code: ErrorCode::E0115,
-                    span: Span {
-                        start,
-                        end: start + '/'.len_utf8() + '/'.len_utf8(),
-                    },
-                });
-            }
-            // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
-            // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
-            // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
-            while let Some(&(_, d)) = chars.peek() {
-                if d == '\n' || d == '\r' {
-                    break;
-                }
-                chars.next();
-            }
-            Ok(None)
-        } else if chars.peek().map(|&(_, d)| d) == Some('*') {
-            // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
-            // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
-            Err(LexError {
-                code: ErrorCode::E0102,
-                span: Span {
-                    start,
-                    end: start + '/'.len_utf8() + '*'.len_utf8(),
-                },
-            })
-        } else {
-            Err(LexError {
-                code: ErrorCode::E0116,
-                span: Span {
-                    start,
-                    end: start + '/'.len_utf8(),
-                },
-            })
-        }
     } else {
         Err(LexError {
             code: ErrorCode::E0116,
@@ -676,6 +702,28 @@ fn punctuation_kind(c: char) -> Option<TokenKind> {
         '{' => Some(TokenKind::LBrace),
         '}' => Some(TokenKind::RBrace),
         ',' => Some(TokenKind::Comma),
+        _ => None,
+    }
+}
+
+/// 1文字の演算子12種(仕様1章1.9: `+ - * / % < > ! ? . | :`)を対応する`TokenKind`に写す。
+/// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
+/// `/` を含むため、コメント(`//`・`/*`)の分岐を通過した後にだけ引くこと。
+/// 2文字演算子(`==` `<=` 等)の最長一致は後続サイクルの担当で、この表は1文字ぶんのみを見る。
+fn operator_kind(c: char) -> Option<TokenKind> {
+    match c {
+        '+' => Some(TokenKind::Plus),
+        '-' => Some(TokenKind::Minus),
+        '*' => Some(TokenKind::Star),
+        '/' => Some(TokenKind::Slash),
+        '%' => Some(TokenKind::Percent),
+        '<' => Some(TokenKind::Lt),
+        '>' => Some(TokenKind::Gt),
+        '!' => Some(TokenKind::Bang),
+        '?' => Some(TokenKind::Question),
+        '.' => Some(TokenKind::Dot),
+        '|' => Some(TokenKind::Pipe),
+        ':' => Some(TokenKind::Colon),
         _ => None,
     }
 }
