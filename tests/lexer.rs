@@ -1109,6 +1109,57 @@ fn int_literal_at_safe_boundary_is_accepted() {
     );
 }
 
+/// floatリテラルがIEEE754倍精度で表現できない大きさのとき(パースすると無限大になる
+/// `1e999` 等)E0114になること(仕様1章L-13〔負例: float-literal-overflow〕)。
+/// 「静かにInfinityにしない」。spanはリテラル全体。
+#[test]
+fn float_literal_overflow_reports_e0114_with_span() {
+    // Arrange
+    let source = "1e999";
+
+    // Act
+    let err = lex(source).expect_err("`1e999` はIEEE754倍精度で表現できないためエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0114,
+            span: Span { start: 0, end: 5 },
+        }
+    );
+}
+
+/// floatが表現可能な大きさの境界を確認すること(仕様1章L-13の境界)。
+/// `1e308` は有限値として表現できるためエラーにならない。`1e-999` は0に丸まるが
+/// 「大きさ」の超過ではない(アンダーフロー方向)のでL-13の対象外。
+/// 負例と同時に追加する境界の網で、1e308側はRedを経ない(現状も通る)。
+#[test]
+fn float_at_representable_magnitude_is_accepted() {
+    // Arrange
+    let source = "1e308 1e-999";
+
+    // Act
+    let tokens = lex(source).expect("`1e308 1e-999` は字句解析エラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Float,
+                text: "1e308".to_string(),
+                span: Span { start: 0, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Float,
+                text: "1e-999".to_string(),
+                span: Span { start: 6, end: 12 },
+            },
+        ]
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

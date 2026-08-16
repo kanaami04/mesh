@@ -180,6 +180,8 @@ pub enum ErrorCode {
     E0112,
     /// 不正な数値リテラル(仕様1章L-12)。
     E0113,
+    /// floatリテラルがIEEE754倍精度で表現できない大きさ(仕様1章L-13)。
+    E0114,
     /// 補間の内側のコメント `//`(仕様1章L-17(b))。
     E0115,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
@@ -414,6 +416,8 @@ fn next_token(
         // Int確定の直前が最後の関門。floatには適用しない(L-13/E0114は別サイクル)。
         if !is_float {
             check_int_overflow(text, Span { start, end }, 10)?;
+        } else {
+            check_float_overflow(text, Span { start, end })?;
         }
         // Int・Floatとも text はソースの生の字面のまま持つ(正規化しない)。
         // 値への変換は後段の担当で、字句解析器は位置と字面の対応を壊さない。
@@ -949,6 +953,38 @@ fn check_int_overflow(text: &str, span: Span, radix: u32) -> Result<(), LexError
     if out_of_range {
         return Err(LexError {
             code: ErrorCode::E0107,
+            span,
+        });
+    }
+    Ok(())
+}
+
+/// floatリテラルがIEEE754倍精度で表現できる大きさに収まっているか検査する
+/// (仕様1章L-13、E0114)。`text` は数字列本体(桁区切り `_` を含みうる)。
+///
+/// `_` を取り除いてから `str::parse::<f64>()` する。floatの字面
+/// (`decInt.decInt[exponent] | decInt exponent`)はRustのf64リテラル構文の
+/// サブセットなので、字句解析器がここまでFloatと判定した`text`のパースは
+/// 必ず成功する。`Err`になるとしたら字句解析器側のバグなので `expect` で落とす。
+///
+/// 大きさが表現域を超えるとf64は静かに`f64::INFINITY`(または`-INFINITY`)に
+/// 丸めてしまう。これを検査なしで通すと、実行時の挙動が字面から想像できない
+/// 値(無限大)にすり替わってしまうため、字句解析の時点でE0114として止める
+/// ——「静かにInfinityにしない」。
+///
+/// アンダーフロー(絶対値が小さすぎて0.0に丸まる、例: `1e-999`)はここでは
+/// 検査しない。仕様1章L-13が対象とするのは「大きさ」(絶対値が大きすぎる方向)
+/// の超過のみで、0への丸めは別の性質の問題であり対象外と明記されているため。
+///
+/// spanは呼び出し側が渡すリテラル全体。
+fn check_float_overflow(text: &str, span: Span) -> Result<(), LexError> {
+    let digits: String = text.chars().filter(|&c| c != '_').collect();
+    let value: f64 = digits
+        .parse()
+        .expect("Float確定済みの字面はf64構文のサブセットなのでパースは必ず成功する");
+    if value.is_infinite() {
+        return Err(LexError {
+            code: ErrorCode::E0114,
             span,
         });
     }
