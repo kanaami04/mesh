@@ -152,6 +152,28 @@ fn all_full_reserved_words_produce_keyword_tokens() {
     );
 }
 
+/// 誘導用予約語(Meshに無い機能を指す予約語)`while` が出現するとE0104が
+/// 位置つきで報告されること(仕様1章1.5・L-7〔負例: reserved-while〕)。
+/// 誘導用は文法上の正当な出現位置が存在しないため、字句段階で即エラーにできる。
+/// reserved-null / reserved-new は網で追加する。
+#[test]
+fn guidance_reserved_word_reports_e0104_with_span() {
+    // Arrange
+    let source = "while x";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `while` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 5 },
+        }
+    );
+}
+
 /// `_` で始まり英字・数字が続く字句は識別子であること(仕様1章1.4: `_tmp` は正規の識別子)。
 #[test]
 fn underscore_prefixed_name_is_identifier() {

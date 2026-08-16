@@ -107,6 +107,8 @@ pub enum StrSegment {
 pub enum ErrorCode {
     /// ブロックコメント `/*` は存在しない(仕様1章L-5)。
     E0102,
+    /// 予約語の誤用——誘導用予約語の出現(仕様1章L-7)。
+    E0104,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
     /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
@@ -188,8 +190,18 @@ fn next_token(
         let (text, end) = scan_while(source, chars, start, c, |d| {
             d.is_ascii_alphanumeric() || d == '_'
         });
-        let kind = keyword_kind(text).unwrap_or(TokenKind::Ident);
-        Ok(Some(token(kind, text, Span { start, end })))
+        if let Some(kind) = keyword_kind(text) {
+            Ok(Some(token(kind, text, Span { start, end })))
+        } else if guidance_reserved(text) {
+            // 誘導用予約語(仕様1章1.5・L-7)。文法上の正当な出現位置が存在しない
+            // ため、字句段階で即エラーにする。spanはスキャン済みの語全体。
+            Err(LexError {
+                code: ErrorCode::E0104,
+                span: Span { start, end },
+            })
+        } else {
+            Ok(Some(token(TokenKind::Ident, text, Span { start, end })))
+        }
     } else if let Some(kind) = punctuation_kind(c) {
         chars.next();
         let end = start + c.len_utf8();
@@ -618,6 +630,38 @@ fn keyword_kind(text: &str) -> Option<TokenKind> {
         "continue" => Some(TokenKind::KwContinue),
         _ => None,
     }
+}
+
+/// 誘導用予約語21語(仕様1章1.5・L-7)かどうかを判定する表引き関数。
+/// Meshに無い機能(他言語由来の構文)を指す語で、文法上の正当な出現位置が
+/// 存在しないため、識別子として認めず字句段階でE0104として報告する
+/// (呼び出し側で `keyword_kind` に該当しなかった語にのみ適用する)。
+fn guidance_reserved(text: &str) -> bool {
+    matches!(
+        text,
+        "while"
+            | "class"
+            | "null"
+            | "undefined"
+            | "enum"
+            | "async"
+            | "await"
+            | "try"
+            | "catch"
+            | "throw"
+            | "var"
+            | "const"
+            | "function"
+            | "switch"
+            | "case"
+            | "do"
+            | "interface"
+            | "new"
+            | "this"
+            | "typeof"
+            | "instanceof"
+            | "defer"
+    )
 }
 
 fn punctuation_kind(c: char) -> Option<TokenKind> {
