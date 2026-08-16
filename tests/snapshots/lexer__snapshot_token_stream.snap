@@ -1,6 +1,6 @@
 ---
 source: tests/lexer.rs
-expression: "mesh::lexer::lex(\"let answer = 1_000 // 答え\\r\\nanswer\\n\")"
+expression: "mesh::lexer::lex(\"let n = 1_000 // 合計\\r\\nlet msg = \\\"答え\\\\n\\\"\\nn\")"
 ---
 Ok(
     [
@@ -14,50 +14,82 @@ Ok(
         },
         Token {
             kind: Ident,
-            text: "answer",
+            text: "n",
             span: Span {
                 start: 4,
-                end: 10,
+                end: 5,
             },
         },
         Token {
             kind: Eq,
             text: "=",
             span: Span {
-                start: 11,
-                end: 12,
+                start: 6,
+                end: 7,
             },
         },
         Token {
             kind: Int,
             text: "1_000",
             span: Span {
-                start: 13,
-                end: 18,
+                start: 8,
+                end: 13,
             },
         },
         Token {
             kind: Newline,
             text: "\r\n",
             span: Span {
-                start: 28,
-                end: 30,
+                start: 23,
+                end: 25,
+            },
+        },
+        Token {
+            kind: KwLet,
+            text: "let",
+            span: Span {
+                start: 25,
+                end: 28,
             },
         },
         Token {
             kind: Ident,
-            text: "answer",
+            text: "msg",
             span: Span {
-                start: 30,
-                end: 36,
+                start: 29,
+                end: 32,
+            },
+        },
+        Token {
+            kind: Eq,
+            text: "=",
+            span: Span {
+                start: 33,
+                end: 34,
+            },
+        },
+        Token {
+            kind: Str,
+            text: "\"答え\\n\"",
+            span: Span {
+                start: 35,
+                end: 45,
             },
         },
         Token {
             kind: Newline,
             text: "\n",
             span: Span {
-                start: 36,
-                end: 37,
+                start: 45,
+                end: 46,
+            },
+        },
+        Token {
+            kind: Ident,
+            text: "n",
+            span: Span {
+                start: 46,
+                end: 47,
             },
         },
     ],

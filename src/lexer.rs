@@ -14,6 +14,8 @@ pub enum TokenKind {
     Eq,
     /// 改行(仕様1章L-19の文終端の基盤)。
     Newline,
+    /// 文字列リテラル(仕様1章1.7)。textはクォート込みの生の字面。
+    Str,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -33,17 +35,23 @@ pub struct Token {
     pub span: Span,
 }
 
-/// 字句エラーのコード(仕様1章のE01xx)。
+/// 字句エラーのコード(仕様1章のE01xx)。バリアントは番号の昇順に並べる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     /// ブロックコメント `/*` は存在しない(仕様1章L-5)。
     E0102,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
+    /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
+    E0108,
+    /// 一覧に無いエスケープ(仕様1章L-14)。
+    E0111,
+    /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
+    E0112,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
-    /// また未実装の正当なトークン(演算子 `+` `(` 等、文字列開始 `"`)も
+    /// また未実装の正当なトークン(演算子 `+` `(` 等)も
     /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
     /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
     /// (L-29が非改行と規定=ADR-0041。上の暫定と違い置き換え予定なし)。
@@ -118,6 +126,92 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     },
                 });
             }
+        } else if c == '"' {
+            // 文字列リテラル(仕様1章1.7)。開き `"` を消費し、閉じ `"` まで読み進める。
+            // textはクォート込みの生の字面。
+            // `\` はエスケープとして扱う: 直後の1文字が許可一覧
+            // (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
+            // その文字が `"` であっても閉じクォートと判定しない。
+            // 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
+            // `\u{...}` は形式と値をまとめて検証する(check_unicode_escape、E0112)。
+            chars.next();
+            let mut end = None;
+            while let Some(&(i, d)) = chars.peek() {
+                if d == '"' {
+                    chars.next();
+                    end = Some(i + '"'.len_utf8());
+                    break;
+                } else if d == '\n' || d == '\r' {
+                    // 文字列リテラルの内側では生の改行(LF・CR単独とも)はE0108
+                    // (仕様1章L-16。文字列内ではE0108がL-29=E0117より優先=ADR-0041)。
+                    return Err(LexError {
+                        code: ErrorCode::E0108,
+                        span: Span {
+                            start: i,
+                            end: i + d.len_utf8(),
+                        },
+                    });
+                } else if d == '\\' {
+                    let backslash = i;
+                    chars.next();
+                    match chars.peek().copied() {
+                        Some((j, nl @ ('\n' | '\r'))) => {
+                            // `\` の直後が生の改行(LF・CR単独とも)のときは、一覧に無い
+                            // エスケープ文字(E0111)ではなくL-16の未終端文字列として扱う
+                            // (仕様1章L-16)。spanは改行1バイトのみ(行をまたがない)。
+                            return Err(LexError {
+                                code: ErrorCode::E0108,
+                                span: Span {
+                                    start: j,
+                                    end: j + nl.len_utf8(),
+                                },
+                            });
+                        }
+                        Some((u_index, 'u')) => {
+                            chars.next();
+                            check_unicode_escape(&mut chars, backslash, u_index + 'u'.len_utf8())?;
+                        }
+                        Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$')) => {
+                            chars.next();
+                        }
+                        Some((j, e)) => {
+                            return Err(LexError {
+                                code: ErrorCode::E0111,
+                                span: Span {
+                                    start: backslash,
+                                    end: j + e.len_utf8(),
+                                },
+                            });
+                        }
+                        None => {
+                            // `\` の直後にEOFに達したときも一覧に無いエスケープ文字
+                            // (E0111)ではなくL-16の未終端文字列として扱う(仕様1章L-16)。
+                            // spanは未終端文字列の流儀どおり開き `"` の1バイト。
+                            return Err(LexError {
+                                code: ErrorCode::E0108,
+                                span: Span {
+                                    start,
+                                    end: start + '"'.len_utf8(),
+                                },
+                            });
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            let end = end.ok_or(LexError {
+                code: ErrorCode::E0108,
+                span: Span {
+                    start,
+                    end: start + '"'.len_utf8(),
+                },
+            })?;
+            tokens.push(token(
+                TokenKind::Str,
+                &source[start..end],
+                Span { start, end },
+            ));
         } else if c == ' ' || c == '\t' {
             chars.next();
         } else if c == '/' {
@@ -163,6 +257,56 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
     }
     Ok(tokens)
+}
+
+/// `\u{H}` エスケープの形式と値を検証する(仕様1章L-15)。`\` の位置 `backslash` と
+/// `u` の直後のバイトオフセット `after_u` を受け取り、`u` の次の文字から読み進める。
+/// 正しい形(`{`+16進1〜6桁+`}`、値がU+10FFFF以下かつサロゲート域U+D800〜U+DFFF外)なら
+/// `}` まで消費して `Ok`。違反はすべてE0112で、spanは `\` から次の位置まで:
+/// - `u` の直後が `{` でない → `u` の直後(=`\u` の2バイト)
+/// - `{` 以降が16進1〜6桁+`}` でなく、違反確定位置が `}` → その `}` の直後
+/// - 上記以外(16進以外の文字・文字列終端・EOF) → 違反文字の手前(=消費済みの末尾)
+fn check_unicode_escape(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    backslash: usize,
+    after_u: usize,
+) -> Result<(), LexError> {
+    let error = |end| LexError {
+        code: ErrorCode::E0112,
+        span: Span {
+            start: backslash,
+            end,
+        },
+    };
+    let Some(&(brace_open, '{')) = chars.peek() else {
+        return Err(error(after_u));
+    };
+    chars.next();
+    // 違反が「閉じ `}` 以外で確定した」ときのspan終端。消費した最後の文字の直後を指す。
+    let mut consumed_end = brace_open + '{'.len_utf8();
+    let mut digits = String::new();
+    while let Some(&(i, h)) = chars.peek() {
+        if !h.is_ascii_hexdigit() {
+            break;
+        }
+        digits.push(h);
+        consumed_end = i + h.len_utf8();
+        chars.next();
+    }
+    let Some(&(brace_close, '}')) = chars.peek() else {
+        return Err(error(consumed_end));
+    };
+    chars.next();
+    let end = brace_close + '}'.len_utf8();
+    if digits.is_empty() || digits.len() > 6 {
+        return Err(error(end));
+    }
+    // 6桁以下の16進数はu32に必ず収まる
+    let value = u32::from_str_radix(&digits, 16).expect("6桁以下の16進数はu32に収まる");
+    if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
+        return Err(error(end));
+    }
+    Ok(())
 }
 
 /// 数値リテラルの桁区切り `_` が「数字と数字の間」にあるか検査する(仕様1章L-9)。
