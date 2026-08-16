@@ -8,6 +8,48 @@ pub enum TokenKind {
     Int,
     /// 予約語 `let`(仕様1章1.5)。
     KwLet,
+    /// 予約語 `mut`(仕様1章1.5)。
+    KwMut,
+    /// 予約語 `fn`(仕様1章1.5)。
+    KwFn,
+    /// 予約語 `struct`(仕様1章1.5)。
+    KwStruct,
+    /// 予約語 `type`(仕様1章1.5)。
+    KwType,
+    /// 予約語 `if`(仕様1章1.5)。
+    KwIf,
+    /// 予約語 `else`(仕様1章1.5)。
+    KwElse,
+    /// 予約語 `match`(仕様1章1.5)。
+    KwMatch,
+    /// 予約語 `for`(仕様1章1.5)。
+    KwFor,
+    /// 予約語 `in`(仕様1章1.5)。
+    KwIn,
+    /// 予約語 `return`(仕様1章1.5)。
+    KwReturn,
+    /// 予約語 `import`(仕様1章1.5)。
+    KwImport,
+    /// 予約語 `export`(仕様1章1.5)。
+    KwExport,
+    /// 予約語 `or`(仕様1章1.5)。
+    KwOr,
+    /// 予約語 `is`(仕様1章1.5)。
+    KwIs,
+    /// 予約語 `none`(仕様1章1.5)。
+    KwNone,
+    /// 予約語 `error`(仕様1章1.5)。
+    KwError,
+    /// 予約語 `extern`(仕様1章1.5)。
+    KwExtern,
+    /// 予約語 `true`(仕様1章1.5)。
+    KwTrue,
+    /// 予約語 `false`(仕様1章1.5)。
+    KwFalse,
+    /// 予約語 `break`(仕様1章1.5)。
+    KwBreak,
+    /// 予約語 `continue`(仕様1章1.5)。
+    KwContinue,
     /// 識別子(仕様1章1.4)。
     Ident,
     /// 代入記号 `=`。
@@ -146,11 +188,7 @@ fn next_token(
         let (text, end) = scan_while(source, chars, start, c, |d| {
             d.is_ascii_alphanumeric() || d == '_'
         });
-        let kind = if text == "let" {
-            TokenKind::KwLet
-        } else {
-            TokenKind::Ident
-        };
+        let kind = keyword_kind(text).unwrap_or(TokenKind::Ident);
         Ok(Some(token(kind, text, Span { start, end })))
     } else if let Some(kind) = punctuation_kind(c) {
         chars.next();
@@ -550,6 +588,38 @@ fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
 
 /// 1文字の区切り記号7種(仕様1章1.9: `( ) [ ] { } ,`)を対応する`TokenKind`に写す。
 /// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
+/// 完全予約語22語(仕様1章1.5)を対応するKw*トークン種別に引く表引き関数。
+/// 該当しなければ `None`(呼び出し側でIdentに落とす)。
+/// 誘導用予約語(`while` `null` 等)と文脈キーワード(`component` `state` 等)は
+/// 意図的にここへ入れない(前者はE0104、後者は常にIdentが正——別サイクルの主題)。
+fn keyword_kind(text: &str) -> Option<TokenKind> {
+    match text {
+        "let" => Some(TokenKind::KwLet),
+        "mut" => Some(TokenKind::KwMut),
+        "fn" => Some(TokenKind::KwFn),
+        "struct" => Some(TokenKind::KwStruct),
+        "type" => Some(TokenKind::KwType),
+        "if" => Some(TokenKind::KwIf),
+        "else" => Some(TokenKind::KwElse),
+        "match" => Some(TokenKind::KwMatch),
+        "for" => Some(TokenKind::KwFor),
+        "in" => Some(TokenKind::KwIn),
+        "return" => Some(TokenKind::KwReturn),
+        "import" => Some(TokenKind::KwImport),
+        "export" => Some(TokenKind::KwExport),
+        "or" => Some(TokenKind::KwOr),
+        "is" => Some(TokenKind::KwIs),
+        "none" => Some(TokenKind::KwNone),
+        "error" => Some(TokenKind::KwError),
+        "extern" => Some(TokenKind::KwExtern),
+        "true" => Some(TokenKind::KwTrue),
+        "false" => Some(TokenKind::KwFalse),
+        "break" => Some(TokenKind::KwBreak),
+        "continue" => Some(TokenKind::KwContinue),
+        _ => None,
+    }
+}
+
 fn punctuation_kind(c: char) -> Option<TokenKind> {
     match c {
         '(' => Some(TokenKind::LParen),

@@ -110,6 +110,48 @@ fn identifier_with_keyword_prefix_is_not_reserved() {
     );
 }
 
+/// 完全予約語22語(仕様1章1.5)がそれぞれ専用のキーワードトークンになること。
+/// text/spanは対象外とし種類列に絞る: 22語ぶんのtext/spanを丸ごと明示すると冗長で
+/// 可読性を損なうため、既存の keyword_let_is_distinguished_from_identifiers と同じ方式を採る。
+#[test]
+fn all_full_reserved_words_produce_keyword_tokens() {
+    // Arrange
+    let source = "let mut fn struct type if else match for in return \
+                   import export or is none error extern true false break continue";
+
+    // Act
+    let tokens = lex(source).expect("完全予約語22語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![
+            TokenKind::KwLet,
+            TokenKind::KwMut,
+            TokenKind::KwFn,
+            TokenKind::KwStruct,
+            TokenKind::KwType,
+            TokenKind::KwIf,
+            TokenKind::KwElse,
+            TokenKind::KwMatch,
+            TokenKind::KwFor,
+            TokenKind::KwIn,
+            TokenKind::KwReturn,
+            TokenKind::KwImport,
+            TokenKind::KwExport,
+            TokenKind::KwOr,
+            TokenKind::KwIs,
+            TokenKind::KwNone,
+            TokenKind::KwError,
+            TokenKind::KwExtern,
+            TokenKind::KwTrue,
+            TokenKind::KwFalse,
+            TokenKind::KwBreak,
+            TokenKind::KwContinue,
+        ]
+    );
+}
+
 /// `_` で始まり英字・数字が続く字句は識別子であること(仕様1章1.4: `_tmp` は正規の識別子)。
 #[test]
 fn underscore_prefixed_name_is_identifier() {
