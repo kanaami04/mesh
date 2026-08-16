@@ -1570,6 +1570,45 @@ fn punctuation_tokens_are_lexed_individually() {
     );
 }
 
+/// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
+/// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
+/// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。
+#[test]
+fn interpolation_produces_interp_segment_with_recursive_tokens() {
+    // Arrange
+    let source = "\"a${x}b\"";
+
+    // Act
+    let tokens = lex(source).expect("補間を含む文字列リテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![
+                StrSegment::Text {
+                    text: "a".to_string(),
+                    span: Span { start: 1, end: 2 },
+                },
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "x".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    }],
+                    span: Span { start: 2, end: 6 },
+                },
+                StrSegment::Text {
+                    text: "b".to_string(),
+                    span: Span { start: 6, end: 7 },
+                },
+            ]),
+            text: "\"a${x}b\"".to_string(),
+            span: Span { start: 0, end: 8 },
+        }]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ入り文字列を1入力に含むスナップショット。

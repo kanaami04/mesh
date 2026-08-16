@@ -96,208 +96,292 @@ pub struct LexError {
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
-    while let Some(&(start, c)) = chars.peek() {
-        if c.is_ascii_digit() {
-            let (text, end) = scan_while(source, &mut chars, start, c, |d| {
-                d.is_ascii_digit() || d == '_'
-            });
-            check_digit_separators(text, start)?;
-            tokens.push(token(TokenKind::Int, text, Span { start, end }));
-        } else if c.is_ascii_alphabetic() || c == '_' {
-            let (text, end) = scan_while(source, &mut chars, start, c, |d| {
-                d.is_ascii_alphanumeric() || d == '_'
-            });
-            let kind = if text == "let" {
-                TokenKind::KwLet
-            } else {
-                TokenKind::Ident
-            };
-            tokens.push(token(kind, text, Span { start, end }));
-        } else if let Some(kind) = punctuation_kind(c) {
-            chars.next();
-            let end = start + c.len_utf8();
-            tokens.push(token(kind, &source[start..end], Span { start, end }));
-        } else if c == '=' {
-            chars.next();
-            let end = start + '='.len_utf8();
-            // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
-            // 分岐条件との二重管理でなく構造で守る)
-            tokens.push(token(
-                TokenKind::Eq,
-                &source[start..end],
-                Span { start, end },
-            ));
-        } else if c == '\n' {
-            chars.next();
-            let end = start + '\n'.len_utf8();
-            tokens.push(token(
-                TokenKind::Newline,
-                &source[start..end],
-                Span { start, end },
-            ));
-        } else if c == '\r' {
-            chars.next();
-            if chars.peek().map(|&(_, d)| d) == Some('\n') {
-                chars.next();
-                // CRLFは1個の改行(仕様1章L-29)。endは他分岐と同じくバイト長から導出する
-                let end = start + '\r'.len_utf8() + '\n'.len_utf8();
-                tokens.push(token(
-                    TokenKind::Newline,
-                    &source[start..end],
-                    Span { start, end },
-                ));
-            } else {
-                return Err(LexError {
-                    code: ErrorCode::E0117,
-                    span: Span {
-                        start,
-                        end: start + '\r'.len_utf8(),
-                    },
-                });
-            }
-        } else if c == '"' {
-            // 文字列リテラル(仕様1章1.7)。開き `"` を消費し、閉じ `"` まで読み進める。
-            // textはクォート込みの生の字面。
-            // `\` はエスケープとして扱う: 直後の1文字が許可一覧
-            // (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
-            // その文字が `"` であっても閉じクォートと判定しない。
-            // 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
-            // `\u{...}` は形式と値をまとめて検証する(check_unicode_escape、E0112)。
-            chars.next();
-            let mut end = None;
-            while let Some(&(i, d)) = chars.peek() {
-                if d == '"' {
-                    chars.next();
-                    end = Some(i + '"'.len_utf8());
-                    break;
-                } else if d == '\n' || d == '\r' {
-                    // 文字列リテラルの内側では生の改行(LF・CR単独とも)はE0108
-                    // (仕様1章L-16。文字列内ではE0108がL-29=E0117より優先=ADR-0041)。
-                    return Err(LexError {
-                        code: ErrorCode::E0108,
-                        span: Span {
-                            start: i,
-                            end: i + d.len_utf8(),
-                        },
-                    });
-                } else if d == '\\' {
-                    let backslash = i;
-                    chars.next();
-                    match chars.peek().copied() {
-                        Some((j, nl @ ('\n' | '\r'))) => {
-                            // `\` の直後が生の改行(LF・CR単独とも)のときは、一覧に無い
-                            // エスケープ文字(E0111)ではなくL-16の未終端文字列として扱う
-                            // (仕様1章L-16)。spanは改行1バイトのみ(行をまたがない)。
-                            return Err(LexError {
-                                code: ErrorCode::E0108,
-                                span: Span {
-                                    start: j,
-                                    end: j + nl.len_utf8(),
-                                },
-                            });
-                        }
-                        Some((u_index, 'u')) => {
-                            chars.next();
-                            check_unicode_escape(&mut chars, backslash, u_index + 'u'.len_utf8())?;
-                        }
-                        Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$')) => {
-                            chars.next();
-                        }
-                        Some((j, e)) => {
-                            return Err(LexError {
-                                code: ErrorCode::E0111,
-                                span: Span {
-                                    start: backslash,
-                                    end: j + e.len_utf8(),
-                                },
-                            });
-                        }
-                        None => {
-                            // `\` の直後にEOFに達したときも一覧に無いエスケープ文字
-                            // (E0111)ではなくL-16の未終端文字列として扱う(仕様1章L-16)。
-                            // spanは未終端文字列の流儀どおり開き `"` の1バイト。
-                            return Err(LexError {
-                                code: ErrorCode::E0108,
-                                span: Span {
-                                    start,
-                                    end: start + '"'.len_utf8(),
-                                },
-                            });
-                        }
-                    }
-                } else {
-                    chars.next();
-                }
-            }
-            let end = end.ok_or(LexError {
-                code: ErrorCode::E0108,
-                span: Span {
-                    start,
-                    end: start + '"'.len_utf8(),
-                },
-            })?;
-            let content_start = start + '"'.len_utf8();
-            let content_end = end - '"'.len_utf8();
-            let mut segments = Vec::new();
-            if content_start != content_end {
-                segments.push(StrSegment::Text {
-                    text: source[content_start..content_end].to_string(),
-                    span: Span {
-                        start: content_start,
-                        end: content_end,
-                    },
-                });
-            }
-            tokens.push(token(
-                TokenKind::Str(segments),
-                &source[start..end],
-                Span { start, end },
-            ));
-        } else if c == ' ' || c == '\t' {
-            chars.next();
-        } else if c == '/' {
-            chars.next();
-            if chars.peek().map(|&(_, d)| d) == Some('/') {
-                // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
-                // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
-                // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
-                chars.next();
-                while let Some(&(_, d)) = chars.peek() {
-                    if d == '\n' || d == '\r' {
-                        break;
-                    }
-                    chars.next();
-                }
-            } else if chars.peek().map(|&(_, d)| d) == Some('*') {
-                // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
-                // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
-                return Err(LexError {
-                    code: ErrorCode::E0102,
-                    span: Span {
-                        start,
-                        end: start + '/'.len_utf8() + '*'.len_utf8(),
-                    },
-                });
-            } else {
-                return Err(LexError {
-                    code: ErrorCode::E0116,
-                    span: Span {
-                        start,
-                        end: start + '/'.len_utf8(),
-                    },
-                });
-            }
-        } else {
-            return Err(LexError {
-                code: ErrorCode::E0116,
-                span: Span {
-                    start,
-                    end: start + c.len_utf8(),
-                },
-            });
+    while chars.peek().is_some() {
+        if let Some(t) = next_token(source, &mut chars)? {
+            tokens.push(t);
         }
     }
     Ok(tokens)
+}
+
+/// 現在位置から1トークンぶん読み進める(字句解析の1ステップ)。
+/// 戻り値の `None` は「このステップではトークンを生成しなかった」ことを表す:
+/// 空白・行コメントを読み飛ばした場合と、EOFに達している場合の両方。
+/// 呼び出し側はEOFの判定を `chars.peek()` で行う(空白の読み飛ばしでは位置が進むため
+/// ループは止まらない)。補間 `${...}` の内側も同じ通常の字句モードでトークン化するため、
+/// メインループとこの関数の両方から呼ばれる(仕様1章L-17)。
+fn next_token(
+    source: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+) -> Result<Option<Token>, LexError> {
+    let Some(&(start, c)) = chars.peek() else {
+        return Ok(None);
+    };
+    if c.is_ascii_digit() {
+        let (text, end) = scan_while(source, chars, start, c, |d| d.is_ascii_digit() || d == '_');
+        check_digit_separators(text, start)?;
+        Ok(Some(token(TokenKind::Int, text, Span { start, end })))
+    } else if c.is_ascii_alphabetic() || c == '_' {
+        let (text, end) = scan_while(source, chars, start, c, |d| {
+            d.is_ascii_alphanumeric() || d == '_'
+        });
+        let kind = if text == "let" {
+            TokenKind::KwLet
+        } else {
+            TokenKind::Ident
+        };
+        Ok(Some(token(kind, text, Span { start, end })))
+    } else if let Some(kind) = punctuation_kind(c) {
+        chars.next();
+        let end = start + c.len_utf8();
+        Ok(Some(token(kind, &source[start..end], Span { start, end })))
+    } else if c == '=' {
+        chars.next();
+        let end = start + '='.len_utf8();
+        // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
+        // 分岐条件との二重管理でなく構造で守る)
+        Ok(Some(token(
+            TokenKind::Eq,
+            &source[start..end],
+            Span { start, end },
+        )))
+    } else if c == '\n' {
+        chars.next();
+        let end = start + '\n'.len_utf8();
+        Ok(Some(token(
+            TokenKind::Newline,
+            &source[start..end],
+            Span { start, end },
+        )))
+    } else if c == '\r' {
+        chars.next();
+        if chars.peek().map(|&(_, d)| d) == Some('\n') {
+            chars.next();
+            // CRLFは1個の改行(仕様1章L-29)。endは他分岐と同じくバイト長から導出する
+            let end = start + '\r'.len_utf8() + '\n'.len_utf8();
+            Ok(Some(token(
+                TokenKind::Newline,
+                &source[start..end],
+                Span { start, end },
+            )))
+        } else {
+            Err(LexError {
+                code: ErrorCode::E0117,
+                span: Span {
+                    start,
+                    end: start + '\r'.len_utf8(),
+                },
+            })
+        }
+    } else if c == '"' {
+        scan_string(source, chars, start).map(Some)
+    } else if c == ' ' || c == '\t' {
+        chars.next();
+        Ok(None)
+    } else if c == '/' {
+        chars.next();
+        if chars.peek().map(|&(_, d)| d) == Some('/') {
+            // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
+            // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
+            // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
+            chars.next();
+            while let Some(&(_, d)) = chars.peek() {
+                if d == '\n' || d == '\r' {
+                    break;
+                }
+                chars.next();
+            }
+            Ok(None)
+        } else if chars.peek().map(|&(_, d)| d) == Some('*') {
+            // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
+            // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
+            Err(LexError {
+                code: ErrorCode::E0102,
+                span: Span {
+                    start,
+                    end: start + '/'.len_utf8() + '*'.len_utf8(),
+                },
+            })
+        } else {
+            Err(LexError {
+                code: ErrorCode::E0116,
+                span: Span {
+                    start,
+                    end: start + '/'.len_utf8(),
+                },
+            })
+        }
+    } else {
+        Err(LexError {
+            code: ErrorCode::E0116,
+            span: Span {
+                start,
+                end: start + c.len_utf8(),
+            },
+        })
+    }
+}
+
+/// 文字列リテラル1個を読み進めてトークンにする(仕様1章1.7)。`start` は開き `"` の位置。
+/// 開き `"` を消費し、閉じ `"` まで読み進める。textはクォート込みの生の字面。
+/// `\` はエスケープとして扱う: 直後の1文字が許可一覧
+/// (`n t r \ " $ u`、仕様1章L-14)にあれば消費して透過し、
+/// その文字が `"` であっても閉じクォートと判定しない。
+/// 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
+/// `\u{...}` は形式と値をまとめて検証する(check_unicode_escape、E0112)。
+/// `${` からは補間区分に切り替える(scan_interpolation、仕様1章L-17)。
+fn scan_string(
+    source: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    start: usize,
+) -> Result<Token, LexError> {
+    chars.next();
+    let mut end = None;
+    let mut segments = Vec::new();
+    // 現在蓄積中のテキスト区分の開始位置。区切り(`${`・閉じ `"`)ごとに切り出して進める。
+    let mut text_start = start + '"'.len_utf8();
+    // `text_start..cut` をテキスト区分として閉じる。空(長さ0)なら区分を作らない。
+    let cut_text = |segments: &mut Vec<StrSegment>, text_start: usize, cut: usize| {
+        if text_start != cut {
+            segments.push(StrSegment::Text {
+                text: source[text_start..cut].to_string(),
+                span: Span {
+                    start: text_start,
+                    end: cut,
+                },
+            });
+        }
+    };
+    while let Some(&(i, d)) = chars.peek() {
+        if d == '"' {
+            chars.next();
+            cut_text(&mut segments, text_start, i);
+            end = Some(i + '"'.len_utf8());
+            break;
+        } else if d == '$' {
+            // `$` の直後が `{` のときだけ補間の開始(仕様1章L-17)。
+            // それ以外の `$` は普通の文字としてテキスト区分に含める(仕様1章L-28)。
+            chars.next();
+            if chars.peek().map(|&(_, e)| e) != Some('{') {
+                continue;
+            }
+            chars.next();
+            let Some((tokens, interp_end)) = scan_interpolation(source, chars)? else {
+                // 閉じ `}` を見ないままEOFに達した場合。文字列側の未終端(E0108)に委ねる。
+                continue;
+            };
+            cut_text(&mut segments, text_start, i);
+            segments.push(StrSegment::Interp {
+                tokens,
+                span: Span {
+                    start: i,
+                    end: interp_end,
+                },
+            });
+            text_start = interp_end;
+        } else if d == '\n' || d == '\r' {
+            // 文字列リテラルの内側では生の改行(LF・CR単独とも)はE0108
+            // (仕様1章L-16。文字列内ではE0108がL-29=E0117より優先=ADR-0041)。
+            return Err(LexError {
+                code: ErrorCode::E0108,
+                span: Span {
+                    start: i,
+                    end: i + d.len_utf8(),
+                },
+            });
+        } else if d == '\\' {
+            let backslash = i;
+            chars.next();
+            match chars.peek().copied() {
+                Some((j, nl @ ('\n' | '\r'))) => {
+                    // `\` の直後が生の改行(LF・CR単独とも)のときは、一覧に無い
+                    // エスケープ文字(E0111)ではなくL-16の未終端文字列として扱う
+                    // (仕様1章L-16)。spanは改行1バイトのみ(行をまたがない)。
+                    return Err(LexError {
+                        code: ErrorCode::E0108,
+                        span: Span {
+                            start: j,
+                            end: j + nl.len_utf8(),
+                        },
+                    });
+                }
+                Some((u_index, 'u')) => {
+                    chars.next();
+                    check_unicode_escape(chars, backslash, u_index + 'u'.len_utf8())?;
+                }
+                Some((_, 'n' | 't' | 'r' | '\\' | '"' | '$')) => {
+                    chars.next();
+                }
+                Some((j, e)) => {
+                    return Err(LexError {
+                        code: ErrorCode::E0111,
+                        span: Span {
+                            start: backslash,
+                            end: j + e.len_utf8(),
+                        },
+                    });
+                }
+                None => {
+                    // `\` の直後にEOFに達したときも一覧に無いエスケープ文字
+                    // (E0111)ではなくL-16の未終端文字列として扱う(仕様1章L-16)。
+                    // spanは未終端文字列の流儀どおり開き `"` の1バイト。
+                    return Err(LexError {
+                        code: ErrorCode::E0108,
+                        span: Span {
+                            start,
+                            end: start + '"'.len_utf8(),
+                        },
+                    });
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    let end = end.ok_or(LexError {
+        code: ErrorCode::E0108,
+        span: Span {
+            start,
+            end: start + '"'.len_utf8(),
+        },
+    })?;
+    Ok(token(
+        TokenKind::Str(segments),
+        &source[start..end],
+        Span { start, end },
+    ))
+}
+
+/// 補間 `${...}` の内側を通常の字句モードでトークン化する(仕様1章L-17)。
+/// `${` を消費した直後から呼び、対応する閉じ `}` まで読み進めて
+/// (トークン列, `}` の直後のバイトオフセット)を返す。
+/// 対応関係は**トークン列上**の括弧深度で決める: `( [ {` で+1、`) ] }` で-1し、
+/// 深度0で現れた `}` が対応する閉じ(この `}` はトークン列に含めない)。
+/// 閉じ `}` を見ないままEOFに達したら `Ok(None)`(呼び出し側の未終端文字列E0108に委ねる暫定挙動。
+/// E0109=未終端・不均衡の正式なエラーは後続サイクルで実装する)。
+fn scan_interpolation(
+    source: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+) -> Result<Option<(Vec<Token>, usize)>, LexError> {
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    while chars.peek().is_some() {
+        let Some(t) = next_token(source, chars)? else {
+            // 空白・行コメントの読み飛ばし。位置は進んでいるのでループを続ける。
+            continue;
+        };
+        match t.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RBrace if depth == 0 => return Ok(Some((tokens, t.span.end))),
+            // 深度0での `)` `]`(不均衡)は暫定で無視する。E0109は後続サイクルで実装する。
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                depth = depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+        tokens.push(t);
+    }
+    Ok(None)
 }
 
 /// `\u{H}` エスケープの形式と値を検証する(仕様1章L-15)。`\` の位置 `backslash` と
