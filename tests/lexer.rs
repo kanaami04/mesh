@@ -2262,6 +2262,71 @@ fn arrow_reports_e0116_with_full_span() {
     );
 }
 
+/// バッククォートはE0116であること(仕様1章L-26〔負例: backtick-string〕。
+/// 案内文言「文字列は `"`」はエラーメッセージ層の担当)。
+/// Redを経ていない後追いの回帰テスト(catch-allで既に成立していた挙動の
+/// conformance ID回収。演算子実装が誤って `` ` `` を受理しないことの網)。
+#[test]
+fn backtick_reports_e0116_with_span() {
+    // Arrange
+    let source = "`hello`";
+
+    // Act
+    let err = lex(source).expect_err("バッククォート文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
+/// シングルクォートはE0116であること(仕様1章L-26〔負例: single-quote-string〕。
+/// 案内文言「文字列は `"`」はエラーメッセージ層の担当)。
+/// Redを経ていない後追いの回帰テスト(catch-allで既に成立していた挙動の
+/// conformance ID回収)。
+#[test]
+fn single_quote_reports_e0116_with_span() {
+    // Arrange
+    let source = "'hello'";
+
+    // Act
+    let err = lex(source).expect_err("シングルクォート文字列はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 1 },
+        }
+    );
+}
+
+/// 単独の `&`(直後が `&` でない)はE0116のままであること(仕様1章1.9に単独 `&` は
+/// 無い——`|` は union型で単独が正当だが `&` は `&&` のみ、という非対称の固定)。
+/// Redを経ていない後追いの回帰テスト(`&&` の実装が単独 `&` を誤って受理しないことの網)。
+#[test]
+fn lone_ampersand_reports_e0116_with_span() {
+    // Arrange
+    let source = "a & b";
+
+    // Act
+    let err = lex(source).expect_err("単独の `&` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+}
+
 /// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
 /// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
 /// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。
@@ -2934,14 +2999,15 @@ fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
-/// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
-/// エスケープ・補間入り文字列を1入力に含むスナップショット。
+/// 回帰の網: ここまでのサイクルで実装した代表トークン種(KwLet/Ident/Eq/Int/Str/Newline
+/// /演算子)と桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
+/// エスケープ・補間入り文字列・演算子(1文字 `%`、2文字 `== && <= => ..` の最長一致)を
+/// 1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
+        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn % 2 == 0 && n <= 10 => 0..n"
     ));
 }
