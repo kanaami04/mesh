@@ -106,6 +106,7 @@ binDigit  = "0" | "1"      octDigit = "0"…"7"
 - **L-16**: リテラル中に生の改行が現れた、または閉じ `"` の前にファイルが終わったとき、エラー E0108 を報告し `\n` または閉じ `"` を案内すること。ここでいう生の改行にはLF・CRLF・単独CRを含む。**文字列リテラルの内側ではE0108がL-29(E0117)より優先する**(ADR-0041)。ただし `\u{` の内側で壊れた形はL-15の注が優先する(E0112)。〔負例: `string-raw-newline`(CR形を含む)、`string-unterminated-eof`〕
 - **L-17**(補間): `${` から対応する `}` までは**通常の字句モードで再帰的に**トークン化すること。「対応する `}`」は、再帰トークン化の結果の**トークン列上で**括弧類(`( ) [ ] { }`)の対応を数えて決める(ネストした文字列リテラルやエスケープの中の括弧「文字」は数えない)。補間内にはネストした文字列リテラルを書ける。ただし: (a) 補間を含む文字列全体は物理1行に収まること、(b) 補間内にコメントは書けない(`//` はエラー E0115)。〔正例テスト: `interpolation-nested`(`"${f("x")}"`、`"${f("(")}"`、`"${m[k] or 0}"`)/ 負例: `interpolation-comment`〕
 - **L-18**: `${` が対応する `}` を得ないままリテラル・行が終わる、または補間内の括弧が不均衡なまま終わるとき、エラー E0109 を報告すること。**補間の内側ではE0109がL-16(E0108)より優先する**。〔負例: `unterminated-interpolation`〕
+  - 注: 補間の内側で発生した**他の字句エラー**(ネスト文字列のE0108/E0111/E0112等)は、E0109・E0115より優先して報告する(より具体的な原因を指すほうが修正しやすい。実装は内側エラーの素直な伝播)。
 - **L-28**: 直後が `{` でない `$` はただの文字であること(`"$5"` は合法)。リテラルとして `${` と書きたいときだけ `\$` を使う。〔正例テスト: `dollar-literal`〕
 
 ```
@@ -170,9 +171,9 @@ let user = findUser(id)?
 | invalid-escape | 負例 | L-14 |
 | unicode-escape-range | 負例 | L-15 |
 | string-raw-newline / string-unterminated-eof | 負例 | L-16 |
-| interpolation-nested | 正例(補間サイクルで実装) | L-17 |
-| interpolation-comment | 負例(補間サイクルで実装) | L-17 |
-| unterminated-interpolation | 負例(補間サイクルで実装) | L-18 |
+| interpolation-nested | 正例 | L-17 |
+| interpolation-comment | 負例 | L-17 |
+| unterminated-interpolation | 負例 | L-18 |
 | dollar-literal | 正例 | L-28 |
 | semicolon | 負例 | L-19 |
 | continuation-operators / continuation-method-chain | 正例 | L-20 |

@@ -1800,14 +1800,83 @@ fn raw_newline_inside_interpolation_reports_e0109_with_span() {
     );
 }
 
+/// 補間の内側にコメント `//` を書けないこと(仕様1章L-17(b)〔負例: interpolation-comment〕)。
+/// 補間 `${...}` の内側は通常の字句モードでトークン化するが、行コメントは対応外——
+/// `//` を許すと閉じ`}`まで(実装次第ではファイル末尾まで)コメント扱いで飲み込まれ、
+/// 補間が閉じないまま黙って壊れるため、E0115として明示的に拒否する。
+/// spanは `//` の2バイトを指す。
+#[test]
+fn comment_inside_interpolation_reports_e0115_with_span() {
+    // Arrange
+    let source = "\"${1 // c}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の`//`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0115,
+            span: Span { start: 5, end: 7 },
+        }
+    );
+}
+
+/// 空の補間 `${}` は空のトークン列を持つInterpセグメントになること(仕様1章L-17)。
+/// 空の式を拒否するのはパーサの担当で、字句は事実をそのまま伝える。
+/// Redを経ていない後追いの回帰テスト(境界: 補間ループが1周も回らない形)。
+#[test]
+fn empty_interpolation_produces_interp_with_no_tokens() {
+    // Arrange
+    let source = "\"${}\"";
+
+    // Act
+    let tokens = lex(source).expect("空の補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![],
+                span: Span { start: 1, end: 4 },
+            }]),
+            text: "\"${}\"".to_string(),
+            span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
+/// 補間の内側で発生した字句エラー(ネスト文字列のE0112)がE0109より優先されること
+/// (仕様1章L-18注: より具体的な原因を指す。実装は内側エラーの素直な伝播)。
+/// Redを経ていない後追いの回帰テスト(宿題だった優先順位の固定)。
+#[test]
+fn inner_lexical_error_takes_priority_over_e0109() {
+    // Arrange
+    let source = "\"${\"\\u{}\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内のネスト文字列の\\u{}はE0112としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 4, end: 8 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
-/// エスケープ入り文字列を1入力に含むスナップショット。
+/// エスケープ・補間入り文字列を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let n = 1_000 // 合計\r\nlet msg = \"答え\\n\"\nn"
+        "let n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
     ));
 }

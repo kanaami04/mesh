@@ -1,6 +1,6 @@
 ---
 source: tests/lexer.rs
-expression: "mesh::lexer::lex(\"let n = 1_000 // 合計\\r\\nlet msg = \\\"答え\\\\n\\\"\\nn\")"
+expression: "mesh::lexer::lex(\"let n = 1_000 // 合計\\r\\nlet msg = \\\"答え: ${n}円\\\\n\\\"\\nn\")"
 ---
 Ok(
     [
@@ -72,34 +72,57 @@ Ok(
             kind: Str(
                 [
                     Text {
-                        text: "答え\\n",
+                        text: "答え: ",
                         span: Span {
                             start: 36,
                             end: 44,
                         },
                     },
+                    Interp {
+                        tokens: [
+                            Token {
+                                kind: Ident,
+                                text: "n",
+                                span: Span {
+                                    start: 46,
+                                    end: 47,
+                                },
+                            },
+                        ],
+                        span: Span {
+                            start: 44,
+                            end: 48,
+                        },
+                    },
+                    Text {
+                        text: "円\\n",
+                        span: Span {
+                            start: 48,
+                            end: 53,
+                        },
+                    },
                 ],
             ),
-            text: "\"答え\\n\"",
+            text: "\"答え: ${n}円\\n\"",
             span: Span {
                 start: 35,
-                end: 45,
+                end: 54,
             },
         },
         Token {
             kind: Newline,
             text: "\n",
             span: Span {
-                start: 45,
-                end: 46,
+                start: 54,
+                end: 55,
             },
         },
         Token {
             kind: Ident,
             text: "n",
             span: Span {
-                start: 46,
-                end: 47,
+                start: 55,
+                end: 56,
             },
         },
     ],

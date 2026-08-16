@@ -75,6 +75,8 @@ pub enum ErrorCode {
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
     E0112,
+    /// 補間の内側のコメント `//`(仕様1章L-17(b))。
+    E0115,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
@@ -99,7 +101,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
     while chars.peek().is_some() {
-        if let Some(t) = next_token(source, &mut chars)? {
+        if let Some(t) = next_token(source, &mut chars, false)? {
             tokens.push(t);
         }
     }
@@ -112,9 +114,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 /// 呼び出し側はEOFの判定を `chars.peek()` で行う(空白の読み飛ばしでは位置が進むため
 /// ループは止まらない)。補間 `${...}` の内側も同じ通常の字句モードでトークン化するため、
 /// メインループとこの関数の両方から呼ばれる(仕様1章L-17)。
+/// `in_interpolation` は呼び出し元が補間 `${...}` の内側かどうかを伝える。
+/// コメントはトークンを生成しないため補間ループ側からは検知できず、
+/// 行コメント分岐自身がこのフラグを見てE0115を判定する(仕様1章L-17(b))。
 fn next_token(
     source: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    in_interpolation: bool,
 ) -> Result<Option<Token>, LexError> {
     let Some(&(start, c)) = chars.peek() else {
         return Ok(None);
@@ -183,10 +189,21 @@ fn next_token(
     } else if c == '/' {
         chars.next();
         if chars.peek().map(|&(_, d)| d) == Some('/') {
+            chars.next();
+            if in_interpolation {
+                // 補間 `${...}` の内側では行コメントを許さない(仕様1章L-17(b))。
+                // spanは `//` の2バイト(両方ASCIIなので各1バイト)。
+                return Err(LexError {
+                    code: ErrorCode::E0115,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8() + '/'.len_utf8(),
+                    },
+                });
+            }
             // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
             // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
             // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
-            chars.next();
             while let Some(&(_, d)) = chars.peek() {
                 if d == '\n' || d == '\r' {
                     break;
@@ -374,7 +391,7 @@ fn scan_interpolation(
     let mut tokens = Vec::new();
     let mut depth = 0usize;
     while chars.peek().is_some() {
-        let Some(t) = next_token(source, chars)? else {
+        let Some(t) = next_token(source, chars, true)? else {
             // 空白・行コメントの読み飛ばし。位置は進んでいるのでループを続ける。
             continue;
         };
