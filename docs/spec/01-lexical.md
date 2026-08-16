@@ -149,7 +149,7 @@ let user = findUser(id)?
 
 各トークンの意味・優先順位は3章で定義する(複合代入の意味論も3章)。
 
-- **L-26**(キャッチオール): この一覧・本章のどの規則にも該当しない文字・記号列はエラー E0116 とし、近い正解があれば案内すること: `===` →「等価比較は `==`」/ `->` →「戻り値型は空白のみ・matchの腕は `=>`」/ `` ` `` →「文字列は `"`(`"` でも `${}` 補間が使えます)」/ `'` →「文字列は `"`」。`;` はL-19が、単独CRはL-29が優先する。〔負例: `triple-equals`、`backtick-string`、`single-quote-string`〕
+- **L-26**(キャッチオール): この一覧・本章のどの規則にも該当しない文字・記号列はエラー E0116 とし、近い正解があれば案内すること: `===` →「等価比較は `==`」/ `->` →「戻り値型は空白のみ・matchの腕は `=>`」/ `` ` `` →「文字列は `"`(`"` でも `${}` 補間が使えます)」/ `'` →「文字列は `"`」。`;` はL-19が、単独CRはL-29が優先する。〔負例: `triple-equals`、`arrow-token`、`backtick-string`、`single-quote-string`〕
 
 ## conformance対応表
 
@@ -187,4 +187,4 @@ let user = findUser(id)?
 | postfix-question-newline | 挙動検証 | L-24 |
 | crlf-newline | 正例 | L-29 |
 | lone-cr | 負例 | L-29 |
-| triple-equals / backtick-string / single-quote-string | 負例 | L-26 |
+| triple-equals / arrow-token / backtick-string / single-quote-string | 負例 | L-26 |

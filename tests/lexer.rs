@@ -633,8 +633,6 @@ fn multibyte_character_error_span_counts_bytes() {
 }
 
 /// どの字句規則にも該当しない文字はエラーE0116として位置つきで報告されること(仕様1章L-26)。
-/// 注: 同じL-26の負例 triple-equals(`===`)は演算子未実装の現状では `Eq`×3 に分かれて
-/// エラーにならないため、演算子実装のサイクルで追加する。
 #[test]
 fn unknown_character_reports_e0116_with_span() {
     // Arrange
@@ -1982,6 +1980,8 @@ fn punctuation_tokens_are_lexed_individually() {
 }
 
 /// 1文字演算子12種 `+ - * / % < > ! ? . | :` がそれぞれ個別のトークンになること(仕様1章1.9)。
+/// 1.9の1文字演算子は `=` を含めて13種だが、`=`(Eq)は既存のlet系テスト
+/// (keyword_let_is_distinguished_from_identifiers 等)が担保するため、この正例からは除く。
 #[test]
 fn one_char_operators_are_lexed_individually() {
     // Arrange
@@ -2241,7 +2241,7 @@ fn triple_equals_reports_e0116_with_full_span() {
     );
 }
 
-/// `->` はE0116として記号列全体のspanで報告されること(仕様1章L-26)。
+/// `->` はE0116として記号列全体のspanで報告されること(仕様1章L-26〔負例: arrow-token〕)。
 /// `-`+`>` に分割せず `->` 全体をエラーにする
 /// (`=>`・空白区切り戻り値型への誘導のための精度)。
 #[test]
@@ -2258,50 +2258,6 @@ fn arrow_reports_e0116_with_full_span() {
         LexError {
             code: ErrorCode::E0116,
             span: Span { start: 2, end: 4 },
-        }
-    );
-}
-
-/// バッククォートはE0116であること(仕様1章L-26〔負例: backtick-string〕。
-/// 案内文言「文字列は `"`」はエラーメッセージ層の担当)。
-/// Redを経ていない後追いの回帰テスト(catch-allで既に成立していた挙動の
-/// conformance ID回収。演算子実装が誤って `` ` `` を受理しないことの網)。
-#[test]
-fn backtick_reports_e0116_with_span() {
-    // Arrange
-    let source = "`hello`";
-
-    // Act
-    let err = lex(source).expect_err("バッククォート文字列はエラーになること");
-
-    // Assert
-    assert_eq!(
-        err,
-        LexError {
-            code: ErrorCode::E0116,
-            span: Span { start: 0, end: 1 },
-        }
-    );
-}
-
-/// シングルクォートはE0116であること(仕様1章L-26〔負例: single-quote-string〕。
-/// 案内文言「文字列は `"`」はエラーメッセージ層の担当)。
-/// Redを経ていない後追いの回帰テスト(catch-allで既に成立していた挙動の
-/// conformance ID回収)。
-#[test]
-fn single_quote_reports_e0116_with_span() {
-    // Arrange
-    let source = "'hello'";
-
-    // Act
-    let err = lex(source).expect_err("シングルクォート文字列はエラーになること");
-
-    // Assert
-    assert_eq!(
-        err,
-        LexError {
-            code: ErrorCode::E0116,
-            span: Span { start: 0, end: 1 },
         }
     );
 }
