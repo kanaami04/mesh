@@ -1609,6 +1609,152 @@ fn interpolation_produces_interp_segment_with_recursive_tokens() {
     );
 }
 
+/// 補間内にネストした文字列リテラルを書けること(仕様1章L-17〔正例: interpolation-nested〕)。
+/// ネスト文字列は再帰トークン化が文字列分岐を再度通ることで特別扱いなしに成立する。
+/// Redを経ていない後追いの回帰テスト(実装が最初から満たすことを実測済み)。
+#[test]
+fn nested_string_inside_interpolation_is_tokenized() {
+    // Arrange
+    let source = "\"${f(\"x\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("ネスト文字列入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Text {
+                            text: "x".to_string(),
+                            span: Span { start: 6, end: 7 },
+                        }]),
+                        text: "\"x\"".to_string(),
+                        span: Span { start: 5, end: 8 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 8, end: 9 },
+                    },
+                ],
+                span: Span { start: 1, end: 10 },
+            }]),
+            text: "\"${f(\"x\")}\"".to_string(),
+            span: Span { start: 0, end: 11 },
+        }]
+    );
+}
+
+/// ネスト文字列の**中身の括弧文字**は補間の括弧対応に数えられないこと
+/// (仕様1章L-17「エスケープの中の括弧『文字』は数えない」の文字列側。
+/// 対応はトークン列上で数えるため、文字列内の `(` はStrの中身であり深度に影響しない)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn paren_inside_nested_string_is_not_counted_for_matching() {
+    // Arrange
+    let source = "\"${f(\"(\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("文字列内括弧入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Text {
+                            text: "(".to_string(),
+                            span: Span { start: 6, end: 7 },
+                        }]),
+                        text: "\"(\"".to_string(),
+                        span: Span { start: 5, end: 8 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 8, end: 9 },
+                    },
+                ],
+                span: Span { start: 1, end: 10 },
+            }]),
+            text: "\"${f(\"(\")}\"".to_string(),
+            span: Span { start: 0, end: 11 },
+        }]
+    );
+}
+
+/// 補間内の角括弧 `[ ]` が深度として対応づけられること(仕様1章L-17
+/// 〔正例: interpolation-nested〕。仕様の3例目 `"${m[k] or 0}"` は `or` が
+/// 予約語テーブル未実装(現状Ident)のため、予約語のサイクルで完全形を追加する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn brackets_inside_interpolation_are_depth_matched() {
+    // Arrange
+    let source = "\"${m[k]}\"";
+
+    // Act
+    let tokens = lex(source).expect("角括弧入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "m".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBracket,
+                        text: "[".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "k".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBracket,
+                        text: "]".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                ],
+                span: Span { start: 1, end: 8 },
+            }]),
+            text: "\"${m[k]}\"".to_string(),
+            span: Span { start: 0, end: 9 },
+        }]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ入り文字列を1入力に含むスナップショット。
