@@ -16,6 +16,20 @@ pub enum TokenKind {
     Newline,
     /// 文字列リテラル(仕様1章1.7)。textはクォート込みの生の字面。
     Str,
+    /// `(`(仕様1章1.9)。
+    LParen,
+    /// `)`(仕様1章1.9)。
+    RParen,
+    /// `[`(仕様1章1.9)。
+    LBracket,
+    /// `]`(仕様1章1.9)。
+    RBracket,
+    /// `{`(仕様1章1.9)。
+    LBrace,
+    /// `}`(仕様1章1.9)。
+    RBrace,
+    /// `,`(仕様1章1.9)。
+    Comma,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -88,6 +102,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 TokenKind::Ident
             };
             tokens.push(token(kind, text, Span { start, end }));
+        } else if let Some(kind) = punctuation_kind(c) {
+            chars.next();
+            let end = start + c.len_utf8();
+            tokens.push(token(kind, &source[start..end], Span { start, end }));
         } else if c == '=' {
             chars.next();
             let end = start + '='.len_utf8();
@@ -331,6 +349,21 @@ fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
         }
     }
     Ok(())
+}
+
+/// 1文字の区切り記号7種(仕様1章1.9: `( ) [ ] { } ,`)を対応する`TokenKind`に写す。
+/// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
+fn punctuation_kind(c: char) -> Option<TokenKind> {
+    match c {
+        '(' => Some(TokenKind::LParen),
+        ')' => Some(TokenKind::RParen),
+        '[' => Some(TokenKind::LBracket),
+        ']' => Some(TokenKind::RBracket),
+        '{' => Some(TokenKind::LBrace),
+        '}' => Some(TokenKind::RBrace),
+        ',' => Some(TokenKind::Comma),
+        _ => None,
+    }
 }
 
 /// トークンを構築する。spanはソース上の実位置を呼び出し側が渡す。

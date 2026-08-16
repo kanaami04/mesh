@@ -1496,6 +1496,59 @@ fn backslash_at_eof_reports_e0108_with_span() {
     );
 }
 
+/// 区切り記号7種 `( ) [ ] { } ,` がそれぞれ1文字のトークンになること(仕様1章1.9)。
+/// 補間L-17の「トークン列上での括弧対応」の前提工事。
+#[test]
+fn punctuation_tokens_are_lexed_individually() {
+    // Arrange
+    let source = "([{,}])";
+
+    // Act
+    let tokens = lex(source).expect("区切り記号7種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ入り文字列を1入力に含むスナップショット。
