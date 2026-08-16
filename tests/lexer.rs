@@ -248,9 +248,13 @@ fn all_guidance_reserved_words_report_e0104() {
         "defer",
     ];
 
-    // Act & Assert(表全体で1検証項目のため語ごとにループで確認)
+    // Act & Assert(表全体で1検証項目のため語ごとにループで確認。
+    // lexは最初のエラーで停止するため22語を1入力に併合できない)
     for word in words {
-        let err = lex(word).expect_err("誘導用予約語はすべてエラーになること");
+        let err = match lex(word) {
+            Err(e) => e,
+            Ok(tokens) => panic!("誘導用予約語 `{word}` はエラーになること: {tokens:?}"),
+        };
         assert_eq!(
             err,
             LexError {
@@ -293,17 +297,16 @@ fn identifier_with_guidance_prefix_is_not_reserved() {
 #[test]
 fn capitalized_reserved_words_are_identifiers() {
     // Arrange
-    let words = ["Let", "While", "NULL"];
+    let source = "Let While NULL";
 
-    // Act & Assert(同一検証項目=大文字は照合されない、のためループで確認)
-    for word in words {
-        let tokens = lex(word).expect("大文字を含む語の字句解析はエラーにならないこと");
-        assert_eq!(
-            tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
-            vec![TokenKind::Ident],
-            "語: {word}"
-        );
-    }
+    // Act
+    let tokens = lex(source).expect("大文字を含む語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Ident]
+    );
 }
 
 /// コメントの中の誘導用予約語は反応しないこと(仕様1章L-4注2の不透明性。
@@ -377,26 +380,28 @@ fn guidance_reserved_inside_interpolation_reports_e0104_with_span() {
     );
 }
 
-/// 文脈キーワード(component/state/view/as)は字句解析では常にIdentトークンであること
-/// (仕様1章L-27〔正例: contextual-keyword-ident〕。予約の判定はパーサがcomponent文法の
-/// 内部でのみ行う。入力は仕様の正例 `let state = loadState()` そのもので、stateが代表。
-/// 4語すべて同じ規則=keyword_kind/guidance_reservedの両表に不在)。
-/// Redを経ていない後追いの回帰テスト。
+/// 文脈キーワード4語(component/state/view/as)がすべてIdentトークンになること
+/// (仕様1章L-27〔正例: contextual-keyword-ident〕: 両予約語表に不在。
+/// 誤ってどちらかの表へ足す退行をこのテストが検知する。予約の判定はパーサが
+/// component文法の内部でのみ行う)。Redを経ていない後追いの回帰テスト。
 #[test]
 fn contextual_keyword_words_all_lex_as_ident() {
     // Arrange
-    let words = ["component", "state", "view", "as"];
+    let source = "component state view as";
 
-    // Act & Assert(L-27の4語全部が同一検証項目のためループで確認。
-    // 誤って予約語表に足す退行をこのループが検知する)
-    for word in words {
-        let tokens = lex(word).expect("文脈キーワードの字句解析はエラーにならないこと");
-        assert_eq!(
-            tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
-            vec![TokenKind::Ident],
-            "語: {word}"
-        );
-    }
+    // Act
+    let tokens = lex(source).expect("文脈キーワード4語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Ident,
+        ]
+    );
 }
 
 /// 文脈キーワードを含む仕様の正例 `let state = loadState()` の全トークン固定

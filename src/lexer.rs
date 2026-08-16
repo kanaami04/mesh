@@ -601,7 +601,7 @@ fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
 }
 
 /// 完全予約語22語(仕様1章1.5)を対応するKw*トークン種別に引く表引き関数。
-/// 該当しなければ `None`(呼び出し側でIdentに落とす)。
+/// 該当しなければ `None`(呼び出し側は誘導用表 `guidance_reserved` → Ident の順に処理する)。
 /// 誘導用予約語(`while` `null` 等)は `guidance_reserved` の担当、
 /// 文脈キーワード(`component` `state` `view` `as`)は常にIdentが正(L-27)のため、
 /// どちらも意図的にこの表へ入れない。
