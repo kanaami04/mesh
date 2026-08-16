@@ -825,6 +825,63 @@ fn exponent_forms_produce_float_tokens() {
     );
 }
 
+/// floatの小数点は両側に数字が必須(仕様1章L-10〔負例: float-dot-edge〕)。数字直後の `.` は
+/// 直後が数字でも `.` でもないとき小数部欠落としてE0106になり、メンバアクセスの `.` とは
+/// 解釈しない(数値リテラルへのフィールドアクセスは3章X-30がstruct型限定のためそもそも合法でない)。
+/// spanは数字列+`.` の全体。
+#[test]
+fn float_missing_fraction_reports_e0106_with_span() {
+    // Arrange
+    let source = "0.";
+
+    // Act
+    let err = lex(source).expect_err("小数部が無い `0.` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+
+    // Arrange
+    let source = "1.abs";
+
+    // Act
+    let err = lex(source).expect_err("数字直後の `.` に識別子が続く `1.abs` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+}
+
+/// floatの整数部欠落(仕様1章L-10〔負例: float-dot-edge〕)。`.` の直後が数字のときE0106になり、
+/// spanは `.`+後続数字列の全体。
+#[test]
+fn float_missing_integer_part_reports_e0106_with_span() {
+    // Arrange
+    let source = ".5";
+
+    // Act
+    let err = lex(source).expect_err("整数部が無い `.5` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

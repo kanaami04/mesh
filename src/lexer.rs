@@ -166,6 +166,8 @@ pub enum ErrorCode {
     E0104,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
+    /// floatの小数点の隣に数字が無い(仕様1章L-10)。
+    E0106,
     /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
     E0108,
     /// 補間 `${` が対応する `}` を得ないまま終わった(仕様1章L-18)。
@@ -247,8 +249,17 @@ fn next_token(
         // 消極規則で、判定は2文字ぶんの非消費先読み(peek_at)で行う。`.` も次の文字も
         // ASCIIなので `end + 1` は必ず文字境界。取り込まない場合は `.` を消費せず
         // Intで止め、演算子側の分岐(DotDot/Dot)に処理を委ねる。
-        let mut is_float = peek_at(source, end) == Some('.')
-            && peek_at(source, end + '.'.len_utf8()).is_some_and(|d| d.is_ascii_digit());
+        let dot_at = end;
+        let is_dot = peek_at(source, dot_at) == Some('.');
+        // `after_dot` は `is_dot` が真のとき(=dot_atに `.` がある)だけ求める。
+        // `.` は1バイトASCIIなので `dot_at + 1` は常に文字境界だが、`.` が
+        // 無い(=EOF等でdot_atが文字列長を超え得る)場合まで先読みすると範囲外になる。
+        let after_dot = if is_dot {
+            peek_at(source, dot_at + '.'.len_utf8())
+        } else {
+            None
+        };
+        let mut is_float = is_dot && after_dot.is_some_and(|d| d.is_ascii_digit());
         if is_float {
             // `.` を消費し、続く小数部(整数部と同じく数字と `_`)を読む。
             chars.next();
@@ -257,6 +268,20 @@ fn next_token(
                 d.is_ascii_digit() || d == '_'
             });
             end = frac_end;
+        } else if peek_at(source, dot_at) == Some('.') && after_dot != Some('.') {
+            // 小数部が無い `0.`、識別子が続く `1.abs` 等(仕様1章L-10)。`.` の直後が
+            // 数字でないのにfloatとして続けるのは書きかけの小数点リテラルとみなしE0106。
+            // `..`(範囲演算子DotDot)だけは除外する: `0..10` は上のfloat判定で
+            // 弾かれた後もここで拾わず、Int確定のまま演算子側の2文字表(DotDot)に委ねる
+            // (既存の消極規則を維持。`dotdot_after_integer_splits_range` が退行の網)。
+            // spanは数字列+`.`の全体(`start..(dotの直後)`)。
+            return Err(LexError {
+                code: ErrorCode::E0106,
+                span: Span {
+                    start,
+                    end: dot_at + '.'.len_utf8(),
+                },
+            });
         }
         // 指数部(仕様1章1.6の `exponent = ("e"|"E") ["+"|"-"] decInt`)。
         // 小数点の有無に関わらず判定する(`decInt exponent` の形も認めるため、
@@ -394,6 +419,26 @@ fn next_token(
         } else {
             Ok(Some(token(kind, &source[start..end], Span { start, end })))
         }
+    } else if c == '.'
+        && peek_at(source, start + '.'.len_utf8()).is_some_and(|d| d.is_ascii_digit())
+    {
+        // 整数部が無い `.5`(仕様1章L-10)。数字直後の `.` はメンバアクセスと解釈しない
+        // ——数値リテラルへのフィールドアクセスはstruct限定(仕様3章X-30)によりそもそも
+        // 合法でないため、「メンバアクセスの `.`」候補は最初から存在しない。書きかけの
+        // 浮動小数点リテラルとみなしE0106として報告する。
+        // `..5` はこの分岐より前にある2文字演算子表(two_char_operator_kind)で
+        // `..`(DotDot)が先に引かれるため、ここに落ちてくるのは `.` の直後が
+        // 数字のとき(`..` の2文字目には該当しない)に限られる。
+        // spanは `.`+数字列全体(`scan_while` で数字列の終端まで測る。`.5`→0..2、`.55`→0..3)。
+        chars.next();
+        let &(digit_start, digit_first) = chars.peek().expect("先読みで数字を確認済み");
+        let (_, end) = scan_while(source, chars, digit_start, digit_first, |d| {
+            d.is_ascii_digit() || d == '_'
+        });
+        Err(LexError {
+            code: ErrorCode::E0106,
+            span: Span { start, end },
+        })
     } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
         chars.next();
         let end = start + c.len_utf8();
