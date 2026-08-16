@@ -216,11 +216,191 @@ fn reserved_new_reports_e0104_with_span() {
     );
 }
 
+/// 誘導用予約語**22語すべて**がE0104(span=語全体)になること(仕様1章1.5・L-7)。
+/// 表全体の網羅が1つの検証項目(完全予約語側の22語1本テストと対称)。
+/// impl-reviewの変異テストで「代表3語のみでは19語の削除変異が生存する」と
+/// 実証された穴を塞ぐ。表の件数driftもこのループが検知する。
+#[test]
+fn all_guidance_reserved_words_report_e0104() {
+    // Arrange
+    let words = [
+        "while",
+        "class",
+        "null",
+        "undefined",
+        "enum",
+        "async",
+        "await",
+        "try",
+        "catch",
+        "throw",
+        "var",
+        "const",
+        "function",
+        "switch",
+        "case",
+        "do",
+        "interface",
+        "new",
+        "this",
+        "typeof",
+        "instanceof",
+        "defer",
+    ];
+
+    // Act & Assert(表全体で1検証項目のため語ごとにループで確認)
+    for word in words {
+        let err = lex(word).expect_err("誘導用予約語はすべてエラーになること");
+        assert_eq!(
+            err,
+            LexError {
+                code: ErrorCode::E0104,
+                span: Span {
+                    start: 0,
+                    end: word.len(),
+                },
+            },
+            "語: {word}"
+        );
+    }
+}
+
+/// 誘導用予約語で**始まる**識別子は予約語でないこと(仕様1章L-2最長一致。
+/// lettuceと同じ原理。誤判定は合法コードのハード拒否になるため境界を固定する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn identifier_with_guidance_prefix_is_not_reserved() {
+    // Arrange
+    let source = "newValue";
+
+    // Act
+    let tokens = lex(source).expect("`newValue` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Ident,
+            text: "newValue".to_string(),
+            span: Span { start: 0, end: 8 },
+        }]
+    );
+}
+
+/// 大文字を含む語は予約語でないこと(仕様1章1.4のletterはA-Z/a-z、1.5の予約語一覧は
+/// すべて小文字——大文字小文字非依存の照合に変える退行をこのテストが検知する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn capitalized_reserved_words_are_identifiers() {
+    // Arrange
+    let words = ["Let", "While", "NULL"];
+
+    // Act & Assert(同一検証項目=大文字は照合されない、のためループで確認)
+    for word in words {
+        let tokens = lex(word).expect("大文字を含む語の字句解析はエラーにならないこと");
+        assert_eq!(
+            tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+            vec![TokenKind::Ident],
+            "語: {word}"
+        );
+    }
+}
+
+/// コメントの中の誘導用予約語は反応しないこと(仕様1章L-4注2の不透明性。
+/// E0104は英字の語で発火する初の字句エラーのため、不透明性の網に新実例を追加)。
+#[test]
+fn comment_is_opaque_to_reserved_words() {
+    // Arrange
+    let source = "// while null new\n1";
+
+    // Act
+    let tokens = lex(source).expect("コメント内の予約語は無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+        ]
+    );
+}
+
+/// 文字列の中身の誘導用予約語は反応しないこと(仕様1章1.7: 文字列の中身は字句モードでない)。
+#[test]
+fn string_is_opaque_to_reserved_words() {
+    // Arrange
+    let source = "\"while null\"";
+
+    // Act
+    let tokens = lex(source).expect("文字列内の予約語は無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "while null".to_string(),
+                span: Span { start: 1, end: 11 },
+            }]),
+            text: "\"while null\"".to_string(),
+            span: Span { start: 0, end: 12 },
+        }]
+    );
+}
+
+/// 補間の内側の誘導用予約語はE0104のまま優先伝播すること(仕様1章L-18注2の
+/// 内側エラー優先にE0104が加わる。終端系読み替えの対象拡大で壊れないことの固定)。
+#[test]
+fn guidance_reserved_inside_interpolation_reports_e0104_with_span() {
+    // Arrange
+    let source = "\"${while}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の誘導用予約語はE0104としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 3, end: 8 },
+        }
+    );
+}
+
 /// 文脈キーワード(component/state/view/as)は字句解析では常にIdentトークンであること
 /// (仕様1章L-27〔正例: contextual-keyword-ident〕。予約の判定はパーサがcomponent文法の
 /// 内部でのみ行う。入力は仕様の正例 `let state = loadState()` そのもので、stateが代表。
 /// 4語すべて同じ規則=keyword_kind/guidance_reservedの両表に不在)。
 /// Redを経ていない後追いの回帰テスト。
+#[test]
+fn contextual_keyword_words_all_lex_as_ident() {
+    // Arrange
+    let words = ["component", "state", "view", "as"];
+
+    // Act & Assert(L-27の4語全部が同一検証項目のためループで確認。
+    // 誤って予約語表に足す退行をこのループが検知する)
+    for word in words {
+        let tokens = lex(word).expect("文脈キーワードの字句解析はエラーにならないこと");
+        assert_eq!(
+            tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+            vec![TokenKind::Ident],
+            "語: {word}"
+        );
+    }
+}
+
+/// 文脈キーワードを含む仕様の正例 `let state = loadState()` の全トークン固定
+/// (仕様1章L-27〔正例: contextual-keyword-ident〕)。
 #[test]
 fn contextual_keywords_lex_as_identifiers() {
     // Arrange
@@ -2463,6 +2643,6 @@ fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
+        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
     ));
 }

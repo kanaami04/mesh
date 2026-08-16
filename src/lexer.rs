@@ -107,7 +107,9 @@ pub enum StrSegment {
 pub enum ErrorCode {
     /// ブロックコメント `/*` は存在しない(仕様1章L-5)。
     E0102,
-    /// 予約語の誤用——誘導用予約語の出現(仕様1章L-7)。
+    /// 予約語の誤用(仕様1章L-7)。字句段階で発火するのは**誘導用予約語**の出現のみ。
+    /// 完全予約語が識別子位置に現れた場合のE0104(L-8変種・6章H-2 error-as-value・
+    /// H-4 error-type-declの変種を含む)は、Kw*トークンを受け取った**パーサが担当**する。
     E0104,
     /// 桁区切り `_` の位置違反(仕様1章L-9)。
     E0105,
@@ -598,12 +600,11 @@ fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
     Ok(())
 }
 
-/// 1文字の区切り記号7種(仕様1章1.9: `( ) [ ] { } ,`)を対応する`TokenKind`に写す。
-/// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
 /// 完全予約語22語(仕様1章1.5)を対応するKw*トークン種別に引く表引き関数。
 /// 該当しなければ `None`(呼び出し側でIdentに落とす)。
-/// 誘導用予約語(`while` `null` 等)と文脈キーワード(`component` `state` 等)は
-/// 意図的にここへ入れない(前者はE0104、後者は常にIdentが正——別サイクルの主題)。
+/// 誘導用予約語(`while` `null` 等)は `guidance_reserved` の担当、
+/// 文脈キーワード(`component` `state` `view` `as`)は常にIdentが正(L-27)のため、
+/// どちらも意図的にこの表へ入れない。
 fn keyword_kind(text: &str) -> Option<TokenKind> {
     match text {
         "let" => Some(TokenKind::KwLet),
@@ -632,7 +633,7 @@ fn keyword_kind(text: &str) -> Option<TokenKind> {
     }
 }
 
-/// 誘導用予約語21語(仕様1章1.5・L-7)かどうかを判定する表引き関数。
+/// 誘導用予約語22語(仕様1章1.5・L-7)かどうかを判定する表引き関数。
 /// Meshに無い機能(他言語由来の構文)を指す語で、文法上の正当な出現位置が
 /// 存在しないため、識別子として認めず字句段階でE0104として報告する
 /// (呼び出し側で `keyword_kind` に該当しなかった語にのみ適用する)。
@@ -664,6 +665,8 @@ fn guidance_reserved(text: &str) -> bool {
     )
 }
 
+/// 1文字の区切り記号7種(仕様1章1.9: `( ) [ ] { } ,`)を対応する`TokenKind`に写す。
+/// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
 fn punctuation_kind(c: char) -> Option<TokenKind> {
     match c {
         '(' => Some(TokenKind::LParen),

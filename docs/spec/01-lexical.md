@@ -163,7 +163,7 @@ let user = findUser(id)?
 | doc-comment-v1 | 正例 | L-30 |
 | non-ascii-ident | 負例 | L-6 |
 | reserved-while / reserved-null / reserved-new | 負例 | L-7 |
-| or-bind-error-name | 負例 | L-8 |
+| or-bind-error-name | 負例(パーサ着手時に実装。or束縛の文脈が必要) | L-8 |
 | contextual-keyword-ident | 正例 | L-27 |
 | underscore-edge | 負例 | L-9 |
 | float-dot-edge | 負例 | L-10 |
