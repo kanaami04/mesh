@@ -2058,6 +2058,85 @@ fn one_char_operators_are_lexed_individually() {
     );
 }
 
+/// 隣接する2文字演算子は1文字の前置きに勝つ最長一致で切り出されること
+/// (仕様1章L-2〔正例: longest-match〕)。空白なしの `a<=b==c` は `a` `<=` `b` `==` `c` の
+/// 5トークンになり、`<` と `=` に分割されないこと。
+#[test]
+fn adjacent_two_char_operators_win_over_one_char_prefix() {
+    // Arrange
+    let source = "a<=b==c";
+
+    // Act
+    let tokens = lex(source).expect("`a<=b==c` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::EqEq,
+                text: "==".to_string(),
+                span: Span { start: 4, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "c".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
+/// `..` の消極規則により、整数直後の `..` は数値に取り込まれず独立した
+/// DotDotトークンになること(仕様1章L-3〔正例: longest-match〕)。`0..10` は
+/// `0` `..` `10` の3トークンになる。
+/// 注: float実装後の境界(`1.5..2` 等)はfloatサイクルで追加検証する。
+#[test]
+fn dotdot_after_integer_splits_range() {
+    // Arrange
+    let source = "0..10";
+
+    // Act
+    let tokens = lex(source).expect("`0..10` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "0".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "10".to_string(),
+                span: Span { start: 3, end: 5 },
+            },
+        ]
+    );
+}
+
 /// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
 /// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
 /// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。

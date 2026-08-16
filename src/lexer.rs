@@ -97,6 +97,12 @@ pub enum TokenKind {
     Pipe,
     /// `:`(仕様1章1.9)。
     Colon,
+    /// `<=`(仕様1章1.9)。
+    LtEq,
+    /// `==`(仕様1章1.9)。
+    EqEq,
+    /// `..`(仕様1章1.9)。
+    DotDot,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -274,20 +280,27 @@ fn next_token(
                 },
             })
         }
+    } else if let Some((kind, second)) = source[start + c.len_utf8()..]
+        .chars()
+        .next()
+        .and_then(|second| two_char_operator_kind(c, second).map(|kind| (kind, second)))
+    {
+        // 2文字演算子の最長一致(仕様1章L-2)。1文字目を**消費する前に**2文字目を
+        // 先読みし、表に載っていれば2文字まとめて1トークンにする。該当しなければ
+        // この分岐に入らず、下の1文字表(punctuation_kind・operator_kind)に落ちる。
+        // 先読みはコメント分岐と同じくソース文字列側で行う: `start` は未消費位置なので
+        // `source[start..]` がイテレータの残りと一致し、1文字目はASCIIなので
+        // `start + c.len_utf8()` は必ず文字境界にある。
+        chars.next();
+        chars.next();
+        let end = start + c.len_utf8() + second.len_utf8();
+        Ok(Some(token(kind, &source[start..end], Span { start, end })))
     } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
         chars.next();
         let end = start + c.len_utf8();
-        Ok(Some(token(kind, &source[start..end], Span { start, end })))
-    } else if c == '=' {
-        chars.next();
-        let end = start + '='.len_utf8();
         // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
         // 分岐条件との二重管理でなく構造で守る)
-        Ok(Some(token(
-            TokenKind::Eq,
-            &source[start..end],
-            Span { start, end },
-        )))
+        Ok(Some(token(kind, &source[start..end], Span { start, end })))
     } else if c == '\n' {
         chars.next();
         let end = start + '\n'.len_utf8();
@@ -706,10 +719,11 @@ fn punctuation_kind(c: char) -> Option<TokenKind> {
     }
 }
 
-/// 1文字の演算子12種(仕様1章1.9: `+ - * / % < > ! ? . | :`)を対応する`TokenKind`に写す。
+/// 1文字の演算子13種(仕様1章1.9: `+ - * / % < > ! ? . | : =`)を対応する`TokenKind`に写す。
 /// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
 /// `/` を含むため、コメント(`//`・`/*`)の分岐を通過した後にだけ引くこと。
-/// 2文字演算子(`==` `<=` 等)の最長一致は後続サイクルの担当で、この表は1文字ぶんのみを見る。
+/// この表は1文字ぶんのみを見る「切り落とし」側で、2文字演算子の優先は
+/// 呼び出し側が `two_char_operator_kind` を先に引くことで担保する(仕様1章L-2の最長一致)。
 fn operator_kind(c: char) -> Option<TokenKind> {
     match c {
         '+' => Some(TokenKind::Plus),
@@ -724,6 +738,22 @@ fn operator_kind(c: char) -> Option<TokenKind> {
         '.' => Some(TokenKind::Dot),
         '|' => Some(TokenKind::Pipe),
         ':' => Some(TokenKind::Colon),
+        '=' => Some(TokenKind::Eq),
+        _ => None,
+    }
+}
+
+/// 2文字の演算子(仕様1章1.9)を対応する`TokenKind`に写す表引き関数。
+/// 1文字目 `first` と、その直後の文字 `second` を受け取り、2文字で1トークンになる
+/// 組み合わせだけを`Some`で返す。該当しない組は`None`で、呼び出し側は1文字表へ落ちる
+/// (仕様1章L-2の最長一致を「2文字を先に引き、外れたら1文字」の順序で実現する)。
+/// `..` は数値リテラル側では読まない(L-3)ため、`0..10` の分割もこの表だけで成立する。
+/// 現在は `<=` `==` `..` の3種のみ。残りの2文字演算子は後続サイクルで足す。
+fn two_char_operator_kind(first: char, second: char) -> Option<TokenKind> {
+    match (first, second) {
+        ('<', '=') => Some(TokenKind::LtEq),
+        ('=', '=') => Some(TokenKind::EqEq),
+        ('.', '.') => Some(TokenKind::DotDot),
         _ => None,
     }
 }
