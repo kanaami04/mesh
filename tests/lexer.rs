@@ -2219,6 +2219,49 @@ fn two_char_operators_are_lexed_individually() {
     );
 }
 
+/// `===` はE0116として記号列全体のspanで報告されること
+/// (仕様1章L-26〔負例: triple-equals〕)。
+/// `==`+`=` の正当な2トークンに分割せず、記号列全体をエラーにする
+/// (エラーメッセージ層が `==` への修正候補を出すための精度)。
+#[test]
+fn triple_equals_reports_e0116_with_full_span() {
+    // Arrange
+    let source = "a === b";
+
+    // Act
+    let err = lex(source).expect_err("`===` は記号列全体がエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 5 },
+        }
+    );
+}
+
+/// `->` はE0116として記号列全体のspanで報告されること(仕様1章L-26)。
+/// `-`+`>` に分割せず `->` 全体をエラーにする
+/// (`=>`・空白区切り戻り値型への誘導のための精度)。
+#[test]
+fn arrow_reports_e0116_with_full_span() {
+    // Arrange
+    let source = "a -> b";
+
+    // Act
+    let err = lex(source).expect_err("`->` は記号列全体がエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 4 },
+        }
+    );
+}
+
 /// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
 /// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
 /// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。

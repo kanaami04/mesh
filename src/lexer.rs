@@ -300,6 +300,19 @@ fn next_token(
                 },
             })
         }
+    } else if c == '-' && source[start + c.len_utf8()..].starts_with('>') {
+        // `->` は仕様に存在しない記号列(仕様1章L-26: 近い正解への誘導)。
+        // `=>`(FatArrow)と紛らわしいアロー風の綴りのため、`-`+`>` に分割せず
+        // 記号列全体をE0116として報告する。2文字演算子表(two_char_operator_kind)には
+        // この組は載せない——載せると正当な2文字演算子と区別が付かなくなるため、
+        // 表の手前に専用ガードとして置く。修正候補の案内文言はエラーメッセージ層の担当。
+        chars.next();
+        chars.next();
+        let end = start + '-'.len_utf8() + '>'.len_utf8();
+        Err(LexError {
+            code: ErrorCode::E0116,
+            span: Span { start, end },
+        })
     } else if let Some((kind, second)) = source[start + c.len_utf8()..]
         .chars()
         .next()
@@ -314,7 +327,23 @@ fn next_token(
         chars.next();
         chars.next();
         let end = start + c.len_utf8() + second.len_utf8();
-        Ok(Some(token(kind, &source[start..end], Span { start, end })))
+        if kind == TokenKind::EqEq && source[end..].starts_with('=') {
+            // `===` は仕様に存在しない記号列(仕様1章L-26)。JS由来の厳密等価演算子への
+            // 誘導のため、2文字表で `==`(EqEq)が引けた後さらに3文字目を**非消費先読み**
+            // して判定する(`====` 以降の続きは考えない。最初の3文字でエラー確定)。
+            // `==`+`=` に分割せず記号列全体をE0116として報告する。
+            // 修正候補の案内文言はエラーメッセージ層の担当。
+            chars.next();
+            Err(LexError {
+                code: ErrorCode::E0116,
+                span: Span {
+                    start,
+                    end: end + '='.len_utf8(),
+                },
+            })
+        } else {
+            Ok(Some(token(kind, &source[start..end], Span { start, end })))
+        }
     } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
         chars.next();
         let end = start + c.len_utf8();
