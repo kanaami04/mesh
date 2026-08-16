@@ -1,6 +1,6 @@
 ---
 source: tests/lexer.rs
-expression: "mesh::lexer::lex(\"let mut n = 1_000 // 合計\\r\\nlet msg = \\\"答え: ${n}円\\\\n\\\"\\nn\")"
+expression: "mesh::lexer::lex(\"let mut n = 1_000 // 合計\\r\\nlet msg = \\\"答え: ${n}円\\\\n\\\"\\nn % 2 == 0 && n <= 10 => 0..n\")"
 ---
 Ok(
     [
@@ -131,6 +131,102 @@ Ok(
             span: Span {
                 start: 59,
                 end: 60,
+            },
+        },
+        Token {
+            kind: Percent,
+            text: "%",
+            span: Span {
+                start: 61,
+                end: 62,
+            },
+        },
+        Token {
+            kind: Int,
+            text: "2",
+            span: Span {
+                start: 63,
+                end: 64,
+            },
+        },
+        Token {
+            kind: EqEq,
+            text: "==",
+            span: Span {
+                start: 65,
+                end: 67,
+            },
+        },
+        Token {
+            kind: Int,
+            text: "0",
+            span: Span {
+                start: 68,
+                end: 69,
+            },
+        },
+        Token {
+            kind: AmpAmp,
+            text: "&&",
+            span: Span {
+                start: 70,
+                end: 72,
+            },
+        },
+        Token {
+            kind: Ident,
+            text: "n",
+            span: Span {
+                start: 73,
+                end: 74,
+            },
+        },
+        Token {
+            kind: LtEq,
+            text: "<=",
+            span: Span {
+                start: 75,
+                end: 77,
+            },
+        },
+        Token {
+            kind: Int,
+            text: "10",
+            span: Span {
+                start: 78,
+                end: 80,
+            },
+        },
+        Token {
+            kind: FatArrow,
+            text: "=>",
+            span: Span {
+                start: 81,
+                end: 83,
+            },
+        },
+        Token {
+            kind: Int,
+            text: "0",
+            span: Span {
+                start: 84,
+                end: 85,
+            },
+        },
+        Token {
+            kind: DotDot,
+            text: "..",
+            span: Span {
+                start: 85,
+                end: 87,
+            },
+        },
+        Token {
+            kind: Ident,
+            text: "n",
+            span: Span {
+                start: 87,
+                end: 88,
             },
         },
     ],

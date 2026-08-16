@@ -633,8 +633,6 @@ fn multibyte_character_error_span_counts_bytes() {
 }
 
 /// どの字句規則にも該当しない文字はエラーE0116として位置つきで報告されること(仕様1章L-26)。
-/// 注: 同じL-26の負例 triple-equals(`===`)は演算子未実装の現状では `Eq`×3 に分かれて
-/// エラーにならないため、演算子実装のサイクルで追加する。
 #[test]
 fn unknown_character_reports_e0116_with_span() {
     // Arrange
@@ -1286,24 +1284,37 @@ fn lone_cr_inside_comment_reports_e0117_with_span() {
     );
 }
 
-/// 単独の `/`(直後が `/` でも `*` でもない)は暫定E0116のままであること
-/// (除算演算子は演算子サイクルで実装。仕様1章L-26)。
-/// span退行(範囲外化)とコード取り違えの両方を変異テストで検知できることを確認済み。
+/// `/` は除算演算子(仕様1章1.9)として1文字トークンになり、`//` はL-4の行コメントとして
+/// トークンを生成しないこと(仕様1章L-4)。暫定E0116テスト(lone_slash_reports_e0116_with_span)
+/// をこの正例で置き換えた。
 #[test]
-fn lone_slash_reports_e0116_with_span() {
+fn slash_is_division_and_double_slash_is_comment() {
     // Arrange
-    let source = "1 / 2";
+    let source = "10 / 2 // half";
 
     // Act
-    let err = lex(source).expect_err("単独の`/`は演算子未実装の現状ではエラーになること");
+    let tokens = lex(source).expect("`/`は除算、`//`はコメントとしてエラーにならないこと");
 
     // Assert
     assert_eq!(
-        err,
-        LexError {
-            code: ErrorCode::E0116,
-            span: Span { start: 2, end: 3 },
-        }
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "10".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Slash,
+                text: "/".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+        ]
     );
 }
 
@@ -1965,6 +1976,310 @@ fn punctuation_tokens_are_lexed_individually() {
                 span: Span { start: 6, end: 7 },
             },
         ]
+    );
+}
+
+/// 1文字演算子12種 `+ - * / % < > ! ? . | :` がそれぞれ個別のトークンになること(仕様1章1.9)。
+/// 1.9の1文字演算子は `=` を含めて13種だが、`=`(Eq)は既存のlet系テスト
+/// (keyword_let_is_distinguished_from_identifiers 等)が担保するため、この正例からは除く。
+#[test]
+fn one_char_operators_are_lexed_individually() {
+    // Arrange
+    let source = "+ - * / % < > ! ? . | :";
+
+    // Act
+    let tokens = lex(source).expect("1文字演算子12種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Plus,
+                text: "+".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Minus,
+                text: "-".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Star,
+                text: "*".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Slash,
+                text: "/".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Percent,
+                text: "%".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Lt,
+                text: "<".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Gt,
+                text: ">".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Bang,
+                text: "!".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Question,
+                text: "?".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Dot,
+                text: ".".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Pipe,
+                text: "|".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+        ]
+    );
+}
+
+/// 隣接する2文字演算子は1文字の前置きに勝つ最長一致で切り出されること
+/// (仕様1章L-2〔正例: longest-match〕)。空白なしの `a<=b==c` は `a` `<=` `b` `==` `c` の
+/// 5トークンになり、`<` と `=` に分割されないこと。
+#[test]
+fn adjacent_two_char_operators_win_over_one_char_prefix() {
+    // Arrange
+    let source = "a<=b==c";
+
+    // Act
+    let tokens = lex(source).expect("`a<=b==c` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::EqEq,
+                text: "==".to_string(),
+                span: Span { start: 4, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "c".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
+/// `..` の消極規則により、整数直後の `..` は数値に取り込まれず独立した
+/// DotDotトークンになること(仕様1章L-3〔正例: longest-match〕)。`0..10` は
+/// `0` `..` `10` の3トークンになる。
+/// 注: float実装後の境界(`1.5..2` 等)はfloatサイクルで追加検証する。
+#[test]
+fn dotdot_after_integer_splits_range() {
+    // Arrange
+    let source = "0..10";
+
+    // Act
+    let tokens = lex(source).expect("`0..10` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "0".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "10".to_string(),
+                span: Span { start: 3, end: 5 },
+            },
+        ]
+    );
+}
+
+/// 2文字演算子13種がそれぞれ1個のトークンとして切り出されること(仕様1章1.9)。
+#[test]
+fn two_char_operators_are_lexed_individually() {
+    // Arrange
+    let source = "== != <= >= && || += -= *= /= %= => ..";
+
+    // Act
+    let tokens = lex(source).expect("2文字演算子13種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::EqEq,
+                text: "==".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::BangEq,
+                text: "!=".to_string(),
+                span: Span { start: 3, end: 5 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 6, end: 8 },
+            },
+            Token {
+                kind: TokenKind::GtEq,
+                text: ">=".to_string(),
+                span: Span { start: 9, end: 11 },
+            },
+            Token {
+                kind: TokenKind::AmpAmp,
+                text: "&&".to_string(),
+                span: Span { start: 12, end: 14 },
+            },
+            Token {
+                kind: TokenKind::PipePipe,
+                text: "||".to_string(),
+                span: Span { start: 15, end: 17 },
+            },
+            Token {
+                kind: TokenKind::PlusEq,
+                text: "+=".to_string(),
+                span: Span { start: 18, end: 20 },
+            },
+            Token {
+                kind: TokenKind::MinusEq,
+                text: "-=".to_string(),
+                span: Span { start: 21, end: 23 },
+            },
+            Token {
+                kind: TokenKind::StarEq,
+                text: "*=".to_string(),
+                span: Span { start: 24, end: 26 },
+            },
+            Token {
+                kind: TokenKind::SlashEq,
+                text: "/=".to_string(),
+                span: Span { start: 27, end: 29 },
+            },
+            Token {
+                kind: TokenKind::PercentEq,
+                text: "%=".to_string(),
+                span: Span { start: 30, end: 32 },
+            },
+            Token {
+                kind: TokenKind::FatArrow,
+                text: "=>".to_string(),
+                span: Span { start: 33, end: 35 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 36, end: 38 },
+            },
+        ]
+    );
+}
+
+/// `===` はE0116として記号列全体のspanで報告されること
+/// (仕様1章L-26〔負例: triple-equals〕)。
+/// `==`+`=` の正当な2トークンに分割せず、記号列全体をエラーにする
+/// (エラーメッセージ層が `==` への修正候補を出すための精度)。
+#[test]
+fn triple_equals_reports_e0116_with_full_span() {
+    // Arrange
+    let source = "a === b";
+
+    // Act
+    let err = lex(source).expect_err("`===` は記号列全体がエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 5 },
+        }
+    );
+}
+
+/// `->` はE0116として記号列全体のspanで報告されること(仕様1章L-26〔負例: arrow-token〕)。
+/// `-`+`>` に分割せず `->` 全体をエラーにする
+/// (`=>`・空白区切り戻り値型への誘導のための精度)。
+#[test]
+fn arrow_reports_e0116_with_full_span() {
+    // Arrange
+    let source = "a -> b";
+
+    // Act
+    let err = lex(source).expect_err("`->` は記号列全体がエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 4 },
+        }
+    );
+}
+
+/// 単独の `&`(直後が `&` でない)はE0116のままであること(仕様1章1.9に単独 `&` は
+/// 無い——`|` は union型で単独が正当だが `&` は `&&` のみ、という非対称の固定)。
+/// Redを経ていない後追いの回帰テスト(`&&` の実装が単独 `&` を誤って受理しないことの網)。
+#[test]
+fn lone_ampersand_reports_e0116_with_span() {
+    // Arrange
+    let source = "a & b";
+
+    // Act
+    let err = lex(source).expect_err("単独の `&` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 3 },
+        }
     );
 }
 
@@ -2640,14 +2955,15 @@ fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
-/// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
-/// エスケープ・補間入り文字列を1入力に含むスナップショット。
+/// 回帰の網: ここまでのサイクルで実装した代表トークン種(KwLet/Ident/Eq/Int/Str/Newline
+/// /演算子)と桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
+/// エスケープ・補間入り文字列・演算子(1文字 `%`、2文字 `== && <= => ..` の最長一致)を
+/// 1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
+        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn % 2 == 0 && n <= 10 => 0..n"
     ));
 }

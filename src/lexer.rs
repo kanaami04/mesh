@@ -73,6 +73,56 @@ pub enum TokenKind {
     RBrace,
     /// `,`(仕様1章1.9)。
     Comma,
+    /// `+`(仕様1章1.9)。
+    Plus,
+    /// `-`(仕様1章1.9)。
+    Minus,
+    /// `*`(仕様1章1.9)。
+    Star,
+    /// `/`(仕様1章1.9)。
+    Slash,
+    /// `%`(仕様1章1.9)。
+    Percent,
+    /// `<`(仕様1章1.9)。
+    Lt,
+    /// `>`(仕様1章1.9)。
+    Gt,
+    /// `!`(仕様1章1.9)。
+    Bang,
+    /// `?`(仕様1章1.9)。
+    Question,
+    /// `.`(仕様1章1.9)。
+    Dot,
+    /// `|`(仕様1章1.9)。
+    Pipe,
+    /// `:`(仕様1章1.9)。
+    Colon,
+    /// `<=`(仕様1章1.9)。
+    LtEq,
+    /// `==`(仕様1章1.9)。
+    EqEq,
+    /// `..`(仕様1章1.9)。
+    DotDot,
+    /// `!=`(仕様1章1.9)。
+    BangEq,
+    /// `>=`(仕様1章1.9)。
+    GtEq,
+    /// `&&`(仕様1章1.9)。
+    AmpAmp,
+    /// `||`(仕様1章1.9)。
+    PipePipe,
+    /// `+=`(仕様1章1.9)。
+    PlusEq,
+    /// `-=`(仕様1章1.9)。
+    MinusEq,
+    /// `*=`(仕様1章1.9)。
+    StarEq,
+    /// `/=`(仕様1章1.9)。
+    SlashEq,
+    /// `%=`(仕様1章1.9)。
+    PercentEq,
+    /// `=>`(仕様1章1.9)。
+    FatArrow,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -126,8 +176,10 @@ pub enum ErrorCode {
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
     /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
-    /// また未実装の正当なトークン(演算子 `+` `(` 等)も
-    /// 現状はこのエラーで落ちる(実装が進めばエラーではなくなる別カテゴリ)。
+    /// 単独の `&`(直後が `&` でない)は仕様1.9に無いため**恒久的に**このコード
+    /// (`&&` の一部としてのみ有効。単独が正当な `|` との非対称)。
+    /// 1.9の演算子・区切り記号33種は全実装済みで、「未実装の正当なトークン」による
+    /// 暫定E0116はもう無い。
     /// Unicode改行類(U+0085/U+2028/U+2029)は**確定で**このコード
     /// (L-29が非改行と規定=ADR-0041。上の暫定と違い置き換え予定なし)。
     E0116,
@@ -204,20 +256,92 @@ fn next_token(
         } else {
             Ok(Some(token(TokenKind::Ident, text, Span { start, end })))
         }
-    } else if let Some(kind) = punctuation_kind(c) {
+    } else if c == '/' && matches!(peek_at(source, start + '/'.len_utf8()), Some('/' | '*')) {
+        // `/` の2文字目を**消費せずに**先読み(peek_at)して、コメント(`//`・`/*`)だけを
+        // ここで捌く(仕様1章L-4・L-5)。単独の `/` はこの分岐に入らず、下の1文字演算子表で
+        // Slashトークン(除算)になる(仕様1章1.9)。
+        chars.next();
+        let (_, second) = chars.next().expect("ガードで2文字目の存在を確認済み");
+        if second == '/' {
+            if in_interpolation {
+                // 補間 `${...}` の内側では行コメントを許さない(仕様1章L-17(b))。
+                // spanは `//` の2バイト(両方ASCIIなので各1バイト)。
+                return Err(LexError {
+                    code: ErrorCode::E0115,
+                    span: Span {
+                        start,
+                        end: start + '/'.len_utf8() + '/'.len_utf8(),
+                    },
+                });
+            }
+            // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
+            // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
+            // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
+            while let Some(&(_, d)) = chars.peek() {
+                if d == '\n' || d == '\r' {
+                    break;
+                }
+                chars.next();
+            }
+            Ok(None)
+        } else {
+            // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
+            // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
+            Err(LexError {
+                code: ErrorCode::E0102,
+                span: Span {
+                    start,
+                    end: start + '/'.len_utf8() + '*'.len_utf8(),
+                },
+            })
+        }
+    } else if c == '-' && peek_at(source, start + c.len_utf8()) == Some('>') {
+        // `->` は仕様に存在しない記号列(仕様1章L-26: 近い正解への誘導)。
+        // `=>`(FatArrow)と紛らわしいアロー風の綴りのため、`-`+`>` に分割せず
+        // 記号列全体をE0116として報告する。2文字演算子表(two_char_operator_kind)には
+        // この組は載せない——載せると正当な2文字演算子と区別が付かなくなるため、
+        // 表の手前に専用ガードとして置く。修正候補の案内文言はエラーメッセージ層の担当。
+        chars.next();
+        chars.next();
+        let end = start + '-'.len_utf8() + '>'.len_utf8();
+        Err(LexError {
+            code: ErrorCode::E0116,
+            span: Span { start, end },
+        })
+    } else if let Some((kind, second)) = peek_at(source, start + c.len_utf8())
+        .and_then(|second| two_char_operator_kind(c, second).map(|kind| (kind, second)))
+    {
+        // 2文字演算子の最長一致(仕様1章L-2)。1文字目を**消費する前に**2文字目を
+        // 先読み(peek_at)し、表に載っていれば2文字まとめて1トークンにする。
+        // 該当しなければこの分岐に入らず、下の1文字表(punctuation_kind・operator_kind)に落ちる。
+        chars.next();
+        chars.next();
+        let end = start + c.len_utf8() + second.len_utf8();
+        if kind == TokenKind::EqEq && peek_at(source, end) == Some('=') {
+            // `===` は仕様に存在しない記号列(仕様1章L-26)。JS由来の厳密等価演算子への
+            // 誘導のため、2文字表で `==`(EqEq)が引けた後さらに3文字目を**非消費先読み**
+            // して判定する(`====` 以降の続きは考えない。最初の3文字でエラー確定)。
+            // `==`+`=` に分割せず記号列全体をE0116として報告する。
+            // 修正候補の案内文言はエラーメッセージ層の担当。
+            // 3文字目の消費は現状観測不能(直後にErrで打ち切るため)だが、
+            // 将来のエラー回復(複数エラー報告)で位置がspanと一致するよう進めておく。
+            chars.next();
+            Err(LexError {
+                code: ErrorCode::E0116,
+                span: Span {
+                    start,
+                    end: end + '='.len_utf8(),
+                },
+            })
+        } else {
+            Ok(Some(token(kind, &source[start..end], Span { start, end })))
+        }
+    } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
         chars.next();
         let end = start + c.len_utf8();
-        Ok(Some(token(kind, &source[start..end], Span { start, end })))
-    } else if c == '=' {
-        chars.next();
-        let end = start + '='.len_utf8();
         // textはリテラルでなくソースから切り出す(text==source[span]の不変条件を
         // 分岐条件との二重管理でなく構造で守る)
-        Ok(Some(token(
-            TokenKind::Eq,
-            &source[start..end],
-            Span { start, end },
-        )))
+        Ok(Some(token(kind, &source[start..end], Span { start, end })))
     } else if c == '\n' {
         chars.next();
         let end = start + '\n'.len_utf8();
@@ -251,50 +375,6 @@ fn next_token(
     } else if c == ' ' || c == '\t' {
         chars.next();
         Ok(None)
-    } else if c == '/' {
-        chars.next();
-        if chars.peek().map(|&(_, d)| d) == Some('/') {
-            chars.next();
-            if in_interpolation {
-                // 補間 `${...}` の内側では行コメントを許さない(仕様1章L-17(b))。
-                // spanは `//` の2バイト(両方ASCIIなので各1バイト)。
-                return Err(LexError {
-                    code: ErrorCode::E0115,
-                    span: Span {
-                        start,
-                        end: start + '/'.len_utf8() + '/'.len_utf8(),
-                    },
-                });
-            }
-            // 行コメント(仕様1章L-4)。`\n` または `\r` の手前まで読み飛ばし、トークンは生成しない。
-            // `\n`/`\r` 自体は消費せず、既存のNewline/CR分岐に処理を委ねる
-            // (CRLF判定とE0117=孤立CRの検出は既存の `\r` 分岐が担う)。
-            while let Some(&(_, d)) = chars.peek() {
-                if d == '\n' || d == '\r' {
-                    break;
-                }
-                chars.next();
-            }
-            Ok(None)
-        } else if chars.peek().map(|&(_, d)| d) == Some('*') {
-            // ブロックコメント `/*`(仕様1章L-5)。ブロックコメントは未サポート。
-            // spanは `/` と `*` の2バイトぶん(両方ASCIIなので各1バイト)。
-            Err(LexError {
-                code: ErrorCode::E0102,
-                span: Span {
-                    start,
-                    end: start + '/'.len_utf8() + '*'.len_utf8(),
-                },
-            })
-        } else {
-            Err(LexError {
-                code: ErrorCode::E0116,
-                span: Span {
-                    start,
-                    end: start + '/'.len_utf8(),
-                },
-            })
-        }
     } else {
         Err(LexError {
             code: ErrorCode::E0116,
@@ -680,6 +760,55 @@ fn punctuation_kind(c: char) -> Option<TokenKind> {
     }
 }
 
+/// 1文字の演算子13種(仕様1章1.9: `+ - * / % < > ! ? . | : =`)を対応する`TokenKind`に写す。
+/// 該当しない文字は`None`(呼び出し側の他分岐に処理を委ねる)。
+/// `/` を含むため、コメント(`//`・`/*`)の分岐を通過した後にだけ引くこと。
+/// この表は1文字ぶんのみを見る「切り落とし」側で、2文字演算子の優先は
+/// 呼び出し側が `two_char_operator_kind` を先に引くことで担保する(仕様1章L-2の最長一致)。
+fn operator_kind(c: char) -> Option<TokenKind> {
+    match c {
+        '+' => Some(TokenKind::Plus),
+        '-' => Some(TokenKind::Minus),
+        '*' => Some(TokenKind::Star),
+        '/' => Some(TokenKind::Slash),
+        '%' => Some(TokenKind::Percent),
+        '<' => Some(TokenKind::Lt),
+        '>' => Some(TokenKind::Gt),
+        '!' => Some(TokenKind::Bang),
+        '?' => Some(TokenKind::Question),
+        '.' => Some(TokenKind::Dot),
+        '|' => Some(TokenKind::Pipe),
+        ':' => Some(TokenKind::Colon),
+        '=' => Some(TokenKind::Eq),
+        _ => None,
+    }
+}
+
+/// 2文字の演算子(仕様1章1.9)を対応する`TokenKind`に写す表引き関数。
+/// 1文字目 `first` と、その直後の文字 `second` を受け取り、2文字で1トークンになる
+/// 組み合わせだけを`Some`で返す。該当しない組は`None`で、呼び出し側は1文字表へ落ちる
+/// (仕様1章L-2の最長一致を「2文字を先に引き、外れたら1文字」の順序で実現する)。
+/// `..` は数値リテラル側では読まない(L-3)ため、`0..10` の分割もこの表だけで成立する。
+/// 全13種: `<=` `==` `..` `!=` `>=` `&&` `||` `+=` `-=` `*=` `/=` `%=` `=>`。
+fn two_char_operator_kind(first: char, second: char) -> Option<TokenKind> {
+    match (first, second) {
+        ('<', '=') => Some(TokenKind::LtEq),
+        ('=', '=') => Some(TokenKind::EqEq),
+        ('.', '.') => Some(TokenKind::DotDot),
+        ('!', '=') => Some(TokenKind::BangEq),
+        ('>', '=') => Some(TokenKind::GtEq),
+        ('&', '&') => Some(TokenKind::AmpAmp),
+        ('|', '|') => Some(TokenKind::PipePipe),
+        ('+', '=') => Some(TokenKind::PlusEq),
+        ('-', '=') => Some(TokenKind::MinusEq),
+        ('*', '=') => Some(TokenKind::StarEq),
+        ('/', '=') => Some(TokenKind::SlashEq),
+        ('%', '=') => Some(TokenKind::PercentEq),
+        ('=', '>') => Some(TokenKind::FatArrow),
+        _ => None,
+    }
+}
+
 /// トークンを構築する。spanはソース上の実位置を呼び出し側が渡す。
 /// textの長さからspanを逆算してはいけない: 将来textが正規化されて
 /// ソースの字面と長さが変わったとき(文字列エスケープ等)、spanが静かに壊れるため。
@@ -711,4 +840,15 @@ fn scan_while<'s>(
         }
     }
     (&source[start..end], end)
+}
+
+/// バイトオフセット `offset` にある文字を**イテレータを消費せずに**返す(非消費先読みの共通部品)。
+/// `Peekable` は1文字先までしか覗けないため、「1文字目を消費する前に2文字目を見る」
+/// 最長一致(仕様1章L-2)の判定はソース文字列側のスライスで行う。
+/// `offset` は文字境界であること。呼び出し側は「`char_indices` 由来の文字境界 `start`」+
+/// 「その位置の実文字のバイト長 `len_utf8()`」の和を渡すため、`c` が非ASCII
+/// (日本語・絵文字等)でも常に成立する(`start + 1` のようなASCII前提の固定値は不可)。
+/// EOFに達しているときは `None`。
+fn peek_at(source: &str, offset: usize) -> Option<char> {
+    source[offset..].chars().next()
 }
