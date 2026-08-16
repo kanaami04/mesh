@@ -103,6 +103,26 @@ pub enum TokenKind {
     EqEq,
     /// `..`(仕様1章1.9)。
     DotDot,
+    /// `!=`(仕様1章1.9)。
+    BangEq,
+    /// `>=`(仕様1章1.9)。
+    GtEq,
+    /// `&&`(仕様1章1.9)。
+    AmpAmp,
+    /// `||`(仕様1章1.9)。
+    PipePipe,
+    /// `+=`(仕様1章1.9)。
+    PlusEq,
+    /// `-=`(仕様1章1.9)。
+    MinusEq,
+    /// `*=`(仕様1章1.9)。
+    StarEq,
+    /// `/=`(仕様1章1.9)。
+    SlashEq,
+    /// `%=`(仕様1章1.9)。
+    PercentEq,
+    /// `=>`(仕様1章1.9)。
+    FatArrow,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -748,12 +768,22 @@ fn operator_kind(c: char) -> Option<TokenKind> {
 /// 組み合わせだけを`Some`で返す。該当しない組は`None`で、呼び出し側は1文字表へ落ちる
 /// (仕様1章L-2の最長一致を「2文字を先に引き、外れたら1文字」の順序で実現する)。
 /// `..` は数値リテラル側では読まない(L-3)ため、`0..10` の分割もこの表だけで成立する。
-/// 現在は `<=` `==` `..` の3種のみ。残りの2文字演算子は後続サイクルで足す。
+/// 全13種: `<=` `==` `..` `!=` `>=` `&&` `||` `+=` `-=` `*=` `/=` `%=` `=>`。
 fn two_char_operator_kind(first: char, second: char) -> Option<TokenKind> {
     match (first, second) {
         ('<', '=') => Some(TokenKind::LtEq),
         ('=', '=') => Some(TokenKind::EqEq),
         ('.', '.') => Some(TokenKind::DotDot),
+        ('!', '=') => Some(TokenKind::BangEq),
+        ('>', '=') => Some(TokenKind::GtEq),
+        ('&', '&') => Some(TokenKind::AmpAmp),
+        ('|', '|') => Some(TokenKind::PipePipe),
+        ('+', '=') => Some(TokenKind::PlusEq),
+        ('-', '=') => Some(TokenKind::MinusEq),
+        ('*', '=') => Some(TokenKind::StarEq),
+        ('/', '=') => Some(TokenKind::SlashEq),
+        ('%', '=') => Some(TokenKind::PercentEq),
+        ('=', '>') => Some(TokenKind::FatArrow),
         _ => None,
     }
 }

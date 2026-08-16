@@ -2137,6 +2137,88 @@ fn dotdot_after_integer_splits_range() {
     );
 }
 
+/// 2文字演算子13種がそれぞれ1個のトークンとして切り出されること(仕様1章1.9)。
+#[test]
+fn two_char_operators_are_lexed_individually() {
+    // Arrange
+    let source = "== != <= >= && || += -= *= /= %= => ..";
+
+    // Act
+    let tokens = lex(source).expect("2文字演算子13種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::EqEq,
+                text: "==".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::BangEq,
+                text: "!=".to_string(),
+                span: Span { start: 3, end: 5 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 6, end: 8 },
+            },
+            Token {
+                kind: TokenKind::GtEq,
+                text: ">=".to_string(),
+                span: Span { start: 9, end: 11 },
+            },
+            Token {
+                kind: TokenKind::AmpAmp,
+                text: "&&".to_string(),
+                span: Span { start: 12, end: 14 },
+            },
+            Token {
+                kind: TokenKind::PipePipe,
+                text: "||".to_string(),
+                span: Span { start: 15, end: 17 },
+            },
+            Token {
+                kind: TokenKind::PlusEq,
+                text: "+=".to_string(),
+                span: Span { start: 18, end: 20 },
+            },
+            Token {
+                kind: TokenKind::MinusEq,
+                text: "-=".to_string(),
+                span: Span { start: 21, end: 23 },
+            },
+            Token {
+                kind: TokenKind::StarEq,
+                text: "*=".to_string(),
+                span: Span { start: 24, end: 26 },
+            },
+            Token {
+                kind: TokenKind::SlashEq,
+                text: "/=".to_string(),
+                span: Span { start: 27, end: 29 },
+            },
+            Token {
+                kind: TokenKind::PercentEq,
+                text: "%=".to_string(),
+                span: Span { start: 30, end: 32 },
+            },
+            Token {
+                kind: TokenKind::FatArrow,
+                text: "=>".to_string(),
+                span: Span { start: 33, end: 35 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 36, end: 38 },
+            },
+        ]
+    );
+}
+
 /// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
 /// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
 /// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。
