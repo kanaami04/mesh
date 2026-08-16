@@ -174,6 +174,155 @@ fn guidance_reserved_word_reports_e0104_with_span() {
     );
 }
 
+/// 誘導用予約語 `null` もE0104になること(仕様1章L-7〔負例: reserved-null〕。
+/// 案内「不在は `T | none`」はメッセージ層で検証)。
+/// Redを経ていない後追いの回帰テスト(表の代表2語目)。
+#[test]
+fn reserved_null_reports_e0104_with_span() {
+    // Arrange
+    let source = "null";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `null` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+}
+
+/// 誘導用予約語 `new` もE0104になること(仕様1章L-7〔負例: reserved-new〕。
+/// 案内「structは `User{...}` で生成します」はメッセージ層で検証)。
+/// Redを経ていない後追いの回帰テスト(表の代表3語目)。
+#[test]
+fn reserved_new_reports_e0104_with_span() {
+    // Arrange
+    let source = "new";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `new` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 3 },
+        }
+    );
+}
+
+/// 文脈キーワード(component/state/view/as)は字句解析では常にIdentトークンであること
+/// (仕様1章L-27〔正例: contextual-keyword-ident〕。予約の判定はパーサがcomponent文法の
+/// 内部でのみ行う。入力は仕様の正例 `let state = loadState()` そのもので、stateが代表。
+/// 4語すべて同じ規則=keyword_kind/guidance_reservedの両表に不在)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn contextual_keywords_lex_as_identifiers() {
+    // Arrange
+    let source = "let state = loadState()";
+
+    // Act
+    let tokens = lex(source).expect("文脈キーワードを含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "state".to_string(),
+                span: Span { start: 4, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "loadState".to_string(),
+                span: Span { start: 12, end: 21 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+        ]
+    );
+}
+
+/// 仕様L-17の正例3例目 `"${m[k] or 0}"` の完全形(`or` がKwOrトークンになる。
+/// 仕様1章L-17〔正例: interpolation-nested〕——予約語テーブル実装により送りを回収)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn spec_third_interpolation_example_with_keyword_or() {
+    // Arrange
+    let source = "\"${m[k] or 0}\"";
+
+    // Act
+    let tokens = lex(source).expect("`or` 入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "m".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBracket,
+                        text: "[".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "k".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBracket,
+                        text: "]".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                    Token {
+                        kind: TokenKind::KwOr,
+                        text: "or".to_string(),
+                        span: Span { start: 8, end: 10 },
+                    },
+                    Token {
+                        kind: TokenKind::Int,
+                        text: "0".to_string(),
+                        span: Span { start: 11, end: 12 },
+                    },
+                ],
+                span: Span { start: 1, end: 13 },
+            }]),
+            text: "\"${m[k] or 0}\"".to_string(),
+            span: Span { start: 0, end: 14 },
+        }]
+    );
+}
+
 /// `_` で始まり英字・数字が続く字句は識別子であること(仕様1章1.4: `_tmp` は正規の識別子)。
 #[test]
 fn underscore_prefixed_name_is_identifier() {
@@ -1773,8 +1922,8 @@ fn paren_inside_nested_string_is_not_counted_for_matching() {
 }
 
 /// 補間内の角括弧 `[ ]` が深度として対応づけられること(仕様1章L-17
-/// 〔正例: interpolation-nested〕。仕様の3例目 `"${m[k] or 0}"` は `or` が
-/// 予約語テーブル未実装(現状Ident)のため、予約語のサイクルで完全形を追加する)。
+/// 〔正例: interpolation-nested〕。仕様の3例目=`or` 入りの完全形は
+/// spec_third_interpolation_example_with_keyword_or が固定)。
 /// Redを経ていない後追いの回帰テスト。
 #[test]
 fn brackets_inside_interpolation_are_depth_matched() {
