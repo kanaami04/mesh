@@ -1183,7 +1183,8 @@ fn integer_with_multiple_digit_separators_is_single_token() {
 
 /// 連続した桁区切り `_` がエラーE0105になり、違反した最初の `_` 1バイトを
 /// 位置として報告すること(仕様1章L-9〔負例: underscore-edge〕)。
-/// 注: 同じunderscore-edgeの `0x_FF`・`1e_6` は16進・指数部実装のサイクルで追加する。
+/// 同じunderscore-edgeの `0x_FF`・`1e_6` は
+/// underscore_in_radix_and_exponent_reports_e0105_with_span が担う。
 #[test]
 fn consecutive_digit_separators_report_e0105_with_span() {
     // Arrange
@@ -1222,7 +1223,7 @@ fn trailing_digit_separator_reports_e0105_with_span() {
     );
 }
 
-/// `_` の直後に英字が続く形はL-12(E0113、将来実装)ではなくE0105になること
+/// `_` の直後に英字が続く形はL-12(E0113)ではなくE0105になること
 /// (仕様1章L-9注2で固定した優先順位〔負例: underscore-edge〕)。
 /// 数字直後の `_` は数値リテラルの一部として読むため。
 #[test]
@@ -3402,15 +3403,16 @@ fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
     );
 }
 
-/// 回帰の網: ここまでのサイクルで実装した代表トークン種(KwLet/Ident/Eq/Int/Str/Newline
-/// /演算子)と桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
-/// エスケープ・補間入り文字列・演算子(1文字 `%`、2文字 `== && <= => ..` の最長一致)を
+/// 回帰の網: ここまでのサイクルで実装した代表トークン種(KwLet/Ident/Eq/Int/Float/Str
+/// /Newline/演算子)と桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・
+/// 日本語入り行コメント・エスケープ・補間入り文字列・演算子(1文字 `%`、2文字
+/// `== && <= => ..` の最長一致)・float(小数・指数)・基数リテラル(16進)を
 /// 1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn % 2 == 0 && n <= 10 => 0..n"
+        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn % 2 == 0 && n <= 10 => 0..n\nlet r = 2.5e-3 * 0xFF"
     ));
 }
