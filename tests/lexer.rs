@@ -1755,6 +1755,51 @@ fn brackets_inside_interpolation_are_depth_matched() {
     );
 }
 
+/// 補間 `${` を開いたまま対応する `}` を得ずにファイルが終わったときはエラーE0109になり、
+/// `${` 2バイトを位置として報告すること(仕様1章L-18〔負例: unterminated-interpolation〕。
+/// 補間の内側ではE0109がL-16=E0108より優先する)。spanが `${` を指すのは
+/// 「どこで始まった補間が閉じていないか」を示すため(未終端文字列が開き `"` を指す流儀と統一)。
+#[test]
+fn unterminated_interpolation_at_eof_reports_e0109_with_span() {
+    // Arrange
+    let source = "\"${x";
+
+    // Act
+    let err = lex(source).expect_err("閉じ`}`の前にEOFに達した補間はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内の改行はNewlineトークンにせずE0109(L-17(a)の物理1行制約)にすること。
+/// 補間 `${...}` は1物理行に収まらなければならず(仕様1章L-17(a))、内側に生の改行が
+/// 現れた時点で対応する `}` を得られない未終端として扱う(仕様1章L-18
+/// 〔負例: unterminated-interpolation〕)。spanは `${` 2バイト
+/// (未終端文字列が開き `"` を指す流儀と統一)。
+#[test]
+fn raw_newline_inside_interpolation_reports_e0109_with_span() {
+    // Arrange
+    let source = "\"${a\nb}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の生の改行はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ入り文字列を1入力に含むスナップショット。

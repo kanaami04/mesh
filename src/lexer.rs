@@ -69,6 +69,8 @@ pub enum ErrorCode {
     E0105,
     /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
     E0108,
+    /// 補間 `${` が対応する `}` を得ないまま終わった(仕様1章L-18)。
+    E0109,
     /// 一覧に無いエスケープ(仕様1章L-14)。
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
@@ -266,10 +268,7 @@ fn scan_string(
                 continue;
             }
             chars.next();
-            let Some((tokens, interp_end)) = scan_interpolation(source, chars)? else {
-                // 閉じ `}` を見ないままEOFに達した場合。文字列側の未終端(E0108)に委ねる。
-                continue;
-            };
+            let (tokens, interp_end) = scan_interpolation(source, chars, i)?;
             cut_text(&mut segments, text_start, i);
             segments.push(StrSegment::Interp {
                 tokens,
@@ -357,12 +356,21 @@ fn scan_string(
 /// (トークン列, `}` の直後のバイトオフセット)を返す。
 /// 対応関係は**トークン列上**の括弧深度で決める: `( [ {` で+1、`) ] }` で-1し、
 /// 深度0で現れた `}` が対応する閉じ(この `}` はトークン列に含めない)。
-/// 閉じ `}` を見ないままEOFに達したら `Ok(None)`(呼び出し側の未終端文字列E0108に委ねる暫定挙動。
-/// E0109=未終端・不均衡の正式なエラーは後続サイクルで実装する)。
+/// 閉じ `}` を見ないままEOFに達した場合、または内側に生の改行(Newlineトークン)が
+/// 現れた場合はE0109(未終端。仕様1章L-17(a)の物理1行制約、L-18)。spanは
+/// `${` の2バイト(`dollar` は呼び出し側が渡す `$` の開始バイト位置)。
 fn scan_interpolation(
     source: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
-) -> Result<Option<(Vec<Token>, usize)>, LexError> {
+    dollar: usize,
+) -> Result<(Vec<Token>, usize), LexError> {
+    let unterminated = || LexError {
+        code: ErrorCode::E0109,
+        span: Span {
+            start: dollar,
+            end: dollar + "${".len(),
+        },
+    };
     let mut tokens = Vec::new();
     let mut depth = 0usize;
     while chars.peek().is_some() {
@@ -370,9 +378,14 @@ fn scan_interpolation(
             // 空白・行コメントの読み飛ばし。位置は進んでいるのでループを続ける。
             continue;
         };
+        if t.kind == TokenKind::Newline {
+            // 補間は1物理行に収まらなければならない(仕様1章L-17(a))ので、
+            // 内側に生の改行が現れた時点で対応する `}` を得られない未終端として扱う。
+            return Err(unterminated());
+        }
         match t.kind {
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
-            TokenKind::RBrace if depth == 0 => return Ok(Some((tokens, t.span.end))),
+            TokenKind::RBrace if depth == 0 => return Ok((tokens, t.span.end)),
             // 深度0での `)` `]`(不均衡)は暫定で無視する。E0109は後続サイクルで実装する。
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
                 depth = depth.saturating_sub(1)
@@ -381,7 +394,7 @@ fn scan_interpolation(
         }
         tokens.push(t);
     }
-    Ok(None)
+    Err(unterminated())
 }
 
 /// `\u{H}` エスケープの形式と値を検証する(仕様1章L-15)。`\` の位置 `backslash` と
