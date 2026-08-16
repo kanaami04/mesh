@@ -1937,10 +1937,9 @@ fn mismatched_bracket_pair_in_interpolation_reports_e0109() {
 }
 
 /// 文字列と補間のネストが実装上限64段を超えたときはE0118になり、spanは上限を超えた
-/// 65段目の開き `"` 1バイトを指すこと(仕様1章L-17注)。上限64段は、深さ約500段で
-/// `cargo test` がスタックオーバーフローによりSIGABRTでプロセスごと落ちる実測に基づき、
-/// 安全側に十分な余裕を持たせて設定した値。conformanceの負例IDは仕様側がL-17注を
-/// 追記するまで未採番(test-writing規約のID先行予約に該当しないため今回は付与しない)。
+/// 65段目の開き `"` 1バイトを指すこと(仕様1章L-31〔負例: nesting-limit〕)。
+/// 上限64段は、深さ約500段で `cargo test` がスタックオーバーフローにより
+/// SIGABRTでプロセスごと落ちる実測に基づき、安全側に十分な余裕を持たせて設定した値。
 /// 入力は手書きできる長さでないため`repeat`で構築する(このテストのみ許容)。
 #[test]
 fn nesting_depth_limit_reports_e0118() {
@@ -2164,6 +2163,83 @@ fn nesting_depth_at_limit_is_accepted() {
 
     // Assert
     assert_eq!(tokens.len(), 1);
+}
+
+/// 補間内で閉じ`}`を忘れて直後に閉じ`"`を書いたタイポは、その閉じ`"`が
+/// 幻のネスト文字列の開きとして飲み込まれるのではなく、根本原因である
+/// 未終端補間としてE0109(`${`2バイト)で報告されること(仕様1章L-18改訂方針:
+/// 補間内で「行または入力が終わったこと」に起因するエラーはすべてE0109に統一する。
+/// 補間はL-17(a)によりこの行で閉じなければならないため、行終端系のエラーは
+/// 根本原因=未終端補間を指す。仕様1章L-18〔負例: unterminated-interpolation〕。
+/// 現状はこの閉じ`"`をネスト文字列の開きとして消費してしまい、ファイル末尾で
+/// L-16のEOF形としてE0108(4..5、原因から離れた位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn missing_brace_before_closing_quote_reports_e0109() {
+    // Arrange
+    let source = "\"${x\"";
+
+    // Act
+    let err = lex(source).expect_err("`}`閉じ忘れ+閉じ`\"`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内のネスト文字列の中に生の改行(LF)が現れたときも、ネスト文字列自身の
+/// L-16(E0108)ではなく、根本原因である未終端補間としてE0109(最も内側の`${`
+/// 2バイト)で報告されること(仕様1章L-18改訂方針・L-17(a)〔負例:
+/// unterminated-interpolation〕)。現状はネスト文字列のL-16が先に効いてしまい、
+/// E0108(5..6、改行1バイトの位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn raw_newline_in_nested_string_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${\"a\nb\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内ネスト文字列の生の改行はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内のネスト文字列の中に単独CR(直後が`\n`でない`\r`)が現れたときも、
+/// L-16(E0108)ではなく根本原因である未終端補間としてE0109(最も内側の`${`
+/// 2バイト)で報告されること(仕様1章L-18改訂方針・L-17(a)〔負例:
+/// unterminated-interpolation〕。単独CR自体の規則E0117(L-29)ではなく、
+/// 補間内の生の改行として扱う点は lone_cr_inside_interpolation_reports_e0109
+/// と同じ考え方)。現状はネスト文字列のL-16が先に効いてしまい、
+/// E0108(5..6、CR1バイトの位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${\"a\rb\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内ネスト文字列の単独`\\r`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
 }
 
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
