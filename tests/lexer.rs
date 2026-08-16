@@ -860,10 +860,26 @@ fn float_missing_fraction_reports_e0106_with_span() {
             span: Span { start: 0, end: 2 },
         }
     );
+
+    // Arrange(仕様L-10注(a)が名指しする優先順位の例: E0106は先頭ゼロのE0113より先に走る)
+    let source = "0755.";
+
+    // Act
+    let err = lex(source).expect_err("`0755.` は先頭ゼロのE0113より先にE0106になること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 0, end: 5 },
+        }
+    );
 }
 
 /// floatの整数部欠落(仕様1章L-10〔負例: float-dot-edge〕)。`.` の直後が数字のときE0106になり、
-/// spanは `.`+後続数字列の全体。
+/// spanは `.`+後続数字列の全体。仕様L-10注(b)が名指しする「数値リテラルの続きとして
+/// 読まれない位置の `.`+数字」(基数リテラル直後の `0xFF.5`・二重小数点 `3.14.5`)も同形。
 #[test]
 fn float_missing_integer_part_reports_e0106_with_span() {
     // Arrange
@@ -878,6 +894,36 @@ fn float_missing_integer_part_reports_e0106_with_span() {
         LexError {
             code: ErrorCode::E0106,
             span: Span { start: 0, end: 2 },
+        }
+    );
+
+    // Arrange(16進の小数は存在しない=1.6。0xFFの直後の .5 が注(b)で拾われる)
+    let source = "0xFF.5";
+
+    // Act
+    let err = lex(source).expect_err("`0xFF.5` の `.5` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 4, end: 6 },
+        }
+    );
+
+    // Arrange(二重の小数点。2個目の .5 が注(b)で拾われる)
+    let source = "3.14.5";
+
+    // Act
+    let err = lex(source).expect_err("`3.14.5` の2個目の小数点はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0106,
+            span: Span { start: 4, end: 6 },
         }
     );
 }
@@ -913,6 +959,65 @@ fn radix_prefixed_integers_produce_int_tokens() {
                 span: Span { start: 12, end: 17 },
             },
         ]
+    );
+}
+
+/// 基数リテラル内の正しい桁区切り `_`(数字と数字の間)が受理されること
+/// (仕様1章1.6の `hexDigit { hexDigit | "_" hexDigit }` 等・L-9)。
+/// check_digit_separatorsの数字述語一般化(10進固定だと `0xF_F` を誤ってE0105にする)の
+/// 退行防止網。impl-reviewの生存変異(述語を10進固定に戻しても全テスト緑)を受けて追加した
+/// Redを経ない後追いテスト(変異の再適用でKILLを確認済み)。
+#[test]
+fn radix_digit_separators_are_accepted() {
+    // Arrange
+    let source = "0xF_F 0b1010_1010 0o7_5_5";
+
+    // Act
+    let tokens = lex(source).expect("基数リテラルの桁区切りはエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "0xF_F".to_string(),
+                span: Span { start: 0, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0b1010_1010".to_string(),
+                span: Span { start: 6, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0o7_5_5".to_string(),
+                span: Span { start: 18, end: 25 },
+            },
+        ]
+    );
+}
+
+/// 整数部・小数部・指数部それぞれの内側の桁区切り `_` を含むfloatが1個のFloatトークンに
+/// なること(仕様1章1.6・L-9)。check_float_overflowのf64パースが `_` 除去を前提にする
+/// 構造(除去を外すとexpectがpanicに化ける)の退行防止網。impl-reviewの生存変異を受けて
+/// 追加したRedを経ない後追いテスト(変異の再適用でKILLを確認済み)。
+#[test]
+fn float_digit_separators_are_accepted() {
+    // Arrange
+    let source = "1_000.000_1e1_0";
+
+    // Act
+    let tokens = lex(source).expect("桁区切り入りfloatはエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "1_000.000_1e1_0".to_string(),
+            span: Span { start: 0, end: 15 },
+        }]
     );
 }
 
@@ -971,6 +1076,10 @@ fn underscore_in_radix_and_exponent_reports_e0105_with_span() {
 /// 仕様1章L-12〔負例: number-malformed〕。指数部が空・基数接頭辞の後に数字が無い・
 /// 基数外の数字・先頭ゼロの10進・数字直後の識別子文字の5形はE0113。
 /// spanはリテラル全体を指すこと(修正候補が全体置換のため、`0b102` を `0b10`+`2` に分割しない流儀を5形に適用)。
+/// 5形の変種としてケース6〜9も固定する: 最小の先頭ゼロ `00` / 接頭辞の直後から基数外の
+/// `0o8`(基数ガードを外れ10進経路の末尾検査で拾う)/ 大文字接頭辞 `0XFF`(接頭辞は
+/// 小文字のみ=1.6のEBNF)/ 先頭ゼロ+識別子文字の複合 `0755abc`(末尾検査が先に発火し
+/// spanは字面全体)。ケース6〜9はimpl-reviewの生存変異を受けて追加したRedを経ない後追い。
 #[test]
 fn malformed_number_reports_e0113_with_span() {
     // Arrange (1: 指数部が空)
@@ -1047,6 +1156,67 @@ fn malformed_number_reports_e0113_with_span() {
             span: Span { start: 0, end: 6 },
         }
     );
+
+    // Arrange (6: 最小の先頭ゼロ)
+    let source = "00";
+
+    // Act
+    let err = lex(source).expect_err("`00` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 2 },
+        }
+    );
+
+    // Arrange (7: 接頭辞の直後から基数外の数字)
+    let source = "0o8";
+
+    // Act
+    let err = lex(source).expect_err("`0o8` は8進の範囲外でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 3 },
+        }
+    );
+
+    // Arrange (8: 大文字の基数接頭辞)
+    let source = "0XFF";
+
+    // Act
+    let err = lex(source).expect_err("`0XFF` は大文字接頭辞でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+
+    // Arrange (9: 先頭ゼロ+識別子文字の複合)
+    let source = "0755abc";
+
+    // Act
+    let err =
+        lex(source).expect_err("`0755abc` は末尾検査が先に発火して字面全体のエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 7 },
+        }
+    );
 }
 
 /// 仕様1章L-11〔負例: int-literal-overflow〕。整数リテラルが安全整数域
@@ -1084,28 +1254,51 @@ fn int_literal_overflow_reports_e0107_with_span() {
             span: Span { start: 0, end: 16 },
         }
     );
+
+    // Arrange (3: u128でも溢れる47桁。from_str_radixのErr分岐も超過として扱う退行防止網。
+    // impl-reviewの生存変異を受けて追加したRedを経ない後追い)
+    let source = "99999999999999999999999999999999999999999999999";
+
+    // Act
+    let err = lex(source).expect_err("47桁の10進はu128でも溢れてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0107,
+            span: Span { start: 0, end: 47 },
+        }
+    );
 }
 
-/// 仕様1章L-11の境界: 安全整数域の上限2^53−1(=9007199254740991)ちょうどは正当な
-/// Intトークンになること。E0107の負例テストと同時に追加する境界の退行防止網であり、
-/// Redを経ない(実装済みの範囲検査が無い現状でも最初から通ってしまう)。
+/// 仕様1章L-11の境界: 安全整数域の上限2^53−1(=9007199254740991)ちょうどは、
+/// 10進でも16進(`0x1FFFFFFFFFFFFF`)でも正当なIntトークンになること。
+/// E0107の負例テストと同時に追加する境界の退行防止網であり、Redを経ない
+/// (16進側はimpl-review指摘で追加: 基数指定の値解釈が下限方向へ誤判定していない証拠)。
 #[test]
 fn int_literal_at_safe_boundary_is_accepted() {
     // Arrange
-    let source = "9007199254740991";
+    let source = "9007199254740991 0x1FFFFFFFFFFFFF";
 
     // Act
-    let tokens =
-        lex(source).expect("`9007199254740991` は安全整数域の境界ちょうどでエラーにならないこと");
+    let tokens = lex(source).expect("安全整数域の境界ちょうどはエラーにならないこと");
 
     // Assert
     assert_eq!(
         tokens,
-        vec![Token {
-            kind: TokenKind::Int,
-            text: "9007199254740991".to_string(),
-            span: Span { start: 0, end: 16 },
-        }]
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "9007199254740991".to_string(),
+                span: Span { start: 0, end: 16 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0x1FFFFFFFFFFFFF".to_string(),
+                span: Span { start: 17, end: 33 },
+            },
+        ]
     );
 }
 
@@ -1131,32 +1324,47 @@ fn float_literal_overflow_reports_e0114_with_span() {
 }
 
 /// floatが表現可能な大きさの境界を確認すること(仕様1章L-13の境界)。
-/// `1e308` は有限値として表現できるためエラーにならない。`1e-999` は0に丸まるが
-/// 「大きさ」の超過ではない(アンダーフロー方向)のでL-13の対象外。
-/// 負例と同時に追加する境界の網で、1e308側はRedを経ない(現状も通る)。
+/// `1e308` は有限値として表現できるためエラーにならない。
+/// 負例E0114と同時に追加する境界の網で、Redを経ない(現状も通る)。
 #[test]
 fn float_at_representable_magnitude_is_accepted() {
     // Arrange
-    let source = "1e308 1e-999";
+    let source = "1e308";
 
     // Act
-    let tokens = lex(source).expect("`1e308 1e-999` は字句解析エラーにならないこと");
+    let tokens = lex(source).expect("`1e308` は字句解析エラーにならないこと");
 
     // Assert
     assert_eq!(
         tokens,
-        vec![
-            Token {
-                kind: TokenKind::Float,
-                text: "1e308".to_string(),
-                span: Span { start: 0, end: 5 },
-            },
-            Token {
-                kind: TokenKind::Float,
-                text: "1e-999".to_string(),
-                span: Span { start: 6, end: 12 },
-            },
-        ]
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "1e308".to_string(),
+            span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
+/// アンダーフロー方向(`1e-999` は0.0に丸まる)はL-13の対象外でエラーにしないこと
+/// (仕様1章L-13: 対象は「表現できない大きさ」=絶対値の上方超過のみ)。
+/// 表現域境界(1e308)とは別検証項目のため関数を分ける(impl-review指摘で分割)。
+/// Redを経ない挙動固定の網。
+#[test]
+fn float_underflow_is_not_an_error() {
+    // Arrange
+    let source = "1e-999";
+
+    // Act
+    let tokens = lex(source).expect("`1e-999` は字句解析エラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "1e-999".to_string(),
+            span: Span { start: 0, end: 6 },
+        }]
     );
 }
 

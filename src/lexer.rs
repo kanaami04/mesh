@@ -441,9 +441,9 @@ fn scan_number(
     // 基数接頭辞つき整数リテラル(仕様1章1.6: `int = decInt | "0x" hexInt | "0b" binInt | "0o" octInt`)。
     // `0` の直後が `x`/`b`/`o` で、かつその次が対応する基数の有効数字のときだけ
     // 基数リテラルとして読む(2文字先読みの最長一致)。この条件を満たさない場合
-    // (`0x` の後に有効数字が無い、`0z` 等)は下の10進読み取りに委ね、
-    // 従来どおり Int("0")+Ident(...) に割れる。`0x` 単独のE0113診断はL-12サイクルの
-    // 担当であり、ここでは先取りしない。
+    // (`0x` の後に有効数字が無い、`0z`・`0o8`・大文字接頭辞 `0X` 等)は下の10進読み取りに
+    // 委ねる。落ちた先では `0` の直後に識別子文字が残るため、末尾検査
+    // (check_trailing_alnum)がE0113として拾う(仕様1章L-12)。
     if c == '0' {
         let prefix = peek_at(source, start + '0'.len_utf8());
         // 数字述語(桁区切り検査用)と基数(値域検査用、E0107)を組で持つ。
@@ -934,7 +934,10 @@ fn check_trailing_alnum(
     let Some(&(tail_start, first)) = chars.peek() else {
         return Ok(());
     };
-    if !(first.is_ascii_alphanumeric() || first == '_') {
+    // 1文字目の判定に `_` は要らない: 10進・基数どちらのスキャンも `_` を貪欲に読むため、
+    // 数値スキャンが止まった位置の文字が `_` になることはない(内側のscan_whileの `_` は
+    // `123a_b` のような連なりの2文字目以降で到達可能なので残す)。
+    if !first.is_ascii_alphanumeric() {
         return Ok(());
     }
     let (_, end) = scan_while(source, chars, tail_start, first, |d| {
@@ -986,8 +989,8 @@ fn check_int_overflow(text: &str, span: Span, radix: u32) -> Result<(), LexError
 /// ——「静かにInfinityにしない」。
 ///
 /// アンダーフロー(絶対値が小さすぎて0.0に丸まる、例: `1e-999`)はここでは
-/// 検査しない。仕様1章L-13が対象とするのは「大きさ」(絶対値が大きすぎる方向)
-/// の超過のみで、0への丸めは別の性質の問題であり対象外と明記されているため。
+/// 検査しない。仕様1章L-13が対象とするのは「表現できない大きさ」(絶対値が
+/// 大きすぎる方向)の超過のみで、0への丸めは対象外(L-13にその旨を明記済み)。
 ///
 /// spanは呼び出し側が渡すリテラル全体。
 fn check_float_overflow(text: &str, span: Span) -> Result<(), LexError> {
