@@ -713,6 +713,81 @@ fn integer_with_digit_separator_is_single_token() {
     );
 }
 
+/// floatリテラル(`decInt "." decInt`)が1個のFloatトークンとして切り出されること(仕様1章1.6)。
+/// textはソースの生の字面のまま保持すること。
+#[test]
+fn float_literal_produces_single_float_token() {
+    // Arrange
+    let source = "3.14";
+
+    // Act
+    let tokens = lex(source).expect("floatリテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "3.14".to_string(),
+            span: Span { start: 0, end: 4 },
+        }]
+    );
+}
+
+/// 整数部が `0` のfloatリテラルも1個のFloatトークンになること(仕様1章1.6の正例 `0.5`)。
+#[test]
+fn float_with_zero_integer_part_is_single_token() {
+    // Arrange
+    let source = "0.5";
+
+    // Act
+    let tokens = lex(source).expect("`0.5` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "0.5".to_string(),
+            span: Span { start: 0, end: 3 },
+        }]
+    );
+}
+
+/// `..` の消極規則はfloat直後にも適用され、floatリテラルの直後の `..` は
+/// 数値に取り込まれず独立したDotDotトークンになること(仕様1章L-3)。
+/// dotdot_after_integer_splits_range のdocコメントが予約していたfloatサイクルの追加検証。
+#[test]
+fn float_before_dotdot_splits_range() {
+    // Arrange
+    let source = "1.5..2";
+
+    // Act
+    let tokens = lex(source).expect("`1.5..2` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Float,
+                text: "1.5".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 3, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+        ]
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

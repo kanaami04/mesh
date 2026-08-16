@@ -123,6 +123,9 @@ pub enum TokenKind {
     PercentEq,
     /// `=>`(仕様1章1.9)。
     FatArrow,
+    /// 10進floatリテラル(例: `3.14`)。仕様1章1.6・L-3。
+    /// textは桁区切り `_` も含めたソースの生の字面のまま(Intと同じく正規化しない)。
+    Float,
 }
 
 /// ソース中の位置(バイトオフセットの半開区間)。位置つきエラー報告の基盤(仕様1章の各E01xx規則)。
@@ -237,9 +240,37 @@ fn next_token(
         return Ok(None);
     };
     if c.is_ascii_digit() {
-        let (text, end) = scan_while(source, chars, start, c, |d| d.is_ascii_digit() || d == '_');
+        // 数値リテラル(仕様1章1.6)。まず整数部(数字と桁区切り `_`)を最長一致で読む。
+        let (_, mut end) = scan_while(source, chars, start, c, |d| d.is_ascii_digit() || d == '_');
+        // `.` を小数点として取り込むのは**直後がASCII数字のときだけ**(仕様1章L-3)。
+        // `1..5` の `..`(DotDot)や `1.method` の `.`(Dot)を数値に飲み込まないための
+        // 消極規則で、判定は2文字ぶんの非消費先読み(peek_at)で行う。`.` も次の文字も
+        // ASCIIなので `end + 1` は必ず文字境界。取り込まない場合は `.` を消費せず
+        // Intで止め、演算子側の分岐(DotDot/Dot)に処理を委ねる。
+        let is_float = peek_at(source, end) == Some('.')
+            && peek_at(source, end + '.'.len_utf8()).is_some_and(|d| d.is_ascii_digit());
+        if is_float {
+            // `.` を消費し、続く小数部(整数部と同じく数字と `_`)を読む。
+            chars.next();
+            let &(frac_start, frac_first) = chars.peek().expect("先読みで小数部の数字を確認済み");
+            let (_, frac_end) = scan_while(source, chars, frac_start, frac_first, |d| {
+                d.is_ascii_digit() || d == '_'
+            });
+            end = frac_end;
+        }
+        // 桁区切り `_` の検査(仕様1章L-9)は `.` を跨いだ字面全体にかける
+        // (`1_000.5` の整数部・小数部を1回で見る)。`.` は数字でないため
+        // 「`_` の隣が数字」の判定はそのまま働く(`1_.5` は `_` の直後が `.` でE0105)。
+        let text = &source[start..end];
         check_digit_separators(text, start)?;
-        Ok(Some(token(TokenKind::Int, text, Span { start, end })))
+        // Int・Floatとも text はソースの生の字面のまま持つ(正規化しない)。
+        // 値への変換は後段の担当で、字句解析器は位置と字面の対応を壊さない。
+        let kind = if is_float {
+            TokenKind::Float
+        } else {
+            TokenKind::Int
+        };
+        Ok(Some(token(kind, text, Span { start, end })))
     } else if c.is_ascii_alphabetic() || c == '_' {
         let (text, end) = scan_while(source, chars, start, c, |d| {
             d.is_ascii_alphanumeric() || d == '_'
