@@ -2129,7 +2129,7 @@ fn two_level_nested_interpolation_is_tokenized() {
 }
 
 /// E0115(補間内コメント)と内側エラーは**出現順**で先のものが報告されること
-/// (仕様1章L-18注1の「E0115とは出現順」の固定。この入力では `//` が
+/// (仕様1章L-18注2の「E0115とは出現順」の固定。この入力では `//` が
 /// ネスト文字列の不正エスケープ `\q` より先に現れるためE0115)。
 #[test]
 fn e0115_and_inner_error_are_reported_in_order_of_appearance() {
