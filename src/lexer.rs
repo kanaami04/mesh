@@ -254,17 +254,10 @@ fn next_token(
         } else {
             Ok(Some(token(TokenKind::Ident, text, Span { start, end })))
         }
-    } else if c == '/'
-        && matches!(
-            source[start + '/'.len_utf8()..].chars().next(),
-            Some('/' | '*')
-        )
-    {
-        // `/` の2文字目を**消費せずに**先読みして、コメント(`//`・`/*`)だけをここで捌く
-        // (仕様1章L-4・L-5)。単独の `/` はこの分岐に入らず、下の1文字演算子表で
+    } else if c == '/' && matches!(peek_at(source, start + '/'.len_utf8()), Some('/' | '*')) {
+        // `/` の2文字目を**消費せずに**先読み(peek_at)して、コメント(`//`・`/*`)だけを
+        // ここで捌く(仕様1章L-4・L-5)。単独の `/` はこの分岐に入らず、下の1文字演算子表で
         // Slashトークン(除算)になる(仕様1章1.9)。
-        // 先読みはソース文字列側で行う: `start` は未消費位置なので `source[start..]` が
-        // イテレータの残りと一致し、`/` は1バイトなので `start + 1` は必ず文字境界にある。
         chars.next();
         let (_, second) = chars.next().expect("ガードで2文字目の存在を確認済み");
         if second == '/' {
@@ -300,7 +293,7 @@ fn next_token(
                 },
             })
         }
-    } else if c == '-' && source[start + c.len_utf8()..].starts_with('>') {
+    } else if c == '-' && peek_at(source, start + c.len_utf8()) == Some('>') {
         // `->` は仕様に存在しない記号列(仕様1章L-26: 近い正解への誘導)。
         // `=>`(FatArrow)と紛らわしいアロー風の綴りのため、`-`+`>` に分割せず
         // 記号列全体をE0116として報告する。2文字演算子表(two_char_operator_kind)には
@@ -313,21 +306,16 @@ fn next_token(
             code: ErrorCode::E0116,
             span: Span { start, end },
         })
-    } else if let Some((kind, second)) = source[start + c.len_utf8()..]
-        .chars()
-        .next()
+    } else if let Some((kind, second)) = peek_at(source, start + c.len_utf8())
         .and_then(|second| two_char_operator_kind(c, second).map(|kind| (kind, second)))
     {
         // 2文字演算子の最長一致(仕様1章L-2)。1文字目を**消費する前に**2文字目を
-        // 先読みし、表に載っていれば2文字まとめて1トークンにする。該当しなければ
-        // この分岐に入らず、下の1文字表(punctuation_kind・operator_kind)に落ちる。
-        // 先読みはコメント分岐と同じくソース文字列側で行う: `start` は未消費位置なので
-        // `source[start..]` がイテレータの残りと一致し、1文字目はASCIIなので
-        // `start + c.len_utf8()` は必ず文字境界にある。
+        // 先読み(peek_at)し、表に載っていれば2文字まとめて1トークンにする。
+        // 該当しなければこの分岐に入らず、下の1文字表(punctuation_kind・operator_kind)に落ちる。
         chars.next();
         chars.next();
         let end = start + c.len_utf8() + second.len_utf8();
-        if kind == TokenKind::EqEq && source[end..].starts_with('=') {
+        if kind == TokenKind::EqEq && peek_at(source, end) == Some('=') {
             // `===` は仕様に存在しない記号列(仕様1章L-26)。JS由来の厳密等価演算子への
             // 誘導のため、2文字表で `==`(EqEq)が引けた後さらに3文字目を**非消費先読み**
             // して判定する(`====` 以降の続きは考えない。最初の3文字でエラー確定)。
@@ -848,4 +836,13 @@ fn scan_while<'s>(
         }
     }
     (&source[start..end], end)
+}
+
+/// バイトオフセット `offset` にある文字を**イテレータを消費せずに**返す(非消費先読みの共通部品)。
+/// `Peekable` は1文字先までしか覗けないため、「1文字目を消費する前に2文字目を見る」
+/// 最長一致(仕様1章L-2)の判定はソース文字列側のスライスで行う。
+/// `offset` は文字境界であること(呼び出し側はASCII文字の直後を渡すため常に成立する)。
+/// EOFに達しているときは `None`。
+fn peek_at(source: &str, offset: usize) -> Option<char> {
+    source[offset..].chars().next()
 }
