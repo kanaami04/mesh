@@ -2,7 +2,7 @@
 //! docs/spec/01-lexical.md を正とし、TDDサイクルごとに1振る舞いずつ追加する。
 //! 書き方はAAAパターン+1テスト1assert(規約: .claude/skills/test-writing/SKILL.md)。
 
-use mesh::lexer::{ErrorCode, LexError, Span, Token, TokenKind, lex};
+use mesh::lexer::{ErrorCode, LexError, Span, StrSegment, Token, TokenKind, lex};
 
 /// 空のソース文字列を字句解析すると、空のトークン列が返ること。
 #[test]
@@ -987,7 +987,10 @@ fn string_literal_produces_single_str_token() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "abc".to_string(),
+                span: Span { start: 1, end: 4 },
+            }]),
             text: "\"abc\"".to_string(),
             span: Span { start: 0, end: 5 },
         }]
@@ -1011,7 +1014,10 @@ fn escaped_quote_does_not_terminate_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "a\\\"b".to_string(),
+                span: Span { start: 1, end: 5 },
+            }]),
             text: "\"a\\\"b\"".to_string(),
             span: Span { start: 0, end: 6 },
         }]
@@ -1166,7 +1172,7 @@ fn empty_string_literal_produces_single_str_token() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![]),
             text: "\"\"".to_string(),
             span: Span { start: 0, end: 2 },
         }]
@@ -1187,7 +1193,10 @@ fn dollar_without_brace_is_literal_in_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "$5".to_string(),
+                span: Span { start: 1, end: 3 },
+            }]),
             text: "\"$5\"".to_string(),
             span: Span { start: 0, end: 4 },
         }]
@@ -1210,7 +1219,10 @@ fn valid_escapes_pass_through_with_raw_text() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "a\\n\\t\\r\\\\\\$\\u{3042}z".to_string(),
+                span: Span { start: 1, end: 21 },
+            }]),
             text: "\"a\\n\\t\\r\\\\\\$\\u{3042}z\"".to_string(),
             span: Span { start: 0, end: 22 },
         }]
@@ -1295,7 +1307,10 @@ fn unicode_escape_boundary_values_are_accepted() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "\\u{10FFFF}\\u{D7FF}\\u{E000}".to_string(),
+                span: Span { start: 1, end: 27 },
+            }]),
             text: "\"\\u{10FFFF}\\u{D7FF}\\u{E000}\"".to_string(),
             span: Span { start: 0, end: 28 },
         }]
@@ -1358,7 +1373,10 @@ fn escaped_dollar_before_brace_is_literal_in_string() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "\\${x}".to_string(),
+                span: Span { start: 1, end: 6 },
+            }]),
             text: "\"\\${x}\"".to_string(),
             span: Span { start: 0, end: 7 },
         }]
@@ -1442,7 +1460,10 @@ fn japanese_string_literal_is_allowed() {
     assert_eq!(
         tokens,
         vec![Token {
-            kind: TokenKind::Str,
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "こんにちは".to_string(),
+                span: Span { start: 1, end: 16 },
+            }]),
             text: "\"こんにちは\"".to_string(),
             span: Span { start: 0, end: 17 },
         }]
@@ -1496,14 +1517,739 @@ fn backslash_at_eof_reports_e0108_with_span() {
     );
 }
 
+/// 区切り記号7種 `( ) [ ] { } ,` がそれぞれ1文字のトークンになること(仕様1章1.9)。
+/// 補間L-17の「トークン列上での括弧対応」の前提工事。
+#[test]
+fn punctuation_tokens_are_lexed_individually() {
+    // Arrange
+    let source = "([{,}])";
+
+    // Act
+    let tokens = lex(source).expect("区切り記号7種の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
+/// 文字列中の `${式}` がInterpセグメント(再帰トークン化した式を内包)になること
+/// (仕様1章L-17〔正例: interpolation-nested の基本形〕・ADR-0042)。
+/// Interpのspanは `${` から対応する `}` まで、内側トークンのspanはソース絶対位置。
+#[test]
+fn interpolation_produces_interp_segment_with_recursive_tokens() {
+    // Arrange
+    let source = "\"a${x}b\"";
+
+    // Act
+    let tokens = lex(source).expect("補間を含む文字列リテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![
+                StrSegment::Text {
+                    text: "a".to_string(),
+                    span: Span { start: 1, end: 2 },
+                },
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "x".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    }],
+                    span: Span { start: 2, end: 6 },
+                },
+                StrSegment::Text {
+                    text: "b".to_string(),
+                    span: Span { start: 6, end: 7 },
+                },
+            ]),
+            text: "\"a${x}b\"".to_string(),
+            span: Span { start: 0, end: 8 },
+        }]
+    );
+}
+
+/// 補間内にネストした文字列リテラルを書けること(仕様1章L-17〔正例: interpolation-nested〕)。
+/// ネスト文字列は再帰トークン化が文字列分岐を再度通ることで特別扱いなしに成立する。
+/// Redを経ていない後追いの回帰テスト(実装が最初から満たすことを実測済み)。
+#[test]
+fn nested_string_inside_interpolation_is_tokenized() {
+    // Arrange
+    let source = "\"${f(\"x\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("ネスト文字列入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Text {
+                            text: "x".to_string(),
+                            span: Span { start: 6, end: 7 },
+                        }]),
+                        text: "\"x\"".to_string(),
+                        span: Span { start: 5, end: 8 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 8, end: 9 },
+                    },
+                ],
+                span: Span { start: 1, end: 10 },
+            }]),
+            text: "\"${f(\"x\")}\"".to_string(),
+            span: Span { start: 0, end: 11 },
+        }]
+    );
+}
+
+/// ネスト文字列の**中身の括弧文字**は補間の括弧対応に数えられないこと
+/// (仕様1章L-17「エスケープの中の括弧『文字』は数えない」の文字列側。
+/// 対応はトークン列上で数えるため、文字列内の `(` はStrの中身であり深度に影響しない)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn paren_inside_nested_string_is_not_counted_for_matching() {
+    // Arrange
+    let source = "\"${f(\"(\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("文字列内括弧入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Text {
+                            text: "(".to_string(),
+                            span: Span { start: 6, end: 7 },
+                        }]),
+                        text: "\"(\"".to_string(),
+                        span: Span { start: 5, end: 8 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 8, end: 9 },
+                    },
+                ],
+                span: Span { start: 1, end: 10 },
+            }]),
+            text: "\"${f(\"(\")}\"".to_string(),
+            span: Span { start: 0, end: 11 },
+        }]
+    );
+}
+
+/// 補間内の角括弧 `[ ]` が深度として対応づけられること(仕様1章L-17
+/// 〔正例: interpolation-nested〕。仕様の3例目 `"${m[k] or 0}"` は `or` が
+/// 予約語テーブル未実装(現状Ident)のため、予約語のサイクルで完全形を追加する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn brackets_inside_interpolation_are_depth_matched() {
+    // Arrange
+    let source = "\"${m[k]}\"";
+
+    // Act
+    let tokens = lex(source).expect("角括弧入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "m".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBracket,
+                        text: "[".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "k".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBracket,
+                        text: "]".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                ],
+                span: Span { start: 1, end: 8 },
+            }]),
+            text: "\"${m[k]}\"".to_string(),
+            span: Span { start: 0, end: 9 },
+        }]
+    );
+}
+
+/// 補間 `${` を開いたまま対応する `}` を得ずにファイルが終わったときはエラーE0109になり、
+/// `${` 2バイトを位置として報告すること(仕様1章L-18〔負例: unterminated-interpolation〕。
+/// 補間の内側ではE0109がL-16=E0108より優先する)。spanが `${` を指すのは
+/// 「どこで始まった補間が閉じていないか」を示すため(未終端文字列が開き `"` を指す流儀と統一)。
+#[test]
+fn unterminated_interpolation_at_eof_reports_e0109_with_span() {
+    // Arrange
+    let source = "\"${x";
+
+    // Act
+    let err = lex(source).expect_err("閉じ`}`の前にEOFに達した補間はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内の改行はNewlineトークンにせずE0109(L-17(a)の物理1行制約)にすること。
+/// 補間 `${...}` は1物理行に収まらなければならず(仕様1章L-17(a))、内側に生の改行が
+/// 現れた時点で対応する `}` を得られない未終端として扱う(仕様1章L-18
+/// 〔負例: unterminated-interpolation〕)。spanは `${` 2バイト
+/// (未終端文字列が開き `"` を指す流儀と統一)。
+#[test]
+fn raw_newline_inside_interpolation_reports_e0109_with_span() {
+    // Arrange
+    let source = "\"${a\nb}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の生の改行はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間の内側にコメント `//` を書けないこと(仕様1章L-17(b)〔負例: interpolation-comment〕)。
+/// 補間 `${...}` の内側は通常の字句モードでトークン化するが、行コメントは対応外——
+/// `//` を許すと閉じ`}`まで(実装次第ではファイル末尾まで)コメント扱いで飲み込まれ、
+/// 補間が閉じないまま黙って壊れるため、E0115として明示的に拒否する。
+/// spanは `//` の2バイトを指す。
+#[test]
+fn comment_inside_interpolation_reports_e0115_with_span() {
+    // Arrange
+    let source = "\"${1 // c}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の`//`はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0115,
+            span: Span { start: 5, end: 7 },
+        }
+    );
+}
+
+/// 空の補間 `${}` は空のトークン列を持つInterpセグメントになること(仕様1章L-17)。
+/// 空の式を拒否するのはパーサの担当で、字句は事実をそのまま伝える。
+/// Redを経ていない後追いの回帰テスト(境界: 補間ループが1周も回らない形)。
+#[test]
+fn empty_interpolation_produces_interp_with_no_tokens() {
+    // Arrange
+    let source = "\"${}\"";
+
+    // Act
+    let tokens = lex(source).expect("空の補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![],
+                span: Span { start: 1, end: 4 },
+            }]),
+            text: "\"${}\"".to_string(),
+            span: Span { start: 0, end: 5 },
+        }]
+    );
+}
+
+/// 補間の内側で発生した字句エラー(ネスト文字列のE0112)がE0109より優先されること
+/// (仕様1章L-18注: より具体的な原因を指す。実装は内側エラーの素直な伝播)。
+/// Redを経ていない後追いの回帰テスト(宿題だった優先順位の固定)。
+#[test]
+fn inner_lexical_error_takes_priority_over_e0109() {
+    // Arrange
+    let source = "\"${\"\\u{}\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内のネスト文字列の\\u{}はE0112としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0112,
+            span: Span { start: 4, end: 8 },
+        }
+    );
+}
+
+/// 補間内で対応する開き括弧を持たない閉じ括弧(`)` `]` `}`)が現れたときはE0109に
+/// なり、spanはその閉じ括弧1バイトを指すこと(仕様1章L-18〔負例: unterminated-interpolation〕。
+/// L-18は現状「対応するE0109」の分岐が未実装で、この閉じ括弧はサイレントに無視されてOkに
+/// なる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn unmatched_closer_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${)}\"";
+
+    // Act
+    let err = lex(source).expect_err("対応する開きを持たない`)`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 3, end: 4 },
+        }
+    );
+}
+
+/// 補間内で開き括弧と種類が一致しない閉じ括弧が現れたときもE0109になり、spanは
+/// その閉じ括弧1バイトを指すこと(`(` に対する `}` は種類不一致。仕様1章L-18
+/// 〔負例: unterminated-interpolation〕。現状は種類を照合せず深度だけで対応づけるため、
+/// この`}`を`(`の対応閉じとして飲み込んでしまい、後続の閉じ`"`まで補間扱いで消費し、
+/// 離れた位置のE0108(未終端文字列)になる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn mismatched_closer_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${f(a}\"";
+
+    // Act
+    let err = lex(source).expect_err("`(`に対して種類の異なる`}`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 6, end: 7 },
+        }
+    );
+}
+
+/// 補間内で開き括弧 `(` に対して種類の異なる閉じ `]` が現れたときもE0109になること
+/// (仕様1章L-18〔負例: unterminated-interpolation〕。現状は種類を照合しないため
+/// `]`をただの不均衡減算として無視し、後続の`}`を`(`の対応閉じとして受理してOkに
+/// なる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn mismatched_bracket_pair_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${(]}\"";
+
+    // Act
+    let err = lex(source).expect_err("`(`に対して種類の異なる`]`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 4, end: 5 },
+        }
+    );
+}
+
+/// 文字列と補間のネストが実装上限64段を超えたときはE0118になり、spanは上限を超えた
+/// 65段目の開き `"` 1バイトを指すこと(仕様1章L-31〔負例: nesting-limit〕)。
+/// 上限64段は、深さ約500段で `cargo test` がスタックオーバーフローにより
+/// SIGABRTでプロセスごと落ちる実測に基づき、安全側に十分な余裕を持たせて設定した値。
+/// 入力は手書きできる長さでないため`repeat`で構築する(このテストのみ許容)。
+#[test]
+fn nesting_depth_limit_reports_e0118() {
+    // Arrange
+    // `"${` を65回・`x`・`}"` を65回で、文字列→補間→文字列→…と65段ネストさせる。
+    // 65段目(0始まりで64段目)の開き`"`は 64 * 3 = 192バイト目。上限64段を1段超える。
+    let source = "\"${".repeat(65) + "x" + &"}\"".repeat(65);
+
+    // Act
+    let err = lex(&source).expect_err("ネスト65段はE0118としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0118,
+            span: Span {
+                start: 192,
+                end: 193
+            },
+        }
+    );
+}
+
+/// 補間内の単独CR(直後が`\n`でない`\r`)は、LF・CRLFと同じ「補間内の生の改行」として
+/// E0109(未終端。L-17(a)の物理1行制約)に統一すること(仕様1章L-17(a)・L-18
+/// 〔負例: unterminated-interpolation〕。現状はCRを補間内の他の文字と同様の通常字句
+/// モードで扱ってしまい、単独CR自体の規則であるE0117(L-29)が先に発生する——
+/// 本テストが再現するimpl-review検出バグ)。
+#[test]
+fn lone_cr_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${a\rb}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の単独`\\r`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内の `{ }` ブロックが深度として対応づけられ、内側の `}` で補間が閉じないこと
+/// (仕様1章L-17「トークン列上で括弧類の対応を数える」の`{}`側。
+/// impl-reviewの変異テストで「LBraceを深度から外しても全テスト緑」と実証された穴を塞ぐ)。
+#[test]
+fn brace_block_inside_interpolation_is_depth_matched() {
+    // Arrange
+    let source = "\"${a{b}c}\"";
+
+    // Act
+    let tokens = lex(source).expect("補間内の{}ブロックの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "a".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBrace,
+                        text: "{".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "b".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBrace,
+                        text: "}".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "c".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    },
+                ],
+                span: Span { start: 1, end: 9 },
+            }]),
+            text: "\"${a{b}c}\"".to_string(),
+            span: Span { start: 0, end: 10 },
+        }]
+    );
+}
+
+/// 連続した補間 `${a}${b}` がテキスト区分を挟まず隣接するInterp 2個になること(仕様1章L-17)。
+/// Redを経ていない後追いの回帰テスト(区分の隣接境界)。
+#[test]
+fn adjacent_interpolations_produce_two_interp_segments() {
+    // Arrange
+    let source = "\"${a}${b}\"";
+
+    // Act
+    let tokens = lex(source).expect("連続補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "a".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    }],
+                    span: Span { start: 1, end: 5 },
+                },
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "b".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    }],
+                    span: Span { start: 5, end: 9 },
+                },
+            ]),
+            text: "\"${a}${b}\"".to_string(),
+            span: Span { start: 0, end: 10 },
+        }]
+    );
+}
+
+/// 2段ネスト(補間内のネスト文字列がさらに補間を含む)が入れ子のまま成立すること
+/// (仕様1章L-17・ADR-0042の再帰表現の核心形)。
+#[test]
+fn two_level_nested_interpolation_is_tokenized() {
+    // Arrange
+    let source = "\"${f(\"${g}\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("2段ネスト補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Interp {
+                            tokens: vec![Token {
+                                kind: TokenKind::Ident,
+                                text: "g".to_string(),
+                                span: Span { start: 8, end: 9 },
+                            }],
+                            span: Span { start: 6, end: 10 },
+                        }]),
+                        text: "\"${g}\"".to_string(),
+                        span: Span { start: 5, end: 11 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 11, end: 12 },
+                    },
+                ],
+                span: Span { start: 1, end: 13 },
+            }]),
+            text: "\"${f(\"${g}\")}\"".to_string(),
+            span: Span { start: 0, end: 14 },
+        }]
+    );
+}
+
+/// E0115(補間内コメント)と内側エラーは**出現順**で先のものが報告されること
+/// (仕様1章L-18注2の「E0115とは出現順」の固定。この入力では `//` が
+/// ネスト文字列の不正エスケープ `\q` より先に現れるためE0115)。
+#[test]
+fn e0115_and_inner_error_are_reported_in_order_of_appearance() {
+    // Arrange
+    let source = "\"${ // c\"\\q\" }\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の先行する`//`がE0115としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0115,
+            span: Span { start: 4, end: 6 },
+        }
+    );
+}
+
+/// ネスト64段ちょうどは上限内で受理されること(仕様1章L-31の境界。65段=E0118は
+/// nesting_depth_limit_reports_e0118 が固定)。
+/// 注: 64段の期待トークン木の丸ごと明示は非現実的なため、例外的に
+/// 「Okかつ最上位が1トークン」の形状検証に留める(理由をここに明記する規約運用)。
+#[test]
+fn nesting_depth_at_limit_is_accepted() {
+    // Arrange
+    let source = format!("{}x{}", "\"${".repeat(64), "}\"".repeat(64));
+
+    // Act
+    let tokens = lex(&source).expect("64段ちょうどのネストはエラーにならないこと");
+
+    // Assert
+    assert_eq!(tokens.len(), 1);
+}
+
+/// 補間内で閉じ`}`を忘れて直後に閉じ`"`を書いたタイポは、その閉じ`"`が
+/// 幻のネスト文字列の開きとして飲み込まれるのではなく、根本原因である
+/// 未終端補間としてE0109(`${`2バイト)で報告されること(仕様1章L-18改訂方針:
+/// 補間内で「行または入力が終わったこと」に起因するエラーはすべてE0109に統一する。
+/// 補間はL-17(a)によりこの行で閉じなければならないため、行終端系のエラーは
+/// 根本原因=未終端補間を指す。仕様1章L-18〔負例: unterminated-interpolation〕。
+/// 現状はこの閉じ`"`をネスト文字列の開きとして消費してしまい、ファイル末尾で
+/// L-16のEOF形としてE0108(4..5、原因から離れた位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn missing_brace_before_closing_quote_reports_e0109() {
+    // Arrange
+    let source = "\"${x\"";
+
+    // Act
+    let err = lex(source).expect_err("`}`閉じ忘れ+閉じ`\"`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内のネスト文字列の中に生の改行(LF)が現れたときも、ネスト文字列自身の
+/// L-16(E0108)ではなく、根本原因である未終端補間としてE0109(最も内側の`${`
+/// 2バイト)で報告されること(仕様1章L-18改訂方針・L-17(a)〔負例:
+/// unterminated-interpolation〕)。現状はネスト文字列のL-16が先に効いてしまい、
+/// E0108(5..6、改行1バイトの位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn raw_newline_in_nested_string_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${\"a\nb\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内ネスト文字列の生の改行はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
+/// 補間内のネスト文字列の中に単独CR(直後が`\n`でない`\r`)が現れたときも、
+/// L-16(E0108)ではなく根本原因である未終端補間としてE0109(最も内側の`${`
+/// 2バイト)で報告されること(仕様1章L-18改訂方針・L-17(a)〔負例:
+/// unterminated-interpolation〕。単独CR自体の規則E0117(L-29)ではなく、
+/// 補間内の生の改行として扱う点は lone_cr_inside_interpolation_reports_e0109
+/// と同じ考え方)。現状はネスト文字列のL-16が先に効いてしまい、
+/// E0108(5..6、CR1バイトの位置)を報告する——
+/// 本テストが再現するimpl-review検出バグ(N1)。
+#[test]
+fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${\"a\rb\"}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内ネスト文字列の単独`\\r`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
-/// エスケープ入り文字列を1入力に含むスナップショット。
+/// エスケープ・補間入り文字列を1入力に含むスナップショット。
 /// TDDサイクルの検証は上の明示的assertが担い、これは出力全体の固定のみを担う
 /// (スナップショットテストはAAAマーカーの対象外)。
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let n = 1_000 // 合計\r\nlet msg = \"答え\\n\"\nn"
+        "let n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
     ));
 }

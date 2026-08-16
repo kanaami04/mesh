@@ -30,6 +30,7 @@ export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && c
 
 - **丸ごと明示**する: `assert_eq!(tokens, vec![Token { kind: TokenKind::Int, text: "42".to_string() }])`。`is_ok()` だけ等の曖昧検証は不可。
 - `expect` のメッセージは日本語で「〜であること」(失敗時にそのまま仕様文として読める)。
+- **例外(巨大入力)**: 期待値の丸ごと明示が非現実的な生成入力(64段ネスト等)に限り、形状検証(トークン数等)まで緩めてよい。理由をdocコメントに明記する(実例: nesting_depth_at_limit_is_accepted)。境界の検知力は対になる負例(65段=E0118)が担保する。
 
 ## TDDサイクル中の分担(実証済みの運用)
 
