@@ -1988,6 +1988,184 @@ fn lone_cr_inside_interpolation_reports_e0109() {
     );
 }
 
+/// 補間内の `{ }` ブロックが深度として対応づけられ、内側の `}` で補間が閉じないこと
+/// (仕様1章L-17「トークン列上で括弧類の対応を数える」の`{}`側。
+/// impl-reviewの変異テストで「LBraceを深度から外しても全テスト緑」と実証された穴を塞ぐ)。
+#[test]
+fn brace_block_inside_interpolation_is_depth_matched() {
+    // Arrange
+    let source = "\"${a{b}c}\"";
+
+    // Act
+    let tokens = lex(source).expect("補間内の{}ブロックの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "a".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBrace,
+                        text: "{".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "b".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBrace,
+                        text: "}".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "c".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    },
+                ],
+                span: Span { start: 1, end: 9 },
+            }]),
+            text: "\"${a{b}c}\"".to_string(),
+            span: Span { start: 0, end: 10 },
+        }]
+    );
+}
+
+/// 連続した補間 `${a}${b}` がテキスト区分を挟まず隣接するInterp 2個になること(仕様1章L-17)。
+/// Redを経ていない後追いの回帰テスト(区分の隣接境界)。
+#[test]
+fn adjacent_interpolations_produce_two_interp_segments() {
+    // Arrange
+    let source = "\"${a}${b}\"";
+
+    // Act
+    let tokens = lex(source).expect("連続補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "a".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    }],
+                    span: Span { start: 1, end: 5 },
+                },
+                StrSegment::Interp {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "b".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    }],
+                    span: Span { start: 5, end: 9 },
+                },
+            ]),
+            text: "\"${a}${b}\"".to_string(),
+            span: Span { start: 0, end: 10 },
+        }]
+    );
+}
+
+/// 2段ネスト(補間内のネスト文字列がさらに補間を含む)が入れ子のまま成立すること
+/// (仕様1章L-17・ADR-0042の再帰表現の核心形)。
+#[test]
+fn two_level_nested_interpolation_is_tokenized() {
+    // Arrange
+    let source = "\"${f(\"${g}\")}\"";
+
+    // Act
+    let tokens = lex(source).expect("2段ネスト補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Str(vec![StrSegment::Interp {
+                            tokens: vec![Token {
+                                kind: TokenKind::Ident,
+                                text: "g".to_string(),
+                                span: Span { start: 8, end: 9 },
+                            }],
+                            span: Span { start: 6, end: 10 },
+                        }]),
+                        text: "\"${g}\"".to_string(),
+                        span: Span { start: 5, end: 11 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 11, end: 12 },
+                    },
+                ],
+                span: Span { start: 1, end: 13 },
+            }]),
+            text: "\"${f(\"${g}\")}\"".to_string(),
+            span: Span { start: 0, end: 14 },
+        }]
+    );
+}
+
+/// E0115(補間内コメント)と内側エラーは**出現順**で先のものが報告されること
+/// (仕様1章L-18注1の「E0115とは出現順」の固定。この入力では `//` が
+/// ネスト文字列の不正エスケープ `\q` より先に現れるためE0115)。
+#[test]
+fn e0115_and_inner_error_are_reported_in_order_of_appearance() {
+    // Arrange
+    let source = "\"${ // c\"\\q\" }\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の先行する`//`がE0115としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0115,
+            span: Span { start: 4, end: 6 },
+        }
+    );
+}
+
+/// ネスト64段ちょうどは上限内で受理されること(仕様1章L-31の境界。65段=E0118は
+/// nesting_depth_limit_reports_e0118 が固定)。
+/// 注: 64段の期待トークン木の丸ごと明示は非現実的なため、例外的に
+/// 「Okかつ最上位が1トークン」の形状検証に留める(理由をここに明記する規約運用)。
+#[test]
+fn nesting_depth_at_limit_is_accepted() {
+    // Arrange
+    let source = format!("{}x{}", "\"${".repeat(64), "}\"".repeat(64));
+
+    // Act
+    let tokens = lex(&source).expect("64段ちょうどのネストはエラーにならないこと");
+
+    // Assert
+    assert_eq!(tokens.len(), 1);
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ・補間入り文字列を1入力に含むスナップショット。
