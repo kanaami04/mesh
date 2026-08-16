@@ -916,6 +916,58 @@ fn radix_prefixed_integers_produce_int_tokens() {
     );
 }
 
+/// 基数接頭辞直後・指数部直後・基数リテラル内の連続 `_` がE0105になり、
+/// 違反した `_` 1バイトを位置として報告すること(仕様1章L-9〔負例: underscore-edge〕の
+/// `0x_FF`・`1e_6` を基数実装のこのサイクルで回収)。L-9注1のとおり、`_` で始まる字句は
+/// 識別子として読まれるため、「先頭」のE0105は基数接頭辞直後と指数部直後の2形でのみ発生する。
+#[test]
+fn underscore_in_radix_and_exponent_reports_e0105_with_span() {
+    // Arrange (1: 基数接頭辞直後の `_`)
+    let source = "0x_FF";
+
+    // Act
+    let err = lex(source).expect_err("`0x_FF` は基数接頭辞直後の `_` でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+
+    // Arrange (2: 指数部直後の `_`)
+    let source = "1e_6";
+
+    // Act
+    let err = lex(source).expect_err("`1e_6` は指数部直後の `_` でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 2, end: 3 },
+        }
+    );
+
+    // Arrange (3: 基数リテラル内の連続 `_`)
+    let source = "0x1__2";
+
+    // Act
+    let err = lex(source).expect_err("`0x1__2` は連続する `_` の1個目でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0105,
+            span: Span { start: 3, end: 4 },
+        }
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]

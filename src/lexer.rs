@@ -259,22 +259,31 @@ fn next_token(
             if let Some(is_radix_digit) = is_radix_digit {
                 let prefix_char = prefix.expect("is_radix_digitがSomeならprefixもSome");
                 let digits_at = start + '0'.len_utf8() + prefix_char.len_utf8();
-                if peek_at(source, digits_at).is_some_and(is_radix_digit) {
+                // 接頭辞の次が有効数字**または桁区切り `_`** なら基数リテラルとして読む。
+                // `_` を条件に含めるのは `0x_FF` を「Int("0")+Ident("x_FF")」に割らず、
+                // 桁区切りの位置違反(E0105)として診断するため(仕様1章L-9注1)。
+                if peek_at(source, digits_at).is_some_and(|d| is_radix_digit(d) || d == '_') {
                     // `0` と接頭辞(x/b/o)を消費し、基数の有効数字列(と桁区切り `_`)を読む。
                     chars.next();
                     chars.next();
                     let &(digit_start, digit_first) = chars
                         .peek()
-                        .expect("先読みで有効数字の存在を確認済みのため必ず1文字ある");
+                        .expect("先読みで本体1文字目の存在を確認済みのため必ず1文字ある");
                     let (_, end) = scan_while(source, chars, digit_start, digit_first, |d| {
                         is_radix_digit(d) || d == '_'
                     });
                     let text = &source[start..end];
-                    // 桁区切り `_` の検査(check_digit_separators)は「隣が10進数字か」を
-                    // 前提とするため、16進等の基数リテラルにそのままかけると誤診断になる
-                    // (例: `0xF_F` は `_` の隣が10進数字でないためE0105を誤って出してしまう)。
-                    // 基数別の桁区切り検査はL-9サイクル(次サイクル)の担当とし、
-                    // 今回は基数リテラルへの桁区切り検査を意図的にスキップする。
+                    // 桁区切り `_` の検査を**基数別の数字判定**で行う(仕様1章L-9)。
+                    // 「数字」の集合は基数ごとに違う(hexInt=0-9a-fA-F、binInt=0|1、
+                    // octInt=0-7)ため、10進固定の判定を流用すると `0xF_F` を誤って
+                    // E0105にしてしまう。そこでcheck_digit_separatorsを数字述語で
+                    // 一般化し、ここでは基数の述語を渡す。検査対象は接頭辞を除いた
+                    // **本体**(`0x` の後ろ)で、接頭辞 `0x` の `0` を「直前の数字」と
+                    // 誤認しないためにこう切る。オフセットにdigits_atを渡すので
+                    // spanは違反した `_` の実位置を指す。
+                    check_digit_separators(&source[digits_at..end], digits_at, |b| {
+                        is_radix_digit(char::from(b))
+                    })?;
                     return Ok(Some(token(TokenKind::Int, text, Span { start, end })));
                 }
             }
@@ -325,8 +334,10 @@ fn next_token(
         // 指数部(仕様1章1.6の `exponent = ("e"|"E") ["+"|"-"] decInt`)。
         // 小数点の有無に関わらず判定する(`decInt exponent` の形も認めるため、
         // `1e6` は小数点が無くてもFloat)。
-        // 取り込むのは**`e`/`E`(と省略可能な符号)の直後がASCII数字のときだけ**という
-        // 消極規則。`1e` や `1e+` のように数字が続かない場合は `e` を1文字も消費せず
+        // 取り込むのは**`e`/`E`(と省略可能な符号)の直後がASCII数字または桁区切り `_`
+        // のときだけ**という消極規則。`_` を含めるのは `1e_6` を「Int("1")+Ident("e_6")」に
+        // 割らず、下の桁区切り検査でE0105として診断するため(仕様1章L-9注1)。
+        // `1e` や `1e+` のように数字も `_` も続かない場合は `e` を1文字も消費せず
         // 数値をInt/Floatで確定し、`e...` は識別子側の分岐(`1end` → Int+Ident)や
         // 後続の診断(E0113系)に委ねる。字句段階で先に `e` を食べてしまうと、
         // それらの処理が本来の字面を見られなくなる。
@@ -335,13 +346,14 @@ fn next_token(
             let after_marker = end + marker.len_utf8();
             let sign = peek_at(source, after_marker).filter(|d| matches!(d, '+' | '-'));
             let digits_at = after_marker + sign.map_or(0, char::len_utf8);
-            if peek_at(source, digits_at).is_some_and(|d| d.is_ascii_digit()) {
+            if peek_at(source, digits_at).is_some_and(|d| d.is_ascii_digit() || d == '_') {
                 // ここで初めて消費する: `e`/`E`、あれば符号、続けて数字列。
                 chars.next();
                 if sign.is_some() {
                     chars.next();
                 }
-                let &(exp_start, exp_first) = chars.peek().expect("先読みで指数部の数字を確認済み");
+                let &(exp_start, exp_first) =
+                    chars.peek().expect("先読みで指数部1文字目を確認済み");
                 let (_, exp_end) = scan_while(source, chars, exp_start, exp_first, |d| {
                     d.is_ascii_digit() || d == '_'
                 });
@@ -352,8 +364,10 @@ fn next_token(
         // 桁区切り `_` の検査(仕様1章L-9)は `.` を跨いだ字面全体にかける
         // (`1_000.5` の整数部・小数部を1回で見る)。`.` は数字でないため
         // 「`_` の隣が数字」の判定はそのまま働く(`1_.5` は `_` の直後が `.` でE0105)。
+        // 数字述語は10進固定(`is_ascii_digit`)。指数部の `1e_6` も同じ検査で捕まる
+        // (`_` の直前が `e` で非数字のため)ので、指数部専用の検査は要らない。
         let text = &source[start..end];
-        check_digit_separators(text, start)?;
+        check_digit_separators(text, start, |b: u8| b.is_ascii_digit())?;
         // Int・Floatとも text はソースの生の字面のまま持つ(正規化しない)。
         // 値への変換は後段の担当で、字句解析器は位置と字面の対応を壊さない。
         let kind = if is_float {
@@ -799,16 +813,29 @@ fn check_unicode_escape(
 }
 
 /// 数値リテラルの桁区切り `_` が「数字と数字の間」にあるか検査する(仕様1章L-9)。
-/// 左から走査し、直前と直後の両方がASCII数字でない最初の `_` をE0105として報告する。
+/// 左から走査し、直前と直後の両方が数字でない最初の `_` をE0105として報告する。
 /// spanはその `_` 1バイトぶん(`_` はASCIIなので1バイト固定)。
-fn check_digit_separators(text: &str, start: usize) -> Result<(), LexError> {
+///
+/// 「数字」の判定を述語 `is_digit` で受けるのは、基数ごとに有効数字の集合が違うため
+/// (仕様1章1.6のEBNF: decInt=0-9、hexInt=0-9a-fA-F、binInt=0|1、octInt=0-7)。
+/// 10進固定にすると `0xF_F` を誤ってE0105にしてしまうので、L-9を各基数のEBNFに
+/// 沿って適用できるようこの形に一般化した。
+///
+/// `text` は検査対象の字面、`start` はその字面のソース内先頭バイト位置
+/// (spanを実位置に直すオフセット)。基数リテラルでは接頭辞 `0x` を除いた本体を渡す
+/// (`0` を「直前の数字」と誤認させないため)。
+fn check_digit_separators(
+    text: &str,
+    start: usize,
+    is_digit: impl Fn(u8) -> bool,
+) -> Result<(), LexError> {
     let bytes = text.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b != b'_' {
             continue;
         }
-        let prev_is_digit = i > 0 && bytes[i - 1].is_ascii_digit();
-        let next_is_digit = bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+        let prev_is_digit = i > 0 && is_digit(bytes[i - 1]);
+        let next_is_digit = bytes.get(i + 1).is_some_and(|&next| is_digit(next));
         if !(prev_is_digit && next_is_digit) {
             return Err(LexError {
                 code: ErrorCode::E0105,
