@@ -168,6 +168,8 @@ pub enum ErrorCode {
     E0105,
     /// floatの小数点の隣に数字が無い(仕様1章L-10)。
     E0106,
+    /// 整数リテラルが安全整数域±2^53−1を超えた(仕様1章L-11)。
+    E0107,
     /// 文字列リテラル中の生の改行・閉じ`"`前のEOF(仕様1章L-16)。
     E0108,
     /// 補間 `${` が対応する `}` を得ないまま終わった(仕様1章L-18)。
@@ -210,6 +212,14 @@ pub struct LexError {
 /// E0118として正常なエラーで打ち切る。
 const MAX_NEST_DEPTH: usize = 64;
 
+/// 整数リテラルの安全整数域の上限、2^53−1(仕様1章L-11・ADR-0015)。
+/// IEEE754倍精度浮動小数点数(JS出力先のNumber型)が誤差なく表現できる整数の上限で、
+/// Meshの整数リテラルはこれを超えるとE0107になる。字句には符号が無く
+/// (`-` は別トークン)リテラル自体は常に非負のため、この定数は絶対値の上限として働く。
+/// 下限側(`-9007199254740991` を下回る式)の判定は字句解析の対象外で、
+/// パーサ・型検査が式全体を評価してから担当する。
+const MAX_SAFE_INT: u128 = 9_007_199_254_740_991;
+
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
@@ -221,6 +231,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     }
     Ok(tokens)
 }
+
+/// 基数接頭辞つき整数リテラルの基数判定結果: (その基数での数字述語, 数値としての基数)。
+/// clippyのtype_complexity対策で `next_token` 内のインライン型をここに切り出した。
+type RadixInfo = (fn(char) -> bool, u32);
 
 /// 現在位置から1トークンぶん読み進める(字句解析の1ステップ)。
 /// 戻り値の `None` は「このステップではトークンを生成しなかった」ことを表す:
@@ -252,13 +266,14 @@ fn next_token(
         // 担当であり、ここでは先取りしない。
         if c == '0' {
             let prefix = peek_at(source, start + '0'.len_utf8());
-            let is_radix_digit: Option<fn(char) -> bool> = match prefix {
-                Some('x') => Some(|d: char| d.is_ascii_hexdigit()),
-                Some('b') => Some(|d: char| matches!(d, '0' | '1')),
-                Some('o') => Some(|d: char| matches!(d, '0'..='7')),
+            // 数字述語(桁区切り検査用)と基数(値域検査用、E0107)を組で持つ。
+            let radix_info: Option<RadixInfo> = match prefix {
+                Some('x') => Some((|d: char| d.is_ascii_hexdigit(), 16)),
+                Some('b') => Some((|d: char| matches!(d, '0' | '1'), 2)),
+                Some('o') => Some((|d: char| matches!(d, '0'..='7'), 8)),
                 _ => None,
             };
-            if let Some(is_radix_digit) = is_radix_digit {
+            if let Some((is_radix_digit, radix)) = radix_info {
                 let prefix_char = prefix.expect("is_radix_digitがSomeならprefixもSome");
                 let digits_at = start + '0'.len_utf8() + prefix_char.len_utf8();
                 // 接頭辞の次が有効数字**または桁区切り `_`** なら基数リテラルとして読む。
@@ -290,6 +305,9 @@ fn next_token(
                     // 続くのは基数外の数字(`0b102` の `2`)か語の貼り付き(`0xFFg`)で、
                     // どちらも不正な数値リテラル。詳細は check_trailing_alnum を参照。
                     check_trailing_alnum(source, chars, start)?;
+                    // 値の範囲検査(仕様1章L-11・E0107)は末尾検査・先頭ゼロ相当の形式検査より後。
+                    // 対象は接頭辞を除いた本体(digits_at以降)で、基数はここで確定している。
+                    check_int_overflow(&source[digits_at..end], Span { start, end }, radix)?;
                     return Ok(Some(token(TokenKind::Int, text, Span { start, end })));
                 }
             }
@@ -391,6 +409,11 @@ fn next_token(
                 code: ErrorCode::E0113,
                 span: Span { start, end },
             });
+        }
+        // 値の範囲検査(仕様1章L-11・E0107)。桁区切り・形式の検査(E0105/E0113)より後、
+        // Int確定の直前が最後の関門。floatには適用しない(L-13/E0114は別サイクル)。
+        if !is_float {
+            check_int_overflow(text, Span { start, end }, 10)?;
         }
         // Int・Floatとも text はソースの生の字面のまま持つ(正規化しない)。
         // 値への変換は後段の担当で、字句解析器は位置と字面の対応を壊さない。
@@ -904,6 +927,32 @@ fn check_trailing_alnum(
         code: ErrorCode::E0113,
         span: Span { start, end },
     })
+}
+
+/// 整数リテラルが安全整数域(絶対値でMAX_SAFE_INT=2^53−1)を超えていないか検査する
+/// (仕様1章L-11、ADR-0015の静的検査版)。`text` は数字列本体(桁区切り `_` を含みうる、
+/// 基数接頭辞 `0x` 等は含まない)、`radix` はその基数(10進=10、16進=16、2進=2、8進=8)。
+///
+/// まず `_` を取り除いてから `u128::from_str_radix` で解釈する。u64ではなくu128で
+/// 受けるのは、極端に長い桁数のリテラル(例: 100桁の10進数)だとu64の範囲チェックの
+/// 前にパース自体がオーバーフローしてしまうため。u128でも収まらない(`Err`)場合は
+/// そのまま範囲超過として扱う——u128の上限(約3.4×10^38)自体がMAX_SAFE_INTよりはるかに
+/// 大きいので、この`Err`は「桁数が非現実的に多い」ケースのみで発生する。
+///
+/// spanは呼び出し側が渡すリテラル全体(基数接頭辞を含む)。
+fn check_int_overflow(text: &str, span: Span, radix: u32) -> Result<(), LexError> {
+    let digits: String = text.chars().filter(|&c| c != '_').collect();
+    let out_of_range = match u128::from_str_radix(&digits, radix) {
+        Ok(value) => value > MAX_SAFE_INT,
+        Err(_) => true,
+    };
+    if out_of_range {
+        return Err(LexError {
+            code: ErrorCode::E0107,
+            span,
+        });
+    }
+    Ok(())
 }
 
 /// 完全予約語22語(仕様1章1.5)を対応するKw*トークン種別に引く表引き関数。

@@ -1049,6 +1049,66 @@ fn malformed_number_reports_e0113_with_span() {
     );
 }
 
+/// 仕様1章L-11〔負例: int-literal-overflow〕。整数リテラルが安全整数域
+/// ±2^53−1(=9007199254740991)を超えるとE0107(ADR-0015の静的検査版)。
+/// 字句には符号が無いため絶対値で判定する(`-` は別トークンで、リテラル自体は常に非負)。
+/// spanはリテラル全体。基数接頭辞つき(16進など)のリテラルにも同じ判定を適用する。
+#[test]
+fn int_literal_overflow_reports_e0107_with_span() {
+    // Arrange (1: 2^53、10進)
+    let source = "9007199254740992";
+
+    // Act
+    let err = lex(source).expect_err("`9007199254740992` は安全整数域を超えてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0107,
+            span: Span { start: 0, end: 16 },
+        }
+    );
+
+    // Arrange (2: 2^53、16進)
+    let source = "0x20000000000000";
+
+    // Act
+    let err = lex(source).expect_err("`0x20000000000000` は安全整数域を超えてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0107,
+            span: Span { start: 0, end: 16 },
+        }
+    );
+}
+
+/// 仕様1章L-11の境界: 安全整数域の上限2^53−1(=9007199254740991)ちょうどは正当な
+/// Intトークンになること。E0107の負例テストと同時に追加する境界の退行防止網であり、
+/// Redを経ない(実装済みの範囲検査が無い現状でも最初から通ってしまう)。
+#[test]
+fn int_literal_at_safe_boundary_is_accepted() {
+    // Arrange
+    let source = "9007199254740991";
+
+    // Act
+    let tokens =
+        lex(source).expect("`9007199254740991` は安全整数域の境界ちょうどでエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "9007199254740991".to_string(),
+            span: Span { start: 0, end: 16 },
+        }]
+    );
+}
+
 /// 桁区切り `_` が複数あっても1個のIntトークンになること(仕様1章の正例列 `1_000_000`)。
 /// 位置検査ループの2周目以降を固定する。
 #[test]
