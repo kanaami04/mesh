@@ -1869,6 +1869,125 @@ fn inner_lexical_error_takes_priority_over_e0109() {
     );
 }
 
+/// 補間内で対応する開き括弧を持たない閉じ括弧(`)` `]` `}`)が現れたときはE0109に
+/// なり、spanはその閉じ括弧1バイトを指すこと(仕様1章L-18〔負例: unterminated-interpolation〕。
+/// L-18は現状「対応するE0109」の分岐が未実装で、この閉じ括弧はサイレントに無視されてOkに
+/// なる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn unmatched_closer_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${)}\"";
+
+    // Act
+    let err = lex(source).expect_err("対応する開きを持たない`)`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 3, end: 4 },
+        }
+    );
+}
+
+/// 補間内で開き括弧と種類が一致しない閉じ括弧が現れたときもE0109になり、spanは
+/// その閉じ括弧1バイトを指すこと(`(` に対する `}` は種類不一致。仕様1章L-18
+/// 〔負例: unterminated-interpolation〕。現状は種類を照合せず深度だけで対応づけるため、
+/// この`}`を`(`の対応閉じとして飲み込んでしまい、後続の閉じ`"`まで補間扱いで消費し、
+/// 離れた位置のE0108(未終端文字列)になる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn mismatched_closer_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${f(a}\"";
+
+    // Act
+    let err = lex(source).expect_err("`(`に対して種類の異なる`}`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 6, end: 7 },
+        }
+    );
+}
+
+/// 補間内で開き括弧 `(` に対して種類の異なる閉じ `]` が現れたときもE0109になること
+/// (仕様1章L-18〔負例: unterminated-interpolation〕。現状は種類を照合しないため
+/// `]`をただの不均衡減算として無視し、後続の`}`を`(`の対応閉じとして受理してOkに
+/// なる——本テストが再現するimpl-review検出バグ)。
+#[test]
+fn mismatched_bracket_pair_in_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${(]}\"";
+
+    // Act
+    let err = lex(source).expect_err("`(`に対して種類の異なる`]`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 4, end: 5 },
+        }
+    );
+}
+
+/// 文字列と補間のネストが実装上限64段を超えたときはE0118になり、spanは上限を超えた
+/// 65段目の開き `"` 1バイトを指すこと(仕様1章L-17注)。上限64段は、深さ約500段で
+/// `cargo test` がスタックオーバーフローによりSIGABRTでプロセスごと落ちる実測に基づき、
+/// 安全側に十分な余裕を持たせて設定した値。conformanceの負例IDは仕様側がL-17注を
+/// 追記するまで未採番(test-writing規約のID先行予約に該当しないため今回は付与しない)。
+/// 入力は手書きできる長さでないため`repeat`で構築する(このテストのみ許容)。
+#[test]
+fn nesting_depth_limit_reports_e0118() {
+    // Arrange
+    // `"${` を65回・`x`・`}"` を65回で、文字列→補間→文字列→…と65段ネストさせる。
+    // 65段目(0始まりで64段目)の開き`"`は 64 * 3 = 192バイト目。上限64段を1段超える。
+    let source = "\"${".repeat(65) + "x" + &"}\"".repeat(65);
+
+    // Act
+    let err = lex(&source).expect_err("ネスト65段はE0118としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0118,
+            span: Span {
+                start: 192,
+                end: 193
+            },
+        }
+    );
+}
+
+/// 補間内の単独CR(直後が`\n`でない`\r`)は、LF・CRLFと同じ「補間内の生の改行」として
+/// E0109(未終端。L-17(a)の物理1行制約)に統一すること(仕様1章L-17(a)・L-18
+/// 〔負例: unterminated-interpolation〕。現状はCRを補間内の他の文字と同様の通常字句
+/// モードで扱ってしまい、単独CR自体の規則であるE0117(L-29)が先に発生する——
+/// 本テストが再現するimpl-review検出バグ)。
+#[test]
+fn lone_cr_inside_interpolation_reports_e0109() {
+    // Arrange
+    let source = "\"${a\rb}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の単独`\\r`はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 1, end: 3 },
+        }
+    );
+}
+
 /// 回帰の網: ここまでのサイクルで実装した全トークン種(KwLet/Ident/Eq/Int/Str/Newline)と
 /// 桁区切り(独立したIntトークンとして)・改行2形(LF/CRLF)・日本語入り行コメント・
 /// エスケープ・補間入り文字列を1入力に含むスナップショット。

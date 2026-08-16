@@ -87,6 +87,8 @@ pub enum ErrorCode {
     E0116,
     /// 単独のCR——直後が `\n` でない `\r`(仕様1章L-29)。
     E0117,
+    /// 文字列と補間のネストが実装上限64段を超えた(仕様1章L-17注)。
+    E0118,
 }
 
 /// 字句解析エラー。
@@ -96,12 +98,19 @@ pub struct LexError {
     pub span: Span,
 }
 
+/// 文字列と補間のネストの実装上限(仕様1章L-17注)。
+/// 「文字列1個」を1段と数える(`"${"..."}"` は2段)。
+/// 再帰下降の字句解析はネスト1段ぶんスタックを消費するため、
+/// 深すぎる入力でスタックオーバーフロー(プロセスごとの異常終了)になる前に
+/// E0118として正常なエラーで打ち切る。
+const MAX_NEST_DEPTH: usize = 64;
+
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
     while chars.peek().is_some() {
-        if let Some(t) = next_token(source, &mut chars, false)? {
+        if let Some(t) = next_token(source, &mut chars, false, 0)? {
             tokens.push(t);
         }
     }
@@ -117,10 +126,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 /// `in_interpolation` は呼び出し元が補間 `${...}` の内側かどうかを伝える。
 /// コメントはトークンを生成しないため補間ループ側からは検知できず、
 /// 行コメント分岐自身がこのフラグを見てE0115を判定する(仕様1章L-17(b))。
+/// `depth` は「今いる位置を囲んでいる文字列リテラルの段数」(最外側は0)。
+/// 文字列分岐がこれを見てネスト上限(MAX_NEST_DEPTH)を判定するため、
+/// メインループ → 文字列 → 補間 → メインループ相当 の経路を貫通して受け渡す。
 fn next_token(
     source: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     in_interpolation: bool,
+    depth: usize,
 ) -> Result<Option<Token>, LexError> {
     let Some(&(start, c)) = chars.peek() else {
         return Ok(None);
@@ -182,7 +195,7 @@ fn next_token(
             })
         }
     } else if c == '"' {
-        scan_string(source, chars, start).map(Some)
+        scan_string(source, chars, start, depth).map(Some)
     } else if c == ' ' || c == '\t' {
         chars.next();
         Ok(None)
@@ -249,11 +262,25 @@ fn next_token(
 /// 一覧に無い場合(EOF含む)はE0111({バックスラッシュ位置}..{違反文字直後})。
 /// `\u{...}` は形式と値をまとめて検証する(check_unicode_escape、E0112)。
 /// `${` からは補間区分に切り替える(scan_interpolation、仕様1章L-17)。
+/// `depth` はこの文字列を囲んでいる文字列の段数で、この文字列自身は `depth + 1` 段目にあたる。
+/// `depth + 1` がMAX_NEST_DEPTHを超えるときは1文字も走査せずE0118を返す(仕様1章L-17注)。
+/// spanは開き `"` の1バイト(未終端文字列E0108と同じ流儀で、深すぎる文字列の頭を指す)。
 fn scan_string(
     source: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     start: usize,
+    depth: usize,
 ) -> Result<Token, LexError> {
+    let depth = depth + 1;
+    if depth > MAX_NEST_DEPTH {
+        return Err(LexError {
+            code: ErrorCode::E0118,
+            span: Span {
+                start,
+                end: start + '"'.len_utf8(),
+            },
+        });
+    }
     chars.next();
     let mut end = None;
     let mut segments = Vec::new();
@@ -285,7 +312,7 @@ fn scan_string(
                 continue;
             }
             chars.next();
-            let (tokens, interp_end) = scan_interpolation(source, chars, i)?;
+            let (tokens, interp_end) = scan_interpolation(source, chars, i, depth)?;
             cut_text(&mut segments, text_start, i);
             segments.push(StrSegment::Interp {
                 tokens,
@@ -371,15 +398,24 @@ fn scan_string(
 /// 補間 `${...}` の内側を通常の字句モードでトークン化する(仕様1章L-17)。
 /// `${` を消費した直後から呼び、対応する閉じ `}` まで読み進めて
 /// (トークン列, `}` の直後のバイトオフセット)を返す。
-/// 対応関係は**トークン列上**の括弧深度で決める: `( [ {` で+1、`) ] }` で-1し、
-/// 深度0で現れた `}` が対応する閉じ(この `}` はトークン列に含めない)。
-/// 閉じ `}` を見ないままEOFに達した場合、または内側に生の改行(Newlineトークン)が
-/// 現れた場合はE0109(未終端。仕様1章L-17(a)の物理1行制約、L-18)。spanは
-/// `${` の2バイト(`dollar` は呼び出し側が渡す `$` の開始バイト位置)。
+/// 対応関係は**トークン列上**の括弧の対応で決める。`( [ {` は対応する閉じ括弧を
+/// スタックに積み、閉じ括弧が現れたら:
+/// - スタックが空で `}` なら、それが補間の対応する閉じ(この `}` はトークン列に含めない)。
+/// - スタック頂上と種類が一致すれば取り出して続行。
+/// - スタックが空(`}` 以外)、または種類が一致しなければ不均衡としてE0109
+///   (spanは違反した閉じ括弧そのもの。仕様1章L-18)。
+///
+/// 閉じ `}` を見ないままEOFに達した場合、または内側に生の改行(Newlineトークン、
+/// および通常字句モードならE0117になる単独CR)が現れた場合もE0109
+/// (未終端。仕様1章L-17(a)の物理1行制約、L-18)で、こちらのspanは `${` の2バイト
+/// (`dollar` は呼び出し側が渡す `$` の開始バイト位置)。
+/// E0117以外の内側のエラーはそのまま伝播する(内側エラー優先。仕様1章L-18注)。
+/// `depth` は囲んでいる文字列の段数で、内側の文字列リテラルへそのまま引き継ぐ。
 fn scan_interpolation(
     source: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     dollar: usize,
+    depth: usize,
 ) -> Result<(Vec<Token>, usize), LexError> {
     let unterminated = || LexError {
         code: ErrorCode::E0109,
@@ -389,11 +425,18 @@ fn scan_interpolation(
         },
     };
     let mut tokens = Vec::new();
-    let mut depth = 0usize;
+    // 未対応の開き括弧に対して「期待される閉じ括弧」を積むスタック。
+    // 深度カウンタでなく種類を持つことで `(` に対する `}` `]` を不均衡として検出できる。
+    let mut expected_closers: Vec<TokenKind> = Vec::new();
     while chars.peek().is_some() {
-        let Some(t) = next_token(source, chars, true)? else {
+        let t = match next_token(source, chars, true, depth) {
+            Ok(Some(t)) => t,
             // 空白・行コメントの読み飛ばし。位置は進んでいるのでループを続ける。
-            continue;
+            Ok(None) => continue,
+            // 単独CRは通常の字句モードではE0117(L-29)だが、補間の内側では
+            // LF・CRLFと同じ「1物理行に収まらない」未終端として扱う(仕様1章L-17(a))。
+            Err(e) if e.code == ErrorCode::E0117 => return Err(unterminated()),
+            Err(e) => return Err(e),
         };
         if t.kind == TokenKind::Newline {
             // 補間は1物理行に収まらなければならない(仕様1章L-17(a))ので、
@@ -401,11 +444,21 @@ fn scan_interpolation(
             return Err(unterminated());
         }
         match t.kind {
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
-            TokenKind::RBrace if depth == 0 => return Ok((tokens, t.span.end)),
-            // 深度0での `)` `]`(不均衡)は暫定で無視する。E0109は後続サイクルで実装する。
+            TokenKind::LParen => expected_closers.push(TokenKind::RParen),
+            TokenKind::LBracket => expected_closers.push(TokenKind::RBracket),
+            TokenKind::LBrace => expected_closers.push(TokenKind::RBrace),
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                depth = depth.saturating_sub(1)
+                if expected_closers.is_empty() && t.kind == TokenKind::RBrace {
+                    return Ok((tokens, t.span.end));
+                }
+                if expected_closers.last() != Some(&t.kind) {
+                    // 対応する開きが無い、または種類が違う閉じ括弧(仕様1章L-18)。
+                    return Err(LexError {
+                        code: ErrorCode::E0109,
+                        span: t.span,
+                    });
+                }
+                expected_closers.pop();
             }
             _ => {}
         }
