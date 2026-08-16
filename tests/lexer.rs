@@ -110,6 +110,404 @@ fn identifier_with_keyword_prefix_is_not_reserved() {
     );
 }
 
+/// 完全予約語22語(仕様1章1.5)がそれぞれ専用のキーワードトークンになること。
+/// text/spanは対象外とし種類列に絞る: 22語ぶんのtext/spanを丸ごと明示すると冗長で
+/// 可読性を損なうため、既存の keyword_let_is_distinguished_from_identifiers と同じ方式を採る。
+#[test]
+fn all_full_reserved_words_produce_keyword_tokens() {
+    // Arrange
+    let source = "let mut fn struct type if else match for in return \
+                   import export or is none error extern true false break continue";
+
+    // Act
+    let tokens = lex(source).expect("完全予約語22語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![
+            TokenKind::KwLet,
+            TokenKind::KwMut,
+            TokenKind::KwFn,
+            TokenKind::KwStruct,
+            TokenKind::KwType,
+            TokenKind::KwIf,
+            TokenKind::KwElse,
+            TokenKind::KwMatch,
+            TokenKind::KwFor,
+            TokenKind::KwIn,
+            TokenKind::KwReturn,
+            TokenKind::KwImport,
+            TokenKind::KwExport,
+            TokenKind::KwOr,
+            TokenKind::KwIs,
+            TokenKind::KwNone,
+            TokenKind::KwError,
+            TokenKind::KwExtern,
+            TokenKind::KwTrue,
+            TokenKind::KwFalse,
+            TokenKind::KwBreak,
+            TokenKind::KwContinue,
+        ]
+    );
+}
+
+/// 誘導用予約語(Meshに無い機能を指す予約語)`while` が出現するとE0104が
+/// 位置つきで報告されること(仕様1章1.5・L-7〔負例: reserved-while〕)。
+/// 誘導用は文法上の正当な出現位置が存在しないため、字句段階で即エラーにできる。
+/// reserved-null / reserved-new は網で追加する。
+#[test]
+fn guidance_reserved_word_reports_e0104_with_span() {
+    // Arrange
+    let source = "while x";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `while` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 5 },
+        }
+    );
+}
+
+/// 誘導用予約語 `null` もE0104になること(仕様1章L-7〔負例: reserved-null〕。
+/// 案内「不在は `T | none`」はメッセージ層で検証)。
+/// Redを経ていない後追いの回帰テスト(表の代表2語目)。
+#[test]
+fn reserved_null_reports_e0104_with_span() {
+    // Arrange
+    let source = "null";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `null` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+}
+
+/// 誘導用予約語 `new` もE0104になること(仕様1章L-7〔負例: reserved-new〕。
+/// 案内「structは `User{...}` で生成します」はメッセージ層で検証)。
+/// Redを経ていない後追いの回帰テスト(表の代表3語目)。
+#[test]
+fn reserved_new_reports_e0104_with_span() {
+    // Arrange
+    let source = "new";
+
+    // Act
+    let err = lex(source).expect_err("誘導用予約語 `new` はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 0, end: 3 },
+        }
+    );
+}
+
+/// 誘導用予約語**22語すべて**がE0104(span=語全体)になること(仕様1章1.5・L-7)。
+/// 表全体の網羅が1つの検証項目(完全予約語側の22語1本テストと対称)。
+/// impl-reviewの変異テストで「代表3語のみでは19語の削除変異が生存する」と
+/// 実証された穴を塞ぐ。表の件数driftもこのループが検知する。
+#[test]
+fn all_guidance_reserved_words_report_e0104() {
+    // Arrange
+    let words = [
+        "while",
+        "class",
+        "null",
+        "undefined",
+        "enum",
+        "async",
+        "await",
+        "try",
+        "catch",
+        "throw",
+        "var",
+        "const",
+        "function",
+        "switch",
+        "case",
+        "do",
+        "interface",
+        "new",
+        "this",
+        "typeof",
+        "instanceof",
+        "defer",
+    ];
+
+    // Act & Assert(表全体で1検証項目のため語ごとにループで確認。
+    // lexは最初のエラーで停止するため22語を1入力に併合できない)
+    for word in words {
+        let err = match lex(word) {
+            Err(e) => e,
+            Ok(tokens) => panic!("誘導用予約語 `{word}` はエラーになること: {tokens:?}"),
+        };
+        assert_eq!(
+            err,
+            LexError {
+                code: ErrorCode::E0104,
+                span: Span {
+                    start: 0,
+                    end: word.len(),
+                },
+            },
+            "語: {word}"
+        );
+    }
+}
+
+/// 誘導用予約語で**始まる**識別子は予約語でないこと(仕様1章L-2最長一致。
+/// lettuceと同じ原理。誤判定は合法コードのハード拒否になるため境界を固定する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn identifier_with_guidance_prefix_is_not_reserved() {
+    // Arrange
+    let source = "newValue";
+
+    // Act
+    let tokens = lex(source).expect("`newValue` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Ident,
+            text: "newValue".to_string(),
+            span: Span { start: 0, end: 8 },
+        }]
+    );
+}
+
+/// 大文字を含む語は予約語でないこと(仕様1章1.4のletterはA-Z/a-z、1.5の予約語一覧は
+/// すべて小文字——大文字小文字非依存の照合に変える退行をこのテストが検知する)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn capitalized_reserved_words_are_identifiers() {
+    // Arrange
+    let source = "Let While NULL";
+
+    // Act
+    let tokens = lex(source).expect("大文字を含む語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Ident]
+    );
+}
+
+/// コメントの中の誘導用予約語は反応しないこと(仕様1章L-4注2の不透明性。
+/// E0104は英字の語で発火する初の字句エラーのため、不透明性の網に新実例を追加)。
+#[test]
+fn comment_is_opaque_to_reserved_words() {
+    // Arrange
+    let source = "// while null new\n1";
+
+    // Act
+    let tokens = lex(source).expect("コメント内の予約語は無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+        ]
+    );
+}
+
+/// 文字列の中身の誘導用予約語は反応しないこと(仕様1章1.7: 文字列の中身は字句モードでない)。
+#[test]
+fn string_is_opaque_to_reserved_words() {
+    // Arrange
+    let source = "\"while null\"";
+
+    // Act
+    let tokens = lex(source).expect("文字列内の予約語は無視されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Text {
+                text: "while null".to_string(),
+                span: Span { start: 1, end: 11 },
+            }]),
+            text: "\"while null\"".to_string(),
+            span: Span { start: 0, end: 12 },
+        }]
+    );
+}
+
+/// 補間の内側の誘導用予約語はE0104のまま優先伝播すること(仕様1章L-18注2の
+/// 内側エラー優先にE0104が加わる。終端系読み替えの対象拡大で壊れないことの固定)。
+#[test]
+fn guidance_reserved_inside_interpolation_reports_e0104_with_span() {
+    // Arrange
+    let source = "\"${while}\"";
+
+    // Act
+    let err = lex(source).expect_err("補間内の誘導用予約語はE0104としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0104,
+            span: Span { start: 3, end: 8 },
+        }
+    );
+}
+
+/// 文脈キーワード4語(component/state/view/as)がすべてIdentトークンになること
+/// (仕様1章L-27〔正例: contextual-keyword-ident〕: 両予約語表に不在。
+/// 誤ってどちらかの表へ足す退行をこのテストが検知する。予約の判定はパーサが
+/// component文法の内部でのみ行う)。Redを経ていない後追いの回帰テスト。
+#[test]
+fn contextual_keyword_words_all_lex_as_ident() {
+    // Arrange
+    let source = "component state view as";
+
+    // Act
+    let tokens = lex(source).expect("文脈キーワード4語の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Ident,
+        ]
+    );
+}
+
+/// 文脈キーワードを含む仕様の正例 `let state = loadState()` の全トークン固定
+/// (仕様1章L-27〔正例: contextual-keyword-ident〕)。
+#[test]
+fn contextual_keywords_lex_as_identifiers() {
+    // Arrange
+    let source = "let state = loadState()";
+
+    // Act
+    let tokens = lex(source).expect("文脈キーワードを含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "state".to_string(),
+                span: Span { start: 4, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "loadState".to_string(),
+                span: Span { start: 12, end: 21 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+        ]
+    );
+}
+
+/// 仕様L-17の正例3例目 `"${m[k] or 0}"` の完全形(`or` がKwOrトークンになる。
+/// 仕様1章L-17〔正例: interpolation-nested〕——予約語テーブル実装により送りを回収)。
+/// Redを経ていない後追いの回帰テスト。
+#[test]
+fn spec_third_interpolation_example_with_keyword_or() {
+    // Arrange
+    let source = "\"${m[k] or 0}\"";
+
+    // Act
+    let tokens = lex(source).expect("`or` 入り補間の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "m".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LBracket,
+                        text: "[".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "k".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::RBracket,
+                        text: "]".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                    Token {
+                        kind: TokenKind::KwOr,
+                        text: "or".to_string(),
+                        span: Span { start: 8, end: 10 },
+                    },
+                    Token {
+                        kind: TokenKind::Int,
+                        text: "0".to_string(),
+                        span: Span { start: 11, end: 12 },
+                    },
+                ],
+                span: Span { start: 1, end: 13 },
+            }]),
+            text: "\"${m[k] or 0}\"".to_string(),
+            span: Span { start: 0, end: 14 },
+        }]
+    );
+}
+
 /// `_` で始まり英字・数字が続く字句は識別子であること(仕様1章1.4: `_tmp` は正規の識別子)。
 #[test]
 fn underscore_prefixed_name_is_identifier() {
@@ -1709,8 +2107,8 @@ fn paren_inside_nested_string_is_not_counted_for_matching() {
 }
 
 /// 補間内の角括弧 `[ ]` が深度として対応づけられること(仕様1章L-17
-/// 〔正例: interpolation-nested〕。仕様の3例目 `"${m[k] or 0}"` は `or` が
-/// 予約語テーブル未実装(現状Ident)のため、予約語のサイクルで完全形を追加する)。
+/// 〔正例: interpolation-nested〕。仕様の3例目=`or` 入りの完全形は
+/// spec_third_interpolation_example_with_keyword_or が固定)。
 /// Redを経ていない後追いの回帰テスト。
 #[test]
 fn brackets_inside_interpolation_are_depth_matched() {
@@ -2250,6 +2648,6 @@ fn lone_cr_in_nested_string_inside_interpolation_reports_e0109() {
 #[test]
 fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
-        "let n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
+        "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn"
     ));
 }

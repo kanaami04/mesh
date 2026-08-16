@@ -163,7 +163,7 @@ let user = findUser(id)?
 | doc-comment-v1 | 正例 | L-30 |
 | non-ascii-ident | 負例 | L-6 |
 | reserved-while / reserved-null / reserved-new | 負例 | L-7 |
-| or-bind-error-name | 負例 | L-8 |
+| or-bind-error-name | 負例(パーサ着手時に実装。or束縛の文脈が必要) | L-8 |
 | contextual-keyword-ident | 正例 | L-27 |
 | underscore-edge | 負例 | L-9 |
 | float-dot-edge | 負例 | L-10 |
@@ -173,7 +173,7 @@ let user = findUser(id)?
 | invalid-escape | 負例 | L-14 |
 | unicode-escape-range | 負例 | L-15 |
 | string-raw-newline / string-unterminated-eof | 負例 | L-16 |
-| interpolation-nested | 正例(`or` 入りの3例目は予約語サイクルで追加) | L-17 |
+| interpolation-nested | 正例 | L-17 |
 | interpolation-comment | 負例 | L-17 |
 | unterminated-interpolation | 負例 | L-18 |
 | nesting-limit | 負例 | L-31 |

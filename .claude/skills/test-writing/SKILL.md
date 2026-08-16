@@ -31,6 +31,7 @@ export PATH="$HOME/.cargo/bin:$PATH" && cd /Users/kanayama/kanaami/language && c
 - **丸ごと明示**する: `assert_eq!(tokens, vec![Token { kind: TokenKind::Int, text: "42".to_string() }])`。`is_ok()` だけ等の曖昧検証は不可。
 - `expect` のメッセージは日本語で「〜であること」(失敗時にそのまま仕様文として読める)。
 - **例外(巨大入力)**: 期待値の丸ごと明示が非現実的な生成入力(64段ネスト等)に限り、形状検証(トークン数等)まで緩めてよい。理由をdocコメントに明記する(実例: nesting_depth_at_limit_is_accepted)。境界の検知力は対になる負例(65段=E0118)が担保する。
+- **例外(負例の語彙表ループ)**: lexは最初のエラーで停止するため、負例の語彙表(誘導用予約語22語等)は1入力に併合できない。この場合に限り配列+forループで全語を検証してよい。失敗メッセージ(assert・panicとも)に**必ず語名を含める**こと(実例: all_guidance_reserved_words_report_e0104)。正例の語彙表は1入力にスペース区切りで並べて種類列を検証する(all_full_reserved_words方式)——ループにしない。
 
 ## TDDサイクル中の分担(実証済みの運用)
 
