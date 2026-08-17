@@ -22,7 +22,7 @@ token = keyword | identifier | number | string | operator | punctuation
 
 ## 1.3 コメント
 
-- **L-4**: `//` から行末まではコメントであり、トークンを生成しないこと。行末トークンの判定(1.8)は**コメントを除去した後**の行末に対して行うこと。〔正例: `line-comment`(前段)/ `comment-before-continuation`(後段。終端挿入の実装サイクルでテスト化)〕
+- **L-4**: `//` から行末まではコメントであり、トークンを生成しないこと。行末トークンの判定(1.8)は**コメントを除去した後**の行末に対して行うこと。〔正例: `line-comment`(前段)/ `comment-before-continuation`(後段)〕
   - 注1: 「行末」とはLFまたはCRLF(L-29)の直前を指す。コメント中に**単独のCR**が現れたときはL-29(E0117)がこの規則より優先する(ADR-0041の「単独のCRは専用エラー」に例外を設けない。文字列内だけはL-16のE0108が優先)。
   - 注2: 注1の単独CRを除き、コメントの中身は不透明であり、コメント外ならエラーになる字句(`/*`・`;`・非ASCII等)を含んでも反応しないこと。
   - 注3: 補間(`${...}`)の内側では `//` はコメントにならない(L-17(b)のE0115)。
@@ -165,7 +165,7 @@ let user = findUser(id)?
 | invalid-utf8 | 負例 | L-1 |
 | longest-match | 正例 | L-2/L-3 |
 | line-comment | 正例 | L-4 |
-| comment-before-continuation | 正例(終端挿入サイクルで実装) | L-4 |
+| comment-before-continuation | 正例 | L-4 |
 | block-comment | 負例 | L-5 |
 | doc-comment-v1 | 正例 | L-30 |
 | non-ascii-ident | 負例 | L-6 |
