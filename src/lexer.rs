@@ -174,6 +174,8 @@ pub enum ErrorCode {
     E0108,
     /// 補間 `${` が対応する `}` を得ないまま終わった(仕様1章L-18)。
     E0109,
+    /// 文末のセミコロン(仕様1章L-19)。セミコロンは存在しない。
+    E0110,
     /// 一覧に無いエスケープ(仕様1章L-14)。
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
@@ -185,7 +187,7 @@ pub enum ErrorCode {
     /// 補間の内側のコメント `//`(仕様1章L-17(b))。
     E0115,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
-    /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
+    /// 注意: 固有の規則を持つが未実装の文字(非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
     /// 単独の `&`(直後が `&` でない)は仕様1.9に無いため**恒久的に**このコード
     /// (`&&` の一部としてのみ有効。単独が正当な `|` との非対称)。
@@ -228,7 +230,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut chars = source.char_indices().peekable();
     while chars.peek().is_some() {
         if let Some(t) = next_token(source, &mut chars, false, 0)? {
-            tokens.push(t);
+            // 終端する改行だけをNewlineトークンとして出力する(ADR-0010のGo方式)。
+            // 直前のトークンが無い(入力先頭)かNewlineのとき、改行はトークンを生成しない。
+            if t.kind == TokenKind::Newline {
+                let last_is_newline = tokens
+                    .last()
+                    .is_some_and(|last: &Token| matches!(last.kind, TokenKind::Newline));
+                if !tokens.is_empty() && !last_is_newline {
+                    tokens.push(t);
+                }
+            } else {
+                tokens.push(t);
+            }
         }
     }
     Ok(tokens)
@@ -375,6 +388,14 @@ fn next_token(
         });
         Err(LexError {
             code: ErrorCode::E0106,
+            span: Span { start, end },
+        })
+    } else if c == ';' {
+        // セミコロン(仕様1章L-19)。セミコロンは存在しない。
+        chars.next();
+        let end = start + ';'.len_utf8();
+        Err(LexError {
+            code: ErrorCode::E0110,
             span: Span { start, end },
         })
     } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {

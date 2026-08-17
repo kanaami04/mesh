@@ -309,8 +309,9 @@ fn capitalized_reserved_words_are_identifiers() {
     );
 }
 
-/// コメントの中の誘導用予約語は反応しないこと(仕様1章L-4注2の不透明性。
-/// E0104は英字の語で発火する初の字句エラーのため、不透明性の網に新実例を追加)。
+/// コメントの中の誘導用予約語は反応しないこと(仕様1章L-4注2の不透明性)。
+/// 先頭コメント行の改行は抑制される。E0104は英字の語で発火する初の字句エラーのため、
+/// 不透明性の網に新実例を追加。
 #[test]
 fn comment_is_opaque_to_reserved_words() {
     // Arrange
@@ -322,18 +323,11 @@ fn comment_is_opaque_to_reserved_words() {
     // Assert
     assert_eq!(
         tokens,
-        vec![
-            Token {
-                kind: TokenKind::Newline,
-                text: "\n".to_string(),
-                span: Span { start: 17, end: 18 },
-            },
-            Token {
-                kind: TokenKind::Int,
-                text: "1".to_string(),
-                span: Span { start: 18, end: 19 },
-            },
-        ]
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1".to_string(),
+            span: Span { start: 18, end: 19 },
+        }]
     );
 }
 
@@ -1697,10 +1691,10 @@ fn trailing_newline_produces_final_newline_token() {
     );
 }
 
-/// 改行だけの入力が空でなく1個のNewlineトークンになること(仕様1章L-19)。
-/// 空入力(トークンゼロ)との境界。オフセット0のNewlineもここで固定する。
+/// 改行のみの入力はトークンを生成しないこと(仕様1章L-19注「直前がNewlineなら終端を挿入しない」)。
+/// 入力先頭の改行も抑制対象。空入力との境界。
 #[test]
-fn newline_only_source_produces_single_newline_token() {
+fn newline_only_source_produces_no_tokens() {
     // Arrange
     let source = "\n";
 
@@ -1708,14 +1702,7 @@ fn newline_only_source_produces_single_newline_token() {
     let tokens = lex(source).expect("改行のみの入力の字句解析はエラーにならないこと");
 
     // Assert
-    assert_eq!(
-        tokens,
-        vec![Token {
-            kind: TokenKind::Newline,
-            text: "\n".to_string(),
-            span: Span { start: 0, end: 1 },
-        }]
-    );
+    assert_eq!(tokens, vec![]);
 }
 
 /// 行末の空白は改行トークンに影響しないこと(仕様1章1.2・L-19)。
@@ -1847,15 +1834,15 @@ fn crlf_produces_single_newline_token() {
     );
 }
 
-/// 連続した改行がそれぞれ独立したNewlineトークンになること(仕様1章L-19)。
-/// 空行(空文)のスキップはパーサの担当で、字句は事実をそのまま伝える。
+/// 文の間の空行は1個のNewlineトークンのみを生成すること(仕様1章L-19)。
+/// 直前にNewlineがある改行は抑制される。空文を作らない制約。
 #[test]
-fn consecutive_newlines_each_produce_token() {
+fn blank_line_between_statements_yields_single_newline_token() {
     // Arrange
     let source = "1\n\n2";
 
     // Act
-    let tokens = lex(source).expect("連続改行を含む字句解析はエラーにならないこと");
+    let tokens = lex(source).expect("空行を含む字句解析はエラーにならないこと");
 
     // Assert
     assert_eq!(
@@ -1870,11 +1857,6 @@ fn consecutive_newlines_each_produce_token() {
                 kind: TokenKind::Newline,
                 text: "\n".to_string(),
                 span: Span { start: 1, end: 2 },
-            },
-            Token {
-                kind: TokenKind::Newline,
-                text: "\n".to_string(),
-                span: Span { start: 2, end: 3 },
             },
             Token {
                 kind: TokenKind::Int,
@@ -2090,11 +2072,10 @@ fn slash_is_division_and_double_slash_is_comment() {
     );
 }
 
-/// コメントのみの行は裸のNewlineトークンを並べること(仕様1章L-4)。
-/// 将来の終端挿入(ADR-0010)は「直前がNewlineなら挿入しない」を備える必要がある——
-/// その前提となる字句側の出力形をここで固定する。
+/// コメントのみの行の改行はトークンを生成しないこと(仕様1章L-19注・L-4)。
+/// 直前に出力したトークンがない（入力先頭またはNewline直後）の改行は抑制される。
 #[test]
-fn comment_only_lines_produce_bare_newline_tokens() {
+fn comment_only_lines_produce_no_newline_tokens() {
     // Arrange
     let source = "// a\n// b\n1";
 
@@ -2104,29 +2085,18 @@ fn comment_only_lines_produce_bare_newline_tokens() {
     // Assert
     assert_eq!(
         tokens,
-        vec![
-            Token {
-                kind: TokenKind::Newline,
-                text: "\n".to_string(),
-                span: Span { start: 4, end: 5 },
-            },
-            Token {
-                kind: TokenKind::Newline,
-                text: "\n".to_string(),
-                span: Span { start: 9, end: 10 },
-            },
-            Token {
-                kind: TokenKind::Int,
-                text: "1".to_string(),
-                span: Span { start: 10, end: 11 },
-            },
-        ]
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1".to_string(),
+            span: Span { start: 10, end: 11 },
+        }]
     );
 }
 
 /// `///`(ドキュメンテーションコメント予約)はv1では `//` と同じ扱いであること
 /// (仕様1章L-30〔正例: doc-comment-v1〕)。
 /// Redを経ていない後追いの回帰テスト(`///` は `//` で始まるため自動的にコメントになる)。
+/// 先頭コメント行の改行は抑制される。
 #[test]
 fn doc_comment_is_treated_as_line_comment_in_v1() {
     // Arrange
@@ -2138,18 +2108,31 @@ fn doc_comment_is_treated_as_line_comment_in_v1() {
     // Assert
     assert_eq!(
         tokens,
-        vec![
-            Token {
-                kind: TokenKind::Newline,
-                text: "\n".to_string(),
-                span: Span { start: 5, end: 6 },
-            },
-            Token {
-                kind: TokenKind::Int,
-                text: "1".to_string(),
-                span: Span { start: 6, end: 7 },
-            },
-        ]
+        vec![Token {
+            kind: TokenKind::Int,
+            text: "1".to_string(),
+            span: Span { start: 6, end: 7 },
+        }]
+    );
+}
+
+/// セミコロンはエラー E0110 になること(仕様1章L-19〔負例: semicolon〕)。
+/// spanは `;` 1バイトをピンポイントで指す。現状は暫定のE0116のため、本テストがRedになる。
+#[test]
+fn semicolon_reports_e0110_with_span() {
+    // Arrange
+    let source = "let x = 1;";
+
+    // Act
+    let err = lex(source).expect_err("セミコロンはE0110としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0110,
+            span: Span { start: 9, end: 10 },
+        }
     );
 }
 
