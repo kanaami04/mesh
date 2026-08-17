@@ -50,9 +50,9 @@ doc-review・impl-review のStopフックが、**同一の作業ツリーで複�
 
 ## Assumptions(この決定が依存している前提)
 
-- Claude CodeのフックはstdinのJSONで `session_id` を受け取れる(Stop・PostToolUseとも。2026-08-17に公式ドキュメントで確認)
-- モデル側は環境変数 `CLAUDE_CODE_SESSION_ID` で同じ値を参照できる(スキルが自分の記録を消すために必要)
-- `.md` の更新は `Edit` / `Write` / `NotebookEdit` を経由する。シェル経由で生成・書き換えられた `.md` は記録されない(既知の限界)
+- **検証済み**: Claude CodeのフックはstdinのJSONで `session_id` を受け取れる(Stop・PostToolUseとも。2026-08-17に公式ドキュメントで確認)
+- **検証済み**: モデル側は環境変数 `CLAUDE_CODE_SESSION_ID` で同じ値を参照できる(スキルが自分の記録を消すために必要)。2026-08-17に、env の値がトランスクリプト `~/.claude/projects/<project>/<session_id>.jsonl` のファイル名と一致することを実測して確認した
+- **未検証(A-22)**: `.md` の更新は `Edit` / `Write` / `NotebookEdit` を経由する。シェル経由で生成・書き換えられた `.md` は記録されない(既知の限界。ASSUMPTIONS.md の A-22 に登録)
 
 ## 既存ADRとの相互作用
 
