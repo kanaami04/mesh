@@ -1,6 +1,6 @@
 ---
 source: tests/lexer.rs
-expression: "mesh::lexer::lex(\"let mut n = 1_000 // 合計\\r\\nlet msg = \\\"答え: ${n}円\\\\n\\\"\\nn % 2 == 0 && n <= 10 => 0..n\")"
+expression: "mesh::lexer::lex(\"let mut n = 1_000 // 合計\\r\\nlet msg = \\\"答え: ${n}円\\\\n\\\"\\nn % 2 == 0 && n <= 10 => 0..n\\nlet r = 2.5e-3 * 0xFF\")"
 ---
 Ok(
     [
@@ -227,6 +227,62 @@ Ok(
             span: Span {
                 start: 87,
                 end: 88,
+            },
+        },
+        Token {
+            kind: Newline,
+            text: "\n",
+            span: Span {
+                start: 88,
+                end: 89,
+            },
+        },
+        Token {
+            kind: KwLet,
+            text: "let",
+            span: Span {
+                start: 89,
+                end: 92,
+            },
+        },
+        Token {
+            kind: Ident,
+            text: "r",
+            span: Span {
+                start: 93,
+                end: 94,
+            },
+        },
+        Token {
+            kind: Eq,
+            text: "=",
+            span: Span {
+                start: 95,
+                end: 96,
+            },
+        },
+        Token {
+            kind: Float,
+            text: "2.5e-3",
+            span: Span {
+                start: 97,
+                end: 103,
+            },
+        },
+        Token {
+            kind: Star,
+            text: "*",
+            span: Span {
+                start: 104,
+                end: 105,
+            },
+        },
+        Token {
+            kind: Int,
+            text: "0xFF",
+            span: Span {
+                start: 106,
+                end: 110,
             },
         },
     ],
