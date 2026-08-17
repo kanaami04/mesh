@@ -4334,3 +4334,707 @@ fn postfix_question_terminates_statement() {
         ]
     );
 }
+
+/// `(` の内側では行末が何であれ改行は文を終端しないこと(仕様1章L-21
+/// 〔正例: multiline-call〕)。トレーリングカンマ無しの複数行呼び出し——
+/// 行末が `(`・識別子・引数名いずれでもNewlineトークンは生成されない。
+#[test]
+fn multiline_call_without_trailing_comma_produces_no_newline() {
+    // Arrange
+    let source = "foo(\n    a,\n    b\n)";
+
+    // Act
+    let tokens = lex(source).expect("括弧内の改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+        ]
+    );
+}
+
+/// `[` の内側でも改行は文を終端しないこと(仕様1章L-21)。
+/// `(`/`[` が別トークン種であるため、スタックが両方に対応していることを固定する。
+#[test]
+fn newline_inside_brackets_is_suppressed() {
+    // Arrange
+    let source = "[1,\n2\n]";
+
+    // Act
+    let tokens = lex(source).expect("括弧内の改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
+    );
+}
+
+/// `(` の内側でも `{` ブロックに入れば終端規則が復活すること(仕様1章L-21
+/// 〔正例: multiline-call〕)。引数の無名fn本体に複数文を含む形——
+/// L-21の正例テストが必ず含める形。本体の各文の行末だけNewlineが生成される。
+#[test]
+fn anonymous_fn_body_inside_call_terminates_statements() {
+    // Arrange
+    let source = "call(fn() {\n    let a = 1\n    let b = 2\n    a\n})";
+
+    // Act
+    let tokens = lex(source).expect("括弧内のブロックを含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "call".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::KwFn,
+                text: "fn".to_string(),
+                span: Span { start: 5, end: 7 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 16, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 24, end: 25 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 25, end: 26 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 30, end: 33 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 36, end: 37 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 38, end: 39 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 39, end: 40 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 44, end: 45 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 45, end: 46 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 46, end: 47 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 47, end: 48 },
+            },
+        ]
+    );
+}
+
+/// 複数行structリテラルは各フィールドの行末カンマで継続すること(仕様1章L-22
+/// 〔正例: multiline-struct-literal〕)。最終フィールドのトレーリングカンマを
+/// 含め、Newlineトークンは生成されない。
+#[test]
+fn multiline_struct_literal_with_trailing_commas_continues() {
+    // Arrange
+    let source = "let p = Point {\n    x: 1,\n    y: 2,\n}";
+
+    // Act
+    let tokens = lex(source).expect("複数行structリテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "p".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "Point".to_string(),
+                span: Span { start: 8, end: 13 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 24, end: 25 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 30, end: 31 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 31, end: 32 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 33, end: 34 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 36, end: 37 },
+            },
+        ]
+    );
+}
+
+/// 最終フィールドのトレーリングカンマ欠落では、そのフィールド行の行末に
+/// Newlineが生成されること(仕様1章L-22〔負例: struct-literal-missing-trailing-
+/// comma〕の字句側の挙動)。`{` の内側は終端規則が復活しているため。この形を
+/// エラーにするのはパーサの担当(字句は事実をトークンで伝えるだけ)。
+#[test]
+fn struct_literal_missing_trailing_comma_emits_newline() {
+    // Arrange
+    let source = "let p = Point {\n    x: 1,\n    y: 2\n}";
+
+    // Act
+    let tokens = lex(source)
+        .expect("トレーリングカンマなしのstructリテラルの字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "p".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "Point".to_string(),
+                span: Span { start: 8, end: 13 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 24, end: 25 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 30, end: 31 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 31, end: 32 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 33, end: 34 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 35, end: 36 },
+            },
+        ]
+    );
+}
+
+/// 深度0で閉じ括弧の直後の改行は文を終端すること(仕様1章L-19/L-21。
+/// 閉じ括弧はL-20の継続トークンでない)。スタックのpop漏れ(閉じた後も
+/// 深度が残る実装)を殺すピン。
+#[test]
+fn newline_after_closing_paren_terminates() {
+    // Arrange
+    let source = "foo(a)\nfoo(b)";
+
+    // Act
+    let tokens = lex(source).expect("閉じ括弧直後の改行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 7, end: 10 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+        ]
+    );
+}
+
+/// `}` でブロックを抜けると `(`/`[` の深度に戻り、以後の改行は再び抑制される
+/// こと(仕様1章L-21の「深度は `{` で退避し、対応する `}` で復元するスタック」)。
+/// 本体内の1文の行末のみNewlineが生成される。
+#[test]
+fn brace_close_restores_paren_depth_suppression() {
+    // Arrange
+    let source = "call(fn() {\n    a\n},\n1)";
+
+    // Act
+    let tokens =
+        lex(source).expect("ブロック閉じ後の改行抑制を確認する字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "call".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::KwFn,
+                text: "fn".to_string(),
+                span: Span { start: 5, end: 7 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 19, end: 20 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+        ]
+    );
+}
+
+/// 深度0で `[`・`{` を行末に置くと継続し、閉じ括弧 `]` の直後の改行は終端すること
+/// (仕様1章L-20の開き括弧+L-19)。`[` の直後の改行はL-21の深度抑制、`{` の直後は
+/// L-20の継続トークン判定(`{` はスタックトップでもある)で抑える——実装上の二重の
+/// 経路を観測される挙動として固定する(impl-review 2026-08-18 観点A/B指摘)。
+#[test]
+fn open_brackets_at_line_end_continue_and_close_terminates() {
+    // Arrange
+    let source = "xs[\n0]\np{\nk: 1}";
+
+    // Act
+    let tokens = lex(source).expect("開き括弧の行末継続の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "xs".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "p".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "k".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+        ]
+    );
+}
+
+/// 複合代入の残り4種(`-=` `*=` `/=` `%=`)を行末に置くと継続すること(仕様1章L-20)。
+/// `+=` は複合代入と区切り記号の行末テストで既に網羅済み——L-20の全継続トークンが
+/// いずれかのテストで行末に置かれた状態を完成させる(impl-review 2026-08-18 指摘)。
+#[test]
+fn remaining_compound_assignments_at_line_end_continue() {
+    // Arrange
+    let source = "n -=\n1\nn *=\n2\nn /=\n3\nn %=\n4";
+
+    // Act
+    let tokens = lex(source).expect("複合代入残り4種の行末継続の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::MinusEq,
+                text: "-=".to_string(),
+                span: Span { start: 2, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::StarEq,
+                text: "*=".to_string(),
+                span: Span { start: 9, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::SlashEq,
+                text: "/=".to_string(),
+                span: Span { start: 16, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "3".to_string(),
+                span: Span { start: 19, end: 20 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::PercentEq,
+                text: "%=".to_string(),
+                span: Span { start: 23, end: 25 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "4".to_string(),
+                span: Span { start: 26, end: 27 },
+            },
+        ]
+    );
+}

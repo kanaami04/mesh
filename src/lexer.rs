@@ -271,16 +271,31 @@ fn is_continuation_token(kind: &TokenKind) -> bool {
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
+    // 括弧深度スタック(仕様1章L-21・ADR-0031)。`(` または `[` の内側では改行を抑制し、
+    // `{ ... }` ブロックに入ったら終端規則を復活させるため、開き括弧の種類を記録する。
+    let mut brackets: Vec<TokenKind> = Vec::new();
     while chars.peek().is_some() {
         if let Some(t) = next_token(source, &mut chars, false, 0)? {
             // 終端する改行だけをNewlineトークンとして出力する(ADR-0010のGo方式)。
             // 直前のトークンが無い(入力先頭)かNewlineか継続トークン(仕様1章L-20)のとき、
-            // 改行はトークンを生成しない。
+            // 改行はトークンを生成しない。L-21の括弧深度抑制もここで判定する。
             if t.kind == TokenKind::Newline {
-                if should_emit_newline(&tokens) {
+                if should_emit_newline(&tokens, &brackets) {
                     tokens.push(t);
                 }
             } else {
+                // 括弧スタックの更新(仕様1章L-21)。開き括弧はpushして保持、閉じ括弧はpopして破棄。
+                // 空スタックでのpopは括弧の不均衡検査が字句の責務でないため何もしない
+                // (補間の内側以外では不均衡はパーサが担当する)。
+                match t.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                        brackets.push(t.kind.clone());
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        brackets.pop();
+                    }
+                    _ => {}
+                }
                 tokens.push(t);
             }
         }
@@ -290,7 +305,19 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
 /// Newlineトークンを生成すべきかを判定する。
 /// トークン列が空でなく、直前のトークンがNewlineでも継続トークンでもないときtrue。
-fn should_emit_newline(tokens: &[Token]) -> bool {
+/// さらに、括弧深度スタックのトップが LParen または LBracket のときは抑制する
+/// (仕様1章L-21。`(`/`[` の内側では改行は終端しない)。LBrace またはスタック空のときは
+/// 終端規則が復活する( `{` ブロック内では文の行末にNewlineを生成する)。
+fn should_emit_newline(tokens: &[Token], brackets: &[TokenKind]) -> bool {
+    // 仕様1章L-21: `(`/`[` の内側では改行を抑制する(スタックのトップで判定)。
+    // トップが LBrace のときはこの抑制を通過し、下の終端判定が復活する。
+    if brackets
+        .last()
+        .is_some_and(|top| matches!(top, TokenKind::LParen | TokenKind::LBracket))
+    {
+        return false;
+    }
+    // 既存の終端判定(ADR-0010・仕様1章L-19/L-20)。
     if let Some(last) = tokens.last() {
         !matches!(last.kind, TokenKind::Newline) && !is_continuation_token(&last.kind)
     } else {
