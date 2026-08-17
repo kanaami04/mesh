@@ -63,3 +63,4 @@
 - [ADR-0041](0041-newline-codes-crlf.md) — 改行はLF/CRLFを受理・単独CRはE0117・Unicode改行類は非改行 ✅
 - [ADR-0042](0042-interpolation-token-representation.md) — 補間のトークン表現は入れ子方式(Strが区分列を内包)✅
 - [ADR-0043](0043-leading-zero-decimal-rejected.md) — 先頭ゼロの10進は全形(int・float・指数)で拒否・無加工JS出力の不変条件 ✅
+- [ADR-0045](0045-review-gate-session-scoped-state.md) — レビューゲートの状態をセッション別に分離・レビュー済み記録は追記のみ ✅
