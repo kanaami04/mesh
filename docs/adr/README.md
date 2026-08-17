@@ -62,3 +62,4 @@
 - [ADR-0040](0040-spec-authoring-decisions.md) — 仕様執筆時確定事項の追補採録(X-29/F-1/T-26/H-10/M-16/L-7)✅
 - [ADR-0041](0041-newline-codes-crlf.md) — 改行はLF/CRLFを受理・単独CRはE0117・Unicode改行類は非改行 ✅
 - [ADR-0042](0042-interpolation-token-representation.md) — 補間のトークン表現は入れ子方式(Strが区分列を内包)✅
+- [ADR-0043](0043-leading-zero-decimal-rejected.md) — 先頭ゼロの10進は全形(int・float・指数)で拒否・無加工JS出力の不変条件 ✅
