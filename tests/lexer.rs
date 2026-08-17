@@ -1867,6 +1867,41 @@ fn blank_line_between_statements_yields_single_newline_token() {
     );
 }
 
+/// CRLF行の空行も同じ抑制規則で1個のNewlineのみを生成すること
+/// (仕様1章L-19注・L-29)。抑制判定はトークン種類ベースであり、Newlineの
+/// textが `\r\n`(2バイト)でも `\n`(1バイト)でも同じ経路で抑制されることを
+/// 固定する(impl-review 2026-08-18 観点A指摘の追加テスト)。
+#[test]
+fn crlf_blank_line_between_statements_yields_single_newline_token() {
+    // Arrange
+    let source = "1\r\n\r\n2";
+
+    // Act
+    let tokens = lex(source).expect("CRLF空行を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\r\n".to_string(),
+                span: Span { start: 1, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+        ]
+    );
+}
+
 /// `//` から行末まではコメントとして読み飛ばされ、トークンを生成しないこと
 /// (仕様1章L-4〔正例: line-comment〕)。改行自体はコメントに含まれず、独立した
 /// Newlineトークンとして残る(L-4「行末トークンの判定はコメントを除去した後の
@@ -3722,4 +3757,580 @@ fn snapshot_token_stream() {
     insta::assert_debug_snapshot!(mesh::lexer::lex(
         "let mut n = 1_000 // 合計\r\nlet msg = \"答え: ${n}円\\n\"\nn % 2 == 0 && n <= 10 => 0..n\nlet r = 2.5e-3 * 0xFF"
     ));
+}
+
+/// 二項演算子を行末に置くと文は次行へ継続し、Newlineトークンが生成されないこと
+/// (仕様1章L-20〔正例: continuation-operators〕)。L-20の二項演算子14種を全列挙する——
+/// 継続トークン表から1種でも漏れる実装をこの網で殺すため、代表抽出しない。
+#[test]
+fn binary_operators_at_line_end_continue() {
+    // Arrange
+    let source =
+        "1 +\n2 -\n3 *\n4 /\n5 %\n6 ==\n7 !=\n8 <\n9 <=\n10 >\n11 >=\n12 &&\n13 ||\n14 |\n15";
+
+    // Act
+    let tokens = lex(source).expect("二項演算子の行末継続の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Plus,
+                text: "+".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Minus,
+                text: "-".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "3".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Star,
+                text: "*".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "4".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Slash,
+                text: "/".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "5".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Percent,
+                text: "%".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "6".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::EqEq,
+                text: "==".to_string(),
+                span: Span { start: 22, end: 24 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "7".to_string(),
+                span: Span { start: 25, end: 26 },
+            },
+            Token {
+                kind: TokenKind::BangEq,
+                text: "!=".to_string(),
+                span: Span { start: 27, end: 29 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "8".to_string(),
+                span: Span { start: 30, end: 31 },
+            },
+            Token {
+                kind: TokenKind::Lt,
+                text: "<".to_string(),
+                span: Span { start: 32, end: 33 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "9".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 36, end: 38 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "10".to_string(),
+                span: Span { start: 39, end: 41 },
+            },
+            Token {
+                kind: TokenKind::Gt,
+                text: ">".to_string(),
+                span: Span { start: 42, end: 43 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "11".to_string(),
+                span: Span { start: 44, end: 46 },
+            },
+            Token {
+                kind: TokenKind::GtEq,
+                text: ">=".to_string(),
+                span: Span { start: 47, end: 49 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "12".to_string(),
+                span: Span { start: 50, end: 52 },
+            },
+            Token {
+                kind: TokenKind::AmpAmp,
+                text: "&&".to_string(),
+                span: Span { start: 53, end: 55 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "13".to_string(),
+                span: Span { start: 56, end: 58 },
+            },
+            Token {
+                kind: TokenKind::PipePipe,
+                text: "||".to_string(),
+                span: Span { start: 59, end: 61 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "14".to_string(),
+                span: Span { start: 62, end: 64 },
+            },
+            Token {
+                kind: TokenKind::Pipe,
+                text: "|".to_string(),
+                span: Span { start: 65, end: 66 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "15".to_string(),
+                span: Span { start: 67, end: 69 },
+            },
+        ]
+    );
+}
+
+/// キーワード演算子 or/is/in を行末に置くと継続すること(仕様1章L-20)。
+/// 継続しない文(`y`・`w` の行末)ではNewlineが復活することも同時に固定する。
+#[test]
+fn keyword_operators_at_line_end_continue() {
+    // Arrange
+    let source = "let a = x or\ny\nlet b = v is\nw\nfor i in\nxs";
+
+    // Act
+    let tokens = lex(source).expect("キーワード演算子の行末継続の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::KwOr,
+                text: "or".to_string(),
+                span: Span { start: 10, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 15, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 19, end: 20 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "v".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::KwIs,
+                text: "is".to_string(),
+                span: Span { start: 25, end: 27 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "w".to_string(),
+                span: Span { start: 28, end: 29 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 29, end: 30 },
+            },
+            Token {
+                kind: TokenKind::KwFor,
+                text: "for".to_string(),
+                span: Span { start: 30, end: 33 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "i".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::KwIn,
+                text: "in".to_string(),
+                span: Span { start: 36, end: 38 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "xs".to_string(),
+                span: Span { start: 39, end: 41 },
+            },
+        ]
+    );
+}
+
+/// 複合代入・`.`・`..`・カンマ・`=`・`=>`・開き括弧を行末に置くと継続すること
+/// (仕様1章L-20。メソッドチェーンの折り返し `x.` 形を含む)。
+#[test]
+fn compound_assignment_and_punctuators_at_line_end_continue() {
+    // Arrange
+    let source = "n +=\n1\nx.\ny\n0..\nn\nq =\n1\n1,\n2\nk =>\nv\nfoo(\n1)";
+
+    // Act
+    let tokens =
+        lex(source).expect("複合代入と区切り記号の行末継続の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::PlusEq,
+                text: "+=".to_string(),
+                span: Span { start: 2, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::Dot,
+                text: ".".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "y".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "0".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::DotDot,
+                text: "..".to_string(),
+                span: Span { start: 13, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "n".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "q".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 22, end: 23 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 24, end: 25 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 25, end: 26 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 27, end: 28 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 28, end: 29 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "k".to_string(),
+                span: Span { start: 29, end: 30 },
+            },
+            Token {
+                kind: TokenKind::FatArrow,
+                text: "=>".to_string(),
+                span: Span { start: 31, end: 33 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "v".to_string(),
+                span: Span { start: 34, end: 35 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 35, end: 36 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 36, end: 39 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 39, end: 40 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 41, end: 42 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 42, end: 43 },
+            },
+        ]
+    );
+}
+
+/// 行末トークンの判定はコメントを除去した後のトークンに対して行うこと
+/// (仕様1章L-4〔正例: comment-before-continuation〕+L-20)。
+/// `+` の行末コメントを挟んでも継続する。
+#[test]
+fn comment_before_continuation_operator() {
+    // Arrange
+    let source = "1 +  // 合計\n2";
+
+    // Act
+    let tokens = lex(source).expect("コメント前の継続演算子の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Plus,
+                text: "+".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 15, end: 16 },
+            },
+        ]
+    );
+}
+
+/// 行頭に演算子を置いても継続は起きないこと(仕様1章L-23〔負例:
+/// no-leading-operator-continuation〕)。継続判定は前行の行末のみ。
+/// Green実装が「次行の行頭トークン」を見る誤実装に変わったとき殺すピンで、
+/// 現行実装では最初から緑(Redを経ていない後追いの回帰テスト)。
+#[test]
+fn leading_operator_does_not_continue_previous_line() {
+    // Arrange
+    let source = "1\n+ 2";
+
+    // Act
+    let tokens = lex(source).expect("行頭演算子の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Plus,
+                text: "+".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+        ]
+    );
+}
+
+/// 後置 `?` の行末は継続せず文を終端すること(仕様1章L-24〔挙動検証:
+/// postfix-question-newline〕)。`?` はL-20の継続トークンでない)。
+/// 継続トークン表にQuestionを混入させた実装を殺すピンで、
+/// 現行実装では最初から緑(Redを経ていない後追いの回帰テスト)。
+#[test]
+fn postfix_question_terminates_statement() {
+    // Arrange
+    let source = "find(id)?\nlog(1)";
+
+    // Act
+    let tokens = lex(source).expect("後置?の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "find".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "id".to_string(),
+                span: Span { start: 5, end: 7 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::Question,
+                text: "?".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "log".to_string(),
+                span: Span { start: 10, end: 13 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 15, end: 16 },
+            },
+        ]
+    );
 }

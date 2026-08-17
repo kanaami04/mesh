@@ -224,6 +224,49 @@ const MAX_NEST_DEPTH: usize = 64;
 /// パーサ・型検査が式全体を評価してから担当する。
 const MAX_SAFE_INT: u128 = 9_007_199_254_740_991;
 
+/// トークン種類が行末継続トークンかどうかを判定する(仕様1章L-20)。
+/// これらのトークンが行末にあるとき、改行はNewlineトークンを生成しない。
+/// コメントはトークンを生成しないため、判定は「コメント除去後の行末」で自動的に成立する。
+fn is_continuation_token(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        // 二項演算子(14種)
+        TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqEq
+            | TokenKind::BangEq
+            | TokenKind::Lt
+            | TokenKind::LtEq
+            | TokenKind::Gt
+            | TokenKind::GtEq
+            | TokenKind::AmpAmp
+            | TokenKind::PipePipe
+            | TokenKind::Pipe
+            // キーワード演算子(3種)
+            | TokenKind::KwOr
+            | TokenKind::KwIs
+            | TokenKind::KwIn
+            // 複合代入(5種)
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            // 記号類(8種)
+            | TokenKind::Dot
+            | TokenKind::DotDot
+            | TokenKind::Comma
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Eq
+            | TokenKind::FatArrow
+    )
+}
+
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
@@ -231,12 +274,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     while chars.peek().is_some() {
         if let Some(t) = next_token(source, &mut chars, false, 0)? {
             // 終端する改行だけをNewlineトークンとして出力する(ADR-0010のGo方式)。
-            // 直前のトークンが無い(入力先頭)かNewlineのとき、改行はトークンを生成しない。
+            // 直前のトークンが無い(入力先頭)かNewlineか継続トークン(仕様1章L-20)のとき、
+            // 改行はトークンを生成しない。
             if t.kind == TokenKind::Newline {
-                let last_is_newline = tokens
-                    .last()
-                    .is_some_and(|last: &Token| matches!(last.kind, TokenKind::Newline));
-                if !tokens.is_empty() && !last_is_newline {
+                if should_emit_newline(&tokens) {
                     tokens.push(t);
                 }
             } else {
@@ -245,6 +286,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
     }
     Ok(tokens)
+}
+
+/// Newlineトークンを生成すべきかを判定する。
+/// トークン列が空でなく、直前のトークンがNewlineでも継続トークンでもないときtrue。
+fn should_emit_newline(tokens: &[Token]) -> bool {
+    if let Some(last) = tokens.last() {
+        !matches!(last.kind, TokenKind::Newline) && !is_continuation_token(&last.kind)
+    } else {
+        false
+    }
 }
 
 /// 基数接頭辞つき整数リテラルの基数判定結果: (その基数での数字述語, 数値としての基数)。
