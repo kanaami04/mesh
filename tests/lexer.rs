@@ -754,6 +754,27 @@ fn float_with_zero_integer_part_is_single_token() {
     );
 }
 
+/// 整数部が `0` のfloat+指数形式も1個のFloatトークンになること(仕様1章1.6の正例・
+/// L-12注2の境界固定。整数部が `0` 1文字+指数は正当)。
+#[test]
+fn float_with_zero_integer_part_and_exponent_is_single_token() {
+    // Arrange
+    let source = "0e5";
+
+    // Act
+    let tokens = lex(source).expect("`0e5` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Float,
+            text: "0e5".to_string(),
+            span: Span { start: 0, end: 3 },
+        }]
+    );
+}
+
 /// `..` の消極規則はfloat直後にも適用され、floatリテラルの直後の `..` は
 /// 数値に取り込まれず独立したDotDotトークンになること(仕様1章L-3)。
 /// dotdot_after_integer_splits_range のdocコメントが予約していたfloatサイクルの追加検証。
@@ -1074,12 +1095,17 @@ fn underscore_in_radix_and_exponent_reports_e0105_with_span() {
 }
 
 /// 仕様1章L-12〔負例: number-malformed〕。指数部が空・基数接頭辞の後に数字が無い・
-/// 基数外の数字・先頭ゼロの10進・数字直後の識別子文字の5形はE0113。
+/// 基数外の数字・先頭ゼロの10進(int/float/指数)・数字直後の識別子文字の5形はE0113。
 /// spanはリテラル全体を指すこと(修正候補が全体置換のため、`0b102` を `0b10`+`2` に分割しない流儀を5形に適用)。
-/// 5形の変種としてケース6〜9も固定する: 最小の先頭ゼロ `00` / 接頭辞の直後から基数外の
+/// 先頭ゼロの変種としてケース6〜15も固定する: 最小の先頭ゼロ `00` / 接頭辞の直後から基数外の
 /// `0o8`(基数ガードを外れ10進経路の末尾検査で拾う)/ 大文字接頭辞 `0XFF`(接頭辞は
 /// 小文字のみ=1.6のEBNF)/ 先頭ゼロ+識別子文字の複合 `0755abc`(末尾検査が先に発火し
-/// spanは字面全体)。ケース6〜9はimpl-reviewの生存変異を受けて追加したRedを経ない後追い。
+/// spanは字面全体)/ 先頭ゼロのfloat `0755.5` / 先頭ゼロのfloat・最小 `00.5` / 先頭ゼロの指数 `01e5` /
+/// 先頭ゼロのfloat+指数 `00.5e1` / 大文字指数 `01E5`(整数部の終わり判定は `E` も境界とする)/
+/// 符号つき指数 `01e+5`(指数の符号は整数部に含まない)。
+/// 先頭ゼロの適用範囲は10進の全形(int/float/指数)で、整数部が`0`で始まり2文字以上の
+/// ケースを網羅する(L-12注2)。ケース14〜15はimpl-review(2026-08-17)の指摘
+/// (`E` 落とし・符号混入の退行変異が全テスト緑のまま生存する)を受けて追加した後追い。
 #[test]
 fn malformed_number_reports_e0113_with_span() {
     // Arrange (1: 指数部が空)
@@ -1215,6 +1241,96 @@ fn malformed_number_reports_e0113_with_span() {
         LexError {
             code: ErrorCode::E0113,
             span: Span { start: 0, end: 7 },
+        }
+    );
+
+    // Arrange (10: 先頭ゼロのfloat)
+    let source = "0755.5";
+
+    // Act
+    let err = lex(source).expect_err("`0755.5` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 6 },
+        }
+    );
+
+    // Arrange (11: 先頭ゼロのfloat・最小)
+    let source = "00.5";
+
+    // Act
+    let err = lex(source).expect_err("`00.5` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+
+    // Arrange (12: 先頭ゼロの指数形式)
+    let source = "01e5";
+
+    // Act
+    let err = lex(source).expect_err("`01e5` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+
+    // Arrange (13: 先頭ゼロのfloat+指数形式)
+    let source = "00.5e1";
+
+    // Act
+    let err = lex(source).expect_err("`00.5e1` は先頭ゼロの10進でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 6 },
+        }
+    );
+
+    // Arrange (14: 先頭ゼロの大文字指数形式)
+    let source = "01E5";
+
+    // Act
+    let err = lex(source).expect_err("`01E5` は大文字 `E` も指数部として先頭ゼロになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 4 },
+        }
+    );
+
+    // Arrange (15: 先頭ゼロの符号つき指数形式)
+    let source = "01e+5";
+
+    // Act
+    let err = lex(source).expect_err("`01e+5` は指数の符号を含め字面全体でエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0113,
+            span: Span { start: 0, end: 5 },
         }
     );
 }

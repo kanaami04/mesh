@@ -580,10 +580,13 @@ fn scan_number(
     // 桁区切り検査(E0105)より**後**に置くのは仕様1章L-9注2の精神による:
     // `1_x` は「`_` の位置違反」とだけ言えばよく、E0113を重ねて出さない。
     check_trailing_alnum(source, chars, start)?;
-    // 先頭ゼロ検査: 10進**int**が `0` で始まり2文字以上なら不正(`0755`・`00`)。
-    // `0` 単独は正当。基数リテラル(`0b1010`)は上のブロックで早期returnするため
-    // ここには来ない。floatの先頭ゼロ(`00.5`)はL-12の対象外(仕様は10進intのみ明記)。
-    if !is_float && text.len() > 1 && text.starts_with('0') {
+    // 先頭ゼロ検査: 10進の全形(int・小数・指数)で整数部が `0` で始まり2文字以上なら不正
+    // (仕様1章L-12注2)。`00`・`0755`・`00.5`・`01e5` が該当。`0` 単独・`0.5`・`0e5` は正当。
+    // 基数リテラル(`0b1010`)は上のブロックで早期returnするためここには来ない。
+    // 判定対象は整数部(小数点・`e`/`E` より前の数字列)で、spanはリテラル全体。
+    let int_part_end = text.find(['.', 'e', 'E']).unwrap_or(text.len());
+    let int_part = &text[..int_part_end];
+    if int_part.len() > 1 && int_part.starts_with('0') {
         return Err(LexError {
             code: ErrorCode::E0113,
             span: Span { start, end },
