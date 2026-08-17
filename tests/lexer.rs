@@ -4427,6 +4427,193 @@ fn newline_inside_brackets_is_suppressed() {
     );
 }
 
+/// CRLF行末でも `(` の内側の改行は抑制されること(仕様1章L-21・L-29)。
+/// 改行の表現がLFでもCRLFでも抑制の判定が同一であることの固定
+/// (impl-review 2026-08-18の改善。Redを経ていない後追いの回帰テスト)。
+#[test]
+fn crlf_inside_parentheses_is_suppressed() {
+    // Arrange
+    let source = "foo(\r\n    a,\r\n    b\r\n)";
+
+    // Act
+    let tokens = lex(source).expect("CRLF改行を含む括弧内の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+        ]
+    );
+}
+
+/// 2段にネストした `(` の内側の改行も抑制されること(仕様1章L-21)。
+/// 深度スタックが複数要素を正しく保持・消費することの固定
+/// (impl-review 2026-08-18の改善。Redを経ていない後追いの回帰テスト)。
+#[test]
+fn nested_parens_suppress_newline() {
+    // Arrange
+    let source = "foo((a,\nb))";
+
+    // Act
+    let tokens = lex(source).expect("ネストした括弧内の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "foo".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+        ]
+    );
+}
+
+/// 異種括弧 `(` `[` `{` の混在下でも改行抑制の判定がスタックトップで正しく行われること
+/// (仕様1章L-21)。`]` でpopした後のトップが `(` であるケースを固定する
+/// (impl-review 2026-08-18の改善。Redを経ていない後追いの回帰テスト)。
+#[test]
+fn mixed_brackets_suppress_newline() {
+    // Arrange
+    let source = "f(([a],\n{b}))";
+
+    // Act
+    let tokens = lex(source).expect("異種括弧の混在する字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "f".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Comma,
+                text: ",".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+        ]
+    );
+}
+
 /// `(` の内側でも `{` ブロックに入れば終端規則が復活すること(仕様1章L-21
 /// 〔正例: multiline-call〕)。引数の無名fn本体に複数文を含む形——
 /// L-21の正例テストが必ず含める形。本体の各文の行末だけNewlineが生成される。

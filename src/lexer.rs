@@ -267,13 +267,41 @@ fn is_continuation_token(kind: &TokenKind) -> bool {
     )
 }
 
+/// 括弧深度スタックの要素(仕様1章L-21・ADR-0031)。
+/// TokenKindでなく専用enumで持つことで、「スタックに入るのは開き括弧3種だけ」を型で保証する
+/// (TokenKindは `Str(Vec<_>)` を含むためCopy不可で、pushのたびにcloneが必要になってしまう)。
+#[derive(Clone, Copy)]
+enum BracketKind {
+    Paren,
+    Bracket,
+    Brace,
+}
+
+impl BracketKind {
+    /// 開き括弧トークンから括弧種への変換。開き括弧3種以外はNone。
+    fn from_open(kind: &TokenKind) -> Option<Self> {
+        match kind {
+            TokenKind::LParen => Some(Self::Paren),
+            TokenKind::LBracket => Some(Self::Bracket),
+            TokenKind::LBrace => Some(Self::Brace),
+            _ => None,
+        }
+    }
+
+    /// この括弧の内側で改行を抑制するか(仕様1章L-21)。
+    /// `(`/`[` は抑制、`{` はブロック内で終端規則を復活させるため抑制しない。
+    fn suppresses_newline(self) -> bool {
+        matches!(self, Self::Paren | Self::Bracket)
+    }
+}
+
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
     // 括弧深度スタック(仕様1章L-21・ADR-0031)。`(` または `[` の内側では改行を抑制し、
     // `{ ... }` ブロックに入ったら終端規則を復活させるため、開き括弧の種類を記録する。
-    let mut brackets: Vec<TokenKind> = Vec::new();
+    let mut brackets: Vec<BracketKind> = Vec::new();
     while chars.peek().is_some() {
         if let Some(t) = next_token(source, &mut chars, false, 0)? {
             // 終端する改行だけをNewlineトークンとして出力する(ADR-0010のGo方式)。
@@ -287,14 +315,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 // 括弧スタックの更新(仕様1章L-21)。開き括弧はpushして保持、閉じ括弧はpopして破棄。
                 // 空スタックでのpopは括弧の不均衡検査が字句の責務でないため何もしない
                 // (補間の内側以外では不均衡はパーサが担当する)。
-                match t.kind {
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
-                        brackets.push(t.kind.clone());
-                    }
-                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                        brackets.pop();
-                    }
-                    _ => {}
+                if let Some(b) = BracketKind::from_open(&t.kind) {
+                    brackets.push(b);
+                } else if matches!(
+                    t.kind,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                ) {
+                    brackets.pop();
                 }
                 tokens.push(t);
             }
@@ -305,16 +332,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
 /// Newlineトークンを生成すべきかを判定する。
 /// トークン列が空でなく、直前のトークンがNewlineでも継続トークンでもないときtrue。
-/// さらに、括弧深度スタックのトップが LParen または LBracket のときは抑制する
-/// (仕様1章L-21。`(`/`[` の内側では改行は終端しない)。LBrace またはスタック空のときは
+/// さらに、括弧深度スタックのトップが `(` または `[` のときは抑制する
+/// (仕様1章L-21。`(`/`[` の内側では改行は終端しない)。`{` またはスタック空のときは
 /// 終端規則が復活する( `{` ブロック内では文の行末にNewlineを生成する)。
-fn should_emit_newline(tokens: &[Token], brackets: &[TokenKind]) -> bool {
+fn should_emit_newline(tokens: &[Token], brackets: &[BracketKind]) -> bool {
     // 仕様1章L-21: `(`/`[` の内側では改行を抑制する(スタックのトップで判定)。
-    // トップが LBrace のときはこの抑制を通過し、下の終端判定が復活する。
-    if brackets
-        .last()
-        .is_some_and(|top| matches!(top, TokenKind::LParen | TokenKind::LBracket))
-    {
+    // トップが `{` のときはこの抑制を通過し、下の終端判定が復活する。
+    if brackets.last().is_some_and(|top| top.suppresses_newline()) {
         return false;
     }
     // 既存の終端判定(ADR-0010・仕様1章L-19/L-20)。
