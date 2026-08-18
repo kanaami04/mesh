@@ -5321,7 +5321,8 @@ fn newline_after_block_close_inside_call_is_suppressed() {
 }
 
 /// `{` の書き忘れ: 種類の合わない閉じ括弧は丸括弧の深度を戻さず、`}` 直後の改行が
-/// 抑制されたままであること(仕様1章L-21「閉じ括弧は同種の開き括弧とだけ対応する」・
+/// 抑制されたままであること(仕様1章L-21「閉じ括弧は同種の開き括弧とだけ対応する」
+/// 〔挙動検証: unmatched-close-bracket〕・
 /// ADR-0047決定1)。上の newline_after_block_close_inside_call_is_suppressed から `{` を
 /// 除いた形——`{` が開かれていないため `}` はスタック上の `(` と対応しない。
 /// 釣り合わない括弧自体はパーサが報告するため、字句解析はエラーにせずトークン列を通す。
@@ -5387,7 +5388,8 @@ fn close_brace_without_open_brace_keeps_newline_suppressed() {
 }
 
 /// 余分な `}`: 種類が合わない閉じ括弧の後も丸括弧の深度が続き、Newlineの区切りが
-/// 増えないこと(仕様1章L-21・ADR-0047決定1)。種類を照合しない実装では `}` が `(` を
+/// 増えないこと(仕様1章L-21〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
+/// 種類を照合しない実装では `}` が `(` を
 /// popして区切りが3個入り、引数リストが3つの文に割れる。修正後はNewlineが `)` の
 /// 直後の1個のみ(`a`・`b` が同じ引数リストにとどまる)。
 #[test]
@@ -5899,5 +5901,113 @@ fn triple_not_equals_inside_interpolation_reports_e0116() {
             code: ErrorCode::E0116,
             span: Span { start: 5, end: 8 },
         }
+    );
+}
+
+/// 不一致の閉じ括弧の照合は**スタックの先頭だけ**を見ること
+/// (仕様1章L-21〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
+/// 深さ2(`(` の内側の `[`)での `)` は、下に同種の `(` があっても戻りに探さない
+/// ——末尾から探して同種が見つかればそこまで戻す実装(パーサでよくある回復
+/// ヒューリスティック)ではNewlineが3個に入る。impl-reviewの解消検証で
+/// 「深追い実装が全テスト緑で生存する」と実証された穴を塞ぐピン。
+#[test]
+fn mismatched_close_paren_at_nested_depth_keeps_newlines_suppressed() {
+    // Arrange
+    let source = "f([a\n)\n b\n]\n)\n";
+
+    // Act
+    let tokens = lex(source).expect("深さ2での種類の違う閉じ括弧もエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "f".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+        ]
+    );
+}
+
+/// `<=` の直後の `=` はE0116にしないこと(仕様1章L-2最長一致・L-26)。
+/// `<=` は1.9に実在する演算子なので2文字で引き、残りの `=` は独立したEqトークンに
+/// なる。`===`/`!==` の3文字目先読みガードは種別を `==`/`!=` に限定したものであり、
+/// 「2文字演算子全般の直後が `=` ならE0116」は誤り——impl-reviewの解消検証で
+/// 「ガードの種別条件を外しても全テスト緑で生存する」と実証された穴を塞ぐピン。
+#[test]
+fn less_equal_followed_by_eq_splits_into_two_tokens() {
+    // Arrange
+    let source = "a <== b";
+
+    // Act
+    let tokens = lex(source).expect("`<==` はE0116ではなく2トークンに分割されること");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LtEq,
+                text: "<=".to_string(),
+                span: Span { start: 2, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+        ]
     );
 }
