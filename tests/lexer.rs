@@ -5773,7 +5773,7 @@ fn bang_quadruple_equals_reports_e0116_at_first_three_chars() {
 /// (仕様1章L-21・ADR-0047「逆向きの副作用」として明記された帰結)。
 /// `(` が開いたままの `}` は種類が違うため深度を戻さず、`let b = 2` の行末も
 /// Newlineにならない(修正前は `}` が `(` を誤って戻すことで区切りが「たまたま」
-/// 復活しNewlineが4個入った)。エラー回復=複数エラー報告の実装後に効く挙動の固定。
+/// 復活しNewlineが2個入った)。エラー回復=複数エラー報告の実装後に効く挙動の固定。
 #[test]
 fn unclosed_open_paren_suppresses_newlines_until_eof() {
     // Arrange

@@ -270,7 +270,7 @@ fn is_continuation_token(kind: &TokenKind) -> bool {
 /// 括弧深度スタックの要素(仕様1章L-21・ADR-0031)。
 /// TokenKindでなく専用enumで持つことで、「スタックに入るのは開き括弧3種だけ」を型で保証する
 /// (TokenKindは `Str(Vec<_>)` を含むためCopy不可で、pushのたびにcloneが必要になってしまう)。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BracketKind {
     Paren,
     Bracket,
