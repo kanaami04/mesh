@@ -5617,7 +5617,7 @@ fn dot_after_hex_literal_splits_into_dot_and_ident() {
 /// 〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
 /// impl-reviewの変異解析で「`(` と `[` を同一視する実装(M1)・`)` が何でも閉じる
 /// 実装(M3)のどちらも既存テストを全部通す」と実証された穴を塞ぐピン——
-/// 両変異では `)` が `[` をpopしてNewlineが3個に入る。`}` 方向は
+/// 両変異では `)` が `[` をpopしてNewlineが3個(2個増)になる。`}` 方向は
 /// close_brace_without_open_brace_keeps_newline_suppressed が固定済み。
 #[test]
 fn mismatched_close_paren_keeps_newlines_suppressed() {
@@ -5908,7 +5908,7 @@ fn triple_not_equals_inside_interpolation_reports_e0116() {
 /// (仕様1章L-21〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
 /// 深さ2(`(` の内側の `[`)での `)` は、下に同種の `(` があっても戻りに探さない
 /// ——末尾から探して同種が見つかればそこまで戻す実装(パーサでよくある回復
-/// ヒューリスティック)ではNewlineが3個に入る。impl-reviewの解消検証で
+/// ヒューリスティック)ではNewlineが4個(3個増)になる。impl-reviewの解消検証で
 /// 「深追い実装が全テスト緑で生存する」と実証された穴を塞ぐピン。
 #[test]
 fn mismatched_close_paren_at_nested_depth_keeps_newlines_suppressed() {
