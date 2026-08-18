@@ -5225,3 +5225,244 @@ fn remaining_compound_assignments_at_line_end_continue() {
         ]
     );
 }
+
+/// `}` で `{` ブロックを抜けた直後の改行が、外側の `(` の深度に復元されて抑制される
+/// こと(仕様1章L-21「深度は `{` で退避し、対応する `}` で復元するスタック構造」)。
+/// 既存の brace_close_restores_paren_depth_suppression は `}` の直後がカンマのため
+/// L-20の継続トークン判定でも緑になる——本テストは `}` の直後を**直接改行**にして、
+/// 復元経路(popとその対象に `}` が含まれること)だけが緑を決めるようにする。
+#[test]
+fn newline_after_block_close_inside_call_is_suppressed() {
+    // Arrange
+    let source = "call(\n  fn() {\n    a\n  }\n)";
+
+    // Act
+    let tokens =
+        lex(source).expect("ブロック閉じ直後の改行を含む括弧内の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "call".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::KwFn,
+                text: "fn".to_string(),
+                span: Span { start: 8, end: 10 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 19, end: 20 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 20, end: 21 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 25, end: 26 },
+            },
+        ]
+    );
+}
+
+/// `}` は文を終端すること(仕様1章L-25)。`}` はL-20の継続トークン一覧に無く、
+/// 深度0では L-19 の原則どおり直後の改行がNewlineトークンになる——
+/// 継続トークン表にRBraceを混入させた実装(ブロック直後の行が前文に飲み込まれる)を殺すピン。
+#[test]
+fn brace_close_terminates_statement() {
+    // Arrange
+    let source = "if x {\n  a\n}\nb";
+
+    // Act
+    let tokens = lex(source).expect("ブロック直後に文が続く字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwIf,
+                text: "if".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "x".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LBrace,
+                text: "{".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+        ]
+    );
+}
+
+/// 行末の `:` は継続を起こさないこと(仕様1章L-20・ADR-0031決定2の確定一覧)。
+/// L-20の一覧は閉じており `:` を含まないため、L-19の原則どおり改行が文を終端する。
+#[test]
+fn colon_at_line_end_does_not_continue() {
+    // Arrange
+    let source = "a:\nb";
+
+    // Act
+    let tokens = lex(source).expect("行末コロンを含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Colon,
+                text: ":".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 行末の `!` は継続を起こさないこと(仕様1章L-20・ADR-0031決定2の確定一覧)。
+/// `!` は単項演算子であり、L-20が挙げる二項演算子14種にも他のどの分類にも含まれない。
+#[test]
+fn bang_at_line_end_does_not_continue() {
+    // Arrange
+    let source = "a!\nb";
+
+    // Act
+    let tokens = lex(source).expect("行末の `!` を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::Bang,
+                text: "!".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 基数リテラル直後の `.` は通常のDotとして読まれること(仕様1章L-10注(a)・ADR-0044決定4)。
+/// `0xFF.abs` は `Int` `Dot` `Ident` に割れる——E0106(注(b))になるのは `.` の直後が
+/// 数字のとき(`0xFF.5`)だけであり、識別子開始文字のときは字句を通す。
+#[test]
+fn dot_after_hex_literal_splits_into_dot_and_ident() {
+    // Arrange
+    let source = "0xFF.abs";
+
+    // Act
+    let tokens = lex(source).expect("`0xFF.abs` の字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Int,
+                text: "0xFF".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::Dot,
+                text: ".".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "abs".to_string(),
+                span: Span { start: 5, end: 8 },
+            },
+        ]
+    );
+}
