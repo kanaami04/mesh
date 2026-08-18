@@ -270,7 +270,7 @@ fn is_continuation_token(kind: &TokenKind) -> bool {
 /// 括弧深度スタックの要素(仕様1章L-21・ADR-0031)。
 /// TokenKindでなく専用enumで持つことで、「スタックに入るのは開き括弧3種だけ」を型で保証する
 /// (TokenKindは `Str(Vec<_>)` を含むためCopy不可で、pushのたびにcloneが必要になってしまう)。
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BracketKind {
     Paren,
     Bracket,
@@ -284,6 +284,16 @@ impl BracketKind {
             TokenKind::LParen => Some(Self::Paren),
             TokenKind::LBracket => Some(Self::Bracket),
             TokenKind::LBrace => Some(Self::Brace),
+            _ => None,
+        }
+    }
+
+    /// 閉じ括弧トークンから括弧種への変換。閉じ括弧3種以外はNone。
+    fn from_close(kind: &TokenKind) -> Option<Self> {
+        match kind {
+            TokenKind::RParen => Some(Self::Paren),
+            TokenKind::RBracket => Some(Self::Bracket),
+            TokenKind::RBrace => Some(Self::Brace),
             _ => None,
         }
     }
@@ -312,15 +322,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     tokens.push(t);
                 }
             } else {
-                // 括弧スタックの更新(仕様1章L-21)。開き括弧はpushして保持、閉じ括弧はpopして破棄。
-                // 空スタックでのpopは括弧の不均衡検査が字句の責務でないため何もしない
-                // (補間の内側以外では不均衡はパーサが担当する)。
+                // 括弧スタックの更新(仕様1章L-21)。開き括弧はpushして保持、閉じ括弧は
+                // **スタックの先頭が同種のときだけ**popする(ADR-0047決定1。
+                // scan_interpolation と同じ種類照合)。先頭が同種でなければ深度を戻さない
+                // ——種類を問わずpopすると、釣り合わない入力で文の区切りが壊れ、
+                // パーサのエラー位置が本当の原因から離れる。釣り合わない括弧自体の
+                // 報告はパーサの担当(補間の内側以外)のため、その場合は何もしない。
                 if let Some(b) = BracketKind::from_open(&t.kind) {
                     brackets.push(b);
-                } else if matches!(
-                    t.kind,
-                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                ) {
+                } else if BracketKind::from_close(&t.kind)
+                    .is_some_and(|b| brackets.last() == Some(&b))
+                {
                     brackets.pop();
                 }
                 tokens.push(t);
@@ -453,12 +465,13 @@ fn next_token(
         chars.next();
         chars.next();
         let end = start + c.len_utf8() + second.len_utf8();
-        if kind == TokenKind::EqEq && peek_at(source, end) == Some('=') {
-            // `===` は仕様に存在しない記号列(仕様1章L-26)。JS由来の厳密等価演算子への
-            // 誘導のため、2文字表で `==`(EqEq)が引けた後さらに3文字目を**非消費先読み**
-            // して判定する(`====` 以降の続きは考えない。最初の3文字でエラー確定)。
-            // `==`+`=` に分割せず記号列全体をE0116として報告する。
-            // 修正候補の案内文言はエラーメッセージ層の担当。
+        if matches!(kind, TokenKind::EqEq | TokenKind::BangEq) && peek_at(source, end) == Some('=')
+        {
+            // `===`・`!==` は仕様に存在しない記号列(仕様1章L-26)。JS由来の厳密等価・
+            // 厳密不等価演算子への誘導のため、2文字表で `==`(EqEq)または `!=`(BangEq)
+            // が引けた後さらに3文字目を**非消費先読み**して判定する(`====` 以降の続きは
+            // 考えない。最初の3文字でエラー確定)。`==`+`=`・`!=`+`=` に分割せず記号列全体を
+            // E0116として報告する。修正候補の案内文言はエラーメッセージ層の担当。
             // 3文字目の消費は現状観測不能(直後にErrで打ち切るため)だが、
             // 将来のエラー回復(複数エラー報告)で位置がspanと一致するよう進めておく。
             chars.next();
