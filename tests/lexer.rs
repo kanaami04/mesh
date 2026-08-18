@@ -5609,3 +5609,295 @@ fn dot_after_hex_literal_splits_into_dot_and_ident() {
         ]
     );
 }
+
+/// `[` の内側に種類の違う閉じ `)` が現れても深度を戻さず、Newlineは `]` の直後の
+/// 1個のみであること(仕様1章L-21「閉じ括弧は同種の開き括弧とだけ対応する」
+/// 〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
+/// impl-reviewの変異解析で「`(` と `[` を同一視する実装(M1)・`)` が何でも閉じる
+/// 実装(M3)のどちらも既存テストを全部通す」と実証された穴を塞ぐピン——
+/// 両変異では `)` が `[` をpopしてNewlineが3個に入る。`}` 方向は
+/// close_brace_without_open_brace_keeps_newline_suppressed が固定済み。
+#[test]
+fn mismatched_close_paren_keeps_newlines_suppressed() {
+    // Arrange
+    let source = "xs[\n  a\n)\n  b\n]\n";
+
+    // Act
+    let tokens = lex(source).expect("種類の違う閉じ括弧を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "xs".to_string(),
+                span: Span { start: 0, end: 2 },
+            },
+            Token {
+                kind: TokenKind::LBracket,
+                text: "[".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 15, end: 16 },
+            },
+        ]
+    );
+}
+
+/// `(` の内側に種類の違う閉じ `]` が現れても深度を戻さず、Newlineは `)` の直後の
+/// 1個のみであること(仕様1章L-21〔挙動検証: unmatched-close-bracket〕・ADR-0047決定1)。
+/// ここまでで `)`・`]`・`}` の3方向が揃う(残る2方向は
+/// mismatched_close_paren_keeps_newlines_suppressed と
+/// extra_close_brace_between_args_keeps_newlines_suppressed)。種類の照合を
+/// 深度の数え合わせに簡略化した実装は3方向のどこかで必ず落ちる。
+#[test]
+fn mismatched_close_bracket_keeps_newlines_suppressed() {
+    // Arrange
+    let source = "f(\n  a\n]\n  b\n)\n";
+
+    // Act
+    let tokens = lex(source).expect("種類の違う閉じ括弧を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "f".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 5, end: 6 },
+            },
+            Token {
+                kind: TokenKind::RBracket,
+                text: "]".to_string(),
+                span: Span { start: 7, end: 8 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 13, end: 14 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 14, end: 15 },
+            },
+        ]
+    );
+}
+
+/// `====` は先頭3文字 `===` の時点でE0116が確定し、spanは最初の3文字を指すこと
+/// (仕様1章L-26〔負例: triple-equals〕)。4文字目まで読んでから `=` を貪欲に
+/// `==` 2トークンへ分割する実装・spanを0..4に広げる実装の両方を殺すピン
+/// (impl-reviewの変異解析で「`=` を貪欲に食う実装が全テスト緑で生存」と実証済み)。
+#[test]
+fn quadruple_equals_reports_e0116_at_first_three_chars() {
+    // Arrange
+    let source = "====";
+
+    // Act
+    let err = lex(source).expect_err("`====` の先頭3文字は `===` としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 3 },
+        }
+    );
+}
+
+/// `!====` も先頭3文字 `!==` の時点でE0116が確定し、spanは最初の3文字を指すこと
+/// (仕様1章L-26〔負例: triple-not-equals〕)。`!=` を先に最長一致で確定させる実装は
+/// 残りの `==` を正当なトークンとして通してしまう——`!==` の判定が `!=` より
+/// 優先することの固定(triple_not_equals_reports_e0116_with_full_span の4文字版)。
+#[test]
+fn bang_quadruple_equals_reports_e0116_at_first_three_chars() {
+    // Arrange
+    let source = "!====";
+
+    // Act
+    let err = lex(source).expect_err("`!====` の先頭3文字は `!==` としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 0, end: 3 },
+        }
+    );
+}
+
+/// 釣り合わない開き括弧があると、以後の改行はEOFまで抑制されること
+/// (仕様1章L-21・ADR-0047「逆向きの副作用」として明記された帰結)。
+/// `(` が開いたままの `}` は種類が違うため深度を戻さず、`let b = 2` の行末も
+/// Newlineにならない(修正前は `}` が `(` を誤って戻すことで区切りが「たまたま」
+/// 復活しNewlineが4個入った)。エラー回復=複数エラー報告の実装後に効く挙動の固定。
+#[test]
+fn unclosed_open_paren_suppresses_newlines_until_eof() {
+    // Arrange
+    let source = "let a = (1\n}\nlet b = 2\n";
+
+    // Act
+    let tokens = lex(source).expect("開き括弧が余る入力も字句解析はエラーにしないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 0, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 6, end: 7 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "1".to_string(),
+                span: Span { start: 9, end: 10 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::KwLet,
+                text: "let".to_string(),
+                span: Span { start: 13, end: 16 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::Eq,
+                text: "=".to_string(),
+                span: Span { start: 19, end: 20 },
+            },
+            Token {
+                kind: TokenKind::Int,
+                text: "2".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+        ]
+    );
+}
+
+/// 深度スタックが空のときに閉じ括弧が来ても、何もせず(エラーにせず)通常どおりの
+/// トークン列を返すこと(仕様1章L-21・ADR-0047案B: 括弧の不均衡の報告はパーサの
+/// 担当であり、字句解析器はスタックを覗いて空ならpopを試みない)。深度0の改行は
+/// 通常どおりNewlineになる。
+#[test]
+fn close_paren_on_empty_stack_does_not_error() {
+    // Arrange
+    let source = "a)\nb";
+
+    // Act
+    let tokens = lex(source).expect("スタック空での閉じ括弧は字句エラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 0, end: 1 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 1, end: 2 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 2, end: 3 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 3, end: 4 },
+            },
+        ]
+    );
+}
+
+/// 補間の内側の `!==` は、補間が閉じないこと(E0109)より先にE0116として報告される
+/// こと(仕様1章L-18注2「終端系以外の内側エラーはE0109より優先」+L-26
+/// 〔負例: triple-not-equals〕)。入力は閉じ `"` も `}` も持たないが、より具体的な
+/// 原因(誤綴り)を指すほうが修正しやすいため優先する。spanは内側の `!==` の3バイト。
+#[test]
+fn triple_not_equals_inside_interpolation_reports_e0116() {
+    // Arrange
+    let source = "\"${a !== b";
+
+    // Act
+    let err = lex(source).expect_err("補間内の `!==` はE0116としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 5, end: 8 },
+        }
+    );
+}
