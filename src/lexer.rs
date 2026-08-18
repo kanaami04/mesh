@@ -174,6 +174,8 @@ pub enum ErrorCode {
     E0108,
     /// 補間 `${` が対応する `}` を得ないまま終わった(仕様1章L-18)。
     E0109,
+    /// 文末のセミコロン(仕様1章L-19)。セミコロンは存在しない。
+    E0110,
     /// 一覧に無いエスケープ(仕様1章L-14)。
     E0111,
     /// `\u{H}` の範囲・形式違反(仕様1章L-15)。
@@ -185,7 +187,7 @@ pub enum ErrorCode {
     /// 補間の内側のコメント `//`(仕様1章L-17(b))。
     E0115,
     /// どの字句規則にも該当しない文字(仕様1章L-26キャッチオール)。
-    /// 注意: 固有の規則を持つが未実装の文字(`;`=E0110、非ASCII識別子=E0103)も
+    /// 注意: 固有の規則を持つが未実装の文字(非ASCII識別子=E0103)も
     /// 現状は暫定でこのコードになる。各規則の実装サイクルで正しいコードに置き換える。
     /// 単独の `&`(直後が `&` でない)は仕様1.9に無いため**恒久的に**このコード
     /// (`&&` の一部としてのみ有効。単独が正当な `|` との非対称)。
@@ -222,16 +224,129 @@ const MAX_NEST_DEPTH: usize = 64;
 /// パーサ・型検査が式全体を評価してから担当する。
 const MAX_SAFE_INT: u128 = 9_007_199_254_740_991;
 
+/// トークン種類が行末継続トークンかどうかを判定する(仕様1章L-20)。
+/// これらのトークンが行末にあるとき、改行はNewlineトークンを生成しない。
+/// コメントはトークンを生成しないため、判定は「コメント除去後の行末」で自動的に成立する。
+fn is_continuation_token(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        // 二項演算子(14種)
+        TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqEq
+            | TokenKind::BangEq
+            | TokenKind::Lt
+            | TokenKind::LtEq
+            | TokenKind::Gt
+            | TokenKind::GtEq
+            | TokenKind::AmpAmp
+            | TokenKind::PipePipe
+            | TokenKind::Pipe
+            // キーワード演算子(3種)
+            | TokenKind::KwOr
+            | TokenKind::KwIs
+            | TokenKind::KwIn
+            // 複合代入(5種)
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            // 記号類(8種)
+            | TokenKind::Dot
+            | TokenKind::DotDot
+            | TokenKind::Comma
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Eq
+            | TokenKind::FatArrow
+    )
+}
+
+/// 括弧深度スタックの要素(仕様1章L-21・ADR-0031)。
+/// TokenKindでなく専用enumで持つことで、「スタックに入るのは開き括弧3種だけ」を型で保証する
+/// (TokenKindは `Str(Vec<_>)` を含むためCopy不可で、pushのたびにcloneが必要になってしまう)。
+#[derive(Clone, Copy)]
+enum BracketKind {
+    Paren,
+    Bracket,
+    Brace,
+}
+
+impl BracketKind {
+    /// 開き括弧トークンから括弧種への変換。開き括弧3種以外はNone。
+    fn from_open(kind: &TokenKind) -> Option<Self> {
+        match kind {
+            TokenKind::LParen => Some(Self::Paren),
+            TokenKind::LBracket => Some(Self::Bracket),
+            TokenKind::LBrace => Some(Self::Brace),
+            _ => None,
+        }
+    }
+
+    /// この括弧の内側で改行を抑制するか(仕様1章L-21)。
+    /// `(`/`[` は抑制、`{` はブロック内で終端規則を復活させるため抑制しない。
+    fn suppresses_newline(self) -> bool {
+        matches!(self, Self::Paren | Self::Bracket)
+    }
+}
+
 /// ソース文字列を字句解析してトークン列を返す。
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
+    // 括弧深度スタック(仕様1章L-21・ADR-0031)。`(` または `[` の内側では改行を抑制し、
+    // `{ ... }` ブロックに入ったら終端規則を復活させるため、開き括弧の種類を記録する。
+    let mut brackets: Vec<BracketKind> = Vec::new();
     while chars.peek().is_some() {
         if let Some(t) = next_token(source, &mut chars, false, 0)? {
-            tokens.push(t);
+            // 終端する改行だけをNewlineトークンとして出力する(ADR-0010のGo方式)。
+            // 直前のトークンが無い(入力先頭)かNewlineか継続トークン(仕様1章L-20)のとき、
+            // 改行はトークンを生成しない。L-21の括弧深度抑制もここで判定する。
+            if t.kind == TokenKind::Newline {
+                if should_emit_newline(&tokens, &brackets) {
+                    tokens.push(t);
+                }
+            } else {
+                // 括弧スタックの更新(仕様1章L-21)。開き括弧はpushして保持、閉じ括弧はpopして破棄。
+                // 空スタックでのpopは括弧の不均衡検査が字句の責務でないため何もしない
+                // (補間の内側以外では不均衡はパーサが担当する)。
+                if let Some(b) = BracketKind::from_open(&t.kind) {
+                    brackets.push(b);
+                } else if matches!(
+                    t.kind,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                ) {
+                    brackets.pop();
+                }
+                tokens.push(t);
+            }
         }
     }
     Ok(tokens)
+}
+
+/// Newlineトークンを生成すべきかを判定する。
+/// トークン列が空でなく、直前のトークンがNewlineでも継続トークンでもないときtrue。
+/// さらに、括弧深度スタックのトップが `(` または `[` のときは抑制する
+/// (仕様1章L-21。`(`/`[` の内側では改行は終端しない)。`{` またはスタック空のときは
+/// 終端規則が復活する( `{` ブロック内では文の行末にNewlineを生成する)。
+fn should_emit_newline(tokens: &[Token], brackets: &[BracketKind]) -> bool {
+    // 仕様1章L-21: `(`/`[` の内側では改行を抑制する(スタックのトップで判定)。
+    // トップが `{` のときはこの抑制を通過し、下の終端判定が復活する。
+    if brackets.last().is_some_and(|top| top.suppresses_newline()) {
+        return false;
+    }
+    // 既存の終端判定(ADR-0010・仕様1章L-19/L-20)。
+    if let Some(last) = tokens.last() {
+        !matches!(last.kind, TokenKind::Newline) && !is_continuation_token(&last.kind)
+    } else {
+        false
+    }
 }
 
 /// 基数接頭辞つき整数リテラルの基数判定結果: (その基数での数字述語, 数値としての基数)。
@@ -375,6 +490,14 @@ fn next_token(
         });
         Err(LexError {
             code: ErrorCode::E0106,
+            span: Span { start, end },
+        })
+    } else if c == ';' {
+        // セミコロン(仕様1章L-19)。セミコロンは存在しない。
+        chars.next();
+        let end = start + ';'.len_utf8();
+        Err(LexError {
+            code: ErrorCode::E0110,
             span: Span { start, end },
         })
     } else if let Some(kind) = punctuation_kind(c).or_else(|| operator_kind(c)) {
