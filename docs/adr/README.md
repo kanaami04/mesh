@@ -64,3 +64,4 @@
 - [ADR-0042](0042-interpolation-token-representation.md) — 補間のトークン表現は入れ子方式(Strが区分列を内包)✅
 - [ADR-0043](0043-leading-zero-decimal-rejected.md) — 先頭ゼロの10進は全形(int・float・指数)で拒否・無加工JS出力の不変条件 ✅
 - [ADR-0044](0044-dot-after-digit-belongs-to-number.md) — 数字直後の `.` は数値の小数点に帰属(`1.abs`=E0106・F-8依存の前提A-22)✅
+- [ADR-0045](0045-review-gate-session-scoped-state.md) — レビューゲートの状態をセッション別に分離・レビュー済み記録は追記のみ ✅
