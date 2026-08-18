@@ -3031,6 +3031,28 @@ fn triple_equals_reports_e0116_with_full_span() {
     );
 }
 
+/// `!==` はE0116として記号列全体のspanで報告されること
+/// (仕様1章L-26〔負例: triple-not-equals〕・ADR-0047決定2)。
+/// `!`+`==` の2トークンに分割せず `!==` 全体をエラーにする
+/// (`!=` への修正候補を出すための精度。`===` と対になる)。
+#[test]
+fn triple_not_equals_reports_e0116_with_full_span() {
+    // Arrange
+    let source = "a !== b";
+
+    // Act
+    let err = lex(source).expect_err("`!==` は記号列全体がエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 2, end: 5 },
+        }
+    );
+}
+
 /// `->` はE0116として記号列全体のspanで報告されること(仕様1章L-26〔負例: arrow-token〕)。
 /// `-`+`>` に分割せず `->` 全体をエラーにする
 /// (`=>`・空白区切り戻り値型への誘導のための精度)。
@@ -5293,6 +5315,127 @@ fn newline_after_block_close_inside_call_is_suppressed() {
                 kind: TokenKind::RParen,
                 text: ")".to_string(),
                 span: Span { start: 25, end: 26 },
+            },
+        ]
+    );
+}
+
+/// `{` の書き忘れ: 種類の合わない閉じ括弧は丸括弧の深度を戻さず、`}` 直後の改行が
+/// 抑制されたままであること(仕様1章L-21「閉じ括弧は同種の開き括弧とだけ対応する」・
+/// ADR-0047決定1)。上の newline_after_block_close_inside_call_is_suppressed から `{` を
+/// 除いた形——`{` が開かれていないため `}` はスタック上の `(` と対応しない。
+/// 釣り合わない括弧自体はパーサが報告するため、字句解析はエラーにせずトークン列を通す。
+#[test]
+fn close_brace_without_open_brace_keeps_newline_suppressed() {
+    // Arrange
+    let source = "call(\n  fn()\n    a\n  }\n)\n";
+
+    // Act
+    let tokens = lex(source).expect("釣り合わない `}` を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "call".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::KwFn,
+                text: "fn".to_string(),
+                span: Span { start: 8, end: 10 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 10, end: 11 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 11, end: 12 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 17, end: 18 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 21, end: 22 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 23, end: 24 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 24, end: 25 },
+            },
+        ]
+    );
+}
+
+/// 余分な `}`: 種類が合わない閉じ括弧の後も丸括弧の深度が続き、Newlineの区切りが
+/// 増えないこと(仕様1章L-21・ADR-0047決定1)。種類を照合しない実装では `}` が `(` を
+/// popして区切りが3個入り、引数リストが3つの文に割れる。修正後はNewlineが `)` の
+/// 直後の1個のみ(`a`・`b` が同じ引数リストにとどまる)。
+#[test]
+fn extra_close_brace_between_args_keeps_newlines_suppressed() {
+    // Arrange
+    let source = "call(\n  a\n  }\n  b\n)\n";
+
+    // Act
+    let tokens = lex(source).expect("余分な `}` を含む字句解析はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![
+            Token {
+                kind: TokenKind::Ident,
+                text: "call".to_string(),
+                span: Span { start: 0, end: 4 },
+            },
+            Token {
+                kind: TokenKind::LParen,
+                text: "(".to_string(),
+                span: Span { start: 4, end: 5 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "a".to_string(),
+                span: Span { start: 8, end: 9 },
+            },
+            Token {
+                kind: TokenKind::RBrace,
+                text: "}".to_string(),
+                span: Span { start: 12, end: 13 },
+            },
+            Token {
+                kind: TokenKind::Ident,
+                text: "b".to_string(),
+                span: Span { start: 16, end: 17 },
+            },
+            Token {
+                kind: TokenKind::RParen,
+                text: ")".to_string(),
+                span: Span { start: 18, end: 19 },
+            },
+            Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_string(),
+                span: Span { start: 19, end: 20 },
             },
         ]
     );
