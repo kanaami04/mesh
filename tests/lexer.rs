@@ -3461,6 +3461,33 @@ fn mismatched_bracket_pair_in_interpolation_reports_e0109() {
     );
 }
 
+/// 補間内の括弧照合は、スタックの最も内側の開き括弧とだけ対応すること。`"${([a)b]}"`
+/// では `)` が現れた時点の対応待ちが `[` であるため、種類の合わない閉じ括弧として
+/// 最初に違反するのは `)` であり、E0109 の span はその `)` 1バイトを指すこと
+/// (仕様1章L-18「種類の合わない閉じ括弧…が現れた状態…このときのspanはその閉じ括弧を
+/// 指す」〔負例: unterminated-interpolation〕・ADR-0047決定1)。
+/// 既存の mismatched_bracket_pair_in_interpolation_reports_e0109 は深さ1(`"${(]}"`)
+/// しか検証しないため、閉じ括弧をスタック末尾から探索して同種の開きが見つかればそこまで
+/// 戻す実装(この入力を `8..9` の `]` でE0109にする誤実装)を検出できない——
+/// impl-review 2026-08-18 の持ち帰りを塞ぐピン(真の原因より後ろにずれたspanを拒む)。
+#[test]
+fn mismatched_closer_under_deeper_stack_reports_e0109_at_first_violation() {
+    // Arrange
+    let source = "\"${([a)b]}\"";
+
+    // Act
+    let err = lex(source).expect_err("深さ2のスタックでの種類不一致はE0109としてエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0109,
+            span: Span { start: 6, end: 7 },
+        }
+    );
+}
+
 /// 文字列と補間のネストが実装上限64段を超えたときはE0118になり、spanは上限を超えた
 /// 65段目の開き `"` 1バイトを指すこと(仕様1章L-31〔負例: nesting-limit〕)。
 /// 上限64段は、深さ約500段で `cargo test` がスタックオーバーフローにより
