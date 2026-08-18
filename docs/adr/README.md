@@ -66,3 +66,4 @@
 - [ADR-0044](0044-dot-after-digit-belongs-to-number.md) — 数字直後の `.` は数値の小数点に帰属(`1.abs`=E0106・F-8依存の前提A-22)✅
 - [ADR-0045](0045-review-gate-session-scoped-state.md) — レビューゲートの状態をセッション別に分離・レビュー済み記録は追記のみ ✅
 - [ADR-0046](0046-delegate-implementation-to-child-sessions.md) — 実装は子セッションへ委譲・レビューは司令が持つ(GLMのサブエージェントは最小モデルへ転落)✅
+- [ADR-0047](0047-bracket-kind-matching-and-not-equals-guidance.md) — 閉じ括弧は同種とだけ対応・`!==` にも誤綴り誘導(L-21/L-26を精密化)✅
