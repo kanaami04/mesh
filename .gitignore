@@ -1,8 +1,11 @@
+# 作業ツリー(Claude Code内蔵のworktree機能とmesh-wtの既定の置き場所)
+/.claude/worktrees/
+
 # レビューゲートのローカル状態(セッション別の編集記録・レビュー済みコミット台帳。ADR-0045)
 /.claude/state/
 
-# Rust実装開始後のビルド成果物
-/target/
+# Rust実装開始後のビルド成果物(先頭スラッシュ無し=入れ子の作業ツリー内にも効かせる)
+target/
 
 # 生成JSの実行検証(E2Eテスト)で使うNode関連
 node_modules/
