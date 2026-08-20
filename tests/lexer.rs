@@ -631,6 +631,55 @@ fn non_ascii_after_ascii_identifier_covers_non_ascii_only() {
     );
 }
 
+/// 連続する非ASCII**字母**の走査は、非ASCIIだが字母でない文字で止まること(仕様1章L-6)。
+/// `±`(U+00B1)は非ASCIIだが記号で字母ではないため、`let 合±計 = 0` のE0103のspanは
+/// `合`(4..7)のみ。L-6が「非ASCII文字の全体」から「非ASCII**字母**の全体」に改訂された
+/// ことで、この境界が正文の要求そのものになった(impl-review解消検証2026-08-20)。
+/// 述語から字母条件を外した実装は `±` も `計` も非ASCIIのため空白まで走査して
+/// 4..12 を返すため、この入力で検知する。
+#[test]
+fn non_ascii_run_stops_at_non_ascii_symbol() {
+    // Arrange
+    let source = "let 合±計 = 0";
+
+    // Act
+    let err =
+        lex(source).expect_err("非ASCII字母の後に非ASCII記号が続く識別子位置はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0103,
+            span: Span { start: 4, end: 7 },
+        }
+    );
+}
+
+/// 連続する非ASCII字母の走査は、Unicode改行類(字母でない)でも止まること
+/// (仕様1章L-6・L-29=ADR-0041)。U+2028 LINE SEPARATORは改行とみなされない
+/// 非ASCII文字だが字母ではないため、`let 合\u{2028}計 = 0` のE0103のspanは
+/// `合`(4..7)のみ。述語から字母条件を外した実装は `計` まで走査して 4..13 を
+/// 返すため、この入力でも同じ変異を検知する。
+#[test]
+fn non_ascii_run_stops_at_unicode_line_separator() {
+    // Arrange
+    let source = "let 合\u{2028}計 = 0";
+
+    // Act
+    let err =
+        lex(source).expect_err("非ASCII字母の後にUnicode改行類が続く識別子位置はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0103,
+            span: Span { start: 4, end: 7 },
+        }
+    );
+}
+
 /// 字母でない非ASCII(全角数字 `０` = U+FF11)はE0103でなくL-26のE0116を報告すること
 /// (仕様1章L-6。「英数字名への変更を促す」案内が数字に意味をなさないため)。
 /// `０` は3バイトのため、spanは `let ` の直後の 4..7。
