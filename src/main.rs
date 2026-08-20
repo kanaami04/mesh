@@ -30,11 +30,13 @@ fn main() -> ExitCode {
 /// 文字数で数えるのはエディタの表示と一致させるため(バイト数だと日本語でずれる)。
 fn line_column(valid_prefix: &str) -> (usize, usize) {
     let line = valid_prefix.matches('\n').count() + 1;
-    let column = valid_prefix
-        .rsplit('\n')
-        .next()
-        .map_or(0, |s| s.chars().count())
-        + 1;
+    // 最終行の切り出しをOptionで受けない: `rsplit` は必ず1要素以上返すため
+    // `map_or(0, ..)` の既定値0は到達不能で、「列0がありうる」と誤読させる。
+    let last_line = match valid_prefix.rfind('\n') {
+        Some(i) => &valid_prefix[i + 1..],
+        None => valid_prefix,
+    };
+    let column = last_line.chars().count() + 1;
     (line, column)
 }
 
@@ -130,6 +132,22 @@ mod tests {
 
         // Assert
         assert_eq!((line, column), (1, 3));
+    }
+
+    /// 列はUnicodeのコードポイント数で数えること(UTF-16単位でない)。
+    /// 星外面の絵文字はUTF-16で2単位を占めるため、LSP流のUTF-16基準実装
+    /// (VS Code等の列表示に合わせる別実装)はここで3を返して破綻する。
+    /// 仕様1章L-1の位置は人が読む行・列であり、文字数基準を正とする。
+    #[test]
+    fn column_counts_code_points_not_utf16_units() {
+        // Arrange
+        let prefix = "\u{1F34E}";
+
+        // Act
+        let (line, column) = line_column(prefix);
+
+        // Assert
+        assert_eq!((line, column), (1, 2));
     }
 
     /// 列は最終行の長さから出すこと(1行目からでない)。`a`(1文字)と

@@ -22,6 +22,8 @@ impl Drop for TempFile {
 /// 2つのテストが同じPIDで同じパスを掴み、片方の後始末がもう片方の読み取り前にファイルを消す
 /// (impl-review 2026-08-20の指摘。worktreeの並行セッション間では実測で65ペア中2回失敗し、
 /// 同一プロセス内では実際に `No such file or directory` で落ちた)。
+/// **新しいテストを足すときは必ず別の `test_name` を渡すこと。**同じ文字列を渡すと
+/// 同一プロセス内の並行実行で衝突が黙って復活する(impl-review 2026-08-20のメモ)。
 fn write_invalid_utf8_source(test_name: &str) -> (String, TempFile) {
     // 3行目 `let x = 0`(9バイト)の直後に不正バイト 0xFF を置く。
     // 0xFF は3行目の10バイト目=1始まりの列10。
