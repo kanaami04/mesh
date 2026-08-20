@@ -17,15 +17,21 @@ impl Drop for TempFile {
 
 /// 不正UTF-8のソースファイルを一時ファイルに書き、そのパス文字列を返す。
 /// 戻り値のTempFileを呼び出し側が保持している間だけファイルが存在する。
-/// ファイル名にプロセスIDを混ぜるのは、このプロジェクトがworktreeで並行セッションを
-/// 回すため: 固定名だと2つの `cargo test` が同じパスを奪い合い、どちらかが落ちる
-/// (impl-review 2026-08-20の実測: 65ペア中2回失敗)。
-fn write_invalid_utf8_source() -> (String, TempFile) {
+/// ファイル名にプロセスIDと**呼び出し元のテスト名**を混ぜるのは、パスの奪い合いを防ぐため。
+/// プロセスIDだけでは足りない——cargoは同一プロセス内でテストを並行実行するので、
+/// 2つのテストが同じPIDで同じパスを掴み、片方の後始末がもう片方の読み取り前にファイルを消す
+/// (impl-review 2026-08-20の指摘。worktreeの並行セッション間では実測で65ペア中2回失敗し、
+/// 同一プロセス内では実際に `No such file or directory` で落ちた)。
+fn write_invalid_utf8_source(test_name: &str) -> (String, TempFile) {
     // 3行目 `let x = 0`(9バイト)の直後に不正バイト 0xFF を置く。
     // 0xFF は3行目の10バイト目=1始まりの列10。
     let source: &[u8] = b"let a = 1\nlet b = 2\nlet x = 0\xFF";
     let mut path = std::env::temp_dir();
-    path.push(format!("mesh-invalid-utf8-{}.mesh", std::process::id()));
+    path.push(format!(
+        "mesh-invalid-utf8-{}-{}.mesh",
+        std::process::id(),
+        test_name
+    ));
     std::fs::write(&path, source).expect("一時ファイルに不正バイト列を書き込めること");
     let path_str = path
         .to_str()
@@ -44,7 +50,7 @@ fn write_invalid_utf8_source() -> (String, TempFile) {
 #[test]
 fn invalid_utf8_source_reports_e0101_with_position() {
     // Arrange
-    let (path_str, _temp) = write_invalid_utf8_source();
+    let (path_str, _temp) = write_invalid_utf8_source("reports-position");
 
     // Act
     let output = Command::new(env!("CARGO_BIN_EXE_mesh"))
@@ -68,7 +74,7 @@ fn invalid_utf8_source_reports_e0101_with_position() {
 #[test]
 fn invalid_utf8_source_exits_with_failure() {
     // Arrange
-    let (path_str, _temp) = write_invalid_utf8_source();
+    let (path_str, _temp) = write_invalid_utf8_source("exits-with-failure");
 
     // Act
     let output = Command::new(env!("CARGO_BIN_EXE_mesh"))
