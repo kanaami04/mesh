@@ -67,3 +67,4 @@
 - [ADR-0045](0045-review-gate-session-scoped-state.md) — レビューゲートの状態をセッション別に分離・レビュー済み記録は追記のみ ✅
 - [ADR-0046](0046-delegate-implementation-to-child-sessions.md) — 実装は子セッションへ委譲・レビューは司令が持つ(GLMのサブエージェントは最小モデルへ転落)✅
 - [ADR-0047](0047-bracket-kind-matching-and-not-equals-guidance.md) — 閉じ括弧は同種とだけ対応・`!==` にも誤綴り誘導(L-21/L-26を精密化)✅
+- [ADR-0048](0048-utf8-check-belongs-to-reader.md) — 不正UTF-8の検査は読み込み層の責務・誤綴り誘導の拡張はPhase 9で判断 ✅
