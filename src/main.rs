@@ -84,3 +84,65 @@ fn build(path: &Path) -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::line_column;
+
+    /// 不正バイトがファイル先頭のとき(有効プレフィックスが空)は1行1列であること
+    /// (仕様1章L-1。行・列とも1始まり)。列の+1を落とした実装を検知する。
+    #[test]
+    fn empty_prefix_is_line_1_column_1() {
+        // Arrange
+        let prefix = "";
+
+        // Act
+        let (line, column) = line_column(prefix);
+
+        // Assert
+        assert_eq!((line, column), (1, 1));
+    }
+
+    /// 末尾改行の直後(次の行頭)は2行1列であること(仕様1章L-1)。
+    /// `lines()` は末尾の空行を返さないため、行を `lines().count()` で数える実装や
+    /// 列を最終行の文字列から出す実装がここで破綻する。
+    #[test]
+    fn prefix_ending_with_newline_is_next_line_column_1() {
+        // Arrange
+        let prefix = "abc\n";
+
+        // Act
+        let (line, column) = line_column(prefix);
+
+        // Assert
+        assert_eq!((line, column), (2, 1));
+    }
+
+    /// 列はバイト数でなく文字数で数えること(仕様1章L-1。エディタの表示と一致させる)。
+    /// `あい` は2文字6バイトのため、不正バイトの列は3(バイト数なら7)。
+    #[test]
+    fn column_counts_characters_not_bytes() {
+        // Arrange
+        let prefix = "あい";
+
+        // Act
+        let (line, column) = line_column(prefix);
+
+        // Assert
+        assert_eq!((line, column), (1, 3));
+    }
+
+    /// 列は最終行の長さから出すこと(1行目からでない)。`a`(1文字)と
+    /// `bcdef`(5文字)の2行で、split()版(最初の行で数える)実装がここで破綻する。
+    #[test]
+    fn column_comes_from_last_line_not_first() {
+        // Arrange
+        let prefix = "a\nbcdef";
+
+        // Act
+        let (line, column) = line_column(prefix);
+
+        // Assert
+        assert_eq!((line, column), (2, 6));
+    }
+}

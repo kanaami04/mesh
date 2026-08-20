@@ -588,6 +588,71 @@ fn non_ascii_identifier_reports_e0103_with_full_span() {
     );
 }
 
+/// 連続する非ASCII字母の読み取りはASCII字母で止まること(仕様1章L-6)。
+/// `let 合calc = 0` の非ASCII字母は `合`(3バイト)のみ。`calc` はASCII字母のため
+/// E0103のspanに入らず、spanは 4..7。非ASCII判定からASCII条件を外した実装は
+/// `calc` まで飲み込んで 4..8 を返すため、この境界で検知する。
+#[test]
+fn non_ascii_run_stops_at_ascii_letter() {
+    // Arrange
+    let source = "let 合calc = 0";
+
+    // Act
+    let err = lex(source).expect_err("非ASCII字母を含む識別子位置はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0103,
+            span: Span { start: 4, end: 7 },
+        }
+    );
+}
+
+/// ASCII識別子に続く非ASCII字母は、識別子全体でなく非ASCII字母だけを指すこと
+/// (仕様1章L-6)。`let calc合 = 0` では `calc`(4..8)は正規のASCII識別子として
+/// トークン化され、`合`(3バイト)だけがE0103の対象。spanは 8..11。
+#[test]
+fn non_ascii_after_ascii_identifier_covers_non_ascii_only() {
+    // Arrange
+    let source = "let calc合 = 0";
+
+    // Act
+    let err = lex(source).expect_err("ASCII識別子末尾の非ASCII字母はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0103,
+            span: Span { start: 8, end: 11 },
+        }
+    );
+}
+
+/// 字母でない非ASCII(全角数字 `０` = U+FF11)はE0103でなくL-26のE0116を報告すること
+/// (仕様1章L-6。「英数字名への変更を促す」案内が数字に意味をなさないため)。
+/// `０` は3バイトのため、spanは `let ` の直後の 4..7。
+/// E0103の判定から字母条件を外した実装がこの入力をE0103にするため、この境界で検知する。
+#[test]
+fn fullwidth_digit_reports_e0116_not_e0103() {
+    // Arrange
+    let source = "let ０ = 0";
+
+    // Act
+    let err = lex(source).expect_err("全角数字は字句規則に該当しないためエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0116,
+            span: Span { start: 4, end: 7 },
+        }
+    );
+}
+
 /// 各トークンがソース中のバイトオフセット位置(span)を持つこと。
 /// 位置つきエラー報告の基盤であり、仕様1章の各E01xx規則が「位置つき」報告を要求する。
 #[test]
