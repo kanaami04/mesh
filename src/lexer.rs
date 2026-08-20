@@ -273,6 +273,8 @@ fn is_continuation_token(kind: &TokenKind) -> bool {
 /// 括弧深度スタックの要素(仕様1章L-21・ADR-0031)。
 /// TokenKindでなく専用enumで持つことで、「スタックに入るのは開き括弧3種だけ」を型で保証する
 /// (TokenKindは `Str(Vec<_>)` を含むためCopy不可で、pushのたびにcloneが必要になってしまう)。
+/// バリアントの追加はL-21(lexの深度)だけでなくL-18(補間内の括弧照合)の意味論も変える
+/// (ADR-0049決定2で両者この写像を共有しているため)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BracketKind {
     Paren,
@@ -907,8 +909,9 @@ fn scan_string(
 /// 補間 `${...}` の内側を通常の字句モードでトークン化する(仕様1章L-17)。
 /// `${` を消費した直後から呼び、対応する閉じ `}` まで読み進めて
 /// (トークン列, `}` の直後のバイトオフセット)を返す。
-/// 対応関係は**トークン列上**の括弧の対応で決める。`( [ {` は対応する閉じ括弧を
-/// スタックに積み、閉じ括弧が現れたら:
+/// 対応関係は**トークン列上**の括弧の対応で決める。`( [ {` は括弧種(BracketKind)を
+/// スタックに積み(`lex` と同じ from_open/from_close の写像を使う。ADR-0049決定2)、
+/// 閉じ括弧が現れたら:
 /// - スタックが空で `}` なら、それが補間の対応する閉じ(この `}` はトークン列に含めない)。
 /// - スタック頂上と種類が一致すれば取り出して続行。
 /// - スタックが空(`}` 以外)、または種類が一致しなければ不均衡としてE0109
@@ -936,9 +939,13 @@ fn scan_interpolation(
         },
     };
     let mut tokens = Vec::new();
-    // 未対応の開き括弧に対して「期待される閉じ括弧」を積むスタック。
-    // 深度カウンタでなく種類を持つことで `(` に対する `}` `]` を不均衡として検出できる。
-    let mut expected_closers: Vec<TokenKind> = Vec::new();
+    // 未対応の開き括弧の種類を積むスタック。`lex` と同じ BracketKind に統一し、
+    // 括弧の種類写像(BracketKind::from_open/from_close)の定義を1箇所にする
+    // (ADR-0049決定2)。深度カウンタでなく種類を持つことで `(` に対する `}` `]` を
+    // 不均衡として検出できる。照合の方針(先頭と同種のときだけ対応)は `lex` と同じだが、
+    // **不一致時の挙動は違う**——`lex` は黙って通す(釣り合わない括弧の報告はパーサの
+    // 担当)のに対し、ここはその場でE0109を報告する。そのためループ本体は共通化しない。
+    let mut brackets: Vec<BracketKind> = Vec::new();
     while chars.peek().is_some() {
         let t = match next_token(source, chars, true, depth) {
             Ok(Some(t)) => t,
@@ -959,24 +966,21 @@ fn scan_interpolation(
             // 内側に生の改行が現れた時点で対応する `}` を得られない未終端として扱う。
             return Err(unterminated());
         }
-        match t.kind {
-            TokenKind::LParen => expected_closers.push(TokenKind::RParen),
-            TokenKind::LBracket => expected_closers.push(TokenKind::RBracket),
-            TokenKind::LBrace => expected_closers.push(TokenKind::RBrace),
-            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                if expected_closers.is_empty() && t.kind == TokenKind::RBrace {
-                    return Ok((tokens, t.span.end));
-                }
-                if expected_closers.last() != Some(&t.kind) {
-                    // 対応する開きが無い、または種類が違う閉じ括弧(仕様1章L-18)。
-                    return Err(LexError {
-                        code: ErrorCode::E0109,
-                        span: t.span,
-                    });
-                }
-                expected_closers.pop();
+        if let Some(b) = BracketKind::from_open(&t.kind) {
+            brackets.push(b);
+        } else if let Some(b) = BracketKind::from_close(&t.kind) {
+            // スタックが空の `}` は補間の終端(この `}` はトークン列に含めない)。
+            if brackets.is_empty() && b == BracketKind::Brace {
+                return Ok((tokens, t.span.end));
             }
-            _ => {}
+            if brackets.last() != Some(&b) {
+                // 対応する開きが無い、または種類が違う閉じ括弧(仕様1章L-18)。
+                return Err(LexError {
+                    code: ErrorCode::E0109,
+                    span: t.span,
+                });
+            }
+            brackets.pop();
         }
         tokens.push(t);
     }

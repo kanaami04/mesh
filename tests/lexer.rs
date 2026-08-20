@@ -3416,6 +3416,110 @@ fn brackets_inside_interpolation_are_depth_matched() {
     );
 }
 
+/// 補間内の括弧が2重に開いて2回閉じるとき、内側から順に1個ずつpopされて
+/// 補間は正常終了すること(仕様1章L-17〔正例: interpolation-nested〕・L-18)。
+/// 既存の釣り合い正例は深さ1(`"${m[k]}"` 等)ばかりで、popをclear(スタック全消し)に
+/// 替える変異を検知できなかった——clearだと内側の `]` でスタックが空になり、
+/// 外側の `)` が「対応する開きが無い閉じ括弧」としてE0109に化ける。深さ2の正例は
+/// その変異のピン(impl-review 2026-08-20。lex側は既に深さ2の正例を持つ)。
+#[test]
+fn depth_two_balanced_brackets_in_interpolation_close_cleanly() {
+    // Arrange
+    let source = "\"${f([1])}\"";
+
+    // Act
+    let tokens = lex(source).expect("深さ2の釣り合った括弧を含む補間はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "f".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::LParen,
+                        text: "(".to_string(),
+                        span: Span { start: 4, end: 5 },
+                    },
+                    Token {
+                        kind: TokenKind::LBracket,
+                        text: "[".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::Int,
+                        text: "1".to_string(),
+                        span: Span { start: 6, end: 7 },
+                    },
+                    Token {
+                        kind: TokenKind::RBracket,
+                        text: "]".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    },
+                    Token {
+                        kind: TokenKind::RParen,
+                        text: ")".to_string(),
+                        span: Span { start: 8, end: 9 },
+                    },
+                ],
+                span: Span { start: 1, end: 10 },
+            }]),
+            text: "\"${f([1])}\"".to_string(),
+            span: Span { start: 0, end: 11 },
+        }]
+    );
+}
+
+/// 補間内の `<` は比較演算子Ltとして字句化され、括弧の対応から除外されること
+/// (仕様1章L-17・1.9)。`<` `>` は括弧でないためスタックに積まれず、閉じ `}` は
+/// 補間の終端として働く。Meshは将来ジェネリクス(`list<int>` 等)を持つため、
+/// `<` を括弧種(Angle)に加える変異が通ると、対応する `>` の無い比較式の補間
+/// (`a < b`)が「種類の合わない閉じ括弧」のE0109に化ける——そのピン
+/// (impl-review 2026-08-20。`<` と `>` が揃った形ではpop同士が相殺して変異を
+/// 検知できないため、片側だけの形で刺す)。
+#[test]
+fn less_than_in_interpolation_is_lt_not_bracket() {
+    // Arrange
+    let source = "\"${a < b}\"";
+
+    // Act
+    let tokens = lex(source).expect("比較演算子を含む補間はエラーにならないこと");
+
+    // Assert
+    assert_eq!(
+        tokens,
+        vec![Token {
+            kind: TokenKind::Str(vec![StrSegment::Interp {
+                tokens: vec![
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "a".to_string(),
+                        span: Span { start: 3, end: 4 },
+                    },
+                    Token {
+                        kind: TokenKind::Lt,
+                        text: "<".to_string(),
+                        span: Span { start: 5, end: 6 },
+                    },
+                    Token {
+                        kind: TokenKind::Ident,
+                        text: "b".to_string(),
+                        span: Span { start: 7, end: 8 },
+                    },
+                ],
+                span: Span { start: 1, end: 9 },
+            }]),
+            text: "\"${a < b}\"".to_string(),
+            span: Span { start: 0, end: 10 },
+        }]
+    );
+}
+
 /// 補間 `${` を開いたまま対応する `}` を得ずにファイルが終わったときはエラーE0109になり、
 /// `${` 2バイトを位置として報告すること(仕様1章L-18〔負例: unterminated-interpolation〕。
 /// 補間の内側ではE0109がL-16=E0108より優先する)。spanが `${` を指すのは
