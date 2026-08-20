@@ -25,6 +25,19 @@ fn main() -> ExitCode {
     }
 }
 
+/// 不正UTF-8検出位置の直前までのバイト列(UTF-8として妥当)を、行・列(ともに1始まり)に
+/// 換算する(仕様1章L-1・ADR-0048)。行は `\n` の個数+1、列は最終行の文字数+1。
+/// 文字数で数えるのはエディタの表示と一致させるため(バイト数だと日本語でずれる)。
+fn line_column(valid_prefix: &str) -> (usize, usize) {
+    let line = valid_prefix.matches('\n').count() + 1;
+    let column = valid_prefix
+        .rsplit('\n')
+        .next()
+        .map_or(0, |s| s.chars().count())
+        + 1;
+    (line, column)
+}
+
 fn build(path: &Path) -> ExitCode {
     if path.extension().and_then(|e| e.to_str()) != Some("mesh") {
         eprintln!(
@@ -33,14 +46,29 @@ fn build(path: &Path) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("エラー: {} を読めません: {e}", path.display());
             return ExitCode::FAILURE;
         }
     };
-    match mesh::compile(&source) {
+    // UTF-8検査は読み込み層の責務(仕様1章L-1・ADR-0048)。字句解析器は妥当なUTF-8を
+    // 受け取る前提で組まれているため、不正バイトはここで位置つきのE0101として止める。
+    let source = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            let valid = std::str::from_utf8(&bytes[..e.valid_up_to()])
+                .expect("valid_up_toまでのバイト列はUTF-8として妥当であるため必ず成功する");
+            let (line, column) = line_column(valid);
+            eprintln!(
+                "エラー: {}:{line}行{column}列: ソースをUTF-8として読めませんでした(E0101)。ファイルをUTF-8で保存し直してください",
+                path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    match mesh::compile(source) {
         Ok(js) => {
             let out = path.with_extension("js");
             if let Err(e) = std::fs::write(&out, js) {
