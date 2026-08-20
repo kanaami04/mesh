@@ -591,7 +591,7 @@ fn non_ascii_identifier_reports_e0103_with_full_span() {
 /// 連続する非ASCII字母の読み取りはASCII字母で止まること(仕様1章L-6)。
 /// `let 合calc = 0` の非ASCII字母は `合`(3バイト)のみ。`calc` はASCII字母のため
 /// E0103のspanに入らず、spanは 4..7。非ASCII判定からASCII条件を外した実装は
-/// `calc` まで飲み込んで 4..8 を返すため、この境界で検知する。
+/// `calc` まで飲み込んで 4..11 を返すため、この境界で検知する。
 #[test]
 fn non_ascii_run_stops_at_ascii_letter() {
     // Arrange
@@ -680,7 +680,7 @@ fn non_ascii_run_stops_at_unicode_line_separator() {
     );
 }
 
-/// 字母でない非ASCII(全角数字 `０` = U+FF11)はE0103でなくL-26のE0116を報告すること
+/// 字母でない非ASCII(全角数字 `０` = U+FF10)はE0103でなくL-26のE0116を報告すること
 /// (仕様1章L-6。「英数字名への変更を促す」案内が数字に意味をなさないため)。
 /// `０` は3バイトのため、spanは `let ` の直後の 4..7。
 /// E0103の判定から字母条件を外した実装がこの入力をE0103にするため、この境界で検知する。
