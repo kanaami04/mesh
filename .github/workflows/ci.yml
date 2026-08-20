@@ -22,3 +22,5 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: テスト
         run: cargo test --all
+      - name: フックのテスト(PreToolUse deferred-check)
+        run: bash .claude/hooks/tests/deferred-check.test.sh
