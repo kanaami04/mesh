@@ -203,6 +203,54 @@ fi
 
 # --- 結果サマリ ----------------------------------------------------------------
 printf '1..%d\n' "$total"
+# --- ケース10: permissionDecision を返さない(R1の回帰防止) --------------------
+# "allow" は許可プロンプトを飛ばすため、「着手前に人が判断すべき」と印を付けた
+# ファイルに限って許可判断を奪う。コメントで意図を書いても機械は撃たないので刺す。
+run_hook "$proj" "case10-session" "src/parser.rs"
+assert_empty "ケース10: permissionDecision を返さない(許可判断を奪わない)" \
+  "$(printf '%s' "$stdout" | jq -r '.hookSpecificOutput.permissionDecision // empty')"
+
+# --- ケース11: worktree配下のパスでも撃ち、その worktree の台帳を読む -----------
+# パスだけ読み替えて台帳の根を本体に残すと、worktreeで台帳を更新しても
+# 本体の古い台帳から撃たれる(impl-review 2026-08-20の指摘)。
+wt="$proj/.claude/worktrees/feat-x"
+mkdir -p "$wt/docs/adr" "$wt/src"
+cat > "$wt/docs/adr/DEFERRED.md" <<'LEDGER'
+| ID | 先送りした事柄 | トリガー | 根拠 | 影響 | 状態 |
+|---|---|---|---|---|---|
+| D-77 | worktree専用の申し送り | `file:src/parser.rs` | r | i | 未対応 |
+LEDGER
+run_hook "$proj" "case11-session" "$wt/src/parser.rs"
+assert_contains "ケース11: worktree側の台帳の行(D-77)が出る" "$(ctx "$stdout")" "D-77"
+assert_not_contains "ケース11: 本体側の台帳の行(D-1)は出ない" "$(ctx "$stdout")" "D-1"
+
+# --- ケース12: 未作成ディレクトリへの新規Writeでも撃つ --------------------------
+# `src/parser/mod.rs` を作る瞬間はディレクトリがまだ無い。祖先を遡って解決できないと
+# 無音になり、まさにD-1・D-2のトリガー領域を取りこぼす。
+cat >> "$proj/docs/adr/DEFERRED.md" <<'LEDGER'
+| D-78 | 未作成ディレクトリの申し送り | `file:src/newdir/mod.rs` | r | i | 未対応 |
+LEDGER
+run_hook "$proj" "case12-session" "$proj_abs/src/newdir/mod.rs"
+assert_contains "ケース12: 未作成ディレクトリでもD-78が出る" "$(ctx "$stdout")" "D-78"
+
+# --- ケース13: 書式不正の行は知らせるが、2回目は黙る ---------------------------
+# R2(永久沈黙)を直した代わりに永久連呼にしないこと。
+cat >> "$proj/docs/adr/DEFERRED.md" <<'LEDGER'
+| D-79x | ID欄が想定形でない行 | `file:src/broken.rs` | r | i | 未対応 |
+LEDGER
+run_hook "$proj" "case13-session" "src/broken.rs"
+assert_contains "ケース13: 書式不正を知らせる" "$(ctx "$stdout")" "書式が不正"
+run_hook "$proj" "case13-session" "src/broken.rs"
+assert_empty "ケース13: 同一セッション2回目は黙る(永久連呼しない)" "$stdout"
+
+# --- ケース14: 末尾パイプの無い行でも状態欄を正しく読む -------------------------
+# GFMは末尾の `|` を省略できる。$(NF-1) 固定だと1列ずれて「解決」を読み落とす。
+cat >> "$proj/docs/adr/DEFERRED.md" <<'LEDGER'
+| D-80 | 末尾パイプ無しで解決済み | `file:src/nopipe.rs` | r | i | 解決(やらないと決めた)
+LEDGER
+run_hook "$proj" "case14-session" "src/nopipe.rs"
+assert_empty "ケース14: 末尾パイプ無しでも解決行は提示しない" "$stdout"
+
 if [ "$failed" -gt 0 ]; then
   printf 'FAILED: %d/%d assertions failed\n' "$failed" "$total"
   exit 1

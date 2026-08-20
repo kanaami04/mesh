@@ -32,6 +32,8 @@ ADR-0047 決定1 で `lex` と `scan_interpolation` の照合**方式**は揃え
 |---|---|---|
 | `file:<パス>` | そのファイルを触ったとき | **PreToolUseフック**(機械) |
 | `phase:<番号>` | そのフェーズに**入る直前**(= 前のフェーズの完了時) | drift-check |
+
+**`file:` を優先する。** 人が発火させる機構は、案A(GitHub issue)を棄却したのと同じ弱さを持つ——フェーズの**完了**は roadmap を更新する明示イベントがあるが、**開始**は誰も宣言しない。代表ファイルが決められるものは `file:` に落とす(impl-reviewの助言)。D-4 は Phase 9 の実験記録 `docs/research/phase9-ai-card-experiment.md` を代表に据えた。`phase:`/`layer:` は代表ファイルが定まらないもの(D-5・D-6 のエラーメッセージ層など)に限る。
 | `layer:<名前>` | その層の実装サイクルで | drift-check |
 
 `file:` のトリガーは `.claude/hooks/deferred-check.sh` が撃つ。Edit/Write の直前に該当行を `additionalContext` で提示する。**`permissionDecision` は返さない**——`"allow"` は許可プロンプトを飛ばすため、「着手前に人が判断すべき」と印を付けたファイルに限って許可判断を奪うことになる(impl-reviewで検出)。決定を省けば通常の許可フローが働き、情報だけが届く。同じ(セッション, ID)の組では1回だけ出す——毎回出すと雑音になる。
