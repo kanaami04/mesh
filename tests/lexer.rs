@@ -566,6 +566,28 @@ fn underscore_alone_is_identifier() {
     );
 }
 
+/// 識別子位置の非ASCII文字はE0103として報告され、spanは連続する非ASCII文字の
+/// 全体を指すこと(仕様1章L-6〔負例: non-ascii-ident〕)。
+/// `合計` は1文字3バイト×2文字=6バイトで、`let ` の4バイトを合わせて 4..10。
+/// 先頭1文字だけ(3バイト)を指すと修正箇所が伝わらないため、仕様が全体を要求している。
+#[test]
+fn non_ascii_identifier_reports_e0103_with_full_span() {
+    // Arrange
+    let source = "let 合計 = 0";
+
+    // Act
+    let err = lex(source).expect_err("非ASCII識別子はエラーになること");
+
+    // Assert
+    assert_eq!(
+        err,
+        LexError {
+            code: ErrorCode::E0103,
+            span: Span { start: 4, end: 10 },
+        }
+    );
+}
+
 /// 各トークンがソース中のバイトオフセット位置(span)を持つこと。
 /// 位置つきエラー報告の基盤であり、仕様1章の各E01xx規則が「位置つき」報告を要求する。
 #[test]
